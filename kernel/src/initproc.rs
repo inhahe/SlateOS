@@ -59,10 +59,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -394,10 +394,22 @@ fn end_stage(name: &str, success: bool, error: Option<&str>) {
     };
 
     if success {
-        crate::syslog!("init.boot", Info, "Stage '{}' complete ({} µs)", name, duration_us);
+        crate::syslog!(
+            "init.boot",
+            Info,
+            "Stage '{}' complete ({} µs)",
+            name,
+            duration_us
+        );
     } else {
-        crate::syslog!("init.boot", Error, "Stage '{}' FAILED ({} µs): {}",
-            name, duration_us, error.unwrap_or("unknown"));
+        crate::syslog!(
+            "init.boot",
+            Error,
+            "Stage '{}' FAILED ({} µs): {}",
+            name,
+            duration_us,
+            error.unwrap_or("unknown")
+        );
     }
 }
 
@@ -428,7 +440,9 @@ pub fn tick() {
     }
     state.last_tick_ns = now;
     #[allow(clippy::arithmetic_side_effects)]
-    { state.total_ticks += 1; }
+    {
+        state.total_ticks += 1;
+    }
 
     // Capture config values before dropping the lock for subsystem calls.
     let auto_flush = state.config.auto_flush_logs;
@@ -501,7 +515,9 @@ pub fn tick() {
     let reaped = reaped_pids.len() as u64;
     state.orphans.retain(|o| !o.reaped);
     #[allow(clippy::arithmetic_side_effects)]
-    { state.total_reaped += reaped; }
+    {
+        state.total_reaped += reaped;
+    }
 
     drop(state);
 
@@ -514,15 +530,23 @@ pub fn tick() {
     if do_health_check {
         let needs_attention = crate::drvmon::tick();
         if !needs_attention.is_empty() {
-            crate::syslog!("init.health", Warning,
-                "{} driver(s) need attention", needs_attention.len());
+            crate::syslog!(
+                "init.health",
+                Warning,
+                "{} driver(s) need attention",
+                needs_attention.len()
+            );
         }
 
         // Check socket activation idle stops.
         let idle_services = crate::sockact::check_idle();
         if !idle_services.is_empty() {
-            crate::syslog!("init.sockact", Info,
-                "{} idle service(s) eligible for stop", idle_services.len());
+            crate::syslog!(
+                "init.sockact",
+                Info,
+                "{} idle service(s) eligible for stop",
+                idle_services.len()
+            );
         }
     }
 
@@ -530,8 +554,13 @@ pub fn tick() {
     if orphan_count > 0 {
         let state = STATE.lock();
         if state.total_ticks.is_multiple_of(100) {
-            crate::syslog!("init.reap", Info,
-                "Reaped {} orphans this cycle, {} total", reaped, state.total_reaped);
+            crate::syslog!(
+                "init.reap",
+                Info,
+                "Reaped {} orphans this cycle, {} total",
+                reaped,
+                state.total_reaped
+            );
         }
     }
 }
@@ -564,7 +593,9 @@ pub fn register_orphan(pid: u32) -> KernelResult<()> {
         if !state.orphans.is_empty() {
             let removed = state.orphans.remove(0);
             #[allow(clippy::arithmetic_side_effects)]
-            { state.total_reaped += 1; }
+            {
+                state.total_reaped += 1;
+            }
 
             // Best-effort: attempt actual reap of the evicted orphan.
             drop(state);
@@ -572,8 +603,12 @@ pub fn register_orphan(pid: u32) -> KernelResult<()> {
                 INIT_PID as crate::proc::pcb::ProcessId,
                 removed.pid as crate::proc::pcb::ProcessId,
             );
-            crate::syslog!("init.reap", Warning,
-                "Force-reaped orphan pid {} (queue full)", removed.pid);
+            crate::syslog!(
+                "init.reap",
+                Warning,
+                "Force-reaped orphan pid {} (queue full)",
+                removed.pid
+            );
             state = STATE.lock();
         }
     }
@@ -619,8 +654,12 @@ pub fn shutdown(reason: ShutdownReason) -> KernelResult<()> {
         state.shutdown_requested_ns = now;
     }
 
-    crate::syslog!("init.shutdown", Info,
-        "System shutdown initiated: {}", reason.label());
+    crate::syslog!(
+        "init.shutdown",
+        Info,
+        "System shutdown initiated: {}",
+        reason.label()
+    );
 
     let grace_ns = STATE.lock().config.shutdown_grace_ns;
 
@@ -643,16 +682,26 @@ pub fn shutdown(reason: ShutdownReason) -> KernelResult<()> {
                 if info.state == crate::fs::servicemgr::ServiceState::Running
                     || info.state == crate::fs::servicemgr::ServiceState::Starting
                 {
-                    crate::syslog!("init.shutdown", Info,
-                        "Stopping service '{}' (id {})", name, svc_id);
+                    crate::syslog!(
+                        "init.shutdown",
+                        Info,
+                        "Stopping service '{}' (id {})",
+                        name,
+                        svc_id
+                    );
                     match crate::fs::servicemgr::stop_service(svc_id) {
                         Ok(()) => {
                             clean_exits = clean_exits.saturating_add(1);
                         }
                         Err(e) => {
-                            crate::syslog!("init.shutdown", Warning,
+                            crate::syslog!(
+                                "init.shutdown",
+                                Warning,
                                 "Failed to stop service '{}' (id {}): {:?}",
-                                name, svc_id, e);
+                                name,
+                                svc_id,
+                                e
+                            );
                             force_kills = force_kills.saturating_add(1);
                         }
                     }
@@ -667,24 +716,38 @@ pub fn shutdown(reason: ShutdownReason) -> KernelResult<()> {
         if svc.state == crate::fs::servicemgr::ServiceState::Running
             || svc.state == crate::fs::servicemgr::ServiceState::Starting
         {
-            crate::syslog!("init.shutdown", Info,
-                "Stopping remaining service '{}' (id {})", svc.name, svc.id);
+            crate::syslog!(
+                "init.shutdown",
+                Info,
+                "Stopping remaining service '{}' (id {})",
+                svc.name,
+                svc.id
+            );
             match crate::fs::servicemgr::stop_service(svc.id) {
                 Ok(()) => {
                     clean_exits = clean_exits.saturating_add(1);
                 }
                 Err(e) => {
-                    crate::syslog!("init.shutdown", Warning,
+                    crate::syslog!(
+                        "init.shutdown",
+                        Warning,
                         "Failed to stop remaining service '{}' (id {}): {:?}",
-                        svc.name, svc.id, e);
+                        svc.name,
+                        svc.id,
+                        e
+                    );
                     force_kills = force_kills.saturating_add(1);
                 }
             }
         }
     }
 
-    crate::syslog!("init.shutdown", Info,
-        "Services stopped: {} clean exits", clean_exits);
+    crate::syslog!(
+        "init.shutdown",
+        Info,
+        "Services stopped: {} clean exits",
+        clean_exits
+    );
 
     // Phase 2: Reap any remaining orphans.
     //
@@ -695,16 +758,22 @@ pub fn shutdown(reason: ShutdownReason) -> KernelResult<()> {
     let mut reap_passes: u32 = 0;
     loop {
         let remaining = orphan_count();
-        if remaining == 0 { break; }
+        if remaining == 0 {
+            break;
+        }
 
         let now_ns = crate::hpet::elapsed_ns();
-        if now_ns >= deadline { break; }
+        if now_ns >= deadline {
+            break;
+        }
 
         // Do a reap pass (similar to tick's orphan logic).
         let pending: Vec<u32>;
         {
             let state = STATE.lock();
-            pending = state.orphans.iter()
+            pending = state
+                .orphans
+                .iter()
                 .filter(|o| !o.reaped)
                 .map(|o| o.pid)
                 .collect();
@@ -716,9 +785,13 @@ pub fn shutdown(reason: ShutdownReason) -> KernelResult<()> {
                 INIT_PID as crate::proc::pcb::ProcessId,
                 opid as crate::proc::pcb::ProcessId,
             ) {
-                Ok(Some(_)) => { reaped_pids.push(opid); }
+                Ok(Some(_)) => {
+                    reaped_pids.push(opid);
+                }
                 Ok(None) => {}
-                Err(_) => { reaped_pids.push(opid); }
+                Err(_) => {
+                    reaped_pids.push(opid);
+                }
             }
         }
 
@@ -732,7 +805,9 @@ pub fn shutdown(reason: ShutdownReason) -> KernelResult<()> {
             let count = reaped_pids.len() as u64;
             state.orphans.retain(|o| !o.reaped);
             #[allow(clippy::arithmetic_side_effects)]
-            { state.total_reaped += count; }
+            {
+                state.total_reaped += count;
+            }
         }
 
         reap_passes = reap_passes.saturating_add(1);
@@ -743,24 +818,39 @@ pub fn shutdown(reason: ShutdownReason) -> KernelResult<()> {
         let mut state = STATE.lock();
         let remaining = state.orphans.len();
         if remaining > 0 {
-            crate::syslog!("init.shutdown", Warning,
-                "Force-clearing {} remaining orphans", remaining);
+            crate::syslog!(
+                "init.shutdown",
+                Warning,
+                "Force-clearing {} remaining orphans",
+                remaining
+            );
             force_kills = remaining as u32;
         }
         #[allow(clippy::arithmetic_side_effects)]
-        { state.total_reaped += remaining as u64; }
+        {
+            state.total_reaped += remaining as u64;
+        }
         state.orphans.clear();
     }
 
-    crate::syslog!("init.shutdown", Info,
-        "Orphan cleanup: {} passes, {} force-killed", reap_passes, force_kills);
+    crate::syslog!(
+        "init.shutdown",
+        Info,
+        "Orphan cleanup: {} passes, {} force-killed",
+        reap_passes,
+        force_kills
+    );
 
     // Phase 3: Sync filesystems and flush caches.
     crate::syslog!("init.shutdown", Info, "Syncing filesystems...");
     if let Err(e) = crate::fs::vfs::Vfs::sync() {
         // Filesystem sync failure during shutdown may indicate data loss.
-        crate::syslog!("init.shutdown", Error,
-            "Filesystem sync failed: {:?} — data may not be persisted", e);
+        crate::syslog!(
+            "init.shutdown",
+            Error,
+            "Filesystem sync failed: {:?} — data may not be persisted",
+            e
+        );
     }
 
     // Phase 4: Flush logs one final time.
@@ -779,9 +869,15 @@ pub fn shutdown(reason: ShutdownReason) -> KernelResult<()> {
     }
 
     let shutdown_ms = crate::hpet::elapsed_ns().saturating_sub(now) / 1_000_000;
-    crate::syslog!("init.shutdown", Info,
+    crate::syslog!(
+        "init.shutdown",
+        Info,
         "Shutdown complete in {} ms (reason: {}, {} clean, {} forced)",
-        shutdown_ms, reason.label(), clean_exits, force_kills);
+        shutdown_ms,
+        reason.label(),
+        clean_exits,
+        force_kills
+    );
 
     Ok(())
 }
@@ -819,8 +915,12 @@ pub fn report_critical_failure(service_name: &str) {
     }
 
     if enter_emergency {
-        crate::syslog!("init.critical", Error,
-            "Critical service '{}' failed — entering emergency mode", service_name);
+        crate::syslog!(
+            "init.critical",
+            Error,
+            "Critical service '{}' failed — entering emergency mode",
+            service_name
+        );
         let mut state = STATE.lock();
         state.system_state = SystemState::Emergency;
     }
@@ -843,10 +943,14 @@ pub fn boot_time_ns() -> u64 {
 /// Get boot stages with timing.
 pub fn boot_stages() -> Vec<(String, u64, bool)> {
     let state = STATE.lock();
-    state.boot_stages.iter().map(|s| {
-        let duration = s.end_ns.saturating_sub(s.start_ns);
-        (s.name.clone(), duration, s.success)
-    }).collect()
+    state
+        .boot_stages
+        .iter()
+        .map(|s| {
+            let duration = s.end_ns.saturating_sub(s.start_ns);
+            (s.name.clone(), duration, s.success)
+        })
+        .collect()
 }
 
 /// Get whether the system is fully booted and running.
@@ -879,8 +983,10 @@ pub fn procfs_content() -> String {
     let mut out = String::from("=== Init Process (PID 1) ===\n\n");
 
     out.push_str(&format!("System State: {}\n", state.system_state.label()));
-    out.push_str(&format!("Boot Time: {:.2} ms\n",
-        state.boot_time_ns as f64 / 1_000_000.0));
+    out.push_str(&format!(
+        "Boot Time: {:.2} ms\n",
+        state.boot_time_ns as f64 / 1_000_000.0
+    ));
     out.push_str(&format!("Main Loop Ticks: {}\n", state.total_ticks));
     out.push_str(&format!("Orphans Reaped: {}\n", state.total_reaped));
     out.push_str(&format!("Pending Orphans: {}\n", state.orphans.len()));
@@ -891,7 +997,10 @@ pub fn procfs_content() -> String {
         out.push_str(&format!("Force Kills: {}\n", state.shutdown_force_kills));
     }
 
-    out.push_str(&format!("\nCritical Services: {}\n", state.critical_services.len()));
+    out.push_str(&format!(
+        "\nCritical Services: {}\n",
+        state.critical_services.len()
+    ));
     for svc in &state.critical_services {
         out.push_str(&format!("  - {}\n", svc));
     }
@@ -906,7 +1015,10 @@ pub fn procfs_content() -> String {
         } else {
             "FAILED"
         };
-        out.push_str(&format!("  {:<15} {:>8} µs  {}", stage.name, duration_us, status));
+        out.push_str(&format!(
+            "  {:<15} {:>8} µs  {}",
+            stage.name, duration_us, status
+        ));
         if let Some(ref err) = stage.error {
             out.push_str(&format!("  ({})", err));
         }
@@ -914,16 +1026,30 @@ pub fn procfs_content() -> String {
     }
 
     out.push_str("\n--- Config ---\n");
-    out.push_str(&format!("  Shutdown Grace: {} ms\n",
-        state.config.shutdown_grace_ns / 1_000_000));
-    out.push_str(&format!("  Auto Flush Logs: {}\n", state.config.auto_flush_logs));
-    out.push_str(&format!("  Log Flush Interval: {} s\n",
-        state.config.log_flush_interval_ns / 1_000_000_000));
-    out.push_str(&format!("  Health Checks: {}\n", state.config.health_checks));
-    out.push_str(&format!("  Health Check Interval: {} s\n",
-        state.config.health_check_interval_ns / 1_000_000_000));
-    out.push_str(&format!("  Emergency on Critical Failure: {}\n",
-        state.config.emergency_on_critical_failure));
+    out.push_str(&format!(
+        "  Shutdown Grace: {} ms\n",
+        state.config.shutdown_grace_ns / 1_000_000
+    ));
+    out.push_str(&format!(
+        "  Auto Flush Logs: {}\n",
+        state.config.auto_flush_logs
+    ));
+    out.push_str(&format!(
+        "  Log Flush Interval: {} s\n",
+        state.config.log_flush_interval_ns / 1_000_000_000
+    ));
+    out.push_str(&format!(
+        "  Health Checks: {}\n",
+        state.config.health_checks
+    ));
+    out.push_str(&format!(
+        "  Health Check Interval: {} s\n",
+        state.config.health_check_interval_ns / 1_000_000_000
+    ));
+    out.push_str(&format!(
+        "  Emergency on Critical Failure: {}\n",
+        state.config.emergency_on_critical_failure
+    ));
 
     out
 }
@@ -943,11 +1069,15 @@ pub fn self_test() -> bool {
             if $cond {
                 crate::serial_println!("  [PASS] {}", $name);
                 #[allow(clippy::arithmetic_side_effects)]
-                { passed += 1; }
+                {
+                    passed += 1;
+                }
             } else {
                 crate::serial_println!("  [FAIL] {}", $name);
                 #[allow(clippy::arithmetic_side_effects)]
-                { failed += 1; }
+                {
+                    failed += 1;
+                }
             }
         };
     }
@@ -959,13 +1089,18 @@ pub fn self_test() -> bool {
     }
 
     // Test 1: Initial state is KernelInit.
-    check!("initial state is KernelInit",
-        system_state() == SystemState::KernelInit);
+    check!(
+        "initial state is KernelInit",
+        system_state() == SystemState::KernelInit
+    );
 
     // Test 2: Start sets state to Running.
     let r = start();
     check!("start succeeds", r.is_ok());
-    check!("state is Running after start", system_state() == SystemState::Running);
+    check!(
+        "state is Running after start",
+        system_state() == SystemState::Running
+    );
     check!("is_running returns true", is_running());
 
     // Test 3: Boot time recorded.
@@ -983,7 +1118,10 @@ pub fn self_test() -> bool {
 
     // Test 6: Double-start fails.
     let r = start();
-    check!("double-start fails with AlreadyExists", r == Err(KernelError::AlreadyExists));
+    check!(
+        "double-start fails with AlreadyExists",
+        r == Err(KernelError::AlreadyExists)
+    );
 
     // Test 7: Orphan management.
     let r = register_orphan(42);
@@ -1006,20 +1144,28 @@ pub fn self_test() -> bool {
     mark_critical("network");
     {
         let state = STATE.lock();
-        check!("critical service registered", state.critical_services.len() == 1);
+        check!(
+            "critical service registered",
+            state.critical_services.len() == 1
+        );
     }
 
     unmark_critical("network");
     {
         let state = STATE.lock();
-        check!("critical service unregistered", state.critical_services.is_empty());
+        check!(
+            "critical service unregistered",
+            state.critical_services.is_empty()
+        );
     }
 
     // Test 9: Critical failure triggers emergency mode.
     mark_critical("storage");
     report_critical_failure("storage");
-    check!("emergency mode after critical failure",
-        system_state() == SystemState::Emergency);
+    check!(
+        "emergency mode after critical failure",
+        system_state() == SystemState::Emergency
+    );
 
     // Restore to Running for remaining tests.
     {
@@ -1030,7 +1176,10 @@ pub fn self_test() -> bool {
     // Test 10: Shutdown.
     let r = shutdown(ShutdownReason::UserRequest);
     check!("shutdown succeeds", r.is_ok());
-    check!("state is Halted after shutdown", system_state() == SystemState::Halted);
+    check!(
+        "state is Halted after shutdown",
+        system_state() == SystemState::Halted
+    );
 
     // Test 11: Double-shutdown fails.
     let r = shutdown(ShutdownReason::Reboot);
@@ -1039,19 +1188,29 @@ pub fn self_test() -> bool {
     // Test 12: Procfs content is non-empty.
     let content = procfs_content();
     check!("procfs content is non-empty", content.len() > 100);
-    check!("procfs contains system state",
-        content.contains("System State:"));
-    check!("procfs contains boot stages",
-        content.contains("Boot Stages"));
+    check!(
+        "procfs contains system state",
+        content.contains("System State:")
+    );
+    check!(
+        "procfs contains boot stages",
+        content.contains("Boot Stages")
+    );
 
     // Test 13: Config management.
     let mut config = get_config();
     config.shutdown_grace_ns = 5_000_000_000;
     set_config(config.clone());
     let retrieved = get_config();
-    check!("config update persists",
-        retrieved.shutdown_grace_ns == 5_000_000_000);
+    check!(
+        "config update persists",
+        retrieved.shutdown_grace_ns == 5_000_000_000
+    );
 
-    crate::serial_println!("[initproc] Tests complete: {} passed, {} failed", passed, failed);
+    crate::serial_println!(
+        "[initproc] Tests complete: {} passed, {} failed",
+        passed,
+        failed
+    );
     failed == 0
 }

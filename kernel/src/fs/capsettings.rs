@@ -25,11 +25,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -191,7 +191,10 @@ pub fn create_group(name: &str, description: &str, caps: &[Capability]) -> Kerne
 /// Remove a group (built-in groups cannot be removed).
 pub fn remove_group(group_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let g = state.groups.iter().find(|g| g.id == group_id)
+    let g = state
+        .groups
+        .iter()
+        .find(|g| g.id == group_id)
         .ok_or(KernelError::NotFound)?;
     if g.builtin {
         return Err(KernelError::PermissionDenied);
@@ -204,7 +207,12 @@ pub fn remove_group(group_id: u64) -> KernelResult<()> {
 
 /// Get a group.
 pub fn get_group(group_id: u64) -> KernelResult<CapGroup> {
-    STATE.lock().groups.iter().find(|g| g.id == group_id).cloned()
+    STATE
+        .lock()
+        .groups
+        .iter()
+        .find(|g| g.id == group_id)
+        .cloned()
         .ok_or(KernelError::NotFound)
 }
 
@@ -216,7 +224,10 @@ pub fn list_groups() -> Vec<CapGroup> {
 /// Add a capability to a group.
 pub fn group_add_cap(group_id: u64, cap: Capability) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let g = state.groups.iter_mut().find(|g| g.id == group_id)
+    let g = state
+        .groups
+        .iter_mut()
+        .find(|g| g.id == group_id)
         .ok_or(KernelError::NotFound)?;
     if !g.caps.contains(&cap) {
         g.caps.push(cap);
@@ -228,7 +239,10 @@ pub fn group_add_cap(group_id: u64, cap: Capability) -> KernelResult<()> {
 /// Remove a capability from a group.
 pub fn group_remove_cap(group_id: u64, cap: Capability) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let g = state.groups.iter_mut().find(|g| g.id == group_id)
+    let g = state
+        .groups
+        .iter_mut()
+        .find(|g| g.id == group_id)
         .ok_or(KernelError::NotFound)?;
     g.caps.retain(|c| *c != cap);
     state.changes += 1;
@@ -268,7 +282,10 @@ pub fn user_add_group(uid: u64, group_id: u64) -> KernelResult<()> {
     if !state.groups.iter().any(|g| g.id == group_id) {
         return Err(KernelError::NotFound);
     }
-    let a = state.user_assignments.iter_mut().find(|a| a.uid == uid)
+    let a = state
+        .user_assignments
+        .iter_mut()
+        .find(|a| a.uid == uid)
         .ok_or(KernelError::NotFound)?;
     if !a.groups.contains(&group_id) {
         a.groups.push(group_id);
@@ -280,7 +297,10 @@ pub fn user_add_group(uid: u64, group_id: u64) -> KernelResult<()> {
 /// Remove a user from a capability group.
 pub fn user_remove_group(uid: u64, group_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let a = state.user_assignments.iter_mut().find(|a| a.uid == uid)
+    let a = state
+        .user_assignments
+        .iter_mut()
+        .find(|a| a.uid == uid)
         .ok_or(KernelError::NotFound)?;
     a.groups.retain(|g| *g != group_id);
     state.changes += 1;
@@ -290,7 +310,10 @@ pub fn user_remove_group(uid: u64, group_id: u64) -> KernelResult<()> {
 /// Add an extra capability to a user.
 pub fn user_add_cap(uid: u64, cap: Capability) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let a = state.user_assignments.iter_mut().find(|a| a.uid == uid)
+    let a = state
+        .user_assignments
+        .iter_mut()
+        .find(|a| a.uid == uid)
         .ok_or(KernelError::NotFound)?;
     if !a.extra_caps.contains(&cap) {
         a.extra_caps.push(cap);
@@ -302,7 +325,10 @@ pub fn user_add_cap(uid: u64, cap: Capability) -> KernelResult<()> {
 /// Deny a capability for a user (overrides group grants).
 pub fn user_deny_cap(uid: u64, cap: Capability) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let a = state.user_assignments.iter_mut().find(|a| a.uid == uid)
+    let a = state
+        .user_assignments
+        .iter_mut()
+        .find(|a| a.uid == uid)
         .ok_or(KernelError::NotFound)?;
     if !a.denied_caps.contains(&cap) {
         a.denied_caps.push(cap);
@@ -314,7 +340,10 @@ pub fn user_deny_cap(uid: u64, cap: Capability) -> KernelResult<()> {
 /// Get effective capabilities for a user.
 pub fn user_effective_caps(uid: u64) -> KernelResult<Vec<Capability>> {
     let state = STATE.lock();
-    let a = state.user_assignments.iter().find(|a| a.uid == uid)
+    let a = state
+        .user_assignments
+        .iter()
+        .find(|a| a.uid == uid)
         .ok_or(KernelError::NotFound)?;
 
     let mut caps = Vec::new();
@@ -341,7 +370,12 @@ pub fn user_effective_caps(uid: u64) -> KernelResult<Vec<Capability>> {
 
 /// Get user assignment.
 pub fn get_user_assignment(uid: u64) -> KernelResult<UserCapAssignment> {
-    STATE.lock().user_assignments.iter().find(|a| a.uid == uid).cloned()
+    STATE
+        .lock()
+        .user_assignments
+        .iter()
+        .find(|a| a.uid == uid)
+        .cloned()
         .ok_or(KernelError::NotFound)
 }
 
@@ -355,9 +389,12 @@ pub fn list_user_assignments() -> Vec<UserCapAssignment> {
 // ---------------------------------------------------------------------------
 
 /// Set capabilities for a program.
-pub fn assign_program(program: &str, required: &[Capability], max: &[Capability],
-    sandboxed: bool) -> KernelResult<u64>
-{
+pub fn assign_program(
+    program: &str,
+    required: &[Capability],
+    max: &[Capability],
+    sandboxed: bool,
+) -> KernelResult<u64> {
     let mut state = STATE.lock();
     if state.program_assignments.len() >= 512 {
         return Err(KernelError::ResourceExhausted);
@@ -378,7 +415,11 @@ pub fn assign_program(program: &str, required: &[Capability], max: &[Capability]
 /// Remove program assignment.
 pub fn remove_program(program: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    if !state.program_assignments.iter().any(|a| a.program == program) {
+    if !state
+        .program_assignments
+        .iter()
+        .any(|a| a.program == program)
+    {
         return Err(KernelError::NotFound);
     }
     state.program_assignments.retain(|a| a.program != program);
@@ -389,8 +430,12 @@ pub fn remove_program(program: &str) -> KernelResult<()> {
 
 /// Get program assignment.
 pub fn get_program(program: &str) -> KernelResult<ProgramCapAssignment> {
-    STATE.lock().program_assignments.iter()
-        .find(|a| a.program == program).cloned()
+    STATE
+        .lock()
+        .program_assignments
+        .iter()
+        .find(|a| a.program == program)
+        .cloned()
         .ok_or(KernelError::NotFound)
 }
 
@@ -436,7 +481,9 @@ pub fn remove_path_requirement(req_id: u64) -> KernelResult<()> {
 /// Get requirements for a specific path (checks prefix matches).
 pub fn path_requirements(path: &str) -> Vec<PathRequirement> {
     let state = STATE.lock();
-    state.path_requirements.iter()
+    state
+        .path_requirements
+        .iter()
         .filter(|r| {
             if r.path.ends_with('*') {
                 let prefix = &r.path[..r.path.len() - 1];
@@ -493,39 +540,84 @@ pub fn init_defaults() {
         return;
     }
 
-    let std_id = add_builtin_group(&mut state, "Standard User",
+    let std_id = add_builtin_group(
+        &mut state,
+        "Standard User",
         "Basic file access, execution, and networking",
-        &[Capability::FileRead, Capability::FileWrite, Capability::Execute,
-          Capability::Network]);
+        &[
+            Capability::FileRead,
+            Capability::FileWrite,
+            Capability::Execute,
+            Capability::Network,
+        ],
+    );
 
-    let dev_id = add_builtin_group(&mut state, "Developer",
+    let dev_id = add_builtin_group(
+        &mut state,
+        "Developer",
         "Standard plus debug, raw sockets, package install",
-        &[Capability::FileRead, Capability::FileWrite, Capability::Execute,
-          Capability::Network, Capability::DebugProcess, Capability::RawSocket,
-          Capability::PackageInstall]);
+        &[
+            Capability::FileRead,
+            Capability::FileWrite,
+            Capability::Execute,
+            Capability::Network,
+            Capability::DebugProcess,
+            Capability::RawSocket,
+            Capability::PackageInstall,
+        ],
+    );
 
-    let _admin_id = add_builtin_group(&mut state, "Administrator",
+    let _admin_id = add_builtin_group(
+        &mut state,
+        "Administrator",
         "Full system access including user and capability management",
-        &[Capability::FileRead, Capability::FileWrite, Capability::Execute,
-          Capability::Network, Capability::BindLowPort, Capability::RawSocket,
-          Capability::Mount, Capability::UserAdmin, Capability::PackageInstall,
-          Capability::SystemConfig, Capability::Chown, Capability::DacOverride,
-          Capability::SetClock, Capability::Reboot, Capability::AuditRead,
-          Capability::AuditWrite, Capability::CapAdmin]);
+        &[
+            Capability::FileRead,
+            Capability::FileWrite,
+            Capability::Execute,
+            Capability::Network,
+            Capability::BindLowPort,
+            Capability::RawSocket,
+            Capability::Mount,
+            Capability::UserAdmin,
+            Capability::PackageInstall,
+            Capability::SystemConfig,
+            Capability::Chown,
+            Capability::DacOverride,
+            Capability::SetClock,
+            Capability::Reboot,
+            Capability::AuditRead,
+            Capability::AuditWrite,
+            Capability::CapAdmin,
+        ],
+    );
 
-    add_builtin_group(&mut state, "Network Service",
+    add_builtin_group(
+        &mut state,
+        "Network Service",
         "Network access with low port binding",
-        &[Capability::FileRead, Capability::Network, Capability::BindLowPort,
-          Capability::RawSocket]);
+        &[
+            Capability::FileRead,
+            Capability::Network,
+            Capability::BindLowPort,
+            Capability::RawSocket,
+        ],
+    );
 
-    add_builtin_group(&mut state, "Restricted",
+    add_builtin_group(
+        &mut state,
+        "Restricted",
         "Read-only file access, no network",
-        &[Capability::FileRead, Capability::Execute]);
+        &[Capability::FileRead, Capability::Execute],
+    );
 
     // Default user assignments.
-    let admin_groups: Vec<u64> = state.groups.iter()
+    let admin_groups: Vec<u64> = state
+        .groups
+        .iter()
         .filter(|g| g.name == "Administrator")
-        .map(|g| g.id).collect();
+        .map(|g| g.id)
+        .collect();
     let root_assign_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     state.user_assignments.push(UserCapAssignment {
         id: root_assign_id,
@@ -569,11 +661,13 @@ pub fn init_defaults() {
 /// Return (group_count, user_count, program_count, path_count, ops).
 pub fn stats() -> (usize, usize, usize, usize, u64) {
     let state = STATE.lock();
-    (state.groups.len(),
-     state.user_assignments.len(),
-     state.program_assignments.len(),
-     state.path_requirements.len(),
-     OP_COUNT.load(Ordering::Relaxed))
+    (
+        state.groups.len(),
+        state.user_assignments.len(),
+        state.program_assignments.len(),
+        state.path_requirements.len(),
+        OP_COUNT.load(Ordering::Relaxed),
+    )
 }
 
 pub fn reset_stats() {
@@ -602,8 +696,16 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: create groups.
     serial_println!("capsettings::self_test 1: create groups");
-    let g1 = create_group("TestGroup", "test", &[Capability::FileRead, Capability::Network])?;
-    let g2 = create_group("DevGroup", "dev", &[Capability::DebugProcess, Capability::Execute])?;
+    let g1 = create_group(
+        "TestGroup",
+        "test",
+        &[Capability::FileRead, Capability::Network],
+    )?;
+    let g2 = create_group(
+        "DevGroup",
+        "dev",
+        &[Capability::DebugProcess, Capability::Execute],
+    )?;
     assert_eq!(list_groups().len(), 2);
 
     // Test 2: modify groups.
@@ -629,10 +731,16 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 4: program assignments.
     serial_println!("capsettings::self_test 4: program assignments");
-    assign_program("/usr/bin/server",
+    assign_program(
+        "/usr/bin/server",
         &[Capability::Network, Capability::BindLowPort],
-        &[Capability::Network, Capability::BindLowPort, Capability::FileRead],
-        true)?;
+        &[
+            Capability::Network,
+            Capability::BindLowPort,
+            Capability::FileRead,
+        ],
+        true,
+    )?;
     let prog = get_program("/usr/bin/server")?;
     assert!(prog.sandboxed);
     assert_eq!(prog.required_caps.len(), 2);

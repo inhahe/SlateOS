@@ -66,14 +66,14 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
-use alloc::borrow::Cow;
-use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::string::String;
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 use crate::sync::Mutex;
+use alloc::borrow::Cow;
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -113,9 +113,7 @@ enum NsRule {
     /// Block access to all paths matching this prefix.
     ///
     /// Any path starting with this prefix returns `PermissionDenied`.
-    Hide {
-        prefix: PathBuf,
-    },
+    Hide { prefix: PathBuf },
 }
 
 /// A namespace definition.
@@ -267,15 +265,13 @@ fn ns_fast_path_available() -> bool {
 ///
 /// The root namespace (ID 0) is implicit — it's not stored here.
 /// Any process with namespace_id = 0 gets unmodified path access.
-static NS_TABLE: Mutex<BTreeMap<NamespaceId, Namespace>> =
-    Mutex::new(BTreeMap::new());
+static NS_TABLE: Mutex<BTreeMap<NamespaceId, Namespace>> = Mutex::new(BTreeMap::new());
 
 /// Per-process namespace assignment.
 ///
 /// Maps ProcessId (u64) → NamespaceId.  Processes not in this table
 /// are in the root namespace (ID 0).
-static PROCESS_NS: Mutex<BTreeMap<u64, NamespaceId>> =
-    Mutex::new(BTreeMap::new());
+static PROCESS_NS: Mutex<BTreeMap<u64, NamespaceId>> = Mutex::new(BTreeMap::new());
 
 /// Per-process filesystem root (chroot).
 ///
@@ -289,8 +285,7 @@ static PROCESS_NS: Mutex<BTreeMap<u64, NamespaceId>> =
 /// onto a host subtree and **clamps `..`** so a guest absolute path can
 /// never escape above its root (the security-critical difference from a
 /// plain prefix Bind rule).  See `apply_root` / `normalize_jailed`.
-static PROCESS_ROOT: Mutex<BTreeMap<u64, PathBuf>> =
-    Mutex::new(BTreeMap::new());
+static PROCESS_ROOT: Mutex<BTreeMap<u64, PathBuf>> = Mutex::new(BTreeMap::new());
 
 /// A single volume (bind) mount: a guest-path prefix that resolves to an
 /// arbitrary host-path target instead of being prefixed with the container
@@ -324,8 +319,7 @@ struct VolumeMount {
 /// (`normalize_jailed`), so a guest cannot use `..` to slip *into* a volume
 /// it shouldn't reach, nor *out* of a volume's subtree — the whole path is
 /// normalized against the guest root `/` before any volume is considered.
-static PROCESS_MOUNTS: Mutex<BTreeMap<u64, Vec<VolumeMount>>> =
-    Mutex::new(BTreeMap::new());
+static PROCESS_MOUNTS: Mutex<BTreeMap<u64, Vec<VolumeMount>>> = Mutex::new(BTreeMap::new());
 
 /// Set of processes whose container **root filesystem** is read-only.
 ///
@@ -356,8 +350,7 @@ static PROCESS_ROOT_RO: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 /// hostname.  (Child processes do not currently inherit it automatically —
 /// the same limitation as `PROCESS_ROOT`; container children are expected to
 /// be registered via the container layer.)
-static PROCESS_HOSTNAME: Mutex<BTreeMap<u64, String>> =
-    Mutex::new(BTreeMap::new());
+static PROCESS_HOSTNAME: Mutex<BTreeMap<u64, String>> = Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -380,8 +373,7 @@ pub fn create(clone_from: NamespaceId) -> KernelResult<NamespaceId> {
 
     let rules = if clone_from != ROOT_NAMESPACE {
         // Clone rules from the source namespace.
-        let source = table.get(&clone_from)
-            .ok_or(KernelError::NotFound)?;
+        let source = table.get(&clone_from).ok_or(KernelError::NotFound)?;
         source.rules.clone()
     } else {
         Vec::new()
@@ -398,7 +390,8 @@ pub fn create(clone_from: NamespaceId) -> KernelResult<NamespaceId> {
 
     serial_println!(
         "[namespace] Created namespace {} (cloned from {})",
-        id, clone_from
+        id,
+        clone_from
     );
 
     Ok(id)
@@ -414,8 +407,7 @@ pub fn destroy(ns_id: NamespaceId) -> KernelResult<()> {
     }
 
     let mut table = NS_TABLE.lock();
-    let ns = table.get(&ns_id)
-        .ok_or(KernelError::NotFound)?;
+    let ns = table.get(&ns_id).ok_or(KernelError::NotFound)?;
 
     if ns.refcount > 0 {
         return Err(KernelError::ResourceExhausted);
@@ -443,8 +435,7 @@ pub fn bind(
     source_prefix: impl AsRef<Path>,
     target_prefix: impl AsRef<Path>,
 ) -> KernelResult<()> {
-    let (source_prefix, target_prefix) =
-        (source_prefix.as_ref(), target_prefix.as_ref());
+    let (source_prefix, target_prefix) = (source_prefix.as_ref(), target_prefix.as_ref());
     if ns_id == ROOT_NAMESPACE {
         return Err(KernelError::InvalidArgument);
     }
@@ -453,8 +444,7 @@ pub fn bind(
     validate_prefix(target_prefix)?;
 
     let mut table = NS_TABLE.lock();
-    let ns = table.get_mut(&ns_id)
-        .ok_or(KernelError::NotFound)?;
+    let ns = table.get_mut(&ns_id).ok_or(KernelError::NotFound)?;
 
     if ns.rules.len() >= MAX_RULES_PER_NS {
         return Err(KernelError::ResourceExhausted);
@@ -472,21 +462,19 @@ pub fn bind(
 ///
 /// Removes the first rule whose source prefix matches exactly.
 /// Returns `NotFound` if no such rule exists.
-pub fn unbind(
-    ns_id: NamespaceId,
-    source_prefix: impl AsRef<Path>,
-) -> KernelResult<()> {
+pub fn unbind(ns_id: NamespaceId, source_prefix: impl AsRef<Path>) -> KernelResult<()> {
     let source_prefix = source_prefix.as_ref();
     if ns_id == ROOT_NAMESPACE {
         return Err(KernelError::InvalidArgument);
     }
 
     let mut table = NS_TABLE.lock();
-    let ns = table.get_mut(&ns_id)
-        .ok_or(KernelError::NotFound)?;
+    let ns = table.get_mut(&ns_id).ok_or(KernelError::NotFound)?;
 
     let pos = ns.rules.iter().position(|rule| match rule {
-        NsRule::Bind { source_prefix: s, .. } => s.as_path() == source_prefix,
+        NsRule::Bind {
+            source_prefix: s, ..
+        } => s.as_path() == source_prefix,
         _ => false,
     });
 
@@ -513,8 +501,7 @@ pub fn hide(ns_id: NamespaceId, prefix: impl AsRef<Path>) -> KernelResult<()> {
     validate_prefix(prefix)?;
 
     let mut table = NS_TABLE.lock();
-    let ns = table.get_mut(&ns_id)
-        .ok_or(KernelError::NotFound)?;
+    let ns = table.get_mut(&ns_id).ok_or(KernelError::NotFound)?;
 
     if ns.rules.len() >= MAX_RULES_PER_NS {
         return Err(KernelError::ResourceExhausted);
@@ -535,8 +522,7 @@ pub fn attach(process_id: u64, ns_id: NamespaceId) -> KernelResult<()> {
     if ns_id != ROOT_NAMESPACE {
         // Verify the namespace exists and increment refcount.
         let mut table = NS_TABLE.lock();
-        let ns = table.get_mut(&ns_id)
-            .ok_or(KernelError::NotFound)?;
+        let ns = table.get_mut(&ns_id).ok_or(KernelError::NotFound)?;
         ns.refcount = ns.refcount.saturating_add(1);
     }
 
@@ -688,7 +674,9 @@ pub fn set_hostname(process_id: u64, name: &str) -> KernelResult<()> {
     if name.is_empty() || name.len() > 64 || name.as_bytes().contains(&0) {
         return Err(KernelError::InvalidArgument);
     }
-    PROCESS_HOSTNAME.lock().insert(process_id, String::from(name));
+    PROCESS_HOSTNAME
+        .lock()
+        .insert(process_id, String::from(name));
     Ok(())
 }
 
@@ -738,8 +726,7 @@ pub fn add_volume(
     host_target: impl AsRef<Path>,
     read_only: bool,
 ) -> KernelResult<()> {
-    let (guest_prefix, host_target) =
-        (guest_prefix.as_ref(), host_target.as_ref());
+    let (guest_prefix, host_target) = (guest_prefix.as_ref(), host_target.as_ref());
     validate_prefix(guest_prefix)?;
     validate_prefix(host_target)?;
     let guest = normalize_jailed(guest_prefix);
@@ -765,7 +752,11 @@ pub fn add_volume(
     if list.len() >= MAX_VOLUMES_PER_PROCESS {
         return Err(KernelError::ResourceExhausted);
     }
-    list.push(VolumeMount { guest_prefix: guest, host_target: host, read_only });
+    list.push(VolumeMount {
+        guest_prefix: guest,
+        host_target: host,
+        read_only,
+    });
     Ok(())
 }
 
@@ -897,8 +888,7 @@ where
         return Ok(Cow::Borrowed(path));
     }
     let task_id = crate::sched::current_task_id();
-    let process_id = crate::proc::thread::owner_process(task_id)
-        .unwrap_or(0);
+    let process_id = crate::proc::thread::owner_process(task_id).unwrap_or(0);
 
     resolve_path_for(process_id, path)
 }
@@ -957,12 +947,20 @@ where
             // container rootfs.  Most jailed processes have none, so avoid the
             // clone when the list is empty.
             let volumes = {
-                PROCESS_MOUNTS.lock().get(&process_id).cloned().unwrap_or_default()
+                PROCESS_MOUNTS
+                    .lock()
+                    .get(&process_id)
+                    .cloned()
+                    .unwrap_or_default()
             };
             if volumes.is_empty() {
                 Ok(Cow::Owned(apply_root(&r, &translated)))
             } else {
-                Ok(Cow::Owned(apply_root_with_volumes(&r, &volumes, &translated)))
+                Ok(Cow::Owned(apply_root_with_volumes(
+                    &r,
+                    &volumes,
+                    &translated,
+                )))
             }
         }
         None => Ok(translated),
@@ -1005,10 +1003,7 @@ pub fn check_writable(path: impl AsRef<Path>) -> KernelResult<()> {
 /// Read-only enforcement only applies to *jailed* processes (volumes and the
 /// read-only-root flag only take effect within a chroot root); an unjailed
 /// process has no volume re-anchoring and is always writable here.
-pub fn check_writable_for(
-    process_id: u64,
-    path: impl AsRef<Path>,
-) -> KernelResult<()> {
+pub fn check_writable_for(process_id: u64, path: impl AsRef<Path>) -> KernelResult<()> {
     let path = path.as_ref();
     // Fast path, before any lock. The existing one below is *after* two global
     // spinlock acquisitions, which at ~500 ns each is most of its cost -- it
@@ -1131,9 +1126,7 @@ pub fn unjail_path_for(process_id: u64, host: impl AsRef<Path>) -> PathBuf {
             let mut best: Option<&VolumeMount> = None;
             for v in list {
                 if host.starts_with(&v.host_target)
-                    && best.is_none_or(|b| {
-                        v.host_target.len() > b.host_target.len()
-                    })
+                    && best.is_none_or(|b| v.host_target.len() > b.host_target.len())
                 {
                     best = Some(v);
                 }
@@ -1141,8 +1134,7 @@ pub fn unjail_path_for(process_id: u64, host: impl AsRef<Path>) -> PathBuf {
             if let Some(v) = best {
                 // `starts_with` above guarantees the strip succeeds; the
                 // fallback keeps this panic-free.
-                let suffix =
-                    host.strip_prefix(&v.host_target).unwrap_or_default();
+                let suffix = host.strip_prefix(&v.host_target).unwrap_or_default();
                 let mut result = v.guest_prefix.clone();
                 result.push(&suffix);
                 return result;
@@ -1172,8 +1164,7 @@ pub fn rule_count(ns_id: NamespaceId) -> KernelResult<usize> {
         return Ok(0);
     }
     let table = NS_TABLE.lock();
-    let ns = table.get(&ns_id)
-        .ok_or(KernelError::NotFound)?;
+    let ns = table.get(&ns_id).ok_or(KernelError::NotFound)?;
     Ok(ns.rules.len())
 }
 
@@ -1203,7 +1194,10 @@ fn validate_prefix(prefix: &Path) -> KernelResult<()> {
 fn apply_rules(rules: &[NsRule], path: &Path) -> KernelResult<PathBuf> {
     for rule in rules {
         match rule {
-            NsRule::Bind { source_prefix, target_prefix } => {
+            NsRule::Bind {
+                source_prefix,
+                target_prefix,
+            } => {
                 if let Some(suffix) = path.strip_prefix(source_prefix) {
                     // Construct the remapped path.  `suffix` is relative, so
                     // `push` re-inserts the separator (and is a no-op when the
@@ -1251,9 +1245,7 @@ fn apply_root(root: &Path, path: &Path) -> PathBuf {
         // Guest root maps to the jail root itself.
         return root.to_path_buf();
     }
-    let mut result = PathBuf::with_capacity(
-        root.len().saturating_add(normalized.len()),
-    );
+    let mut result = PathBuf::with_capacity(root.len().saturating_add(normalized.len()));
     result.extend_bytes(root.as_bytes());
     // `normalized` starts with `/`, so plain concatenation is already
     // correctly separated (and `root` never carries a trailing slash — it is
@@ -1275,19 +1267,13 @@ fn apply_root(root: &Path, path: &Path) -> PathBuf {
 /// *before* any volume is considered, a guest cannot use `..` to escape a
 /// volume's subtree or to climb out of one volume and into another — the
 /// security property of the bare chroot is preserved.
-fn apply_root_with_volumes(
-    root: &Path,
-    volumes: &[VolumeMount],
-    path: &Path,
-) -> PathBuf {
+fn apply_root_with_volumes(root: &Path, volumes: &[VolumeMount], path: &Path) -> PathBuf {
     if !path.is_absolute() {
         // Relative — handled by the cwd layer, same as `apply_root`.
         return path.to_path_buf();
     }
     let normalized = normalize_jailed(path);
-    if let Some((host_target, suffix)) =
-        longest_volume_match(volumes, &normalized)
-    {
+    if let Some((host_target, suffix)) = longest_volume_match(volumes, &normalized) {
         let mut result = host_target;
         // `suffix` is relative; an empty one leaves the mount point itself.
         result.push(&suffix);
@@ -1296,9 +1282,7 @@ fn apply_root_with_volumes(
     if normalized.as_path() == Path::new("/") {
         return root.to_path_buf();
     }
-    let mut result = PathBuf::with_capacity(
-        root.len().saturating_add(normalized.len()),
-    );
+    let mut result = PathBuf::with_capacity(root.len().saturating_add(normalized.len()));
     result.extend_bytes(root.as_bytes());
     result.extend_bytes(normalized.as_bytes());
     result
@@ -1414,7 +1398,10 @@ fn test_ns_fast_path_flag() -> KernelResult<()> {
     // Fast path really is being taken: the identity result below is what it
     // returns, and the slow path would return the same, so this alone is not
     // evidence -- it is the precondition for the three checks that follow.
-    assert_eq!(&*resolve_path_for(PID_ROOT, "/bin/sh")?, Path::new("/bin/sh"));
+    assert_eq!(
+        &*resolve_path_for(PID_ROOT, "/bin/sh")?,
+        Path::new("/bin/sh")
+    );
 
     // ...and it borrows rather than allocating.
     //
@@ -1433,7 +1420,10 @@ fn test_ns_fast_path_flag() -> KernelResult<()> {
 
     // --- Site 1: set_root (worst failure mode: chroot escape) ---
     set_root(PID_ROOT, "/containers/fp/rootfs")?;
-    assert!(ns_features_active(), "set_root did not disable the fast path");
+    assert!(
+        ns_features_active(),
+        "set_root did not disable the fast path"
+    );
     assert_eq!(
         &*resolve_path_for(PID_ROOT, "/bin/sh")?,
         Path::new("/containers/fp/rootfs/bin/sh"),
@@ -1455,7 +1445,10 @@ fn test_ns_fast_path_flag() -> KernelResult<()> {
     hide(ns, "/secret")?;
     // Creating and populating a namespace nobody is attached to must not
     // itself disable the fast path -- it changes no process's view.
-    assert!(!ns_features_active(), "creating an unattached namespace armed the flag");
+    assert!(
+        !ns_features_active(),
+        "creating an unattached namespace armed the flag"
+    );
     attach(PID_NS, ns)?;
     assert!(ns_features_active(), "attach did not disable the fast path");
     assert!(
@@ -1474,7 +1467,10 @@ fn test_ns_fast_path_flag() -> KernelResult<()> {
     // it from the volume alone is the only way this assertion can fail.
     assert!(reset_ns_features_if_trivial(), "site 2 leaked state");
     add_volume(PID_VOL, "/data", "/host/data", true)?;
-    assert!(ns_features_active(), "add_volume did not disable the fast path");
+    assert!(
+        ns_features_active(),
+        "add_volume did not disable the fast path"
+    );
     set_root(PID_VOL, "/containers/fp2/rootfs")?;
     assert!(
         check_writable_for(PID_VOL, "/data/file").is_err(),
@@ -1592,10 +1588,7 @@ fn test_hide_resolution() -> KernelResult<()> {
     // Path matching the hide prefix should return PermissionDenied.
     let result = apply_rules(&ns_obj.rules, Path::new("/secret/keys.txt"));
     assert!(result.is_err());
-    assert!(matches!(
-        result.unwrap_err(),
-        KernelError::PermissionDenied
-    ));
+    assert!(matches!(result.unwrap_err(), KernelError::PermissionDenied));
 
     // Exact match.
     let result = apply_rules(&ns_obj.rules, Path::new("/secret"));
@@ -1747,7 +1740,10 @@ fn test_process_root() -> KernelResult<()> {
     // No root: paths pass through unchanged.
     assert_eq!(&*resolve_path_for(pid, "/bin/sh")?, Path::new("/bin/sh"));
     // unjail is a no-op for an unjailed process (host path == guest path).
-    assert_eq!(unjail_path_for(pid, "/bin/sh").as_path(), Path::new("/bin/sh"));
+    assert_eq!(
+        unjail_path_for(pid, "/bin/sh").as_path(),
+        Path::new("/bin/sh")
+    );
 
     // Jail the process to a container rootfs.
     set_root(pid, "/containers/c1/rootfs")?;
@@ -1762,7 +1758,10 @@ fn test_process_root() -> KernelResult<()> {
         Path::new("/containers/c1/rootfs/bin/sh"),
     );
     // Guest root maps to the jail root itself.
-    assert_eq!(&*resolve_path_for(pid, "/")?, Path::new("/containers/c1/rootfs"));
+    assert_eq!(
+        &*resolve_path_for(pid, "/")?,
+        Path::new("/containers/c1/rootfs")
+    );
     // `.` and duplicate slashes collapse.
     assert_eq!(
         &*resolve_path_for(pid, "/./bin//sh")?,
@@ -1814,13 +1813,19 @@ fn test_process_root() -> KernelResult<()> {
     // exact inverse of `apply_root` for the jailed pid (root is
     // "/containers/c1/rootfs" here).
     assert_eq!(unjail_path_for(pid, &once).as_path(), Path::new("/bin/sh"));
-    assert_eq!(unjail_path_for(pid, "/containers/c1/rootfs").as_path(), Path::new("/"));
+    assert_eq!(
+        unjail_path_for(pid, "/containers/c1/rootfs").as_path(),
+        Path::new("/")
+    );
     // Round-trip: unjail(resolve(guest)) recovers the normalized guest path.
     let g = resolve_path_for(pid, "/a/b/../c")?;
     assert_eq!(&*g, Path::new("/containers/c1/rootfs/a/c"));
     assert_eq!(unjail_path_for(pid, &g).as_path(), Path::new("/a/c"));
     // A host path not within the jail is returned unchanged (defensive).
-    assert_eq!(unjail_path_for(pid, "/elsewhere/x").as_path(), Path::new("/elsewhere/x"));
+    assert_eq!(
+        unjail_path_for(pid, "/elsewhere/x").as_path(),
+        Path::new("/elsewhere/x")
+    );
 
     // A root that normalizes to "/" clears the jail.
     set_root(pid, "/")?;
@@ -1902,20 +1907,41 @@ fn test_volume_mounts() -> KernelResult<()> {
     // Longest-prefix wins: a nested volume shadows the parent.
     add_volume(pid, "/data/cache", "/fastcache", false)?;
     assert_eq!(volume_count(pid), 2);
-    assert_eq!(&*resolve_path_for(pid, "/data/cache/a")?, Path::new("/fastcache/a"));
-    assert_eq!(&*resolve_path_for(pid, "/data/cache")?, Path::new("/fastcache"));
+    assert_eq!(
+        &*resolve_path_for(pid, "/data/cache/a")?,
+        Path::new("/fastcache/a")
+    );
+    assert_eq!(
+        &*resolve_path_for(pid, "/data/cache")?,
+        Path::new("/fastcache")
+    );
     // A sibling under the parent volume is unaffected.
-    assert_eq!(&*resolve_path_for(pid, "/data/other")?, Path::new("/host/shared/other"));
+    assert_eq!(
+        &*resolve_path_for(pid, "/data/other")?,
+        Path::new("/host/shared/other")
+    );
 
     // Re-adding at an existing guest prefix replaces (does not stack).
     add_volume(pid, "/data", "/host/shared2", false)?;
     assert_eq!(volume_count(pid), 2);
-    assert_eq!(&*resolve_path_for(pid, "/data/file")?, Path::new("/host/shared2/file"));
+    assert_eq!(
+        &*resolve_path_for(pid, "/data/file")?,
+        Path::new("/host/shared2/file")
+    );
 
     // Reverse mapping (fchdir into a volume): host path → guest path.
-    assert_eq!(unjail_path_for(pid, "/host/shared2/file").as_path(), Path::new("/data/file"));
-    assert_eq!(unjail_path_for(pid, "/host/shared2").as_path(), Path::new("/data"));
-    assert_eq!(unjail_path_for(pid, "/fastcache/a").as_path(), Path::new("/data/cache/a"));
+    assert_eq!(
+        unjail_path_for(pid, "/host/shared2/file").as_path(),
+        Path::new("/data/file")
+    );
+    assert_eq!(
+        unjail_path_for(pid, "/host/shared2").as_path(),
+        Path::new("/data")
+    );
+    assert_eq!(
+        unjail_path_for(pid, "/fastcache/a").as_path(),
+        Path::new("/data/cache/a")
+    );
     // Rootfs paths still reverse to their guest path.
     assert_eq!(
         unjail_path_for(pid, "/containers/v1/rootfs/bin/sh").as_path(),
@@ -1924,13 +1950,19 @@ fn test_volume_mounts() -> KernelResult<()> {
 
     // Trailing slashes / `.` in volume args are normalized away.
     add_volume(pid, "/logs/", "/var/log/./c1/", false)?;
-    assert_eq!(&*resolve_path_for(pid, "/logs/app.log")?, Path::new("/var/log/c1/app.log"));
+    assert_eq!(
+        &*resolve_path_for(pid, "/logs/app.log")?,
+        Path::new("/var/log/c1/app.log")
+    );
 
     // Read-only volumes: writes under a read-only volume are rejected with
     // EROFS, while reads/path resolution still work.  Add a read-only volume
     // and verify check_writable_for enforces it.
     add_volume(pid, "/ro", "/host/ro-target", true)?;
-    assert_eq!(&*resolve_path_for(pid, "/ro/file")?, Path::new("/host/ro-target/file"));
+    assert_eq!(
+        &*resolve_path_for(pid, "/ro/file")?,
+        Path::new("/host/ro-target/file")
+    );
     assert!(check_writable_for(pid, "/ro/file").is_err());
     assert!(check_writable_for(pid, "/ro").is_err());
     // A read-write volume permits writes.
@@ -1975,7 +2007,10 @@ fn test_volume_mounts() -> KernelResult<()> {
     assert_eq!(volume_count(pid), 0);
     assert!(get_root(pid).is_none());
     // After detach, the former volume path is a plain host path again.
-    assert_eq!(&*resolve_path_for(pid, "/data/file")?, Path::new("/data/file"));
+    assert_eq!(
+        &*resolve_path_for(pid, "/data/file")?,
+        Path::new("/data/file")
+    );
 
     serial_println!("[namespace]   Volume (bind) mounts: OK");
     Ok(())

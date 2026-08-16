@@ -34,11 +34,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -230,7 +230,8 @@ pub fn run_all() -> KernelResult<DiagReport> {
         all_categories.push(report);
     }
 
-    let worst = all_issues.iter()
+    let worst = all_issues
+        .iter()
         .map(|i| i.severity)
         .max()
         .unwrap_or(Severity::Info);
@@ -298,7 +299,8 @@ pub fn run_category(cat: DiagCategory) -> KernelResult<CategoryReport> {
 pub fn quick_check() -> Vec<DiagIssue> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.issues.iter()
+        s.issues
+            .iter()
             .filter(|i| i.severity >= Severity::Warning)
             .cloned()
             .collect()
@@ -348,7 +350,8 @@ fn diag_network() -> (u32, u32, Vec<DiagIssue>) {
     let (iface_count, connected, _, _) = crate::fs::netsettings::stats();
     if iface_count == 0 {
         issues.push(make_issue(
-            DiagCategory::Network, Severity::Critical,
+            DiagCategory::Network,
+            Severity::Critical,
             "No network interfaces",
             "No network interfaces are configured.",
             "Add a network interface via netsettings.",
@@ -361,7 +364,8 @@ fn diag_network() -> (u32, u32, Vec<DiagIssue>) {
     tests += 1;
     if connected == 0 && iface_count > 0 {
         issues.push(make_issue(
-            DiagCategory::Network, Severity::Warning,
+            DiagCategory::Network,
+            Severity::Warning,
             "No connected interfaces",
             &format!("{} interfaces configured but none connected.", iface_count),
             "Check cable/WiFi connection or enable an interface.",
@@ -382,7 +386,8 @@ fn diag_network() -> (u32, u32, Vec<DiagIssue>) {
         passed += 1;
     } else {
         issues.push(make_issue(
-            DiagCategory::Network, Severity::Info,
+            DiagCategory::Network,
+            Severity::Info,
             "DNS not configured",
             "No DNS servers configured (no interfaces).",
             "Configure DNS via netsettings.",
@@ -403,7 +408,8 @@ fn diag_storage() -> (u32, u32, Vec<DiagIssue>) {
         passed += 1;
     } else {
         issues.push(make_issue(
-            DiagCategory::Storage, Severity::Critical,
+            DiagCategory::Storage,
+            Severity::Critical,
             "Root filesystem not accessible",
             "Cannot read root directory /.",
             "Check filesystem mounts.",
@@ -416,7 +422,8 @@ fn diag_storage() -> (u32, u32, Vec<DiagIssue>) {
         passed += 1;
     } else {
         issues.push(make_issue(
-            DiagCategory::Storage, Severity::Warning,
+            DiagCategory::Storage,
+            Severity::Warning,
             "/tmp not available",
             "Temporary filesystem not mounted at /tmp.",
             "Mount memfs at /tmp during boot.",
@@ -432,15 +439,20 @@ fn diag_storage() -> (u32, u32, Vec<DiagIssue>) {
             let used_pct = ((total - free) * 100) / total;
             if used_pct > 95 {
                 issues.push(make_issue(
-                    DiagCategory::Storage, Severity::Critical,
+                    DiagCategory::Storage,
+                    Severity::Critical,
                     "Disk almost full",
-                    &format!("Root filesystem is {}% full ({} free).",
-                        used_pct, crate::fs::storageclean::format_size(free)),
+                    &format!(
+                        "Root filesystem is {}% full ({} free).",
+                        used_pct,
+                        crate::fs::storageclean::format_size(free)
+                    ),
                     "Free space using 'sclean scan' and 'sclean clean'.",
                 ));
             } else if used_pct > 85 {
                 issues.push(make_issue(
-                    DiagCategory::Storage, Severity::Warning,
+                    DiagCategory::Storage,
+                    Severity::Warning,
                     "Disk space low",
                     &format!("Root filesystem is {}% full.", used_pct),
                     "Consider cleaning up unused files.",
@@ -461,7 +473,8 @@ fn diag_storage() -> (u32, u32, Vec<DiagIssue>) {
         passed += 1;
     } else {
         issues.push(make_issue(
-            DiagCategory::Storage, Severity::Warning,
+            DiagCategory::Storage,
+            Severity::Warning,
             "/proc not available",
             "Process filesystem not mounted.",
             "Procfs should be mounted during boot.",
@@ -490,17 +503,21 @@ fn diag_memory() -> (u32, u32, Vec<DiagIssue>) {
         tests += 1;
         if used_pct > 95 {
             issues.push(make_issue(
-                DiagCategory::Memory, Severity::Critical,
+                DiagCategory::Memory,
+                Severity::Critical,
                 "Memory critically low",
-                &format!("{}% of RAM in use ({} of {}).",
+                &format!(
+                    "{}% of RAM in use ({} of {}).",
                     used_pct,
                     crate::fs::storageclean::format_size(mem.used_bytes),
-                    crate::fs::storageclean::format_size(mem.total_bytes)),
+                    crate::fs::storageclean::format_size(mem.total_bytes)
+                ),
                 "Close applications or add more RAM.",
             ));
         } else if used_pct > 85 {
             issues.push(make_issue(
-                DiagCategory::Memory, Severity::Warning,
+                DiagCategory::Memory,
+                Severity::Warning,
                 "Memory usage high",
                 &format!("{}% of RAM in use.", used_pct),
                 "Monitor memory usage and close unused applications.",
@@ -510,7 +527,8 @@ fn diag_memory() -> (u32, u32, Vec<DiagIssue>) {
         }
     } else {
         issues.push(make_issue(
-            DiagCategory::Memory, Severity::Info,
+            DiagCategory::Memory,
+            Severity::Info,
             "Memory info unavailable",
             "Cannot query memory statistics.",
             "Initialize sysinfo module.",
@@ -543,7 +561,8 @@ fn diag_services() -> (u32, u32, Vec<DiagIssue>) {
         passed += 1;
     } else {
         issues.push(make_issue(
-            DiagCategory::Services, Severity::Info,
+            DiagCategory::Services,
+            Severity::Info,
             "No autostart items",
             "No startup items configured.",
             "Add services to autostart for automatic startup.",
@@ -566,7 +585,8 @@ fn diag_services() -> (u32, u32, Vec<DiagIssue>) {
         passed += 1;
     } else {
         issues.push(make_issue(
-            DiagCategory::Services, Severity::Info,
+            DiagCategory::Services,
+            Severity::Info,
             "No applications registered",
             "Application registry is empty.",
             "Register applications via appregistry.",
@@ -588,7 +608,8 @@ fn diag_boot() -> (u32, u32, Vec<DiagIssue>) {
         passed += 1;
     } else {
         issues.push(make_issue(
-            DiagCategory::Boot, Severity::Info,
+            DiagCategory::Boot,
+            Severity::Info,
             "No boot entries",
             "Boot configuration has no entries.",
             "Initialize bootcfg with default entries.",
@@ -607,7 +628,8 @@ fn diag_boot() -> (u32, u32, Vec<DiagIssue>) {
     let (count, _, _, _) = crate::fs::autostart::stats();
     if count > 20 {
         issues.push(make_issue(
-            DiagCategory::Boot, Severity::Warning,
+            DiagCategory::Boot,
+            Severity::Warning,
             "Many startup items",
             &format!("{} items in autostart may slow boot.", count),
             "Review autostart items and disable non-essential ones.",
@@ -631,7 +653,8 @@ fn diag_security() -> (u32, u32, Vec<DiagIssue>) {
         passed += 1;
     } else {
         issues.push(make_issue(
-            DiagCategory::Security, Severity::Warning,
+            DiagCategory::Security,
+            Severity::Warning,
             "No user accounts",
             "No user accounts configured.",
             "Create user accounts via useracct.",
@@ -645,7 +668,8 @@ fn diag_security() -> (u32, u32, Vec<DiagIssue>) {
         passed += 1;
     } else {
         issues.push(make_issue(
-            DiagCategory::Security, Severity::Warning,
+            DiagCategory::Security,
+            Severity::Warning,
             "No certificates",
             "Certificate store is empty — HTTPS will fail.",
             "Initialize certmgr with system root CAs.",
@@ -659,7 +683,8 @@ fn diag_security() -> (u32, u32, Vec<DiagIssue>) {
         passed += 1;
     } else {
         issues.push(make_issue(
-            DiagCategory::Security, Severity::Info,
+            DiagCategory::Security,
+            Severity::Info,
             "No capability groups",
             "Capability settings not initialized.",
             "Initialize capsettings with default groups.",
@@ -683,7 +708,8 @@ pub fn current_issues() -> Vec<DiagIssue> {
 pub fn issues_by_severity(min_severity: Severity) -> Vec<DiagIssue> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.issues.iter()
+        s.issues
+            .iter()
             .filter(|i| i.severity >= min_severity)
             .cloned()
             .collect()
@@ -694,7 +720,8 @@ pub fn issues_by_severity(min_severity: Severity) -> Vec<DiagIssue> {
 pub fn issues_for_category(cat: DiagCategory) -> Vec<DiagIssue> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.issues.iter()
+        s.issues
+            .iter()
             .filter(|i| i.category == cat)
             .cloned()
             .collect()
@@ -705,7 +732,8 @@ pub fn issues_for_category(cat: DiagCategory) -> Vec<DiagIssue> {
 pub fn history() -> Vec<(u64, u32, u32, usize)> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.history.iter()
+        s.history
+            .iter()
             .map(|h| (h.timestamp_ns, h.total_tests, h.total_passed, h.issue_count))
             .collect()
     })
@@ -719,7 +747,13 @@ pub fn history() -> Vec<(u64, u32, u32, usize)> {
 pub fn stats() -> (usize, u64, u64, usize, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.issues.len(), s.total_runs, s.total_issues_found, s.history.len(), s.ops),
+        Some(s) => (
+            s.issues.len(),
+            s.total_runs,
+            s.total_issues_found,
+            s.history.len(),
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -752,8 +786,13 @@ pub fn self_test() {
         assert!(report.total_tests > 0);
         assert!(report.total_passed <= report.total_tests);
         assert!(report.duration_us < 10_000_000); // Should complete in < 10s
-        serial_println!("[sysdiag]   2. Run all diagnostics — OK ({}t/{}p/{}i in {}us)",
-            report.total_tests, report.total_passed, report.total_issues, report.duration_us);
+        serial_println!(
+            "[sysdiag]   2. Run all diagnostics — OK ({}t/{}p/{}i in {}us)",
+            report.total_tests,
+            report.total_passed,
+            report.total_issues,
+            report.duration_us
+        );
     }
 
     // Test 3: run individual category

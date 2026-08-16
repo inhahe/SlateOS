@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -158,7 +158,9 @@ where
 /// the real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         connections: Vec::new(),
         next_id: 1,
@@ -172,20 +174,31 @@ pub fn init_defaults() {
 
 /// List all active connections.
 pub fn list_connections() -> Vec<Connection> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.connections.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.connections.clone())
 }
 
 /// Get connection by ID.
 pub fn get_connection(id: u32) -> Option<Connection> {
-    STATE.lock().as_ref().and_then(|s| s.connections.iter().find(|c| c.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.connections.iter().find(|c| c.id == id).cloned())
 }
 
 /// Add a new connection.
-pub fn add_connection(proto: Protocol, state: ConnState,
-    local_addr: &str, local_port: u16,
-    remote_addr: &str, remote_port: u16,
-    pid: u32, process_name: &str) -> KernelResult<u32>
-{
+pub fn add_connection(
+    proto: Protocol,
+    state: ConnState,
+    local_addr: &str,
+    local_port: u16,
+    remote_addr: &str,
+    remote_port: u16,
+    pid: u32,
+    process_name: &str,
+) -> KernelResult<u32> {
     with_state(|st| {
         if st.connections.len() >= MAX_CONNECTIONS {
             return Err(KernelError::ResourceExhausted);
@@ -194,11 +207,18 @@ pub fn add_connection(proto: Protocol, state: ConnState,
         let id = st.next_id;
         st.next_id += 1;
         st.connections.push(Connection {
-            id, protocol: proto, state,
-            local_addr: String::from(local_addr), local_port,
-            remote_addr: String::from(remote_addr), remote_port,
-            pid, process_name: String::from(process_name),
-            bytes_sent: 0, bytes_recv: 0, created_ns: now,
+            id,
+            protocol: proto,
+            state,
+            local_addr: String::from(local_addr),
+            local_port,
+            remote_addr: String::from(remote_addr),
+            remote_port,
+            pid,
+            process_name: String::from(process_name),
+            bytes_sent: 0,
+            bytes_recv: 0,
+            created_ns: now,
         });
         st.total_created += 1;
         Ok(id)
@@ -212,7 +232,10 @@ pub fn add_connection(proto: Protocol, state: ConnState,
 /// reflects real throughput rather than seeded values.
 pub fn record_traffic(id: u32, sent: u64, recv: u64) -> KernelResult<()> {
     with_state(|state| {
-        let c = state.connections.iter_mut().find(|c| c.id == id)
+        let c = state
+            .connections
+            .iter_mut()
+            .find(|c| c.id == id)
             .ok_or(KernelError::NotFound)?;
         c.bytes_sent += sent;
         c.bytes_recv += recv;
@@ -227,7 +250,9 @@ pub fn close_connection(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.connections.len();
         state.connections.retain(|c| c.id != id);
-        if state.connections.len() == before { return Err(KernelError::NotFound); }
+        if state.connections.len() == before {
+            return Err(KernelError::NotFound);
+        }
         state.total_closed += 1;
         Ok(())
     })
@@ -236,21 +261,33 @@ pub fn close_connection(id: u32) -> KernelResult<()> {
 /// Get connections for a specific process.
 pub fn per_process(pid: u32) -> Vec<Connection> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.connections.iter().filter(|c| c.pid == pid).cloned().collect()
+        s.connections
+            .iter()
+            .filter(|c| c.pid == pid)
+            .cloned()
+            .collect()
     })
 }
 
 /// Filter by protocol.
 pub fn by_protocol(proto: Protocol) -> Vec<Connection> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.connections.iter().filter(|c| c.protocol == proto).cloned().collect()
+        s.connections
+            .iter()
+            .filter(|c| c.protocol == proto)
+            .cloned()
+            .collect()
     })
 }
 
 /// Filter by state.
 pub fn by_state(state: ConnState) -> Vec<Connection> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.connections.iter().filter(|c| c.state == state).cloned().collect()
+        s.connections
+            .iter()
+            .filter(|c| c.state == state)
+            .cloned()
+            .collect()
     })
 }
 
@@ -258,8 +295,14 @@ pub fn by_state(state: ConnState) -> Vec<Connection> {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.connections.len(), s.total_created, s.total_closed,
-                     s.total_bytes_sent, s.total_bytes_recv, s.ops),
+        Some(s) => (
+            s.connections.len(),
+            s.total_created,
+            s.total_closed,
+            s.total_bytes_sent,
+            s.total_bytes_recv,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -284,24 +327,53 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] empty init: OK");
 
     // 2: Add a listening TCP connection (ids start at 1).
-    let listen_id = add_connection(Protocol::Tcp, ConnState::Listen,
-        "0.0.0.0", 22, "0.0.0.0", 0, 100, "sshd").expect("add listen");
+    let listen_id = add_connection(
+        Protocol::Tcp,
+        ConnState::Listen,
+        "0.0.0.0",
+        22,
+        "0.0.0.0",
+        0,
+        100,
+        "sshd",
+    )
+    .expect("add listen");
     assert_eq!(listen_id, 1);
     assert_eq!(list_connections().len(), 1);
     crate::serial_println!("  [2/8] add: OK");
 
     // 3: Add an established TCP and a UDP connection for the filters below.
-    let tcp_id = add_connection(Protocol::Tcp, ConnState::Established,
-        "10.0.2.15", 45678, "1.2.3.4", 443, 200, "browser").expect("add tcp");
-    let _udp_id = add_connection(Protocol::Udp, ConnState::Established,
-        "10.0.2.15", 53000, "8.8.8.8", 53, 50, "resolved").expect("add udp");
+    let tcp_id = add_connection(
+        Protocol::Tcp,
+        ConnState::Established,
+        "10.0.2.15",
+        45678,
+        "1.2.3.4",
+        443,
+        200,
+        "browser",
+    )
+    .expect("add tcp");
+    let _udp_id = add_connection(
+        Protocol::Udp,
+        ConnState::Established,
+        "10.0.2.15",
+        53000,
+        "8.8.8.8",
+        53,
+        50,
+        "resolved",
+    )
+    .expect("add udp");
     assert_eq!(list_connections().len(), 3);
     crate::serial_println!("  [3/8] add more: OK");
 
     // 4: Get connection — exact fields.
     let conn = get_connection(listen_id).expect("get");
-    assert_eq!((conn.protocol, conn.state, conn.local_port),
-               (Protocol::Tcp, ConnState::Listen, 22));
+    assert_eq!(
+        (conn.protocol, conn.state, conn.local_port),
+        (Protocol::Tcp, ConnState::Listen, 22)
+    );
     crate::serial_println!("  [4/8] get: OK");
 
     // 5: Record traffic (exact, from zero) on the established TCP connection.
@@ -325,7 +397,10 @@ pub fn self_test() {
 
     // 8: Aggregate totals equal the exact sums of the operations above.
     let (active, created, closed, sent, recv, ops) = stats();
-    assert_eq!((active, created, closed, sent, recv), (2, 3, 1, 4096, 65536));
+    assert_eq!(
+        (active, created, closed, sent, recv),
+        (2, 3, 1, 4096, 65536)
+    );
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

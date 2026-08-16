@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -106,8 +106,24 @@ where
     f(state)
 }
 
-fn make_pool(pool: BufPool, active: u64, bytes: u64, allocs: u64, frees: u64, drops: u64, peak: u64) -> PoolStats {
-    PoolStats { pool, active_buffers: active, total_bytes: bytes, allocs, frees, drops, peak_buffers: peak }
+fn make_pool(
+    pool: BufPool,
+    active: u64,
+    bytes: u64,
+    allocs: u64,
+    frees: u64,
+    drops: u64,
+    peak: u64,
+) -> PoolStats {
+    PoolStats {
+        pool,
+        active_buffers: active,
+        total_bytes: bytes,
+        allocs,
+        frees,
+        drops,
+        peak_buffers: peak,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +147,9 @@ fn make_pool(pool: BufPool, active: u64, bytes: u64, allocs: u64, frees: u64, dr
 /// 231.6MB allocated.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         pools: [
             make_pool(BufPool::Tcp, 0, 0, 0, 0, 0, 0),
@@ -188,14 +206,24 @@ pub fn record_drop(pool: BufPool) -> KernelResult<()> {
 
 /// Per-pool statistics.
 pub fn pool_stats() -> Vec<PoolStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.pools.to_vec())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.pools.to_vec())
 }
 
 /// Statistics: (pool_count, total_allocs, total_frees, total_drops, total_bytes, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (6, s.total_allocs, s.total_frees, s.total_drops, s.total_bytes_allocated, s.ops),
+        Some(s) => (
+            6,
+            s.total_allocs,
+            s.total_frees,
+            s.total_drops,
+            s.total_bytes_allocated,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -215,8 +243,17 @@ pub fn self_test() {
     let pools = pool_stats();
     assert_eq!(pools.len(), 6);
     for p in &pools {
-        assert_eq!((p.active_buffers, p.total_bytes, p.allocs, p.frees, p.drops, p.peak_buffers),
-                   (0, 0, 0, 0, 0, 0));
+        assert_eq!(
+            (
+                p.active_buffers,
+                p.total_bytes,
+                p.allocs,
+                p.frees,
+                p.drops,
+                p.peak_buffers
+            ),
+            (0, 0, 0, 0, 0, 0)
+        );
     }
     let (c0, a0, f0, d0, b0, _) = stats();
     assert_eq!((c0, a0, f0, d0, b0), (6, 0, 0, 0, 0));
@@ -225,7 +262,10 @@ pub fn self_test() {
     // 2: Alloc — active/allocs/bytes/peak advance for the pool and globals.
     alloc(BufPool::Tcp, 1500).expect("alloc");
     let t = &pool_stats()[BufPool::Tcp.index()];
-    assert_eq!((t.active_buffers, t.allocs, t.total_bytes, t.peak_buffers), (1, 1, 1500, 1));
+    assert_eq!(
+        (t.active_buffers, t.allocs, t.total_bytes, t.peak_buffers),
+        (1, 1, 1500, 1)
+    );
     let (_, allocs, _, _, bytes, _) = stats();
     assert_eq!((allocs, bytes), (1, 1500));
     crate::serial_println!("  [2/8] alloc: OK");
@@ -233,7 +273,10 @@ pub fn self_test() {
     // 3: Free — active and total_bytes drop; frees and peak behaviour exact.
     free(BufPool::Tcp, 1500).expect("free");
     let t = &pool_stats()[BufPool::Tcp.index()];
-    assert_eq!((t.active_buffers, t.frees, t.total_bytes, t.peak_buffers), (0, 1, 0, 1));
+    assert_eq!(
+        (t.active_buffers, t.frees, t.total_bytes, t.peak_buffers),
+        (0, 1, 0, 1)
+    );
     assert_eq!(stats().2, 1); // total_frees
     crate::serial_println!("  [3/8] free: OK");
 
@@ -244,8 +287,12 @@ pub fn self_test() {
     crate::serial_println!("  [4/8] drop: OK");
 
     // 5: Peak tracking — peak holds the high-water mark after frees.
-    for _ in 0..5 { alloc(BufPool::Icmp, 64).expect("multi_alloc"); }
-    for _ in 0..2 { free(BufPool::Icmp, 64).expect("multi_free"); }
+    for _ in 0..5 {
+        alloc(BufPool::Icmp, 64).expect("multi_alloc");
+    }
+    for _ in 0..2 {
+        free(BufPool::Icmp, 64).expect("multi_free");
+    }
     let p = &pool_stats()[BufPool::Icmp.index()];
     assert_eq!((p.active_buffers, p.peak_buffers), (3, 5));
     crate::serial_println!("  [5/8] peak: OK");

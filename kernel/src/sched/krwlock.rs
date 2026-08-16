@@ -275,7 +275,11 @@ impl<T> KRwLock<T> {
     /// Release the write lock (called by WriteGuard drop).
     fn write_unlock(&self) {
         let prev = self.state.swap(UNLOCKED, Ordering::Release);
-        debug_assert_eq!(prev, WRITE_LOCKED, "write_unlock called but state was {}", prev);
+        debug_assert_eq!(
+            prev, WRITE_LOCKED,
+            "write_unlock called but state was {}",
+            prev
+        );
 
         // If writers are waiting, wake one writer (writer preference).
         // Otherwise wake all queued readers (they can run concurrently).

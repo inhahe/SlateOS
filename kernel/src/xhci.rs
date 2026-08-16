@@ -25,9 +25,8 @@
 //! Based on the Intel xHCI specification revision 1.2 and the Linux
 //! kernel's `drivers/usb/host/xhci*.c` implementation.
 
-
 use alloc::vec::Vec;
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{Ordering, fence};
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame};
@@ -196,8 +195,8 @@ const PORTSC_CSC: u32 = 1 << 17;
 /// Port Reset Change.
 const PORTSC_PRC: u32 = 1 << 21;
 /// Bits that are cleared by writing 1 (write-1-to-clear).
-const PORTSC_W1C_MASK: u32 = PORTSC_CSC | PORTSC_PRC | (1 << 18) | (1 << 19)
-    | (1 << 20) | (1 << 22) | (1 << 23);
+const PORTSC_W1C_MASK: u32 =
+    PORTSC_CSC | PORTSC_PRC | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 22) | (1 << 23);
 
 // USB speed constants
 /// Full Speed (12 Mbps, USB 1.1).
@@ -251,7 +250,11 @@ pub struct Trb {
 impl Trb {
     /// Create a zeroed TRB.
     pub const fn zeroed() -> Self {
-        Self { parameter: 0, status: 0, control: 0 }
+        Self {
+            parameter: 0,
+            status: 0,
+            control: 0,
+        }
     }
 
     /// Extract the TRB type from the control field (bits 15:10).
@@ -429,7 +432,10 @@ impl TrbRing {
             trb.control &= !TRB_CYCLE;
         }
 
-        let phys = self.frame.addr().wrapping_add((self.enqueue_idx * 16) as u64);
+        let phys = self
+            .frame
+            .addr()
+            .wrapping_add((self.enqueue_idx * 16) as u64);
 
         // Write the TRB.
         // SAFETY: enqueue_idx is within [0, capacity).
@@ -607,24 +613,25 @@ impl XhciController {
     fn init(hhdm_offset: u64) -> KernelResult<Self> {
         // Find xHCI controllers via PCI class/subclass.
         let controllers = pci::find_devices_by_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB);
-        let pci_dev = controllers.iter()
+        let pci_dev = controllers
+            .iter()
             .find(|d| {
                 // Check prog-if = 0x30 (xHCI).
-                let prog_if = pci::config_read8(
-                    d.address.bus, d.address.device, d.address.function, 0x09
-                );
+                let prog_if =
+                    pci::config_read8(d.address.bus, d.address.device, d.address.function, 0x09);
                 prog_if == PCI_PROGIF_XHCI
             })
             .ok_or(KernelError::NotFound)?;
 
         crate::serial_println!(
             "[xhci] Found xHCI controller: {:04X}:{:04X} at {:?}",
-            pci_dev.vendor_id, pci_dev.device_id, pci_dev.address
+            pci_dev.vendor_id,
+            pci_dev.device_id,
+            pci_dev.address
         );
 
         // Get BAR0 as 64-bit MMIO address.
-        let mmio_phys = pci::bar_mmio_addr64(pci_dev, 0)
-            .ok_or(KernelError::InvalidArgument)?;
+        let mmio_phys = pci::bar_mmio_addr64(pci_dev, 0).ok_or(KernelError::InvalidArgument)?;
 
         if mmio_phys == 0 {
             return Err(KernelError::InvalidArgument);
@@ -647,9 +654,9 @@ impl XhciController {
                 let virt = VirtAddr::new(mmio_virt.wrapping_add(i.wrapping_mul(16384)));
                 // SAFETY: frame_phys is PCI BAR MMIO. Mapping device
                 // registers into kernel VA space with NO_CACHE.
-                if let Err(_e) = unsafe {
-                    page_table::map_frame(pml4_phys, virt, frame, mmio_flags)
-                } {
+                if let Err(_e) =
+                    unsafe { page_table::map_frame(pml4_phys, virt, frame, mmio_flags) }
+                {
                     // May already be mapped if within HHDM on large-RAM systems.
                 }
             }
@@ -689,8 +696,13 @@ impl XhciController {
 
         crate::serial_println!(
             "[xhci] Version {}.{:02X}, slots={}, ports={}, intrs={}, 64-bit={}, ctx64={}",
-            hci_version >> 8, hci_version & 0xFF,
-            max_slots, max_ports, max_intrs, ac64, csz
+            hci_version >> 8,
+            hci_version & 0xFF,
+            max_slots,
+            max_ports,
+            max_intrs,
+            ac64,
+            csz
         );
 
         if !ac64 {
@@ -945,7 +957,9 @@ impl XhciController {
             if connected {
                 crate::serial_println!(
                     "[xhci] Port {}: connected, speed={}, enabled={}",
-                    port_num, speed_name(speed), enabled
+                    port_num,
+                    speed_name(speed),
+                    enabled
                 );
             }
         }
@@ -1056,9 +1070,8 @@ impl XhciController {
     #[allow(clippy::arithmetic_side_effects)]
     fn poll_event(&mut self) -> Option<Trb> {
         // SAFETY: event_ring_trbs is valid memory.
-        let trb = unsafe {
-            core::ptr::read_volatile(self.event_ring_trbs.add(self.event_dequeue_idx))
-        };
+        let trb =
+            unsafe { core::ptr::read_volatile(self.event_ring_trbs.add(self.event_dequeue_idx)) };
 
         // Check cycle bit — matches our Consumer Cycle State?
         let trb_cycle = (trb.control & TRB_CYCLE) != 0;
@@ -1074,7 +1087,9 @@ impl XhciController {
         }
 
         // Update ERDP to tell the controller we've consumed this event.
-        let erdp_phys = self.event_ring_frame.addr()
+        let erdp_phys = self
+            .event_ring_frame
+            .addr()
             .wrapping_add((self.event_dequeue_idx * 16) as u64);
         // SAFETY: rt_base is valid MMIO; 0x20 is the Interrupter 0 register offset.
         let ir0_base = unsafe { self.rt_base.add(0x20) };
@@ -1101,7 +1116,8 @@ impl XhciController {
                 // Unknown event type — log it.
                 crate::serial_println!(
                     "[xhci] Unhandled event: type={}, cc={}",
-                    trb.trb_type(), trb.completion_code()
+                    trb.trb_type(),
+                    trb.completion_code()
                 );
             }
         }
@@ -1140,12 +1156,7 @@ impl XhciController {
     ///
     /// Creates the Input Context for Address Device command.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-    fn setup_device_context(
-        &mut self,
-        slot_id: u8,
-        port_num: u8,
-        speed: u8,
-    ) -> KernelResult<()> {
+    fn setup_device_context(&mut self, slot_id: u8, port_num: u8, speed: u8) -> KernelResult<()> {
         let ctx_size = self.context_entry_size();
         let slot_idx = (slot_id as usize).wrapping_sub(1);
 
@@ -1158,7 +1169,9 @@ impl XhciController {
         let out_ctx_phys = out_ctx_frame.addr();
         let out_ctx_virt = out_ctx_phys.wrapping_add(self.hhdm_offset) as *mut u8;
         // SAFETY: Just allocated.
-        unsafe { core::ptr::write_bytes(out_ctx_virt, 0, frame::FRAME_SIZE); }
+        unsafe {
+            core::ptr::write_bytes(out_ctx_virt, 0, frame::FRAME_SIZE);
+        }
 
         // Store in DCBAA.
         // SAFETY: dcbaa is valid, slot_id is within bounds.
@@ -1177,7 +1190,9 @@ impl XhciController {
         let in_ctx_phys = in_ctx_frame.addr();
         let in_ctx_virt = in_ctx_phys.wrapping_add(self.hhdm_offset) as *mut u8;
         // SAFETY: Just allocated.
-        unsafe { core::ptr::write_bytes(in_ctx_virt, 0, frame::FRAME_SIZE); }
+        unsafe {
+            core::ptr::write_bytes(in_ctx_virt, 0, frame::FRAME_SIZE);
+        }
 
         // Fill the Input Control Context (first context entry).
         // Add flags: bits 0 (Slot) and 1 (EP0) set.
@@ -1251,8 +1266,12 @@ impl XhciController {
             return Err(KernelError::IoError);
         }
 
-        crate::serial_println!("[xhci] Slot {} addressed (port {}, {})",
-            slot_id, port_num, speed_name(speed));
+        crate::serial_println!(
+            "[xhci] Slot {} addressed (port {}, {})",
+            slot_id,
+            port_num,
+            speed_name(speed)
+        );
 
         Ok(())
     }
@@ -1277,7 +1296,8 @@ impl XhciController {
             return Err(KernelError::InvalidArgument);
         }
 
-        let ring = self.slot_ep0_rings[slot_idx].as_mut()
+        let ring = self.slot_ep0_rings[slot_idx]
+            .as_mut()
             .ok_or(KernelError::NoSuchDevice)?;
 
         // Setup Stage TRB.
@@ -1317,7 +1337,11 @@ impl XhciController {
 
         // Status Stage TRB.
         // Direction is opposite of data stage (IN data → OUT status).
-        let status_dir = if length == 0 || direction_in { 0u32 } else { 1u32 << 16 };
+        let status_dir = if length == 0 || direction_in {
+            0u32
+        } else {
+            1u32 << 16
+        };
         let status_trb = Trb {
             parameter: 0,
             status: 0,
@@ -1334,9 +1358,7 @@ impl XhciController {
         let event = self.wait_for_event(TRB_TYPE_TRANSFER_EVENT, 2_000_000)?;
         let cc = event.completion_code();
         if cc != TRB_CC_SUCCESS && cc != TRB_CC_SHORT_PACKET {
-            crate::serial_println!(
-                "[xhci] Control transfer failed: cc={}", cc
-            );
+            crate::serial_println!("[xhci] Control transfer failed: cc={}", cc);
             return Err(KernelError::IoError);
         }
 
@@ -1357,18 +1379,20 @@ impl XhciController {
 
         // Zero it.
         // SAFETY: Just allocated.
-        unsafe { core::ptr::write_bytes(buf_virt, 0, 64); }
+        unsafe {
+            core::ptr::write_bytes(buf_virt, 0, 64);
+        }
 
         // GET_DESCRIPTOR request: device descriptor = type 1, index 0.
         let transferred = self.control_transfer(
             slot_id,
-            0x80,                    // bmRequestType: Device-to-Host, Standard, Device
-            USB_REQ_GET_DESCRIPTOR,  // bRequest
+            0x80,                            // bmRequestType: Device-to-Host, Standard, Device
+            USB_REQ_GET_DESCRIPTOR,          // bRequest
             u16::from(USB_DESC_DEVICE) << 8, // wValue: type << 8 | index
-            0,                       // wIndex
-            buf_phys,                // data buffer physical address
-            18,                      // wLength (device descriptor is 18 bytes)
-            true,                    // IN transfer
+            0,                               // wIndex
+            buf_phys,                        // data buffer physical address
+            18,                              // wLength (device descriptor is 18 bytes)
+            true,                            // IN transfer
         )?;
 
         if transferred < 18 {
@@ -1379,9 +1403,7 @@ impl XhciController {
 
         // Copy out the descriptor.
         // SAFETY: We verified at least 18 bytes were transferred.
-        let desc = unsafe {
-            core::ptr::read_unaligned(buf_virt as *const UsbDeviceDescriptor)
-        };
+        let desc = unsafe { core::ptr::read_unaligned(buf_virt as *const UsbDeviceDescriptor) };
 
         // Free the buffer.
         // SAFETY: We own this frame.
@@ -1396,7 +1418,9 @@ impl XhciController {
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn enumerate_devices(&mut self) {
         // Collect connected ports first (avoid borrow issues).
-        let connected_ports: Vec<u8> = self.ports.iter()
+        let connected_ports: Vec<u8> = self
+            .ports
+            .iter()
             .filter(|p| p.connected)
             .map(|p| p.number)
             .collect();
@@ -1440,7 +1464,12 @@ impl XhciController {
 
                     crate::serial_println!(
                         "[xhci] Device on port {}: VID={:04X} PID={:04X} class={:02X}/{:02X} maxpkt={}",
-                        port_num, vid, pid, cls, sub, mps
+                        port_num,
+                        vid,
+                        pid,
+                        cls,
+                        sub,
+                        mps
                     );
 
                     self.devices.push(UsbDevice {
@@ -1457,7 +1486,8 @@ impl XhciController {
                 Err(e) => {
                     crate::serial_println!(
                         "[xhci] Failed to read device descriptor on port {}: {:?}",
-                        port_num, e
+                        port_num,
+                        e
                     );
                 }
             }
@@ -1580,7 +1610,9 @@ impl XhciController {
         let buf_phys = buf_frame.addr();
         let buf_virt = buf_phys.wrapping_add(self.hhdm_offset) as *mut u8;
         // SAFETY: Just allocated.
-        unsafe { core::ptr::write_bytes(buf_virt, 0, 256); }
+        unsafe {
+            core::ptr::write_bytes(buf_virt, 0, 256);
+        }
 
         // GET_DESCRIPTOR for Configuration (type 2, index 0).
         let transferred = self.control_transfer(
@@ -1603,9 +1635,8 @@ impl XhciController {
         // Parse config descriptor header.
         // SAFETY: buf_virt is valid for at least `transferred` (≥9) bytes; the
         // config descriptor header is 9 bytes and may be unaligned in the buffer.
-        let config_desc = unsafe {
-            core::ptr::read_unaligned(buf_virt as *const UsbConfigDescriptor)
-        };
+        let config_desc =
+            unsafe { core::ptr::read_unaligned(buf_virt as *const UsbConfigDescriptor) };
         let config_value = config_desc.b_configuration_value;
         let total_len = { config_desc.w_total_length } as usize;
         let actual_len = transferred.min(total_len).min(255);
@@ -1631,7 +1662,9 @@ impl XhciController {
                         // SAFETY: desc_len ≥ 9 = sizeof(UsbInterfaceDescriptor)
                         // and offset + desc_len ≤ actual_len, all within buf_frame.
                         let iface = unsafe {
-                            core::ptr::read_unaligned(buf_virt.add(offset) as *const UsbInterfaceDescriptor)
+                            core::ptr::read_unaligned(
+                                buf_virt.add(offset) as *const UsbInterfaceDescriptor
+                            )
                         };
                         if iface.b_interface_class == USB_CLASS_HID {
                             current_iface = Some((
@@ -1650,7 +1683,9 @@ impl XhciController {
                             // SAFETY: desc_len ≥ 7 = sizeof(UsbEndpointDescriptor)
                             // and offset + desc_len ≤ actual_len, all within buf_frame.
                             let ep = unsafe {
-                                core::ptr::read_unaligned(buf_virt.add(offset) as *const UsbEndpointDescriptor)
+                                core::ptr::read_unaligned(
+                                    buf_virt.add(offset) as *const UsbEndpointDescriptor
+                                )
                             };
                             let ep_addr = ep.b_endpoint_address;
                             let ep_attrs = ep.bm_attributes;
@@ -1754,7 +1789,9 @@ impl XhciController {
                 Ok(v) => v,
                 Err(e) => {
                     crate::serial_println!(
-                        "[xhci] Failed to read config desc for slot {}: {:?}", slot_id, e
+                        "[xhci] Failed to read config desc for slot {}: {:?}",
+                        slot_id,
+                        e
                     );
                     continue;
                 }
@@ -1767,7 +1804,9 @@ impl XhciController {
             // Set configuration.
             if let Err(e) = self.set_configuration(slot_id, config_value) {
                 crate::serial_println!(
-                    "[xhci] SET_CONFIGURATION failed for slot {}: {:?}", slot_id, e
+                    "[xhci] SET_CONFIGURATION failed for slot {}: {:?}",
+                    slot_id,
+                    e
                 );
                 continue;
             }
@@ -1785,7 +1824,9 @@ impl XhciController {
                     if let Err(e) = self.hid_set_boot_protocol(slot_id, hid.interface_num) {
                         crate::serial_println!(
                             "[xhci] SET_PROTOCOL failed for slot {} {}: {:?}",
-                            slot_id, protocol_name, e
+                            slot_id,
+                            protocol_name,
+                            e
                         );
                     }
                 }
@@ -1794,29 +1835,41 @@ impl XhciController {
                 let _ = self.hid_set_idle(slot_id, hid.interface_num);
 
                 // Configure the interrupt endpoint for receiving reports.
-                let dev_speed = self.devices.iter()
+                let dev_speed = self
+                    .devices
+                    .iter()
                     .find(|d| d.slot_id == slot_id)
                     .map(|d| d.speed)
                     .unwrap_or(USB_SPEED_HIGH);
                 if let Err(e) = self.setup_interrupt_endpoint(
-                    slot_id, hid.interrupt_ep, hid.interrupt_max_packet,
-                    hid.interval, dev_speed,
+                    slot_id,
+                    hid.interrupt_ep,
+                    hid.interrupt_max_packet,
+                    hid.interval,
+                    dev_speed,
                 ) {
                     crate::serial_println!(
                         "[xhci] Setup interrupt EP failed for slot {} {}: {:?}",
-                        slot_id, protocol_name, e
+                        slot_id,
+                        protocol_name,
+                        e
                     );
                 } else {
                     // Post initial receive buffer.
                     let _ = self.post_interrupt_receive(
-                        slot_id, hid.interrupt_ep, hid.interrupt_max_packet,
+                        slot_id,
+                        hid.interrupt_ep,
+                        hid.interrupt_max_packet,
                     );
                 }
 
                 crate::serial_println!(
                     "[xhci] Configured {} on slot {} (EP{} IN, {} bytes, interval={})",
-                    protocol_name, slot_id, hid.interrupt_ep,
-                    hid.interrupt_max_packet, hid.interval
+                    protocol_name,
+                    slot_id,
+                    hid.interrupt_ep,
+                    hid.interrupt_max_packet,
+                    hid.interval
                 );
 
                 configured.push(hid.clone());
@@ -1858,7 +1911,9 @@ impl XhciController {
         let in_ctx_phys = in_ctx_frame.addr();
         let in_ctx_virt = in_ctx_phys.wrapping_add(self.hhdm_offset) as *mut u8;
         // SAFETY: Just allocated.
-        unsafe { core::ptr::write_bytes(in_ctx_virt, 0, frame::FRAME_SIZE); }
+        unsafe {
+            core::ptr::write_bytes(in_ctx_virt, 0, frame::FRAME_SIZE);
+        }
 
         // Input Control Context: Add Context Flags — set bit for the endpoint DCI
         // and the Slot Context (bit 0 always set for Configure Endpoint).
@@ -1899,7 +1954,10 @@ impl XhciController {
                 let val = interval.max(1);
                 let mut exp = 0u8;
                 let mut v = val;
-                while v > 1 { v >>= 1; exp = exp.wrapping_add(1); }
+                while v > 1 {
+                    v >>= 1;
+                    exp = exp.wrapping_add(1);
+                }
                 exp.wrapping_add(3).min(15)
             }
         };
@@ -1943,7 +2001,9 @@ impl XhciController {
         if cc != TRB_CC_SUCCESS {
             crate::serial_println!(
                 "[xhci] Configure Endpoint failed for slot {} EP{}: cc={}",
-                slot_id, ep_num, cc
+                slot_id,
+                ep_num,
+                cc
             );
             return Err(KernelError::IoError);
         }
@@ -1953,7 +2013,10 @@ impl XhciController {
 
         crate::serial_println!(
             "[xhci] Interrupt EP{} IN configured for slot {} (max_pkt={}, interval={})",
-            ep_num, slot_id, max_packet, xhci_interval
+            ep_num,
+            slot_id,
+            max_packet,
+            xhci_interval
         );
 
         Ok(())
@@ -1981,7 +2044,9 @@ impl XhciController {
             let buf_frame = frame::alloc_frame()?;
             let buf_virt = buf_frame.addr().wrapping_add(self.hhdm_offset) as *mut u8;
             // SAFETY: Just allocated.
-            unsafe { core::ptr::write_bytes(buf_virt, 0, 64); }
+            unsafe {
+                core::ptr::write_bytes(buf_virt, 0, 64);
+            }
             self.slot_int_bufs[slot_idx] = Some(buf_frame);
         }
 
@@ -1991,7 +2056,8 @@ impl XhciController {
             .addr();
 
         // Get the interrupt ring.
-        let ring = self.slot_int_rings[slot_idx].as_mut()
+        let ring = self.slot_int_rings[slot_idx]
+            .as_mut()
             .ok_or(KernelError::NoSuchDevice)?;
 
         // Enqueue a Normal TRB (device writes data to our buffer).
@@ -2035,9 +2101,7 @@ impl XhciController {
                         let buf_virt = buf_frame.addr().wrapping_add(self.hhdm_offset) as *const u8;
                         let len = transfer_len.min(64) as usize;
                         // SAFETY: buf_virt is valid, len is bounded.
-                        let data = unsafe {
-                            core::slice::from_raw_parts(buf_virt, len)
-                        };
+                        let data = unsafe { core::slice::from_raw_parts(buf_virt, len) };
                         return Some(data);
                     }
                 }
@@ -2092,7 +2156,9 @@ pub fn init(hhdm_offset: u64) {
             let n_ports = ctrl.ports.len();
             crate::serial_println!(
                 "[xhci] Initialization complete: {} ports, {} devices, {} HID interfaces",
-                n_ports, n_devices, n_hid
+                n_ports,
+                n_devices,
+                n_hid
             );
 
             *XHCI.lock() = Some(ctrl);
@@ -2138,7 +2204,10 @@ pub fn hid_interfaces() -> Vec<UsbHidInterface> {
 /// Check if a USB keyboard is available.
 pub fn has_keyboard() -> bool {
     match XHCI.lock().as_ref() {
-        Some(ctrl) => ctrl.hid_interfaces.iter().any(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD),
+        Some(ctrl) => ctrl
+            .hid_interfaces
+            .iter()
+            .any(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD),
         None => false,
     }
 }
@@ -2146,7 +2215,10 @@ pub fn has_keyboard() -> bool {
 /// Check if a USB mouse is available.
 pub fn has_mouse() -> bool {
     match XHCI.lock().as_ref() {
-        Some(ctrl) => ctrl.hid_interfaces.iter().any(|h| h.protocol == USB_HID_PROTOCOL_MOUSE),
+        Some(ctrl) => ctrl
+            .hid_interfaces
+            .iter()
+            .any(|h| h.protocol == USB_HID_PROTOCOL_MOUSE),
         None => false,
     }
 }
@@ -2170,7 +2242,9 @@ pub fn poll_keyboard() -> Option<HidKeyboardReport> {
     let ctrl = ctrl.as_mut()?;
 
     // Find the keyboard slot.
-    let kb_iface = ctrl.hid_interfaces.iter()
+    let kb_iface = ctrl
+        .hid_interfaces
+        .iter()
         .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)?;
     let slot_id = kb_iface.slot_id;
     let slot_idx = (slot_id as usize).wrapping_sub(1);
@@ -2184,11 +2258,15 @@ pub fn poll_keyboard() -> Option<HidKeyboardReport> {
                 keycodes: [data[2], data[3], data[4], data[5], data[6], data[7]],
             };
             // Re-post receive buffer for next report.
-            let max_pkt = ctrl.hid_interfaces.iter()
+            let max_pkt = ctrl
+                .hid_interfaces
+                .iter()
                 .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)
                 .map(|h| h.interrupt_max_packet)
                 .unwrap_or(8);
-            let ep_num = ctrl.hid_interfaces.iter()
+            let ep_num = ctrl
+                .hid_interfaces
+                .iter()
                 .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)
                 .map(|h| h.interrupt_ep)
                 .unwrap_or(1);
@@ -2199,11 +2277,15 @@ pub fn poll_keyboard() -> Option<HidKeyboardReport> {
 
     // Re-post if the buffer was consumed but no valid report.
     if ctrl.slot_int_rings[slot_idx].is_some() {
-        let max_pkt = ctrl.hid_interfaces.iter()
+        let max_pkt = ctrl
+            .hid_interfaces
+            .iter()
             .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)
             .map(|h| h.interrupt_max_packet)
             .unwrap_or(8);
-        let ep_num = ctrl.hid_interfaces.iter()
+        let ep_num = ctrl
+            .hid_interfaces
+            .iter()
             .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)
             .map(|h| h.interrupt_ep)
             .unwrap_or(1);
@@ -2223,7 +2305,9 @@ pub fn poll_mouse() -> Option<HidMouseReport> {
     let ctrl = ctrl.as_mut()?;
 
     // Find the mouse slot.
-    let mouse_iface = ctrl.hid_interfaces.iter()
+    let mouse_iface = ctrl
+        .hid_interfaces
+        .iter()
         .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)?;
     let slot_id = mouse_iface.slot_id;
     let slot_idx = (slot_id as usize).wrapping_sub(1);
@@ -2238,11 +2322,15 @@ pub fn poll_mouse() -> Option<HidMouseReport> {
                 wheel: if data.len() >= 4 { data[3] as i8 } else { 0 },
             };
             // Re-post receive buffer.
-            let max_pkt = ctrl.hid_interfaces.iter()
+            let max_pkt = ctrl
+                .hid_interfaces
+                .iter()
                 .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)
                 .map(|h| h.interrupt_max_packet)
                 .unwrap_or(4);
-            let ep_num = ctrl.hid_interfaces.iter()
+            let ep_num = ctrl
+                .hid_interfaces
+                .iter()
                 .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)
                 .map(|h| h.interrupt_ep)
                 .unwrap_or(1);
@@ -2253,11 +2341,15 @@ pub fn poll_mouse() -> Option<HidMouseReport> {
 
     // Re-post if needed.
     if ctrl.slot_int_rings[slot_idx].is_some() {
-        let max_pkt = ctrl.hid_interfaces.iter()
+        let max_pkt = ctrl
+            .hid_interfaces
+            .iter()
             .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)
             .map(|h| h.interrupt_max_packet)
             .unwrap_or(4);
-        let ep_num = ctrl.hid_interfaces.iter()
+        let ep_num = ctrl
+            .hid_interfaces
+            .iter()
             .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)
             .map(|h| h.interrupt_ep)
             .unwrap_or(1);
@@ -2333,14 +2425,20 @@ pub fn self_test() {
 
     // Test 1: PCI detection API.
     let controllers = pci::find_devices_by_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB);
-    let xhci_count = controllers.iter().filter(|d| {
-        let prog_if = pci::config_read8(
-            d.address.bus, d.address.device, d.address.function, 0x09
-        );
-        prog_if == PCI_PROGIF_XHCI
-    }).count();
+    let xhci_count = controllers
+        .iter()
+        .filter(|d| {
+            let prog_if =
+                pci::config_read8(d.address.bus, d.address.device, d.address.function, 0x09);
+            prog_if == PCI_PROGIF_XHCI
+        })
+        .count();
 
-    crate::serial_println!("[xhci]   PCI scan: {} USB controller(s), {} xHCI", controllers.len(), xhci_count);
+    crate::serial_println!(
+        "[xhci]   PCI scan: {} USB controller(s), {} xHCI",
+        controllers.len(),
+        xhci_count
+    );
 
     // Test 2: Check global state consistency.
     let available = is_available();
@@ -2348,13 +2446,23 @@ pub fn self_test() {
     let devs = devices();
     crate::serial_println!(
         "[xhci]   State: available={}, ports={}, devices={}",
-        available, ports.len(), devs.len()
+        available,
+        ports.len(),
+        devs.len()
     );
 
     // Test 3: Verify TRB structure layout.
     assert_eq!(core::mem::size_of::<Trb>(), 16, "TRB must be 16 bytes");
-    assert_eq!(core::mem::size_of::<ErstEntry>(), 16, "ERST entry must be 16 bytes");
-    assert_eq!(core::mem::size_of::<UsbDeviceDescriptor>(), 18, "Device descriptor must be 18 bytes");
+    assert_eq!(
+        core::mem::size_of::<ErstEntry>(),
+        16,
+        "ERST entry must be 16 bytes"
+    );
+    assert_eq!(
+        core::mem::size_of::<UsbDeviceDescriptor>(),
+        18,
+        "Device descriptor must be 18 bytes"
+    );
 
     // Test 4: TRB field extraction.
     let test_trb = Trb {

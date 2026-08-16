@@ -34,10 +34,10 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
-use alloc::format;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
+use alloc::string::String;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -220,7 +220,10 @@ pub fn init_defaults() {
             schedule_mode: ScheduleMode::Scheduled,
             night_temp: DEFAULT_NIGHT_TEMP,
             day_temp: DEFAULT_DAY_TEMP,
-            start_time: ScheduleTime { hour: 21, minute: 0 },
+            start_time: ScheduleTime {
+                hour: 21,
+                minute: 0,
+            },
             end_time: ScheduleTime { hour: 7, minute: 0 },
             location: None,
             transition_minutes: DEFAULT_TRANSITION_MIN,
@@ -345,7 +348,10 @@ pub fn set_location(latitude: i32, longitude: i32) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        state.config.location = Some(GeoLocation { latitude, longitude });
+        state.config.location = Some(GeoLocation {
+            latitude,
+            longitude,
+        });
         Ok(())
     })
 }
@@ -417,25 +423,30 @@ pub fn check_schedule(hour: u8, minute: u8) -> u32 {
             // In manual mode, state is driven by toggle/set_enabled.
             state.config.state == NightLightState::Active
         }
-        ScheduleMode::Scheduled => {
-            is_in_period(
-                hour, minute,
-                &state.config.start_time,
-                &state.config.end_time,
-            )
-        }
+        ScheduleMode::Scheduled => is_in_period(
+            hour,
+            minute,
+            &state.config.start_time,
+            &state.config.end_time,
+        ),
         ScheduleMode::SunsetSunrise => {
             // Use sunset/sunrise approximation based on location.
             if let Some(loc) = &state.config.location {
-                let (sunset_h, sunset_m, sunrise_h, sunrise_m) =
-                    approx_sun_times(loc.latitude);
-                let sunset = ScheduleTime { hour: sunset_h, minute: sunset_m };
-                let sunrise = ScheduleTime { hour: sunrise_h, minute: sunrise_m };
+                let (sunset_h, sunset_m, sunrise_h, sunrise_m) = approx_sun_times(loc.latitude);
+                let sunset = ScheduleTime {
+                    hour: sunset_h,
+                    minute: sunset_m,
+                };
+                let sunrise = ScheduleTime {
+                    hour: sunrise_h,
+                    minute: sunrise_m,
+                };
                 is_in_period(hour, minute, &sunset, &sunrise)
             } else {
                 // No location set; use default schedule.
                 is_in_period(
-                    hour, minute,
+                    hour,
+                    minute,
                     &state.config.start_time,
                     &state.config.end_time,
                 )
@@ -522,7 +533,8 @@ pub fn current_temperature() -> u32 {
 /// Get the current configuration snapshot.
 pub fn config() -> KernelResult<NightLightConfig> {
     let guard = STATE.lock();
-    guard.as_ref()
+    guard
+        .as_ref()
         .map(|s| s.config.clone())
         .ok_or(KernelError::NotSupported)
 }
@@ -545,7 +557,7 @@ pub fn temp_to_rgb(temp_k: u32) -> (u8, u8, u8) {
     // Lookup table: (kelvin, r, g, b) at 500K intervals from 1000K to 6500K.
     // Pre-computed from the Helland algorithm.
     const TABLE: &[(u32, u8, u8, u8)] = &[
-        (1000, 255, 56,  0),
+        (1000, 255, 56, 0),
         (1500, 255, 109, 0),
         (2000, 255, 137, 18),
         (2500, 255, 161, 72),

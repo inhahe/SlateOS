@@ -112,17 +112,17 @@ pub const SYS_SLEEP: u64 = 11;
 pub const SYS_MMAP: u64 = 20;
 
 /// Mmap flag: pages are readable.
-pub const MAP_READ: u64    = 1 << 0;
+pub const MAP_READ: u64 = 1 << 0;
 /// Mmap flag: pages are writable.
-pub const MAP_WRITE: u64   = 1 << 1;
+pub const MAP_WRITE: u64 = 1 << 1;
 /// Mmap flag: pages are executable.
-pub const MAP_EXEC: u64    = 1 << 2;
+pub const MAP_EXEC: u64 = 1 << 2;
 /// Mmap flag: disable CPU caching (for device MMIO).
 pub const MAP_NOCACHE: u64 = 1 << 3;
 /// Mmap flag: map specific physical address (from `arg3`).
-pub const MAP_MMIO: u64    = 1 << 4;
+pub const MAP_MMIO: u64 = 1 << 4;
 /// Mmap flag: use exact virtual address from `arg0`.
-pub const MAP_FIXED: u64   = 1 << 5;
+pub const MAP_FIXED: u64 = 1 << 5;
 /// Mmap flag: lazy (demand-paged) allocation.
 ///
 /// Instead of allocating and mapping physical frames immediately,
@@ -130,7 +130,7 @@ pub const MAP_FIXED: u64   = 1 << 5;
 /// on first access (page fault).  Without this flag, mmap performs
 /// committed allocation (the default per design spec: "committed
 /// memory by default, lazy allocation opt-in").
-pub const MAP_LAZY: u64    = 1 << 6;
+pub const MAP_LAZY: u64 = 1 << 6;
 
 /// Unmap a previously mapped region.
 ///

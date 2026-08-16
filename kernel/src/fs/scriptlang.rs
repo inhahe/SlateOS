@@ -32,10 +32,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -185,7 +185,11 @@ pub fn register_engine(
     if state.engines.len() >= 128 {
         return Err(KernelError::ResourceExhausted);
     }
-    if state.engines.iter().any(|e| e.name == name && e.version == version) {
+    if state
+        .engines
+        .iter()
+        .any(|e| e.name == name && e.version == version)
+    {
         return Err(KernelError::AlreadyExists);
     }
     let id = NEXT_ENGINE_ID.fetch_add(1, Ordering::Relaxed);
@@ -388,12 +392,7 @@ pub fn list_contexts() -> Vec<ScriptContext> {
 }
 
 /// Add a binding (host-provided variable/function) to a context.
-pub fn add_binding(
-    handle: u64,
-    name: &str,
-    type_desc: &str,
-    writable: bool,
-) -> KernelResult<()> {
+pub fn add_binding(handle: u64, name: &str, type_desc: &str, writable: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
     let ctx = state
         .contexts
@@ -482,7 +481,7 @@ pub fn init_defaults() {
         builtin: true,
         enabled: true,
         max_memory: 64 * 1024 * 1024, // 64 MiB per context
-        max_time_ms: 30_000,           // 30 seconds
+        max_time_ms: 30_000,          // 30 seconds
         description: String::from("Lightweight embeddable scripting language"),
     });
 
@@ -517,8 +516,8 @@ pub fn init_defaults() {
         engine_path: String::from("/usr/bin/sh"),
         builtin: true,
         enabled: true,
-        max_memory: 0,    // no limit
-        max_time_ms: 0,   // no limit
+        max_memory: 0,  // no limit
+        max_time_ms: 0, // no limit
         description: String::from("OS shell command interpreter"),
     });
 
@@ -536,7 +535,7 @@ pub fn init_defaults() {
         builtin: true,
         enabled: true,
         max_memory: 512 * 1024 * 1024, // 512 MiB
-        max_time_ms: 0,               // no limit
+        max_time_ms: 0,                // no limit
         description: String::from("AOT-compiled Python via fastpy"),
     });
 
@@ -599,19 +598,37 @@ pub fn self_test() -> KernelResult<()> {
     // Test 1: register engines.
     serial_println!("scriptlang::self_test 1: register engines");
     let lua = register_engine(
-        "TestLua", "5.4", EngineType::Interpreted, SandboxLevel::Basic,
-        "/usr/lib/lua", "test lua engine", true,
+        "TestLua",
+        "5.4",
+        EngineType::Interpreted,
+        SandboxLevel::Basic,
+        "/usr/lib/lua",
+        "test lua engine",
+        true,
     )?;
     let wasm = register_engine(
-        "TestWasm", "1.0", EngineType::Wasm, SandboxLevel::Capability,
-        "/usr/lib/wasm", "test wasm engine", true,
+        "TestWasm",
+        "1.0",
+        EngineType::Wasm,
+        SandboxLevel::Capability,
+        "/usr/lib/wasm",
+        "test wasm engine",
+        true,
     )?;
     assert_eq!(list_engines().len(), 2);
     // Duplicate name+version fails.
-    assert!(register_engine(
-        "TestLua", "5.4", EngineType::Interpreted, SandboxLevel::Basic,
-        "/x", "dup", false,
-    ).is_err());
+    assert!(
+        register_engine(
+            "TestLua",
+            "5.4",
+            EngineType::Interpreted,
+            SandboxLevel::Basic,
+            "/x",
+            "dup",
+            false,
+        )
+        .is_err()
+    );
 
     // Test 2: extensions and MIME types.
     serial_println!("scriptlang::self_test 2: extensions and MIME");

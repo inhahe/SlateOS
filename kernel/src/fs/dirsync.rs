@@ -186,7 +186,9 @@ pub fn compare(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> KernelResult<Dir
         if let Some(dst_entry) = dst_entries.get(rel) {
             // Both exist — compare.
             if src_entry.entry_type == EntryType::File && dst_entry.entry_type == EntryType::File {
-                if src_entry.size != dst_entry.size || src_entry.modified_ns != dst_entry.modified_ns {
+                if src_entry.size != dst_entry.size
+                    || src_entry.modified_ns != dst_entry.modified_ns
+                {
                     diff.modified_files.push(rel.clone());
                 } else {
                     diff.unchanged_files.push(rel.clone());
@@ -227,7 +229,11 @@ pub fn compare(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> KernelResult<Dir
 }
 
 /// Synchronize source to destination (one-way).
-pub fn sync(src: impl AsRef<Path>, dst: impl AsRef<Path>, opts: &SyncOptions) -> KernelResult<SyncResult> {
+pub fn sync(
+    src: impl AsRef<Path>,
+    dst: impl AsRef<Path>,
+    opts: &SyncOptions,
+) -> KernelResult<SyncResult> {
     let (src, dst) = (src.as_ref(), dst.as_ref());
     let diff = compare(src, dst)?;
     let mut result = SyncResult::default();
@@ -244,8 +250,11 @@ pub fn sync(src: impl AsRef<Path>, dst: impl AsRef<Path>, opts: &SyncOptions) ->
             match Vfs::mkdir(&dst_path) {
                 Ok(()) => result.dirs_created = result.dirs_created.saturating_add(1),
                 Err(KernelError::AlreadyExists) => {}
-                Err(e) => result.errors.push(
-                    alloc::format!("mkdir {}: {:?}", dst_path.display(), e)),
+                Err(e) => {
+                    result
+                        .errors
+                        .push(alloc::format!("mkdir {}: {:?}", dst_path.display(), e))
+                }
             }
         }
     }
@@ -263,8 +272,9 @@ pub fn sync(src: impl AsRef<Path>, dst: impl AsRef<Path>, opts: &SyncOptions) ->
                     result.copied = result.copied.saturating_add(1);
                     result.bytes_copied = result.bytes_copied.saturating_add(bytes);
                 }
-                Err(e) => result.errors.push(
-                    alloc::format!("copy {}: {:?}", rel.display(), e)),
+                Err(e) => result
+                    .errors
+                    .push(alloc::format!("copy {}: {:?}", rel.display(), e)),
             }
         }
     }
@@ -293,8 +303,9 @@ pub fn sync(src: impl AsRef<Path>, dst: impl AsRef<Path>, opts: &SyncOptions) ->
                     result.copied = result.copied.saturating_add(1);
                     result.bytes_copied = result.bytes_copied.saturating_add(bytes);
                 }
-                Err(e) => result.errors.push(
-                    alloc::format!("update {}: {:?}", rel.display(), e)),
+                Err(e) => result
+                    .errors
+                    .push(alloc::format!("update {}: {:?}", rel.display(), e)),
             }
         }
     }
@@ -308,8 +319,11 @@ pub fn sync(src: impl AsRef<Path>, dst: impl AsRef<Path>, opts: &SyncOptions) ->
             } else {
                 match Vfs::remove(&dst_path) {
                     Ok(()) => result.deleted = result.deleted.saturating_add(1),
-                    Err(e) => result.errors.push(
-                        alloc::format!("delete {}: {:?}", rel.display(), e)),
+                    Err(e) => {
+                        result
+                            .errors
+                            .push(alloc::format!("delete {}: {:?}", rel.display(), e))
+                    }
                 }
             }
         }
@@ -326,8 +340,11 @@ pub fn sync(src: impl AsRef<Path>, dst: impl AsRef<Path>, opts: &SyncOptions) ->
             } else {
                 match Vfs::rmdir(&dst_path) {
                     Ok(()) => result.dirs_deleted = result.dirs_deleted.saturating_add(1),
-                    Err(e) => result.errors.push(
-                        alloc::format!("rmdir {}: {:?}", rel.display(), e)),
+                    Err(e) => {
+                        result
+                            .errors
+                            .push(alloc::format!("rmdir {}: {:?}", rel.display(), e))
+                    }
                 }
             }
         }
@@ -337,7 +354,10 @@ pub fn sync(src: impl AsRef<Path>, dst: impl AsRef<Path>, opts: &SyncOptions) ->
 
     serial_println!(
         "[dirsync] Sync: {} copied, {} deleted, {} dirs created, {} errors",
-        result.copied, result.deleted, result.dirs_created, result.errors.len(),
+        result.copied,
+        result.deleted,
+        result.dirs_created,
+        result.errors.len(),
     );
 
     Ok(result)
@@ -380,24 +400,33 @@ fn collect_tree(
         // byte-prefix strip could.  A non-match can only mean `readdir`
         // returned something outside the tree it was asked about; keeping the
         // absolute path is the same fallback as before.
-        let rel = full.as_path().strip_prefix(root).unwrap_or_else(|| full.clone());
+        let rel = full
+            .as_path()
+            .strip_prefix(root)
+            .unwrap_or_else(|| full.clone());
 
         match entry.entry_type {
             EntryType::File => {
                 if let Ok(meta) = Vfs::metadata(&full) {
-                    out.insert(rel, FileEntry {
-                        size: meta.size,
-                        modified_ns: meta.modified_ns,
-                        entry_type: EntryType::File,
-                    });
+                    out.insert(
+                        rel,
+                        FileEntry {
+                            size: meta.size,
+                            modified_ns: meta.modified_ns,
+                            entry_type: EntryType::File,
+                        },
+                    );
                 }
             }
             EntryType::Directory => {
-                out.insert(rel.clone(), FileEntry {
-                    size: 0,
-                    modified_ns: 0,
-                    entry_type: EntryType::Directory,
-                });
+                out.insert(
+                    rel.clone(),
+                    FileEntry {
+                        size: 0,
+                        modified_ns: 0,
+                        entry_type: EntryType::Directory,
+                    },
+                );
                 collect_tree(root, &full, out, depth + 1)?;
             }
             _ => {} // Skip symlinks etc.
@@ -464,11 +493,26 @@ fn test_compare_different() {
 
     let diff = compare("/tmp/ds_c", "/tmp/ds_d").expect("compare");
     // b.txt is only in source → new
-    assert!(diff.new_files.iter().any(|f| f.as_path() == Path::new("b.txt")), "b.txt should be new");
+    assert!(
+        diff.new_files
+            .iter()
+            .any(|f| f.as_path() == Path::new("b.txt")),
+        "b.txt should be new"
+    );
     // c.txt is only in destination → deleted
-    assert!(diff.deleted_files.iter().any(|f| f.as_path() == Path::new("c.txt")), "c.txt should be deleted");
+    assert!(
+        diff.deleted_files
+            .iter()
+            .any(|f| f.as_path() == Path::new("c.txt")),
+        "c.txt should be deleted"
+    );
     // a.txt differs (different content/size) → modified
-    assert!(diff.modified_files.iter().any(|f| f.as_path() == Path::new("a.txt")), "a.txt should be modified");
+    assert!(
+        diff.modified_files
+            .iter()
+            .any(|f| f.as_path() == Path::new("a.txt")),
+        "a.txt should be modified"
+    );
 
     let _ = Vfs::remove("/tmp/ds_c/a.txt");
     let _ = Vfs::remove("/tmp/ds_c/b.txt");
@@ -516,7 +560,10 @@ fn test_sync_delete() {
     assert!(result.deleted >= 1, "should delete extra file");
 
     // extra.txt should be gone.
-    assert!(Vfs::read_file("/tmp/ds_d2/extra.txt").is_err(), "extra.txt should be deleted");
+    assert!(
+        Vfs::read_file("/tmp/ds_d2/extra.txt").is_err(),
+        "extra.txt should be deleted"
+    );
 
     let _ = Vfs::remove("/tmp/ds_s2/keep.txt");
     let _ = Vfs::remove("/tmp/ds_d2/keep.txt");
@@ -539,7 +586,10 @@ fn test_sync_dry_run() {
     assert!(result.copied >= 1, "should report copy in dry run");
 
     // File should NOT actually exist in destination.
-    assert!(Vfs::read_file("/tmp/ds_dry_d/new.txt").is_err(), "dry run should not copy");
+    assert!(
+        Vfs::read_file("/tmp/ds_dry_d/new.txt").is_err(),
+        "dry run should not copy"
+    );
 
     let _ = Vfs::remove("/tmp/ds_dry_s/new.txt");
     let _ = Vfs::rmdir("/tmp/ds_dry_s");

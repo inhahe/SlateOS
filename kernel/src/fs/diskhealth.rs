@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -128,9 +128,15 @@ where
 fn compute_health(disk: &DiskInfo) -> HealthGrade {
     if disk.reallocated_sectors > 100 || disk.remaining_life_pct < 5 {
         HealthGrade::Critical
-    } else if disk.reallocated_sectors > 20 || disk.remaining_life_pct < 20 || disk.temperature_c > 60 {
+    } else if disk.reallocated_sectors > 20
+        || disk.remaining_life_pct < 20
+        || disk.temperature_c > 60
+    {
         HealthGrade::Poor
-    } else if disk.reallocated_sectors > 5 || disk.remaining_life_pct < 50 || disk.temperature_c > 50 {
+    } else if disk.reallocated_sectors > 5
+        || disk.remaining_life_pct < 50
+        || disk.temperature_c > 50
+    {
         HealthGrade::Fair
     } else if disk.remaining_life_pct < 80 || disk.temperature_c > 40 {
         HealthGrade::Good
@@ -164,7 +170,9 @@ fn compute_health(disk: &DiskInfo) -> HealthGrade {
 /// drive is enumerated and [`update_attrs`] when SMART data is polled.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         disks: Vec::new(),
         next_id: 1,
@@ -176,7 +184,13 @@ pub fn init_defaults() {
 }
 
 /// Add a disk to monitor.
-pub fn add_disk(name: &str, model: &str, serial: &str, dtype: DiskType, capacity: u64) -> KernelResult<u32> {
+pub fn add_disk(
+    name: &str,
+    model: &str,
+    serial: &str,
+    dtype: DiskType,
+    capacity: u64,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.disks.len() >= MAX_DISKS {
             return Err(KernelError::ResourceExhausted);
@@ -185,11 +199,20 @@ pub fn add_disk(name: &str, model: &str, serial: &str, dtype: DiskType, capacity
         let id = state.next_id;
         state.next_id += 1;
         state.disks.push(DiskInfo {
-            id, device_name: String::from(name), model: String::from(model),
-            serial: String::from(serial), disk_type: dtype, capacity_bytes: capacity,
-            health: HealthGrade::Unknown, temperature_c: 0, power_on_hours: 0,
-            read_error_rate: 0, write_error_rate: 0, reallocated_sectors: 0,
-            remaining_life_pct: 100, last_check_ns: now,
+            id,
+            device_name: String::from(name),
+            model: String::from(model),
+            serial: String::from(serial),
+            disk_type: dtype,
+            capacity_bytes: capacity,
+            health: HealthGrade::Unknown,
+            temperature_c: 0,
+            power_on_hours: 0,
+            read_error_rate: 0,
+            write_error_rate: 0,
+            reallocated_sectors: 0,
+            remaining_life_pct: 100,
+            last_check_ns: now,
         });
         Ok(id)
     })
@@ -200,7 +223,9 @@ pub fn remove_disk(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.disks.len();
         state.disks.retain(|d| d.id != id);
-        if state.disks.len() == before { return Err(KernelError::NotFound); }
+        if state.disks.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -209,7 +234,10 @@ pub fn remove_disk(id: u32) -> KernelResult<()> {
 pub fn check_health(id: u32) -> KernelResult<HealthGrade> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let disk = state.disks.iter_mut().find(|d| d.id == id)
+        let disk = state
+            .disks
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         disk.health = compute_health(disk);
         disk.last_check_ns = now;
@@ -225,9 +253,20 @@ pub fn check_health(id: u32) -> KernelResult<HealthGrade> {
 }
 
 /// Update SMART attributes.
-pub fn update_attrs(id: u32, temp: u32, power_hours: u64, read_err: u64, write_err: u64, realloc: u64, life_pct: u32) -> KernelResult<()> {
+pub fn update_attrs(
+    id: u32,
+    temp: u32,
+    power_hours: u64,
+    read_err: u64,
+    write_err: u64,
+    realloc: u64,
+    life_pct: u32,
+) -> KernelResult<()> {
     with_state(|state| {
-        let disk = state.disks.iter_mut().find(|d| d.id == id)
+        let disk = state
+            .disks
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         disk.temperature_c = temp;
         disk.power_on_hours = power_hours;
@@ -241,19 +280,31 @@ pub fn update_attrs(id: u32, temp: u32, power_hours: u64, read_err: u64, write_e
 
 /// Get disk info.
 pub fn get_disk(id: u32) -> Option<DiskInfo> {
-    STATE.lock().as_ref().and_then(|s| s.disks.iter().find(|d| d.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.disks.iter().find(|d| d.id == id).cloned())
 }
 
 /// List all disks.
 pub fn list_disks() -> Vec<DiskInfo> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.disks.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.disks.clone())
 }
 
 /// Statistics: (disk_count, total_checks, total_warnings, total_failures_predicted, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.disks.len(), s.total_checks, s.total_warnings, s.total_failures_predicted, s.ops),
+        Some(s) => (
+            s.disks.len(),
+            s.total_checks,
+            s.total_warnings,
+            s.total_failures_predicted,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -281,7 +332,14 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] empty init: OK");
 
     // 2: Add a disk — monotonic id, Unknown health until first check.
-    let id = add_disk("sdb", "TEST-MODEL", "TEST-SERIAL", DiskType::Hdd, 1_000_000_000_000).expect("add");
+    let id = add_disk(
+        "sdb",
+        "TEST-MODEL",
+        "TEST-SERIAL",
+        DiskType::Hdd,
+        1_000_000_000_000,
+    )
+    .expect("add");
     assert_eq!(list_disks().len(), 1);
     let d = get_disk(id).expect("get");
     assert_eq!(d.health, HealthGrade::Unknown);
@@ -290,7 +348,10 @@ pub fn self_test() {
 
     // 3: Healthy attrs → Excellent (no realloc, full life, cool).
     update_attrs(id, 30, 100, 0, 0, 0, 100).expect("update healthy");
-    assert_eq!(check_health(id).expect("check healthy"), HealthGrade::Excellent);
+    assert_eq!(
+        check_health(id).expect("check healthy"),
+        HealthGrade::Excellent
+    );
     crate::serial_println!("  [3/8] excellent health: OK");
 
     // 4: Poor attrs (55°C, 30 realloc, 40% life) → Poor; bumps warnings.

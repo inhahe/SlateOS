@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -100,7 +100,9 @@ where
 /// 9,750,000 writes and 50,000 / 20,000 untracked accesses.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         regions: Vec::new(),
         total_reads: 0,
@@ -114,11 +116,20 @@ pub fn init_defaults() {
 /// Register a port region.
 pub fn register_region(name: &str, base: u16, length: u16) -> KernelResult<()> {
     with_state(|state| {
-        if state.regions.len() >= MAX_REGIONS { return Err(KernelError::ResourceExhausted); }
-        if state.regions.iter().any(|r| r.base == base) { return Err(KernelError::AlreadyExists); }
+        if state.regions.len() >= MAX_REGIONS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.regions.iter().any(|r| r.base == base) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.regions.push(PortRegion {
-            name: String::from(name), base, length,
-            reads: 0, writes: 0, read_bytes: 0, write_bytes: 0,
+            name: String::from(name),
+            base,
+            length,
+            reads: 0,
+            writes: 0,
+            read_bytes: 0,
+            write_bytes: 0,
         });
         Ok(())
     })
@@ -127,7 +138,10 @@ pub fn register_region(name: &str, base: u16, length: u16) -> KernelResult<()> {
 /// Record a port read.
 pub fn record_in(port: u16, size: u32) -> KernelResult<()> {
     with_state(|state| {
-        let found = state.regions.iter_mut().find(|r| port >= r.base && port < r.base + r.length);
+        let found = state
+            .regions
+            .iter_mut()
+            .find(|r| port >= r.base && port < r.base + r.length);
         if let Some(r) = found {
             r.reads += 1;
             r.read_bytes += size as u64;
@@ -142,7 +156,10 @@ pub fn record_in(port: u16, size: u32) -> KernelResult<()> {
 /// Record a port write.
 pub fn record_out(port: u16, size: u32) -> KernelResult<()> {
     with_state(|state| {
-        let found = state.regions.iter_mut().find(|r| port >= r.base && port < r.base + r.length);
+        let found = state
+            .regions
+            .iter_mut()
+            .find(|r| port >= r.base && port < r.base + r.length);
         if let Some(r) = found {
             r.writes += 1;
             r.write_bytes += size as u64;
@@ -156,14 +173,24 @@ pub fn record_out(port: u16, size: u32) -> KernelResult<()> {
 
 /// Per-region stats.
 pub fn per_region() -> Vec<PortRegion> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.regions.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.regions.clone())
 }
 
 /// Statistics: (region_count, total_reads, total_writes, untracked_reads, untracked_writes, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.regions.len(), s.total_reads, s.total_writes, s.untracked_reads, s.untracked_writes, s.ops),
+        Some(s) => (
+            s.regions.len(),
+            s.total_reads,
+            s.total_writes,
+            s.untracked_reads,
+            s.untracked_writes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -189,21 +216,33 @@ pub fn self_test() {
     //    region at the same base is AlreadyExists.
     register_region("TEST", 0x100, 4).expect("register");
     assert_eq!(per_region().len(), 1);
-    let r = per_region().into_iter().find(|r| r.base == 0x100).expect("find");
-    assert_eq!((r.reads, r.writes, r.read_bytes, r.write_bytes), (0, 0, 0, 0));
+    let r = per_region()
+        .into_iter()
+        .find(|r| r.base == 0x100)
+        .expect("find");
+    assert_eq!(
+        (r.reads, r.writes, r.read_bytes, r.write_bytes),
+        (0, 0, 0, 0)
+    );
     assert!(register_region("DUP", 0x100, 4).is_err());
     crate::serial_println!("  [2/8] register: OK");
 
     // 3: In (tracked) — per-region reads and the global total advance.
     record_in(0x100, 1).expect("in");
-    let r = per_region().into_iter().find(|r| r.base == 0x100).expect("p3");
+    let r = per_region()
+        .into_iter()
+        .find(|r| r.base == 0x100)
+        .expect("p3");
     assert_eq!((r.reads, r.read_bytes), (1, 1));
     assert_eq!(stats().1, 1); // total_reads
     crate::serial_println!("  [3/8] in tracked: OK");
 
     // 4: Out (tracked) — per-region writes and the global total advance.
     record_out(0x101, 2).expect("out");
-    let r = per_region().into_iter().find(|r| r.base == 0x100).expect("p4");
+    let r = per_region()
+        .into_iter()
+        .find(|r| r.base == 0x100)
+        .expect("p4");
     assert_eq!((r.writes, r.write_bytes), (1, 2));
     assert_eq!(stats().2, 1); // total_writes
     crate::serial_println!("  [4/8] out tracked: OK");
@@ -217,8 +256,13 @@ pub fn self_test() {
 
     // 6: Multiple accesses — 100 reads on the TEST region accrue exactly the
     //    reads they receive (no fabricated baseline).
-    for _ in 0..100 { record_in(0x100, 1).expect("loop"); }
-    let r = per_region().into_iter().find(|r| r.base == 0x100).expect("p6");
+    for _ in 0..100 {
+        record_in(0x100, 1).expect("loop");
+    }
+    let r = per_region()
+        .into_iter()
+        .find(|r| r.base == 0x100)
+        .expect("p6");
     assert_eq!((r.reads, r.read_bytes), (101, 101)); // 1 + 100
     crate::serial_println!("  [6/8] multi access: OK");
 
@@ -226,7 +270,10 @@ pub fn self_test() {
     //    0x104 is just past the end (untracked).
     record_in(0x103, 1).expect("boundary_in");
     record_in(0x104, 1).expect("boundary_out");
-    let r = per_region().into_iter().find(|r| r.base == 0x100).expect("p7");
+    let r = per_region()
+        .into_iter()
+        .find(|r| r.base == 0x100)
+        .expect("p7");
     assert_eq!(r.reads, 102); // 0x103 counted, 0x104 not
     assert_eq!(stats().3, 2); // untracked_reads now 2 (0xFFFF + 0x104)
     crate::serial_println!("  [7/8] boundaries: OK");

@@ -81,14 +81,11 @@ impl Rights {
     pub const NONE: Self = Self(0);
 
     /// Typical read-only: read + wait + duplicate.
-    pub const READ_ONLY: Self = Self(
-        Self::READ.0 | Self::WAIT.0 | Self::DUPLICATE.0,
-    );
+    pub const READ_ONLY: Self = Self(Self::READ.0 | Self::WAIT.0 | Self::DUPLICATE.0);
 
     /// Typical read-write: read + write + wait + duplicate.
-    pub const READ_WRITE: Self = Self(
-        Self::READ.0 | Self::WRITE.0 | Self::WAIT.0 | Self::DUPLICATE.0,
-    );
+    pub const READ_WRITE: Self =
+        Self(Self::READ.0 | Self::WRITE.0 | Self::WAIT.0 | Self::DUPLICATE.0);
 
     // --- Constructors ---
 

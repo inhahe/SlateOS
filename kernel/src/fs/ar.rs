@@ -48,10 +48,10 @@
 
 #![allow(dead_code)]
 
-use alloc::vec;
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
+use alloc::vec;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -228,7 +228,8 @@ pub fn unar(data: &[u8]) -> KernelResult<Vec<ArEntry>> {
             return Err(KernelError::CorruptedData);
         }
 
-        let member_data = data.get(data_start..data_end)
+        let member_data = data
+            .get(data_start..data_end)
             .ok_or(KernelError::CorruptedData)?;
 
         // Parse the member name.  The field is *bytes*, space-padded on the
@@ -258,8 +259,7 @@ pub fn unar(data: &[u8]) -> KernelResult<Vec<ArEntry>> {
                 // A reference past the end of the table is corruption, not a
                 // name.  This used to yield the literal name "???", which
                 // extracts to a file that has nothing to do with the member.
-                resolve_long_name(&long_names, offset)
-                    .ok_or(KernelError::CorruptedData)?
+                resolve_long_name(&long_names, offset).ok_or(KernelError::CorruptedData)?
             }
             // Regular name: strip the trailing '/' terminator.  Stripping it
             // *after* the space trim is what lets a name end in a space
@@ -391,12 +391,7 @@ pub fn mkar(entries: &[ArEntry]) -> KernelResult<Vec<u8>> {
         }
 
         // Write the "//" member containing the long name table.
-        write_member_header(
-            &mut buf,
-            b"//",
-            0, 0, 0, 0,
-            long_name_table.len(),
-        );
+        write_member_header(&mut buf, b"//", 0, 0, 0, 0, long_name_table.len());
         buf.extend_from_slice(&long_name_table);
         // Pad to 2-byte boundary.
         if long_name_table.len() % 2 != 0 {
@@ -530,7 +525,10 @@ fn test_parsing() -> KernelResult<()> {
 
     // Octal parsing.
     if parse_octal(b"100644  ") != 0o100644 {
-        crate::serial_println!("[ar]   FAIL: parse_octal(100644) = {}", parse_octal(b"100644  "));
+        crate::serial_println!(
+            "[ar]   FAIL: parse_octal(100644) = {}",
+            parse_octal(b"100644  ")
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -582,7 +580,10 @@ fn test_roundtrip() -> KernelResult<()> {
     }
 
     if extracted[0].name.as_path() != Path::new("hello.txt") {
-        crate::serial_println!("[ar]   FAIL: entry 0 name: '{}'", extracted[0].name.display());
+        crate::serial_println!(
+            "[ar]   FAIL: entry 0 name: '{}'",
+            extracted[0].name.display()
+        );
         return Err(KernelError::InternalError);
     }
     if extracted[0].data != b"Hello, ar!\n" {
@@ -595,7 +596,10 @@ fn test_roundtrip() -> KernelResult<()> {
     }
 
     if extracted[1].name.as_path() != Path::new("empty") {
-        crate::serial_println!("[ar]   FAIL: entry 1 name: '{}'", extracted[1].name.display());
+        crate::serial_println!(
+            "[ar]   FAIL: entry 1 name: '{}'",
+            extracted[1].name.display()
+        );
         return Err(KernelError::InternalError);
     }
     if !extracted[1].data.is_empty() {
@@ -640,7 +644,10 @@ fn test_long_names() -> KernelResult<()> {
     let extracted = unar(&archive)?;
 
     if extracted.len() != 3 {
-        crate::serial_println!("[ar]   FAIL: long names: expected 3 entries, got {}", extracted.len());
+        crate::serial_println!(
+            "[ar]   FAIL: long names: expected 3 entries, got {}",
+            extracted.len()
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -729,7 +736,10 @@ fn test_byte_names() -> KernelResult<()> {
 
     let extracted = unar(&mkar(&entries)?)?;
     if extracted.len() != 2 {
-        crate::serial_println!("[ar]   FAIL: byte names: expected 2, got {}", extracted.len());
+        crate::serial_println!(
+            "[ar]   FAIL: byte names: expected 2, got {}",
+            extracted.len()
+        );
         return Err(KernelError::InternalError);
     }
     if extracted[0].name.as_bytes() != short || extracted[1].name.as_bytes() != long {

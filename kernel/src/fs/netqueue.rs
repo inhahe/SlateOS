@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -118,7 +118,9 @@ where
 /// record functions on every packet/drop/NAPI-poll event.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         queues: Vec::new(),
         total_rx_packets: 0,
@@ -132,23 +134,44 @@ pub fn init_defaults() {
 /// Register a queue.
 pub fn register_queue(iface: &str, queue_id: u32, direction: QueueDir) -> KernelResult<()> {
     with_state(|state| {
-        if state.queues.len() >= MAX_QUEUES { return Err(KernelError::ResourceExhausted); }
-        if state.queues.iter().any(|q| q.iface == iface && q.queue_id == queue_id && q.direction == direction) {
+        if state.queues.len() >= MAX_QUEUES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state
+            .queues
+            .iter()
+            .any(|q| q.iface == iface && q.queue_id == queue_id && q.direction == direction)
+        {
             return Err(KernelError::AlreadyExists);
         }
         state.queues.push(QueueStats {
-            iface: String::from(iface), queue_id, direction,
-            packets: 0, bytes: 0, drops: 0, napi_polls: 0,
-            napi_budget_exhausted: 0, backlog_len: 0,
+            iface: String::from(iface),
+            queue_id,
+            direction,
+            packets: 0,
+            bytes: 0,
+            drops: 0,
+            napi_polls: 0,
+            napi_budget_exhausted: 0,
+            backlog_len: 0,
         });
         Ok(())
     })
 }
 
 /// Record packets on a queue.
-pub fn record_packets(iface: &str, queue_id: u32, direction: QueueDir, packets: u64, bytes: u64) -> KernelResult<()> {
+pub fn record_packets(
+    iface: &str,
+    queue_id: u32,
+    direction: QueueDir,
+    packets: u64,
+    bytes: u64,
+) -> KernelResult<()> {
     with_state(|state| {
-        let q = state.queues.iter_mut().find(|q| q.iface == iface && q.queue_id == queue_id && q.direction == direction)
+        let q = state
+            .queues
+            .iter_mut()
+            .find(|q| q.iface == iface && q.queue_id == queue_id && q.direction == direction)
             .ok_or(KernelError::NotFound)?;
         q.packets += packets;
         q.bytes += bytes;
@@ -163,7 +186,10 @@ pub fn record_packets(iface: &str, queue_id: u32, direction: QueueDir, packets: 
 /// Record a drop.
 pub fn record_drop(iface: &str, queue_id: u32, direction: QueueDir) -> KernelResult<()> {
     with_state(|state| {
-        let q = state.queues.iter_mut().find(|q| q.iface == iface && q.queue_id == queue_id && q.direction == direction)
+        let q = state
+            .queues
+            .iter_mut()
+            .find(|q| q.iface == iface && q.queue_id == queue_id && q.direction == direction)
             .ok_or(KernelError::NotFound)?;
         q.drops += 1;
         state.total_drops += 1;
@@ -174,10 +200,15 @@ pub fn record_drop(iface: &str, queue_id: u32, direction: QueueDir) -> KernelRes
 /// Record a NAPI poll.
 pub fn record_napi_poll(iface: &str, queue_id: u32, budget_exhausted: bool) -> KernelResult<()> {
     with_state(|state| {
-        let q = state.queues.iter_mut().find(|q| q.iface == iface && q.queue_id == queue_id && q.direction == QueueDir::Rx)
+        let q = state
+            .queues
+            .iter_mut()
+            .find(|q| q.iface == iface && q.queue_id == queue_id && q.direction == QueueDir::Rx)
             .ok_or(KernelError::NotFound)?;
         q.napi_polls += 1;
-        if budget_exhausted { q.napi_budget_exhausted += 1; }
+        if budget_exhausted {
+            q.napi_budget_exhausted += 1;
+        }
         state.total_napi_polls += 1;
         Ok(())
     })
@@ -185,13 +216,20 @@ pub fn record_napi_poll(iface: &str, queue_id: u32, budget_exhausted: bool) -> K
 
 /// Per-queue stats.
 pub fn per_queue() -> Vec<QueueStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.queues.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.queues.clone())
 }
 
 /// Queues for an interface.
 pub fn for_iface(iface: &str) -> Vec<QueueStats> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.queues.iter().filter(|q| q.iface == iface).cloned().collect()
+        s.queues
+            .iter()
+            .filter(|q| q.iface == iface)
+            .cloned()
+            .collect()
     })
 }
 
@@ -199,7 +237,14 @@ pub fn for_iface(iface: &str) -> Vec<QueueStats> {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.queues.len(), s.total_rx_packets, s.total_tx_packets, s.total_napi_polls, s.total_drops, s.ops),
+        Some(s) => (
+            s.queues.len(),
+            s.total_rx_packets,
+            s.total_tx_packets,
+            s.total_napi_polls,
+            s.total_drops,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -237,19 +282,32 @@ pub fn self_test() {
     // 3: Packets — per-queue packets/bytes rise; RX tally feeds total_rx.
     record_packets("eth0", 0, QueueDir::Rx, 100, 5000).expect("rx packets");
     record_packets("eth0", 0, QueueDir::Tx, 40, 2000).expect("tx packets");
-    let rx = per_queue().into_iter().find(|q| q.queue_id == 0 && q.direction == QueueDir::Rx).expect("find rx");
+    let rx = per_queue()
+        .into_iter()
+        .find(|q| q.queue_id == 0 && q.direction == QueueDir::Rx)
+        .expect("find rx");
     assert_eq!((rx.packets, rx.bytes), (100, 5000));
     crate::serial_println!("  [3/8] packets: OK");
 
     // 4: Drop — per-queue drops and total rise by one.
     record_drop("eth0", 0, QueueDir::Rx).expect("drop");
-    assert_eq!(per_queue().into_iter().find(|q| q.direction == QueueDir::Rx).expect("find rx").drops, 1);
+    assert_eq!(
+        per_queue()
+            .into_iter()
+            .find(|q| q.direction == QueueDir::Rx)
+            .expect("find rx")
+            .drops,
+        1
+    );
     crate::serial_println!("  [4/8] drop: OK");
 
     // 5: NAPI poll — only RX queues poll; budget-exhausted flag tallied.
     record_napi_poll("eth0", 0, true).expect("napi exhausted");
     record_napi_poll("eth0", 0, false).expect("napi ok");
-    let rx = per_queue().into_iter().find(|q| q.direction == QueueDir::Rx).expect("find rx");
+    let rx = per_queue()
+        .into_iter()
+        .find(|q| q.direction == QueueDir::Rx)
+        .expect("find rx");
     assert_eq!(rx.napi_polls, 2);
     assert_eq!(rx.napi_budget_exhausted, 1); // only the first was exhausted
     crate::serial_println!("  [5/8] napi: OK");

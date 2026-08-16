@@ -228,12 +228,7 @@ impl<'a> Ipv4Packet<'a> {
 ///
 /// Computes the IP header checksum.
 #[allow(dead_code)] // Public API.
-pub fn build_packet(
-    src: Ipv4Addr,
-    dst: Ipv4Addr,
-    protocol: u8,
-    payload: &[u8],
-) -> Vec<u8> {
+pub fn build_packet(src: Ipv4Addr, dst: Ipv4Addr, protocol: u8, payload: &[u8]) -> Vec<u8> {
     build_packet_ecn(src, dst, protocol, payload, 0)
 }
 
@@ -676,8 +671,12 @@ fn build_packet_custom_ttl(
 
     // Compute IP header checksum.
     let checksum = ip_checksum(&pkt[..IPV4_HEADER_SIZE]);
-    if let Some(b) = pkt.get_mut(checksum_offset) { *b = (checksum >> 8) as u8; }
-    if let Some(b) = pkt.get_mut(checksum_offset + 1) { *b = checksum as u8; }
+    if let Some(b) = pkt.get_mut(checksum_offset) {
+        *b = (checksum >> 8) as u8;
+    }
+    if let Some(b) = pkt.get_mut(checksum_offset + 1) {
+        *b = checksum as u8;
+    }
 
     // Append payload.
     pkt.extend_from_slice(payload);
@@ -803,11 +802,7 @@ fn send_ns_ecn(
 ///
 /// TCP uses `send_ns_ecn` which always sets DF (TCP relies on MSS
 /// to avoid fragmentation, and uses Path MTU Discovery).
-pub fn send_fragmentable(
-    dst: Ipv4Addr,
-    protocol: u8,
-    payload: &[u8],
-) -> KernelResult<()> {
+pub fn send_fragmentable(dst: Ipv4Addr, protocol: u8, payload: &[u8]) -> KernelResult<()> {
     send_fragmentable_ns(crate::netns::ROOT_NS, dst, protocol, payload)
 }
 
@@ -859,7 +854,11 @@ fn send_fragmentable_ns(
     while offset < payload.len() {
         let remaining = payload.len() - offset;
         let is_last = remaining <= MAX_FRAGMENT_PAYLOAD;
-        let frag_len = if is_last { remaining } else { MAX_FRAGMENT_PAYLOAD };
+        let frag_len = if is_last {
+            remaining
+        } else {
+            MAX_FRAGMENT_PAYLOAD
+        };
 
         let frag_payload = &payload[offset..offset + frag_len];
         // Fragment offset is in 8-byte units.
@@ -867,8 +866,13 @@ fn send_fragmentable_ns(
         let more_fragments = !is_last;
 
         let frag_packet = build_fragment(
-            our_ip, dst, protocol, frag_payload,
-            ip_id, frag_offset_units, more_fragments,
+            our_ip,
+            dst,
+            protocol,
+            frag_payload,
+            ip_id,
+            frag_offset_units,
+            more_fragments,
         );
         let frame = ethernet::build_frame(&dst_mac, &our_mac, ETHERTYPE_IPV4, &frag_packet);
         super::send_frame_ns(ns_id, &frame)?;
@@ -1046,7 +1050,10 @@ fn test_ip_checksum() -> KernelResult<()> {
     let hdr = &pkt[..IPV4_HEADER_SIZE];
     let check = ip_checksum(hdr);
     if check != 0 {
-        crate::serial_println!("[ipv4]   FAIL: checksum of valid header = {:#06x}, expected 0", check);
+        crate::serial_println!(
+            "[ipv4]   FAIL: checksum of valid header = {:#06x}, expected 0",
+            check
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -1090,11 +1097,18 @@ fn test_build_parse_roundtrip() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if parsed.payload != payload {
-        crate::serial_println!("[ipv4]   FAIL: payload mismatch (len={})", parsed.payload.len());
+        crate::serial_println!(
+            "[ipv4]   FAIL: payload mismatch (len={})",
+            parsed.payload.len()
+        );
         return Err(KernelError::InternalError);
     }
     if parsed.ttl != DEFAULT_TTL {
-        crate::serial_println!("[ipv4]   FAIL: ttl = {}, expected {}", parsed.ttl, DEFAULT_TTL);
+        crate::serial_println!(
+            "[ipv4]   FAIL: ttl = {}, expected {}",
+            parsed.ttl,
+            DEFAULT_TTL
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -1188,9 +1202,8 @@ fn test_fragment_flags() -> KernelResult<()> {
 
     // Build a fragment with MF=1, offset=185 (1480 bytes / 8 = 185).
     let frag = build_fragment(
-        src, dst, PROTO_UDP, payload,
-        42, // ip_id
-        185, // offset in 8-byte units
+        src, dst, PROTO_UDP, payload, 42,   // ip_id
+        185,  // offset in 8-byte units
         true, // more_fragments
     );
     let parsed_frag = Ipv4Packet::parse(&frag)?;
@@ -1200,7 +1213,10 @@ fn test_fragment_flags() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if parsed_frag.fragment_offset() != 185 {
-        crate::serial_println!("[ipv4]   FAIL: offset = {}, expected 185", parsed_frag.fragment_offset());
+        crate::serial_println!(
+            "[ipv4]   FAIL: offset = {}, expected 185",
+            parsed_frag.fragment_offset()
+        );
         return Err(KernelError::InternalError);
     }
     if !parsed_frag.is_fragment() {
@@ -1217,7 +1233,10 @@ fn test_fragment_flags() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if parsed_last.fragment_offset() != 370 {
-        crate::serial_println!("[ipv4]   FAIL: last frag offset = {}", parsed_last.fragment_offset());
+        crate::serial_println!(
+            "[ipv4]   FAIL: last frag offset = {}",
+            parsed_last.fragment_offset()
+        );
         return Err(KernelError::InternalError);
     }
     // Last fragment still is_fragment() because offset != 0.
@@ -1242,7 +1261,7 @@ fn test_transport_checksum_roundtrip() -> KernelResult<()> {
     segment.extend_from_slice(&1234u16.to_be_bytes()); // src port
     segment.extend_from_slice(&5678u16.to_be_bytes()); // dst port
     segment.extend_from_slice(&udp_len.to_be_bytes()); // length
-    segment.extend_from_slice(&0u16.to_be_bytes());    // checksum = 0 (to compute)
+    segment.extend_from_slice(&0u16.to_be_bytes()); // checksum = 0 (to compute)
     segment.extend_from_slice(data);
 
     // Compute checksum.
@@ -1348,17 +1367,10 @@ fn test_subnet_broadcast() -> KernelResult<()> {
 /// namespaces, consults the namespace's routing table via
 /// `netns::route_lookup()` and falls back to the namespace's default
 /// gateway.
-fn resolve_next_hop(
-    ns_id: crate::netns::NetNsId,
-    our_ip: Ipv4Addr,
-    dst: Ipv4Addr,
-) -> Ipv4Addr {
+fn resolve_next_hop(ns_id: crate::netns::NetNsId, our_ip: Ipv4Addr, dst: Ipv4Addr) -> Ipv4Addr {
     if ns_id != crate::netns::ROOT_NS {
         // Non-root namespace: use the per-namespace routing table.
-        if let Some(gw) = crate::netns::route_lookup(
-            ns_id,
-            crate::netns::Ipv4Addr(dst.0),
-        ) {
+        if let Some(gw) = crate::netns::route_lookup(ns_id, crate::netns::Ipv4Addr(dst.0)) {
             return if gw == crate::netns::Ipv4Addr::UNSPECIFIED {
                 dst // Direct delivery (connected route).
             } else {
@@ -1380,10 +1392,9 @@ fn resolve_next_hop(
     // (non-default) route via SYS_NET_ROUTE_ADD, then fall back to the
     // interface's default gateway / connected delivery. An empty table behaves
     // exactly as before this was added (see design-decisions §52).
-    if let Some(gw) = crate::netns::route_lookup(
-        crate::netns::ROOT_NS,
-        crate::netns::Ipv4Addr(dst.0),
-    ) {
+    if let Some(gw) =
+        crate::netns::route_lookup(crate::netns::ROOT_NS, crate::netns::Ipv4Addr(dst.0))
+    {
         return if gw == crate::netns::Ipv4Addr::UNSPECIFIED {
             dst // Directly-connected route (gateway 0.0.0.0).
         } else {

@@ -83,7 +83,8 @@ impl Ext4Fs {
 
         // Combine base seconds + extra field → nanoseconds since epoch.
         let combine_ts = |base_secs: u32, extra_offset: usize| -> u64 {
-            let extra = raw_inode.as_ref()
+            let extra = raw_inode
+                .as_ref()
                 .and_then(|raw| raw.get(extra_offset..extra_offset.wrapping_add(4)))
                 .and_then(|s| <[u8; 4]>::try_from(s).ok())
                 .map_or(0u32, u32::from_le_bytes);
@@ -98,7 +99,8 @@ impl Ext4Fs {
         let sec_to_ns = |s: u32| u64::from(s).saturating_mul(1_000_000_000);
 
         // Creation time: base at 0x90, extra at 0x94.
-        let created_ns = raw_inode.as_ref()
+        let created_ns = raw_inode
+            .as_ref()
             .and_then(|raw| raw.get(0x90..0x94))
             .and_then(|s| <[u8; 4]>::try_from(s).ok())
             .map_or(0u32, u32::from_le_bytes);
@@ -163,11 +165,15 @@ impl FileSystem for Ext4Fs {
 
         let entries = raw_entries
             .into_iter()
-            .filter(|(_, _, name)| name.as_path() != Path::new(".") && name.as_path() != Path::new(".."))
+            .filter(|(_, _, name)| {
+                name.as_path() != Path::new(".") && name.as_path() != Path::new("..")
+            })
             .map(|(child_ino, ftype, name)| {
                 let entry_type = dir_type_to_entry_type(ftype);
                 // Try to get the file size from the child inode.
-                let size = self.driver.read_inode(child_ino)
+                let size = self
+                    .driver
+                    .read_inode(child_ino)
                     .map(|ci| inode_file_size(&ci))
                     .unwrap_or(0);
                 DirEntry {
@@ -200,7 +206,9 @@ impl FileSystem for Ext4Fs {
         // Filter . and .. and count total.
         let filtered: Vec<_> = raw_entries
             .into_iter()
-            .filter(|(_, _, name)| name.as_path() != Path::new(".") && name.as_path() != Path::new(".."))
+            .filter(|(_, _, name)| {
+                name.as_path() != Path::new(".") && name.as_path() != Path::new("..")
+            })
             .collect();
         let total = filtered.len();
 
@@ -216,10 +224,16 @@ impl FileSystem for Ext4Fs {
             .take(end.saturating_sub(start))
             .map(|(child_ino, ftype, name)| {
                 let entry_type = dir_type_to_entry_type(ftype);
-                let size = self.driver.read_inode(child_ino)
+                let size = self
+                    .driver
+                    .read_inode(child_ino)
                     .map(|ci| inode_file_size(&ci))
                     .unwrap_or(0);
-                DirEntry { name, entry_type, size }
+                DirEntry {
+                    name,
+                    entry_type,
+                    size,
+                }
             })
             .collect();
 
@@ -232,9 +246,7 @@ impl FileSystem for Ext4Fs {
 
         let mode = inode.i_mode & file_type::S_IFMT;
         match mode {
-            file_type::S_IFREG => {
-                self.driver.read_file_data(ino, &inode)
-            }
+            file_type::S_IFREG => self.driver.read_file_data(ino, &inode),
             file_type::S_IFLNK => {
                 // For symlinks, the target path is stored:
                 // - In i_block if the target is <= 60 bytes (fast symlink)
@@ -353,8 +365,12 @@ impl FileSystem for Ext4Fs {
             set_inode_blocks_48(&mut inode, 0);
             inode.i_file_acl_lo = 0;
             // Clear i_file_acl_high in i_osd2[2..4].
-            if let Some(b) = inode.i_osd2.get_mut(2) { *b = 0; }
-            if let Some(b) = inode.i_osd2.get_mut(3) { *b = 0; }
+            if let Some(b) = inode.i_osd2.get_mut(2) {
+                *b = 0;
+            }
+            if let Some(b) = inode.i_osd2.get_mut(3) {
+                *b = 0;
+            }
 
             // Write the zeroed inode first, then free the inode number.
             self.driver.write_inode(ino, &inode)?;
@@ -379,16 +395,19 @@ impl FileSystem for Ext4Fs {
         }
 
         // Check that the name doesn't already exist.
-        if self.driver.dir_lookup(&parent_inode, parent_ino, name).is_ok() {
+        if self
+            .driver
+            .dir_lookup(&parent_inode, parent_ino, name)
+            .is_ok()
+        {
             return Err(KernelError::AlreadyExists);
         }
 
         // Create the directory inode.
         let preferred_group = self.driver.superblock().inode_group(parent_ino);
-        let (dir_ino, mut dir_inode) = self.driver.create_inode(
-            file_type::S_IFDIR | 0o755,
-            preferred_group,
-        )?;
+        let (dir_ino, mut dir_inode) = self
+            .driver
+            .create_inode(file_type::S_IFDIR | 0o755, preferred_group)?;
 
         // Create the initial directory data with . and .. entries.
         let block_size = self.driver.superblock().block_size as usize;
@@ -437,8 +456,11 @@ impl FileSystem for Ext4Fs {
 
         // Check that the directory is empty (only . and ..).
         let entries = self.driver.read_dir_entries(ino, &inode)?;
-        let real_entries = entries.iter()
-            .filter(|(_, _, name)| name.as_path() != Path::new(".") && name.as_path() != Path::new(".."))
+        let real_entries = entries
+            .iter()
+            .filter(|(_, _, name)| {
+                name.as_path() != Path::new(".") && name.as_path() != Path::new("..")
+            })
             .count();
         if real_entries > 0 {
             return Err(KernelError::NotEmpty);
@@ -467,8 +489,12 @@ impl FileSystem for Ext4Fs {
         inode.i_size_high = 0;
         set_inode_blocks_48(&mut inode, 0);
         inode.i_file_acl_lo = 0;
-        if let Some(b) = inode.i_osd2.get_mut(2) { *b = 0; }
-        if let Some(b) = inode.i_osd2.get_mut(3) { *b = 0; }
+        if let Some(b) = inode.i_osd2.get_mut(2) {
+            *b = 0;
+        }
+        if let Some(b) = inode.i_osd2.get_mut(3) {
+            *b = 0;
+        }
         self.driver.write_inode(ino, &inode)?;
 
         // Free the inode itself (is_directory=true to update used_dirs count).
@@ -525,8 +551,12 @@ impl FileSystem for Ext4Fs {
                 dest_inode.i_size_high = 0;
                 set_inode_blocks_48(&mut dest_inode, 0);
                 dest_inode.i_file_acl_lo = 0;
-                if let Some(b) = dest_inode.i_osd2.get_mut(2) { *b = 0; }
-                if let Some(b) = dest_inode.i_osd2.get_mut(3) { *b = 0; }
+                if let Some(b) = dest_inode.i_osd2.get_mut(2) {
+                    *b = 0;
+                }
+                if let Some(b) = dest_inode.i_osd2.get_mut(3) {
+                    *b = 0;
+                }
                 self.driver.write_inode(dest_ino, &dest_inode)?;
                 self.driver.free_inode_number(dest_ino, false)?;
             } else {
@@ -581,26 +611,28 @@ impl FileSystem for Ext4Fs {
             let mut dir_inode_copy = src_inode;
             // Write modified data to existing blocks — only the ".."
             // entry changed, no size change, so no reallocation needed.
-            match self.driver.write_to_existing_blocks(src_ino, &dir_inode_copy, &dir_data) {
-                Ok(()) => {},
+            match self
+                .driver
+                .write_to_existing_blocks(src_ino, &dir_inode_copy, &dir_data)
+            {
+                Ok(()) => {}
                 Err(KernelError::NotSupported) => {
                     // Deep extent tree — fall back to full rewrite.
                     let old_inode = dir_inode_copy;
                     self.driver.invalidate_extent_cache(src_ino);
-                    self.driver.write_file_data(&mut dir_inode_copy, &dir_data)?;
+                    self.driver
+                        .write_file_data(&mut dir_inode_copy, &dir_data)?;
                     self.driver.free_inode_data(src_ino, &old_inode)?;
-                },
+                }
                 Err(e) => return Err(e),
             }
 
             // Old parent loses a link (the moved dir's ".." no longer
             // points here), new parent gains one.
-            src_parent_inode.i_links_count =
-                src_parent_inode.i_links_count.saturating_sub(1);
+            src_parent_inode.i_links_count = src_parent_inode.i_links_count.saturating_sub(1);
             self.driver.write_inode(src_parent_ino, &src_parent_inode)?;
 
-            dst_parent_inode.i_links_count =
-                dst_parent_inode.i_links_count.saturating_add(1);
+            dst_parent_inode.i_links_count = dst_parent_inode.i_links_count.saturating_add(1);
             self.driver.write_inode(dst_parent_ino, &dst_parent_inode)?;
         }
 
@@ -685,7 +717,8 @@ impl FileSystem for Ext4Fs {
 
             // Step 1: write the in-bounds portion in place.
             if !in_bounds.is_empty() {
-                self.driver.write_at_inplace(ino, &inode, offset, in_bounds)?;
+                self.driver
+                    .write_at_inplace(ino, &inode, offset, in_bounds)?;
             }
 
             // Step 2: append the past-EOF portion.
@@ -709,9 +742,9 @@ impl FileSystem for Ext4Fs {
                         if end_usize > contents.len() {
                             contents.resize(end_usize, 0);
                         }
-                        if let Some(dest) = contents.get_mut(
-                            start..start.saturating_add(data.len())
-                        ) {
+                        if let Some(dest) =
+                            contents.get_mut(start..start.saturating_add(data.len()))
+                        {
                             dest.copy_from_slice(data);
                         }
                         return self.write_file(path, &contents);
@@ -759,10 +792,8 @@ impl FileSystem for Ext4Fs {
         }
 
         // Calculate blocks currently allocated vs needed.
-        let current_blocks = current_size
-            .saturating_add(block_size.saturating_sub(1)) / block_size;
-        let needed_blocks = size
-            .saturating_add(block_size.saturating_sub(1)) / block_size;
+        let current_blocks = current_size.saturating_add(block_size.saturating_sub(1)) / block_size;
+        let needed_blocks = size.saturating_add(block_size.saturating_sub(1)) / block_size;
 
         if needed_blocks <= current_blocks {
             // Already have enough allocated blocks.
@@ -783,7 +814,9 @@ impl FileSystem for Ext4Fs {
 
             // Goal: allocate adjacent to last existing extent for contiguity.
             // Parse the extent tree to find the last physical block.
-            let last_extent_end = self.driver.last_extent_end(&new_inode)
+            let last_extent_end = self
+                .driver
+                .last_extent_end(&new_inode)
                 .unwrap_or(u64::from(self.driver.superblock().raw.s_first_data_block));
 
             #[allow(clippy::cast_possible_truncation)]
@@ -839,12 +872,8 @@ impl FileSystem for Ext4Fs {
         // Set extent with UNWRITTEN flag (0x8000 | block_count).
         #[allow(clippy::cast_possible_truncation)]
         let block_count_u16 = blocks_to_alloc as u16;
-        self.driver.set_single_extent_unwritten(
-            &mut new_inode,
-            0,
-            first_block,
-            block_count_u16,
-        );
+        self.driver
+            .set_single_extent_unwritten(&mut new_inode, 0, first_block, block_count_u16);
 
         // Update block count (in 512-byte sectors) but NOT file size.
         // File size stays 0 — reads past logical EOF return zeros.
@@ -1092,7 +1121,11 @@ impl FileSystem for Ext4Fs {
         }
 
         // Check name doesn't already exist.
-        if self.driver.dir_lookup(&parent_inode, parent_ino, name).is_ok() {
+        if self
+            .driver
+            .dir_lookup(&parent_inode, parent_ino, name)
+            .is_ok()
+        {
             return Err(KernelError::AlreadyExists);
         }
 
@@ -1100,10 +1133,9 @@ impl FileSystem for Ext4Fs {
 
         // Allocate the symlink inode.
         let preferred_group = self.driver.superblock().inode_group(parent_ino);
-        let (sym_ino, mut sym_inode) = self.driver.create_inode(
-            file_type::S_IFLNK | 0o777,
-            preferred_group,
-        )?;
+        let (sym_ino, mut sym_inode) = self
+            .driver
+            .create_inode(file_type::S_IFLNK | 0o777, preferred_group)?;
 
         if target_bytes.len() <= 60 {
             // Fast symlink: store target in i_block directly (no data blocks).
@@ -1188,7 +1220,11 @@ impl FileSystem for Ext4Fs {
         };
         s.push_str(&alloc::format!(
             "\ndcache: {}/{} slots, {} hits, {} misses ({}% hit rate)",
-            valid, super::driver::EXT4_DCACHE_SIZE, hits, misses, rate,
+            valid,
+            super::driver::EXT4_DCACHE_SIZE,
+            hits,
+            misses,
+            rate,
         ));
 
         // Extent range cache stats.
@@ -1201,7 +1237,11 @@ impl FileSystem for Ext4Fs {
         };
         s.push_str(&alloc::format!(
             "\nextent_cache: {}/{} slots, {} hits, {} misses ({}% hit rate)",
-            evalid, super::driver::EXTENT_CACHE_SIZE, ehits, emisses, erate,
+            evalid,
+            super::driver::EXTENT_CACHE_SIZE,
+            ehits,
+            emisses,
+            erate,
         ));
 
         // Inode cache stats.
@@ -1214,7 +1254,11 @@ impl FileSystem for Ext4Fs {
         };
         s.push_str(&alloc::format!(
             "\ninode_cache: {}/{} slots, {} hits, {} misses ({}% hit rate)",
-            ivalid, super::driver::INODE_CACHE_SIZE, ihits, imisses, irate,
+            ivalid,
+            super::driver::INODE_CACHE_SIZE,
+            ihits,
+            imisses,
+            irate,
         ));
 
         s
@@ -1303,7 +1347,11 @@ impl Ext4Fs {
         }
 
         // Check that the new name doesn't already exist.
-        if self.driver.dir_lookup(&parent_inode, parent_ino, name).is_ok() {
+        if self
+            .driver
+            .dir_lookup(&parent_inode, parent_ino, name)
+            .is_ok()
+        {
             return Err(KernelError::AlreadyExists);
         }
 
@@ -1323,8 +1371,11 @@ impl Ext4Fs {
 
         // Add the directory entry.
         self.driver.add_dir_entry(
-            &mut parent_inode, parent_ino,
-            existing_ino, name, ftype_byte,
+            &mut parent_inode,
+            parent_ino,
+            existing_ino,
+            name,
+            ftype_byte,
         )?;
         self.driver.write_inode(parent_ino, &parent_inode)?;
 
@@ -1377,7 +1428,9 @@ impl Ext4Fs {
 
         // Convert nanoseconds to seconds (ext4 core inode stores seconds).
         let ns_to_sec = |ns: u64| -> u32 {
-            if ns == 0 { return 0; }
+            if ns == 0 {
+                return 0;
+            }
             (ns / 1_000_000_000) as u32
         };
 
@@ -1491,16 +1544,19 @@ impl Ext4Fs {
         }
 
         // Check that name doesn't already exist.
-        if self.driver.dir_lookup(&parent_inode, parent_ino, name).is_ok() {
+        if self
+            .driver
+            .dir_lookup(&parent_inode, parent_ino, name)
+            .is_ok()
+        {
             return Err(KernelError::AlreadyExists);
         }
 
         // Allocate inode in same group as parent for locality.
         let preferred_group = self.driver.superblock().inode_group(parent_ino);
-        let (file_ino, mut file_inode) = self.driver.create_inode(
-            file_type::S_IFREG | 0o644,
-            preferred_group,
-        )?;
+        let (file_ino, mut file_inode) = self
+            .driver
+            .create_inode(file_type::S_IFREG | 0o644, preferred_group)?;
 
         // Write file data.
         self.driver.write_file_data(&mut file_inode, data)?;
@@ -1536,7 +1592,8 @@ impl Ext4Fs {
         let mut prev_offset: Option<usize> = None;
 
         while offset.saturating_add(entry_header_size) <= dir_data.len() {
-            let hdr_bytes = dir_data.get(offset..offset.saturating_add(entry_header_size))
+            let hdr_bytes = dir_data
+                .get(offset..offset.saturating_add(entry_header_size))
                 .ok_or(KernelError::IoError)?;
             let hdr = super::driver::read_struct_pub::<super::ondisk::Ext4DirEntry2>(hdr_bytes)?;
 
@@ -1553,17 +1610,17 @@ impl Ext4Fs {
                         // and merging with the previous entry if possible.
                         if let Some(prev_off) = prev_offset {
                             // Merge: add this entry's rec_len to the previous entry's.
-                            let prev_rec_bytes = dir_data.get(
-                                prev_off.saturating_add(4)..prev_off.saturating_add(6)
-                            ).ok_or(KernelError::IoError)?;
+                            let prev_rec_bytes = dir_data
+                                .get(prev_off.saturating_add(4)..prev_off.saturating_add(6))
+                                .ok_or(KernelError::IoError)?;
                             let prev_rec = u16::from_le_bytes([
                                 *prev_rec_bytes.first().ok_or(KernelError::IoError)?,
                                 *prev_rec_bytes.get(1).ok_or(KernelError::IoError)?,
                             ]);
                             let new_rec = prev_rec.saturating_add(hdr.rec_len);
-                            if let Some(dest) = dir_data.get_mut(
-                                prev_off.saturating_add(4)..prev_off.saturating_add(6)
-                            ) {
+                            if let Some(dest) = dir_data
+                                .get_mut(prev_off.saturating_add(4)..prev_off.saturating_add(6))
+                            {
                                 dest.copy_from_slice(&new_rec.to_le_bytes());
                             }
                         } else {
@@ -1583,21 +1640,20 @@ impl Ext4Fs {
 
                         // Write modified data to existing blocks — only
                         // an entry was zeroed/merged, no size change.
-                        match self.driver.write_to_existing_blocks(
-                            dir_ino, dir_inode, &dir_data,
-                        ) {
-                            Ok(()) => {},
+                        match self
+                            .driver
+                            .write_to_existing_blocks(dir_ino, dir_inode, &dir_data)
+                        {
+                            Ok(()) => {}
                             Err(KernelError::NotSupported) => {
                                 // Deep extent tree — fall back to full rewrite.
                                 let old_inode = *dir_inode;
                                 let mut dir_inode_copy = *dir_inode;
                                 self.driver.invalidate_extent_cache(dir_ino);
-                                self.driver.write_file_data(
-                                    &mut dir_inode_copy,
-                                    &dir_data,
-                                )?;
+                                self.driver
+                                    .write_file_data(&mut dir_inode_copy, &dir_data)?;
                                 self.driver.free_inode_data(dir_ino, &old_inode)?;
-                            },
+                            }
                             Err(e) => return Err(e),
                         }
                         return Ok(());
@@ -1617,7 +1673,11 @@ impl Ext4Fs {
     /// Delegates to the driver's `read_symlink_target` which handles
     /// both fast symlinks (≤60 bytes in i_block) and slow symlinks
     /// (target stored in data blocks).
-    fn read_symlink_target(&self, inode_nr: u32, inode: &super::ondisk::Ext4Inode) -> KernelResult<Vec<u8>> {
+    fn read_symlink_target(
+        &self,
+        inode_nr: u32,
+        inode: &super::ondisk::Ext4Inode,
+    ) -> KernelResult<Vec<u8>> {
         self.driver.read_symlink_target(inode_nr, inode)
     }
 }
@@ -1687,8 +1747,12 @@ fn set_inode_uid_32(inode: &mut super::ondisk::Ext4Inode, uid: u32) {
     inode.i_uid = uid as u16;
     let hi = (uid >> 16) as u16;
     let hi_bytes = hi.to_le_bytes();
-    if let Some(slot) = inode.i_osd2.get_mut(4) { *slot = hi_bytes[0]; }
-    if let Some(slot) = inode.i_osd2.get_mut(5) { *slot = hi_bytes[1]; }
+    if let Some(slot) = inode.i_osd2.get_mut(4) {
+        *slot = hi_bytes[0];
+    }
+    if let Some(slot) = inode.i_osd2.get_mut(5) {
+        *slot = hi_bytes[1];
+    }
 }
 
 /// Write a 32-bit GID into an ext4 inode.
@@ -1696,8 +1760,12 @@ fn set_inode_gid_32(inode: &mut super::ondisk::Ext4Inode, gid: u32) {
     inode.i_gid = gid as u16;
     let hi = (gid >> 16) as u16;
     let hi_bytes = hi.to_le_bytes();
-    if let Some(slot) = inode.i_osd2.get_mut(6) { *slot = hi_bytes[0]; }
-    if let Some(slot) = inode.i_osd2.get_mut(7) { *slot = hi_bytes[1]; }
+    if let Some(slot) = inode.i_osd2.get_mut(6) {
+        *slot = hi_bytes[0];
+    }
+    if let Some(slot) = inode.i_osd2.get_mut(7) {
+        *slot = hi_bytes[1];
+    }
 }
 
 /// Read the inode block count and return 512-byte sectors.
@@ -1741,8 +1809,12 @@ fn inode_block_sectors(inode: &super::ondisk::Ext4Inode, block_size: u32) -> u64
 fn set_inode_blocks_48(inode: &mut super::ondisk::Ext4Inode, sectors: u64) {
     inode.i_blocks_lo = sectors as u32;
     let hi = ((sectors >> 32) as u16).to_le_bytes();
-    if let Some(slot) = inode.i_osd2.get_mut(0) { *slot = hi[0]; }
-    if let Some(slot) = inode.i_osd2.get_mut(1) { *slot = hi[1]; }
+    if let Some(slot) = inode.i_osd2.get_mut(0) {
+        *slot = hi[0];
+    }
+    if let Some(slot) = inode.i_osd2.get_mut(1) {
+        *slot = hi[1];
+    }
     // Always clear HUGE_FILE since we store sectors, not fs blocks.
     inode.i_flags &= !super::ondisk::inode_flags::HUGE_FILE;
 }
@@ -1855,7 +1927,8 @@ fn test_split_parent_name() -> KernelResult<()> {
     if parent != Path::new("/foo") || name != Path::new("bar") {
         crate::serial_println!(
             "[ext4-vfs]   FAIL: split('/foo/bar') = ('{}', '{}')",
-            parent.display(), name.display()
+            parent.display(),
+            name.display()
         );
         return Err(KernelError::InternalError);
     }
@@ -1865,7 +1938,8 @@ fn test_split_parent_name() -> KernelResult<()> {
     if parent != Path::new("/") || name != Path::new("file.txt") {
         crate::serial_println!(
             "[ext4-vfs]   FAIL: split('/file.txt') = ('{}', '{}')",
-            parent.display(), name.display()
+            parent.display(),
+            name.display()
         );
         return Err(KernelError::InternalError);
     }
@@ -1920,9 +1994,7 @@ fn test_inode_file_size() -> KernelResult<()> {
     inode.i_size_high = 0x0000_0001;
     let size = inode_file_size(&inode);
     if size != 0x0000_0001_1234_5678 {
-        crate::serial_println!(
-            "[ext4-vfs]   FAIL: regular file size = {:#x}", size
-        );
+        crate::serial_println!("[ext4-vfs]   FAIL: regular file size = {:#x}", size);
         return Err(KernelError::InternalError);
     }
 
@@ -1932,9 +2004,7 @@ fn test_inode_file_size() -> KernelResult<()> {
     inode.i_size_high = 0xDEAD;
     let size = inode_file_size(&inode);
     if size != 4096 {
-        crate::serial_println!(
-            "[ext4-vfs]   FAIL: dir size = {} (should ignore hi)", size
-        );
+        crate::serial_println!("[ext4-vfs]   FAIL: dir size = {} (should ignore hi)", size);
         return Err(KernelError::InternalError);
     }
 
@@ -1959,16 +2029,15 @@ fn test_inode_uid_gid_32() -> KernelResult<()> {
     set_inode_uid_32(&mut inode, 70000);
     let uid = inode_uid_32(&inode);
     if uid != 70000 {
-        crate::serial_println!(
-            "[ext4-vfs]   FAIL: UID readback = {}, expected 70000", uid
-        );
+        crate::serial_println!("[ext4-vfs]   FAIL: UID readback = {}, expected 70000", uid);
         return Err(KernelError::InternalError);
     }
 
     // Verify lo/hi split: lo = 70000 & 0xFFFF = 0x1170, hi = 1.
     if inode.i_uid != 0x1170 {
         crate::serial_println!(
-            "[ext4-vfs]   FAIL: i_uid = {:#x}, expected 0x1170", inode.i_uid
+            "[ext4-vfs]   FAIL: i_uid = {:#x}, expected 0x1170",
+            inode.i_uid
         );
         return Err(KernelError::InternalError);
     }
@@ -1977,9 +2046,7 @@ fn test_inode_uid_gid_32() -> KernelResult<()> {
     set_inode_gid_32(&mut inode, 100000);
     let gid = inode_gid_32(&inode);
     if gid != 100000 {
-        crate::serial_println!(
-            "[ext4-vfs]   FAIL: GID readback = {}, expected 100000", gid
-        );
+        crate::serial_println!("[ext4-vfs]   FAIL: GID readback = {}, expected 100000", gid);
         return Err(KernelError::InternalError);
     }
 
@@ -2135,7 +2202,10 @@ mod tests {
         use super::super::ondisk::dir_type;
         assert_eq!(dir_type_to_entry_type(dir_type::DIR), EntryType::Directory);
         assert_eq!(dir_type_to_entry_type(dir_type::REG_FILE), EntryType::File);
-        assert_eq!(dir_type_to_entry_type(dir_type::SYMLINK), EntryType::Symlink);
+        assert_eq!(
+            dir_type_to_entry_type(dir_type::SYMLINK),
+            EntryType::Symlink
+        );
         // Unknown types fall back to File.
         assert_eq!(dir_type_to_entry_type(dir_type::CHRDEV), EntryType::File);
         assert_eq!(dir_type_to_entry_type(dir_type::SOCK), EntryType::File);

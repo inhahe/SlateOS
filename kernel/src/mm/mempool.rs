@@ -38,9 +38,9 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex as Mutex;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -179,7 +179,9 @@ impl MemPool {
 
         serial_println!(
             "[mempool] '{}' initialized: {} x {} bytes ({} KiB slab)",
-            self.name, cap, self.obj_size,
+            self.name,
+            cap,
+            self.obj_size,
             total_bytes / 1024
         );
         true
@@ -209,7 +211,10 @@ impl MemPool {
             let in_use_u32 = in_use as u32;
             while in_use_u32 > cur_wm {
                 match self.high_watermark.compare_exchange_weak(
-                    cur_wm, in_use_u32, Ordering::Relaxed, Ordering::Relaxed,
+                    cur_wm,
+                    in_use_u32,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
                 ) {
                     Ok(_) => break,
                     Err(actual) => cur_wm = actual,
@@ -224,7 +229,9 @@ impl MemPool {
                 let ptr = (base as usize).wrapping_add(offset) as *mut u8;
                 // Zero the buffer before handing out (defense-in-depth).
                 // SAFETY: ptr is within our slab, obj_size is the slot size.
-                unsafe { core::ptr::write_bytes(ptr, 0, self.obj_size); }
+                unsafe {
+                    core::ptr::write_bytes(ptr, 0, self.obj_size);
+                }
                 self.allocs.fetch_add(1, Ordering::Relaxed);
                 Some(ptr)
             }
@@ -254,7 +261,10 @@ impl MemPool {
             // Pointer is outside our slab — corruption or wrong pool.
             serial_println!(
                 "[mempool] '{}' ERROR: free({:?}) outside slab (base={:#x}, size={})",
-                self.name, ptr, base, self.capacity.saturating_mul(self.obj_size)
+                self.name,
+                ptr,
+                base,
+                self.capacity.saturating_mul(self.obj_size)
             );
             return false;
         }
@@ -268,7 +278,8 @@ impl MemPool {
             // Misaligned pointer — not at a slot boundary.
             serial_println!(
                 "[mempool] '{}' ERROR: free({:?}) not slot-aligned",
-                self.name, ptr
+                self.name,
+                ptr
             );
             return false;
         }
@@ -281,7 +292,8 @@ impl MemPool {
             // Stack full — double free.
             serial_println!(
                 "[mempool] '{}' ERROR: possible double-free (slot {})",
-                self.name, idx
+                self.name,
+                idx
             );
             return false;
         }
@@ -300,7 +312,10 @@ impl MemPool {
             obj_size: self.obj_size,
             capacity: self.capacity.min(MAX_POOL_CAPACITY),
             available: free_count,
-            in_use: self.capacity.min(MAX_POOL_CAPACITY).saturating_sub(free_count),
+            in_use: self
+                .capacity
+                .min(MAX_POOL_CAPACITY)
+                .saturating_sub(free_count),
             total_allocs: self.allocs.load(Ordering::Relaxed),
             total_frees: self.frees.load(Ordering::Relaxed),
             alloc_failures: self.alloc_failures.load(Ordering::Relaxed),
@@ -444,11 +459,16 @@ pub fn self_test() {
     assert_eq!(st.available, 8);
     assert_eq!(st.in_use, 0);
     assert_eq!(st.total_allocs, 9); // 8 + 1 re-alloc
-    assert_eq!(st.total_frees, 9);  // 1 + 8
+    assert_eq!(st.total_frees, 9); // 1 + 8
     assert_eq!(st.alloc_failures, 1);
     assert_eq!(st.high_watermark, 8);
-    serial_println!("[mempool]   Stats: OK (allocs={}, frees={}, failures={}, hwm={})",
-        st.total_allocs, st.total_frees, st.alloc_failures, st.high_watermark);
+    serial_println!(
+        "[mempool]   Stats: OK (allocs={}, frees={}, failures={}, hwm={})",
+        st.total_allocs,
+        st.total_frees,
+        st.alloc_failures,
+        st.high_watermark
+    );
 
     // Test 7: Null/invalid free rejected.
     // SAFETY: null is intentionally invalid — free() should reject it gracefully.

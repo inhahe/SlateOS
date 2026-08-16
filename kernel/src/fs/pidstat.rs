@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -104,19 +104,19 @@ where
 /// `free_pid` as it creates and reaps processes.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
-        namespaces: alloc::vec![
-            PidNamespace {
-                ns_id: 0,
-                parent_id: None,
-                active_pids: 0,
-                max_pid: DEFAULT_MAX_PID,
-                allocated: 0,
-                freed: 0,
-                high_watermark: 0,
-            },
-        ],
+        namespaces: alloc::vec![PidNamespace {
+            ns_id: 0,
+            parent_id: None,
+            active_pids: 0,
+            max_pid: DEFAULT_MAX_PID,
+            allocated: 0,
+            freed: 0,
+            high_watermark: 0,
+        },],
         next_ns_id: 1,
         total_allocated: 0,
         total_freed: 0,
@@ -128,7 +128,10 @@ pub fn init_defaults() {
 /// Allocate a PID in a namespace.
 pub fn alloc_pid(ns_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let ns = state.namespaces.iter_mut().find(|n| n.ns_id == ns_id)
+        let ns = state
+            .namespaces
+            .iter_mut()
+            .find(|n| n.ns_id == ns_id)
             .ok_or(KernelError::NotFound)?;
         ns.allocated += 1;
         ns.active_pids += 1;
@@ -138,7 +141,9 @@ pub fn alloc_pid(ns_id: u32) -> KernelResult<()> {
         }
         state.total_allocated += 1;
         // Reuse detection: if freed > 0, we're likely reusing PIDs.
-        if ns.freed > 0 { state.total_reuses += 1; }
+        if ns.freed > 0 {
+            state.total_reuses += 1;
+        }
         Ok(())
     })
 }
@@ -146,7 +151,10 @@ pub fn alloc_pid(ns_id: u32) -> KernelResult<()> {
 /// Free a PID in a namespace.
 pub fn free_pid(ns_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let ns = state.namespaces.iter_mut().find(|n| n.ns_id == ns_id)
+        let ns = state
+            .namespaces
+            .iter_mut()
+            .find(|n| n.ns_id == ns_id)
             .ok_or(KernelError::NotFound)?;
         ns.freed += 1;
         ns.active_pids = ns.active_pids.saturating_sub(1);
@@ -167,8 +175,13 @@ pub fn create_ns(parent_id: u32, max_pid: u32) -> KernelResult<u32> {
         let id = state.next_ns_id;
         state.next_ns_id += 1;
         state.namespaces.push(PidNamespace {
-            ns_id: id, parent_id: Some(parent_id), active_pids: 0,
-            max_pid, allocated: 0, freed: 0, high_watermark: 0,
+            ns_id: id,
+            parent_id: Some(parent_id),
+            active_pids: 0,
+            max_pid,
+            allocated: 0,
+            freed: 0,
+            high_watermark: 0,
         });
         Ok(id)
     })
@@ -176,21 +189,31 @@ pub fn create_ns(parent_id: u32, max_pid: u32) -> KernelResult<u32> {
 
 /// List all namespaces.
 pub fn ns_list() -> Vec<PidNamespace> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.namespaces.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.namespaces.clone())
 }
 
 /// Get a specific namespace.
 pub fn ns_info(ns_id: u32) -> Option<PidNamespace> {
-    STATE.lock().as_ref().and_then(|s| {
-        s.namespaces.iter().find(|n| n.ns_id == ns_id).cloned()
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.namespaces.iter().find(|n| n.ns_id == ns_id).cloned())
 }
 
 /// Statistics: (ns_count, total_allocated, total_freed, total_reuses, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.namespaces.len(), s.total_allocated, s.total_freed, s.total_reuses, s.ops),
+        Some(s) => (
+            s.namespaces.len(),
+            s.total_allocated,
+            s.total_freed,
+            s.total_reuses,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -215,7 +238,15 @@ pub fn self_test() {
     let root = ns_info(0).expect("root");
     assert_eq!(root.parent_id, None);
     assert_eq!(root.max_pid, DEFAULT_MAX_PID);
-    assert_eq!((root.active_pids, root.allocated, root.freed, root.high_watermark), (0, 0, 0, 0));
+    assert_eq!(
+        (
+            root.active_pids,
+            root.allocated,
+            root.freed,
+            root.high_watermark
+        ),
+        (0, 0, 0, 0)
+    );
     let (n0, a0, f0, r0, _o0) = stats();
     assert_eq!((n0, a0, f0, r0), (1, 0, 0, 0));
     crate::serial_println!("  [1/8] root-only init: OK");
@@ -252,7 +283,9 @@ pub fn self_test() {
     crate::serial_println!("  [5/8] child ns: OK");
 
     // 6: High watermark tracks peak active PIDs (6 allocs without frees → 6).
-    for _ in 0..5 { alloc_pid(child_id).expect("alloc_multi"); }
+    for _ in 0..5 {
+        alloc_pid(child_id).expect("alloc_multi");
+    }
     let child = ns_info(child_id).expect("child");
     assert_eq!(child.active_pids, 6);
     assert_eq!(child.high_watermark, 6);

@@ -58,9 +58,9 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
@@ -149,7 +149,9 @@ fn mime_for_extension(ext: &str) -> &'static str {
         "js" | "mjs" => "application/javascript; charset=utf-8",
         "json" => "application/json; charset=utf-8",
         "xml" => "application/xml",
-        "txt" | "log" | "conf" | "cfg" | "ini" | "toml" | "yaml" | "yml" => "text/plain; charset=utf-8",
+        "txt" | "log" | "conf" | "cfg" | "ini" | "toml" | "yaml" | "yml" => {
+            "text/plain; charset=utf-8"
+        }
         "md" => "text/markdown; charset=utf-8",
         "csv" => "text/csv; charset=utf-8",
         "png" => "image/png",
@@ -288,10 +290,7 @@ fn percent_decode(s: &str) -> Vec<u8> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (
-                hex_digit(bytes[i + 1]),
-                hex_digit(bytes[i + 2]),
-            ) {
+            if let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
                 result.push(hi * 16 + lo);
                 i += 3;
                 continue;
@@ -382,7 +381,9 @@ fn normalize_path(path: &[u8]) -> PathBuf {
     for part in path.split(|&b| b == b'/') {
         match part {
             b"" | b"." => { /* skip */ }
-            b".." => { segments.pop(); }
+            b".." => {
+                segments.pop();
+            }
             _ => segments.push(part),
         }
     }
@@ -436,24 +437,19 @@ fn etag_for_body(body: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Atomic request counter.
-static REQUEST_COUNT: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static REQUEST_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Atomic 304 Not Modified counter (ETag cache hits).
-static NOT_MODIFIED_COUNT: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static NOT_MODIFIED_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Atomic 206 Partial Content counter (Range request hits).
-static PARTIAL_COUNT: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static PARTIAL_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Atomic gzip-compressed response counter.
-static GZIP_COUNT: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static GZIP_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Atomic total bytes saved by gzip compression.
-static GZIP_BYTES_SAVED: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static GZIP_BYTES_SAVED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Maximum entries in the access log ring buffer.
 const ACCESS_LOG_SIZE: usize = 64;
@@ -539,7 +535,12 @@ fn log_access(method: &str, path: &Path, status: u16, body_size: usize, duration
 
 /// Get the N most recent access log entries.
 pub fn recent_access_log(count: usize) -> Vec<AccessLogEntry> {
-    ACCESS_LOG.lock().recent(count).into_iter().cloned().collect()
+    ACCESS_LOG
+        .lock()
+        .recent(count)
+        .into_iter()
+        .cloned()
+        .collect()
 }
 
 /// Get the number of 206 Partial Content responses (Range request hits).
@@ -584,8 +585,7 @@ const RATE_LIMIT_BURST: u32 = 60;
 static RATE_LIMIT_ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// Atomic 429 Too Many Requests counter.
-static RATE_LIMITED_COUNT: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static RATE_LIMITED_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Per-IP token bucket entry.
 struct RateLimitEntry {
@@ -603,7 +603,13 @@ static RATE_LIMITER: spin::Mutex<[RateLimitEntry; RATE_LIMIT_SLOTS]> =
 
 /// Create the initial empty rate limit table (const-compatible).
 const fn init_rate_entries() -> [RateLimitEntry; RATE_LIMIT_SLOTS] {
-    let mut arr = [const { RateLimitEntry { ip: [0; 4], tokens: 0, last_tick: 0 } }; RATE_LIMIT_SLOTS];
+    let mut arr = [const {
+        RateLimitEntry {
+            ip: [0; 4],
+            tokens: 0,
+            last_tick: 0,
+        }
+    }; RATE_LIMIT_SLOTS];
     let mut i = 0;
     while i < RATE_LIMIT_SLOTS {
         arr[i] = RateLimitEntry {
@@ -673,7 +679,10 @@ fn check_rate_limit(src_ip: [u8; 4]) -> bool {
     let elapsed_ticks = now.saturating_sub(table[idx].last_tick);
     if elapsed_ticks > 0 {
         let refill = (elapsed_ticks as u32).saturating_mul(RATE_LIMIT_RPS) / 100;
-        table[idx].tokens = table[idx].tokens.saturating_add(refill).min(RATE_LIMIT_BURST);
+        table[idx].tokens = table[idx]
+            .tokens
+            .saturating_add(refill)
+            .min(RATE_LIMIT_BURST);
         table[idx].last_tick = now;
     }
 
@@ -719,7 +728,8 @@ fn build_response(status: u16, reason: &str, content_type: &str, body: &[u8]) ->
          Cache-Control: no-cache\r\n\
          Connection: close\r\n\
          \r\n",
-        status, reason,
+        status,
+        reason,
         SERVER_NAME,
         content_type,
         body.len(),
@@ -764,7 +774,8 @@ fn build_response_gzip(status: u16, reason: &str, content_type: &str, body: &[u8
          Cache-Control: no-cache\r\n\
          Connection: close\r\n\
          \r\n",
-        status, reason,
+        status,
+        reason,
         SERVER_NAME,
         content_type,
         compressed.len(),
@@ -802,7 +813,12 @@ fn is_compressible(content_type: &str) -> bool {
 }
 
 /// Build a HEAD response (headers only, no body).
-fn build_head_response(status: u16, reason: &str, content_type: &str, content_length: usize) -> Vec<u8> {
+fn build_head_response(
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    content_length: usize,
+) -> Vec<u8> {
     let resp = format!(
         "HTTP/1.1 {} {}\r\n\
          Server: {}\r\n\
@@ -810,10 +826,7 @@ fn build_head_response(status: u16, reason: &str, content_type: &str, content_le
          Content-Length: {}\r\n\
          Connection: close\r\n\
          \r\n",
-        status, reason,
-        SERVER_NAME,
-        content_type,
-        content_length,
+        status, reason, SERVER_NAME, content_type, content_length,
     );
     resp.into_bytes()
 }
@@ -827,8 +840,7 @@ fn not_modified_response(etag: &str) -> Vec<u8> {
          Cache-Control: no-cache\r\n\
          Connection: close\r\n\
          \r\n",
-        SERVER_NAME,
-        etag,
+        SERVER_NAME, etag,
     );
     resp.into_bytes()
 }
@@ -860,7 +872,9 @@ fn partial_content_response(
         SERVER_NAME,
         content_type,
         slice.len(),
-        start, end, total,
+        start,
+        end,
+        total,
         etag,
     );
 
@@ -877,8 +891,7 @@ fn range_not_satisfiable(total_size: usize) -> Vec<u8> {
          Content-Range: bytes */{}\r\n\
          Connection: close\r\n\
          \r\n",
-        SERVER_NAME,
-        total_size,
+        SERVER_NAME, total_size,
     );
     resp.into_bytes()
 }
@@ -999,7 +1012,7 @@ fn extract_status(response: &[u8]) -> u16 {
 /// may contain `<`, `"`, `?`, `#` or bytes that are not valid UTF-8.
 #[allow(clippy::arithmetic_side_effects)]
 fn directory_listing(vfs_path: &Path, uri_path: &Path) -> KernelResult<Vec<u8>> {
-    use crate::fs::vfs::{Vfs, EntryType};
+    use crate::fs::vfs::{EntryType, Vfs};
 
     let entries = Vfs::readdir(vfs_path)?;
     let uri_text = html_path(uri_path);
@@ -1047,7 +1060,9 @@ fn directory_listing(vfs_path: &Path, uri_path: &Path) -> KernelResult<Vec<u8>> 
             format_size(entry.size)
         };
 
-        let type_str = if is_dir { "Directory" } else {
+        let type_str = if is_dir {
+            "Directory"
+        } else {
             mime_for_path(name)
         };
 
@@ -1160,7 +1175,13 @@ fn handle_connection(conn_handle: usize) {
 /// - Range requests (Range: bytes=N-M → 206 Partial Content)
 /// - HEAD method (headers only)
 /// - gzip compression for compressible MIME types
-fn serve_file(vfs_path: &Path, method: &str, if_none_match: &Option<String>, range: &Option<String>, use_gzip: bool) -> Vec<u8> {
+fn serve_file(
+    vfs_path: &Path,
+    method: &str,
+    if_none_match: &Option<String>,
+    range: &Option<String>,
+    use_gzip: bool,
+) -> Vec<u8> {
     use crate::fs::vfs::Vfs;
 
     match Vfs::read_file(vfs_path) {
@@ -1379,9 +1400,7 @@ fn handle_tls_connection(tcp_handle: usize) {
 ///
 /// Accumulates data from `tls_server_recv()` until we see the end of
 /// the HTTP headers (`\r\n\r\n`), or until we hit a size/attempt limit.
-fn tls_read_request(
-    session: &mut super::tls::TlsServerSession,
-) -> KernelResult<Vec<u8>> {
+fn tls_read_request(session: &mut super::tls::TlsServerSession) -> KernelResult<Vec<u8>> {
     let mut buf = Vec::new();
 
     for _ in 0..TLS_RECV_ATTEMPTS {
@@ -1452,7 +1471,7 @@ fn etag_matches(if_none_match: &Option<String>, body: &[u8]) -> bool {
 /// a 304 Not Modified response is returned instead of the full body.
 #[allow(clippy::arithmetic_side_effects)]
 fn process_http_request(request_data: &[u8]) -> Vec<u8> {
-    use crate::fs::vfs::{Vfs, EntryType};
+    use crate::fs::vfs::{EntryType, Vfs};
 
     // Capture request start time for access log duration tracking.
     let req_start_ns = crate::hrtimer::now_ns();
@@ -1478,9 +1497,10 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
     // Dashboard API and HTML — intercept before VFS serving. These routes are
     // fixed ASCII strings, so a path that is not valid UTF-8 can never name
     // one and goes straight to the VFS.
-    let api_route = req.path.to_str().filter(|p| {
-        p.starts_with("/api/") || *p == "/dashboard" || *p == "/dashboard/"
-    });
+    let api_route = req
+        .path
+        .to_str()
+        .filter(|p| p.starts_with("/api/") || *p == "/dashboard" || *p == "/dashboard/");
     if let Some(route) = api_route {
         if let Some((content_type, body)) = super::dashboard::handle_api_request(route) {
             // ETag check for dashboard API (especially useful for the
@@ -1492,9 +1512,8 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
                 return not_modified_response(&etag_for_body(&body));
             }
             let blen = body.len();
-            let use_gzip = accepts_gzip(&req.accept_encoding)
-                && is_compressible(&content_type)
-                && blen > 256; // Don't bother compressing tiny responses
+            let use_gzip =
+                accepts_gzip(&req.accept_encoding) && is_compressible(&content_type) && blen > 256; // Don't bother compressing tiny responses
             let response = if req.method == "HEAD" {
                 build_head_response(200, "OK", &content_type, blen)
             } else if use_gzip {
@@ -1527,7 +1546,13 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
             let index_path = vfs_path.join("index.html");
 
             if Vfs::stat(&index_path).is_ok() {
-                let r = serve_file(&index_path, &req.method, &req.if_none_match, &req.range, use_gzip);
+                let r = serve_file(
+                    &index_path,
+                    &req.method,
+                    &req.if_none_match,
+                    &req.range,
+                    use_gzip,
+                );
                 let s = extract_status(&r);
                 let l = r.len();
                 (r, s, l)
@@ -1559,7 +1584,13 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
             }
         }
         Ok(_) => {
-            let r = serve_file(&vfs_path, &req.method, &req.if_none_match, &req.range, use_gzip);
+            let r = serve_file(
+                &vfs_path,
+                &req.method,
+                &req.if_none_match,
+                &req.range,
+                use_gzip,
+            );
             let s = extract_status(&r);
             let l = r.len();
             (r, s, l)
@@ -1615,7 +1646,9 @@ pub fn start_tls(port: u16) -> KernelResult<()> {
     serial_println!(
         "[httpd] HTTPS server started on port {} (cert fingerprint: SHA256:{:02x}{:02x}{:02x}...{:02x})",
         port,
-        fingerprint[0], fingerprint[1], fingerprint[2],
+        fingerprint[0],
+        fingerprint[1],
+        fingerprint[2],
         fingerprint[31],
     );
     Ok(())
@@ -1818,9 +1851,11 @@ pub fn self_test() -> KernelResult<()> {
     let resp = process_http_request(b"GET /proc/version HTTP/1.1\r\nHost: x\r\n\r\n");
     let resp_str = core::str::from_utf8(&resp).unwrap_or("");
     // /proc/version should exist and return 200.
-    assert!(resp_str.starts_with("HTTP/1.1 200 OK\r\n") ||
-            resp_str.starts_with("HTTP/1.1 404 Not Found\r\n"),
-            "Expected 200 or 404 for /proc/version");
+    assert!(
+        resp_str.starts_with("HTTP/1.1 200 OK\r\n")
+            || resp_str.starts_with("HTTP/1.1 404 Not Found\r\n"),
+        "Expected 200 or 404 for /proc/version"
+    );
     serial_println!("[httpd]   process_http_request: OK");
 
     // Test 11: process_http_request rejects POST.
@@ -1850,10 +1885,16 @@ pub fn self_test() -> KernelResult<()> {
     let etag2 = etag_for_body(body);
     let etag3 = etag_for_body(b"Different content");
     assert_eq!(etag1, etag2, "Same content must produce same ETag");
-    assert_ne!(etag1, etag3, "Different content must produce different ETag");
+    assert_ne!(
+        etag1, etag3,
+        "Different content must produce different ETag"
+    );
     assert!(etag1.starts_with('"'), "ETag must be quoted");
     assert!(etag1.ends_with('"'), "ETag must be quoted");
-    assert!(etag1.contains("fnv1a-"), "ETag must contain algorithm prefix");
+    assert!(
+        etag1.contains("fnv1a-"),
+        "ETag must contain algorithm prefix"
+    );
     serial_println!("[httpd]   ETag generation: OK");
 
     // Test 15: ETag conditional matching.
@@ -1861,18 +1902,33 @@ pub fn self_test() -> KernelResult<()> {
     let etag = etag_for_body(body);
     let inm = Some(etag.clone());
     assert!(etag_matches(&inm, body), "Matching ETag should return true");
-    assert!(!etag_matches(&inm, b"Changed content"), "Changed content should not match");
-    assert!(!etag_matches(&None, body), "No If-None-Match should not match");
+    assert!(
+        !etag_matches(&inm, b"Changed content"),
+        "Changed content should not match"
+    );
+    assert!(
+        !etag_matches(&None, body),
+        "No If-None-Match should not match"
+    );
     // Comma-separated list (multiple ETags).
     let multi_inm = Some(format!("\"other\", {}, \"another\"", etag));
-    assert!(etag_matches(&multi_inm, body), "ETag in comma list should match");
+    assert!(
+        etag_matches(&multi_inm, body),
+        "ETag in comma list should match"
+    );
     serial_println!("[httpd]   ETag conditional matching: OK");
 
     // Test 16: Response includes ETag header.
     let resp = build_response(200, "OK", "text/plain", b"ETag test body");
     let resp_str = core::str::from_utf8(&resp).unwrap_or("");
-    assert!(resp_str.contains("ETag: \"fnv1a-"), "Response must include ETag header");
-    assert!(resp_str.contains("Cache-Control: no-cache"), "Response must include Cache-Control");
+    assert!(
+        resp_str.contains("ETag: \"fnv1a-"),
+        "Response must include ETag header"
+    );
+    assert!(
+        resp_str.contains("Cache-Control: no-cache"),
+        "Response must include Cache-Control"
+    );
     serial_println!("[httpd]   ETag in response: OK");
 
     // Test 17: 304 Not Modified response format.
@@ -1881,12 +1937,15 @@ pub fn self_test() -> KernelResult<()> {
     let resp304_str = core::str::from_utf8(&resp304).unwrap_or("");
     assert!(resp304_str.starts_with("HTTP/1.1 304 Not Modified\r\n"));
     assert!(resp304_str.contains(&format!("ETag: {}", etag)));
-    assert!(!resp304_str.contains("Content-Length:"), "304 should not have Content-Length");
+    assert!(
+        !resp304_str.contains("Content-Length:"),
+        "304 should not have Content-Length"
+    );
     serial_println!("[httpd]   304 Not Modified response: OK");
 
     // Test 18: Request header parsing (If-None-Match).
     let req = parse_request(
-        b"GET /index.html HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"fnv1a-abc123\"\r\n\r\n"
+        b"GET /index.html HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"fnv1a-abc123\"\r\n\r\n",
     );
     assert!(req.is_some());
     let r = req.unwrap();
@@ -1941,9 +2000,7 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[httpd]   416 Range Not Satisfiable: OK");
 
     // Test 23: Range header in request parsing.
-    let req = parse_request(
-        b"GET /bigfile.bin HTTP/1.1\r\nHost: x\r\nRange: bytes=0-1023\r\n\r\n"
-    );
+    let req = parse_request(b"GET /bigfile.bin HTTP/1.1\r\nHost: x\r\nRange: bytes=0-1023\r\n\r\n");
     assert!(req.is_some());
     let r = req.unwrap();
     assert_eq!(r.range.as_deref(), Some("bytes=0-1023"));
@@ -2091,37 +2148,62 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         let compressed = crate::fs::compress::gzip(&body);
-        let ratio_pct = body.len().saturating_mul(100).checked_div(compressed.len().max(1)).unwrap_or(0);
-        serial_println!("[httpd]   gzip: {}B → {}B ({}% ratio)",
-            body.len(), compressed.len(), ratio_pct);
+        let ratio_pct = body
+            .len()
+            .saturating_mul(100)
+            .checked_div(compressed.len().max(1))
+            .unwrap_or(0);
+        serial_println!(
+            "[httpd]   gzip: {}B → {}B ({}% ratio)",
+            body.len(),
+            compressed.len(),
+            ratio_pct
+        );
 
         if compressed.len() < body.len() {
             // Compression worked — verify the response builder uses it.
             let resp = build_response_gzip(200, "OK", "text/html", &body);
             // Headers are ASCII, but the gzip body is binary.  Find the
             // end-of-headers marker and check only the header portion.
-            let header_end = resp.windows(4)
+            let header_end = resp
+                .windows(4)
                 .position(|w| w == b"\r\n\r\n")
                 .map(|p| p.saturating_add(4))
                 .unwrap_or(resp.len());
             let header_str = core::str::from_utf8(&resp[..header_end]).unwrap_or("");
-            assert!(header_str.contains("Content-Encoding: gzip\r\n"),
-                "gzip response should contain Content-Encoding header");
-            assert!(header_str.contains("Vary: Accept-Encoding\r\n"),
-                "gzip response should contain Vary header");
+            assert!(
+                header_str.contains("Content-Encoding: gzip\r\n"),
+                "gzip response should contain Content-Encoding header"
+            );
+            assert!(
+                header_str.contains("Vary: Accept-Encoding\r\n"),
+                "gzip response should contain Vary header"
+            );
             // Verify the compressed response is smaller than uncompressed.
             let uncompressed = build_response(200, "OK", "text/html", &body);
-            assert!(resp.len() < uncompressed.len(),
-                "gzip ({}) should be smaller than plain ({})", resp.len(), uncompressed.len());
-            serial_println!("[httpd]   gzip response: OK ({}B vs {}B uncompressed)",
-                resp.len(), uncompressed.len());
+            assert!(
+                resp.len() < uncompressed.len(),
+                "gzip ({}) should be smaller than plain ({})",
+                resp.len(),
+                uncompressed.len()
+            );
+            serial_println!(
+                "[httpd]   gzip response: OK ({}B vs {}B uncompressed)",
+                resp.len(),
+                uncompressed.len()
+            );
         } else {
             // Compression didn't help — verify the fallback works.
             let resp = build_response_gzip(200, "OK", "text/html", &body);
-            assert!(resp.starts_with(b"HTTP/1.1 200 OK\r\n"),
-                "fallback response should be valid HTTP");
-            serial_println!("[httpd]   gzip response: OK (fallback, {}B ≥ {}B)",
-                compressed.len(), body.len());
+            assert!(
+                resp.starts_with(b"HTTP/1.1 200 OK\r\n"),
+                "fallback response should be valid HTTP"
+            );
+            serial_println!(
+                "[httpd]   gzip response: OK (fallback, {}B ≥ {}B)",
+                compressed.len(),
+                body.len()
+            );
         }
     }
 
@@ -2152,7 +2234,10 @@ mod tests {
         assert_eq!(extract_status(b"HTTP/1.1 404 Not Found\r\n"), 404);
         assert_eq!(extract_status(b"HTTP/1.1 304 Not Modified\r\n"), 304);
         assert_eq!(extract_status(b"HTTP/1.1 206 Partial Content\r\n"), 206);
-        assert_eq!(extract_status(b"HTTP/1.1 416 Range Not Satisfiable\r\n"), 416);
+        assert_eq!(
+            extract_status(b"HTTP/1.1 416 Range Not Satisfiable\r\n"),
+            416
+        );
         // Malformed / too short.
         assert_eq!(extract_status(b""), 0);
         assert_eq!(extract_status(b"HTTP/1.1"), 0);
@@ -2194,7 +2279,10 @@ mod tests {
         // First entry should be #10 (0..9 overwritten).
         assert_eq!(entries[0].path, "/p10");
         // Last should be ACCESS_LOG_SIZE + 9.
-        assert_eq!(entries[ACCESS_LOG_SIZE - 1].path, format!("/p{}", ACCESS_LOG_SIZE + 9));
+        assert_eq!(
+            entries[ACCESS_LOG_SIZE - 1].path,
+            format!("/p{}", ACCESS_LOG_SIZE + 9)
+        );
     }
 
     #[test]

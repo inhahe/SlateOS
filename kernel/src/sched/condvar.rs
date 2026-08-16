@@ -263,7 +263,10 @@ pub fn self_test() {
         let guard = mutex.lock();
         // Nobody will notify, so timeout should expire.
         let (guard, timed_out) = cv2.wait_timeout_ns(guard, 500_000); // 500µs
-        assert!(timed_out, "wait_timeout_ns should report timeout when not notified");
+        assert!(
+            timed_out,
+            "wait_timeout_ns should report timeout when not notified"
+        );
         assert_eq!(*guard, 123); // Data intact.
     }
     serial_println!("[condvar]   wait_timeout_ns (expired): OK");

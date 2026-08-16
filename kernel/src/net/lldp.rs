@@ -34,16 +34,16 @@
 //! - Maintain neighbor table (up to 16 entries, TTL-based expiry)
 //! - Display discovered neighbors via kshell `lldp` command
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::error::KernelResult;
-use super::interface::Ipv4Addr;
 use super::ethernet;
+use super::interface::Ipv4Addr;
+use crate::error::KernelResult;
 use crate::virtio::net::MacAddress;
 
 // ---------------------------------------------------------------------------
@@ -134,7 +134,11 @@ fn parse_tlv(data: &[u8]) -> Option<(Tlv<'_>, usize)> {
 /// `length <= 511`.
 #[allow(clippy::arithmetic_side_effects)]
 fn encode_tlv_header(tlv_type: u8, length: usize) -> [u8; 2] {
-    debug_assert!(length <= 511, "LLDP TLV length exceeds 9-bit maximum ({})", length);
+    debug_assert!(
+        length <= 511,
+        "LLDP TLV length exceeds 9-bit maximum ({})",
+        length
+    );
     let header = ((tlv_type as u16) << 9) | (length as u16 & 0x01FF);
     header.to_be_bytes()
 }
@@ -256,8 +260,12 @@ pub fn process_frame(src_mac: &MacAddress, payload: &[u8]) -> KernelResult<()> {
                         CHASSIS_MAC_ADDRESS if tlv.value.len() >= 7 => {
                             neighbor.chassis_id = format!(
                                 "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                                tlv.value[1], tlv.value[2], tlv.value[3],
-                                tlv.value[4], tlv.value[5], tlv.value[6],
+                                tlv.value[1],
+                                tlv.value[2],
+                                tlv.value[3],
+                                tlv.value[4],
+                                tlv.value[5],
+                                tlv.value[6],
                             );
                         }
                         _ => {
@@ -277,8 +285,12 @@ pub fn process_frame(src_mac: &MacAddress, payload: &[u8]) -> KernelResult<()> {
                         PORT_MAC_ADDRESS if tlv.value.len() >= 7 => {
                             neighbor.port_id = format!(
                                 "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                                tlv.value[1], tlv.value[2], tlv.value[3],
-                                tlv.value[4], tlv.value[5], tlv.value[6],
+                                tlv.value[1],
+                                tlv.value[2],
+                                tlv.value[3],
+                                tlv.value[4],
+                                tlv.value[5],
+                                tlv.value[6],
                             );
                         }
                         _ => {
@@ -303,10 +315,8 @@ pub fn process_frame(src_mac: &MacAddress, payload: &[u8]) -> KernelResult<()> {
             }
             TLV_SYSTEM_CAP => {
                 if tlv.value.len() >= 4 {
-                    neighbor.capabilities =
-                        u16::from_be_bytes([tlv.value[0], tlv.value[1]]);
-                    neighbor.enabled_caps =
-                        u16::from_be_bytes([tlv.value[2], tlv.value[3]]);
+                    neighbor.capabilities = u16::from_be_bytes([tlv.value[0], tlv.value[1]]);
+                    neighbor.enabled_caps = u16::from_be_bytes([tlv.value[2], tlv.value[3]]);
                 }
             }
             TLV_MGMT_ADDR => {
@@ -320,15 +330,10 @@ pub fn process_frame(src_mac: &MacAddress, payload: &[u8]) -> KernelResult<()> {
                     // Validate: addr_str_len must be 5 for IPv4
                     // (1 subtype byte + 4 address bytes), and the TLV
                     // must actually contain that many bytes.
-                    if addr_subtype == 1
-                        && addr_str_len >= 5
-                        && tlv.value.len() > addr_str_len
-                    {
+                    if addr_subtype == 1 && addr_str_len >= 5 && tlv.value.len() > addr_str_len {
                         // IPv4.
-                        neighbor.mgmt_ip = Ipv4Addr([
-                            tlv.value[2], tlv.value[3],
-                            tlv.value[4], tlv.value[5],
-                        ]);
+                        neighbor.mgmt_ip =
+                            Ipv4Addr([tlv.value[2], tlv.value[3], tlv.value[4], tlv.value[5]]);
                     }
                 }
             }
@@ -388,7 +393,11 @@ fn update_neighbor(new: Neighbor) {
         crate::serial_println!(
             "[lldp] New neighbor: {} ({})",
             new.mac,
-            if new.system_name.is_empty() { &new.chassis_id } else { &new.system_name },
+            if new.system_name.is_empty() {
+                &new.chassis_id
+            } else {
+                &new.system_name
+            },
         );
         neighbors.push(new);
     } else {
@@ -478,12 +487,12 @@ fn build_lldpdu() -> Vec<u8> {
         let value_len = 1 + 1 + 4 + 1 + 4 + 1; // 12 bytes.
         let hdr = encode_tlv_header(TLV_MGMT_ADDR, value_len);
         payload.extend_from_slice(&hdr);
-        payload.push(5);          // addr string length.
-        payload.push(1);          // subtype: IPv4.
+        payload.push(5); // addr string length.
+        payload.push(1); // subtype: IPv4.
         payload.extend_from_slice(&our_ip.0);
-        payload.push(2);          // interface numbering: ifIndex.
+        payload.push(2); // interface numbering: ifIndex.
         payload.extend_from_slice(&1u32.to_be_bytes()); // interface number.
-        payload.push(0);          // OID string length (none).
+        payload.push(0); // OID string length (none).
     }
 
     // End of LLDPDU TLV (type=0, length=0).
@@ -584,17 +593,29 @@ pub fn tick() {
 /// Format system capabilities as a human-readable string.
 pub fn format_capabilities(caps: u16) -> String {
     let mut parts = Vec::new();
-    if caps & CAP_OTHER != 0 { parts.push("Other"); }
-    if caps & CAP_REPEATER != 0 { parts.push("Repeater"); }
-    if caps & CAP_BRIDGE != 0 { parts.push("Bridge"); }
-    if caps & CAP_ROUTER != 0 { parts.push("Router"); }
-    if caps & CAP_STATION != 0 { parts.push("Station"); }
+    if caps & CAP_OTHER != 0 {
+        parts.push("Other");
+    }
+    if caps & CAP_REPEATER != 0 {
+        parts.push("Repeater");
+    }
+    if caps & CAP_BRIDGE != 0 {
+        parts.push("Bridge");
+    }
+    if caps & CAP_ROUTER != 0 {
+        parts.push("Router");
+    }
+    if caps & CAP_STATION != 0 {
+        parts.push("Station");
+    }
     if parts.is_empty() {
         String::from("none")
     } else {
         let mut s = String::new();
         for (i, p) in parts.iter().enumerate() {
-            if i > 0 { s.push_str(", "); }
+            if i > 0 {
+                s.push_str(", ");
+            }
             s.push_str(p);
         }
         s
@@ -637,7 +658,10 @@ pub fn procfs_content() -> String {
     let mut out = String::with_capacity(512);
     out.push_str("LLDP (Link Layer Discovery Protocol)\n");
     out.push_str("====================================\n\n");
-    out.push_str(&format!("TX enabled:       {}\n", if s.tx_enabled { "yes" } else { "no" }));
+    out.push_str(&format!(
+        "TX enabled:       {}\n",
+        if s.tx_enabled { "yes" } else { "no" }
+    ));
     out.push_str(&format!("Neighbors:        {}\n", s.neighbor_count));
     out.push_str(&format!("Frames received:  {}\n", s.frames_received));
     out.push_str(&format!("Frames sent:      {}\n", s.frames_sent));

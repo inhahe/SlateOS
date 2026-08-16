@@ -30,11 +30,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -416,7 +416,8 @@ pub fn set_output_dir(dir: &str) -> KernelResult<()> {
 /// Get current config.
 pub fn get_config() -> KernelResult<RecordConfig> {
     let guard = STATE.lock();
-    guard.as_ref()
+    guard
+        .as_ref()
         .map(|s| s.config.clone())
         .ok_or(KernelError::NotSupported)
 }
@@ -428,16 +429,26 @@ pub fn get_config() -> KernelResult<RecordConfig> {
 /// Start a new recording session. Returns session ID.
 pub fn start_recording() -> KernelResult<u64> {
     with_state(|state| {
-        let active = state.recordings.iter()
-            .filter(|r| matches!(r.state,
-                RecordingState::Recording | RecordingState::Paused | RecordingState::Countdown))
+        let active = state
+            .recordings
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.state,
+                    RecordingState::Recording | RecordingState::Paused | RecordingState::Countdown
+                )
+            })
             .count();
         if active >= MAX_ACTIVE_SESSIONS {
             return Err(KernelError::ResourceExhausted);
         }
         if state.recordings.len() >= MAX_RECORDINGS {
             // Remove oldest completed.
-            if let Some(pos) = state.recordings.iter().position(|r| r.state == RecordingState::Idle) {
+            if let Some(pos) = state
+                .recordings
+                .iter()
+                .position(|r| r.state == RecordingState::Idle)
+            {
                 state.recordings.remove(pos);
             } else {
                 return Err(KernelError::ResourceExhausted);
@@ -481,7 +492,9 @@ pub fn start_recording() -> KernelResult<u64> {
 /// Transition from countdown to recording.
 pub fn begin_capture(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let rec = state.recordings.iter_mut()
+        let rec = state
+            .recordings
+            .iter_mut()
             .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         if rec.state != RecordingState::Countdown {
@@ -496,7 +509,9 @@ pub fn begin_capture(id: u64) -> KernelResult<()> {
 /// Pause recording.
 pub fn pause_recording(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let rec = state.recordings.iter_mut()
+        let rec = state
+            .recordings
+            .iter_mut()
             .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         if rec.state != RecordingState::Recording {
@@ -510,7 +525,9 @@ pub fn pause_recording(id: u64) -> KernelResult<()> {
 /// Resume recording.
 pub fn resume_recording(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let rec = state.recordings.iter_mut()
+        let rec = state
+            .recordings
+            .iter_mut()
             .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         if rec.state != RecordingState::Paused {
@@ -524,10 +541,15 @@ pub fn resume_recording(id: u64) -> KernelResult<()> {
 /// Stop recording and finalize.
 pub fn stop_recording(id: u64) -> KernelResult<Recording> {
     with_state(|state| {
-        let rec = state.recordings.iter_mut()
+        let rec = state
+            .recordings
+            .iter_mut()
             .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
-        if !matches!(rec.state, RecordingState::Recording | RecordingState::Paused | RecordingState::Countdown) {
+        if !matches!(
+            rec.state,
+            RecordingState::Recording | RecordingState::Paused | RecordingState::Countdown
+        ) {
             return Err(KernelError::InvalidArgument);
         }
 
@@ -538,9 +560,9 @@ pub fn stop_recording(id: u64) -> KernelResult<Recording> {
 
         // Estimate file size based on duration and quality.
         let bytes_per_sec: u64 = match rec.quality {
-            QualityPreset::Low => 500_000,      // ~500KB/s
-            QualityPreset::Medium => 2_000_000,  // ~2MB/s
-            QualityPreset::High => 5_000_000,    // ~5MB/s
+            QualityPreset::Low => 500_000,         // ~500KB/s
+            QualityPreset::Medium => 2_000_000,    // ~2MB/s
+            QualityPreset::High => 5_000_000,      // ~5MB/s
             QualityPreset::Lossless => 20_000_000, // ~20MB/s
         };
         rec.file_size = bytes_per_sec * rec.duration_seconds as u64;
@@ -555,7 +577,9 @@ pub fn stop_recording(id: u64) -> KernelResult<Recording> {
 /// Record a frame (called by compositor).
 pub fn record_frame(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let rec = state.recordings.iter_mut()
+        let rec = state
+            .recordings
+            .iter_mut()
             .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         if rec.state != RecordingState::Recording {
@@ -570,7 +594,9 @@ pub fn record_frame(id: u64) -> KernelResult<()> {
 pub fn is_recording() -> bool {
     let guard = STATE.lock();
     guard.as_ref().is_some_and(|s| {
-        s.recordings.iter().any(|r| r.state == RecordingState::Recording)
+        s.recordings
+            .iter()
+            .any(|r| r.state == RecordingState::Recording)
     })
 }
 
@@ -582,7 +608,9 @@ pub fn is_recording() -> bool {
 pub fn get_recording(id: u64) -> KernelResult<Recording> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.recordings.iter()
+    state
+        .recordings
+        .iter()
         .find(|r| r.id == id)
         .cloned()
         .ok_or(KernelError::NotFound)
@@ -591,16 +619,23 @@ pub fn get_recording(id: u64) -> KernelResult<Recording> {
 /// List all recordings.
 pub fn list_recordings() -> Vec<Recording> {
     let guard = STATE.lock();
-    guard.as_ref().map_or_else(Vec::new, |s| s.recordings.clone())
+    guard
+        .as_ref()
+        .map_or_else(Vec::new, |s| s.recordings.clone())
 }
 
 /// List active recordings.
 pub fn active_recordings() -> Vec<Recording> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.recordings.iter()
-            .filter(|r| matches!(r.state,
-                RecordingState::Recording | RecordingState::Paused | RecordingState::Countdown))
+        s.recordings
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.state,
+                    RecordingState::Recording | RecordingState::Paused | RecordingState::Countdown
+                )
+            })
             .cloned()
             .collect()
     })
@@ -630,10 +665,19 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let active = s.recordings.iter()
+            let active = s
+                .recordings
+                .iter()
                 .filter(|r| matches!(r.state, RecordingState::Recording | RecordingState::Paused))
                 .count();
-            (s.recordings.len(), active, s.total_recordings, s.total_seconds, s.total_bytes, s.ops)
+            (
+                s.recordings.len(),
+                active,
+                s.total_recordings,
+                s.total_seconds,
+                s.total_bytes,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0, 0),
     }
@@ -642,7 +686,11 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
 /// Format file size as human-readable string.
 fn format_size(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
-        format!("{}.{} GB", bytes / 1_073_741_824, (bytes % 1_073_741_824) / 107_374_182)
+        format!(
+            "{}.{} GB",
+            bytes / 1_073_741_824,
+            (bytes % 1_073_741_824) / 107_374_182
+        )
     } else if bytes >= 1_048_576 {
         format!("{}.{} MB", bytes / 1_048_576, (bytes % 1_048_576) / 104_857)
     } else if bytes >= 1024 {

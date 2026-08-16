@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -190,13 +190,20 @@ where
 }
 
 fn health_from_capacity(design: u32, current: u32) -> HealthStatus {
-    if design == 0 || current == 0 { return HealthStatus::Unknown; }
+    if design == 0 || current == 0 {
+        return HealthStatus::Unknown;
+    }
     // Use integer percentage: current * 100 / design.
     let pct = (current as u64 * 100) / (design as u64);
-    if pct >= 80 { HealthStatus::Good }
-    else if pct >= 60 { HealthStatus::Fair }
-    else if pct >= 40 { HealthStatus::Poor }
-    else { HealthStatus::Critical }
+    if pct >= 80 {
+        HealthStatus::Good
+    } else if pct >= 60 {
+        HealthStatus::Fair
+    } else if pct >= 40 {
+        HealthStatus::Poor
+    } else {
+        HealthStatus::Critical
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +227,9 @@ pub fn init_defaults() {
     // The alert thresholds (low/critical %, critical action, charge limit) are
     // genuine user-tunable policy defaults, not observations, so they are kept.
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     *guard = Some(State {
         sources: Vec::new(),
@@ -241,14 +250,25 @@ pub fn register_source(
         let id = state.next_id;
         state.next_id += 1;
         state.sources.push(PowerSource {
-            id, name: String::from(name), source_type,
-            state: ChargeState::Unknown, charge_pct: 0,
-            design_capacity_mwh, full_charge_capacity_mwh: design_capacity_mwh,
-            energy_remaining_mwh: 0, power_rate_mw: 0,
-            time_remaining_min: 0, voltage_mv: 0, cycle_count: 0,
-            health: HealthStatus::Unknown, temperature_mc: 0,
-            manufacturer: String::new(), model: String::new(),
-            serial: String::new(), present: true, ac_connected: false,
+            id,
+            name: String::from(name),
+            source_type,
+            state: ChargeState::Unknown,
+            charge_pct: 0,
+            design_capacity_mwh,
+            full_charge_capacity_mwh: design_capacity_mwh,
+            energy_remaining_mwh: 0,
+            power_rate_mw: 0,
+            time_remaining_min: 0,
+            voltage_mv: 0,
+            cycle_count: 0,
+            health: HealthStatus::Unknown,
+            temperature_mc: 0,
+            manufacturer: String::new(),
+            model: String::new(),
+            serial: String::new(),
+            present: true,
+            ac_connected: false,
         });
         Ok(id)
     })
@@ -263,7 +283,10 @@ pub fn update_status(
     rate_mw: u32,
 ) -> KernelResult<()> {
     with_state(|state| {
-        let src = state.sources.iter_mut().find(|s| s.id == id)
+        let src = state
+            .sources
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         src.state = charge_state;
         src.charge_pct = charge_pct.min(100);
@@ -312,33 +335,53 @@ pub fn set_ac_connected(connected: bool) -> KernelResult<()> {
 pub fn primary_battery() -> Option<PowerSource> {
     let guard = STATE.lock();
     guard.as_ref().and_then(|s| {
-        s.sources.iter().find(|src| src.source_type == PowerSourceType::Battery && src.present).cloned()
+        s.sources
+            .iter()
+            .find(|src| src.source_type == PowerSourceType::Battery && src.present)
+            .cloned()
     })
 }
 
 /// List all power sources.
 pub fn list_sources() -> Vec<PowerSource> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.sources.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.sources.clone())
 }
 
 /// Get a power source by ID.
 pub fn get_source(id: u32) -> KernelResult<PowerSource> {
     with_state(|state| {
-        state.sources.iter().find(|s| s.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .sources
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// Set alert thresholds.
 pub fn set_low_threshold(pct: u8) -> KernelResult<()> {
-    with_state(|state| { state.alerts.low_pct = pct; Ok(()) })
+    with_state(|state| {
+        state.alerts.low_pct = pct;
+        Ok(())
+    })
 }
 
 pub fn set_critical_threshold(pct: u8) -> KernelResult<()> {
-    with_state(|state| { state.alerts.critical_pct = pct; Ok(()) })
+    with_state(|state| {
+        state.alerts.critical_pct = pct;
+        Ok(())
+    })
 }
 
 pub fn set_critical_action(action: &str) -> KernelResult<()> {
-    with_state(|state| { state.alerts.critical_action = String::from(action); Ok(()) })
+    with_state(|state| {
+        state.alerts.critical_action = String::from(action);
+        Ok(())
+    })
 }
 
 pub fn set_charge_limit(enabled: bool, pct: u8) -> KernelResult<()> {
@@ -361,7 +404,9 @@ pub fn charge_pct() -> u8 {
 /// Quick check if on AC power.
 pub fn on_ac_power() -> bool {
     let guard = STATE.lock();
-    guard.as_ref().is_some_and(|s| s.sources.iter().any(|src| src.ac_connected))
+    guard
+        .as_ref()
+        .is_some_and(|s| s.sources.iter().any(|src| src.ac_connected))
 }
 
 /// Statistics: (source_count, charge_pct, state_label, cycle_count, alert_count, ops).
@@ -369,12 +414,22 @@ pub fn stats() -> (usize, u8, &'static str, u32, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let bat = s.sources.iter().find(|src| src.source_type == PowerSourceType::Battery);
+            let bat = s
+                .sources
+                .iter()
+                .find(|src| src.source_type == PowerSourceType::Battery);
             let (pct, state_label, cycles) = match bat {
                 Some(b) => (b.charge_pct, b.state.label(), b.cycle_count),
                 None => (0, "N/A", 0),
             };
-            (s.sources.len(), pct, state_label, cycles, s.alert_count, s.ops)
+            (
+                s.sources.len(),
+                pct,
+                state_label,
+                cycles,
+                s.alert_count,
+                s.ops,
+            )
         }
         None => (0, 0, "N/A", 0, 0, 0),
     }

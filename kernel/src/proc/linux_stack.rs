@@ -316,7 +316,11 @@ pub fn build_sysv_stack(
     }
     // [at, info_bottom) remains zero padding (already zeroed).
 
-    Ok(SysvStackImage { image, rsp, auxv_bytes })
+    Ok(SysvStackImage {
+        image,
+        rsp,
+        auxv_bytes,
+    })
 }
 
 /// Compute the in-memory virtual address of the program-header table.
@@ -328,8 +332,8 @@ pub fn build_sysv_stack(
 /// segment covers the header table (then `AT_PHDR` is simply omitted).
 fn phdr_vaddr(elf: &ElfFile<'_>) -> Option<u64> {
     let phoff = elf.header.e_phoff;
-    let phdr_table_len = u64::from(elf.header.e_phentsize)
-        .checked_mul(u64::from(elf.header.e_phnum))?;
+    let phdr_table_len =
+        u64::from(elf.header.e_phentsize).checked_mul(u64::from(elf.header.e_phnum))?;
     let phoff_end = phoff.checked_add(phdr_table_len)?;
     for i in 0..elf.program_header_count() {
         let ph = elf.program_header(i)?;
@@ -422,14 +426,18 @@ unsafe fn write_user_image(pml4_phys: u64, vaddr: u64, bytes: &[u8]) -> KernelRe
         let phys = page_table::translate(pml4_phys, VirtAddr::new(cur))
             .ok_or(KernelError::InvalidAddress)?;
         let page_off = cur % frame_size;
-        let in_page = frame_size.checked_sub(page_off).ok_or(KernelError::Overflow)?;
+        let in_page = frame_size
+            .checked_sub(page_off)
+            .ok_or(KernelError::Overflow)?;
         let remaining = total.checked_sub(written).ok_or(KernelError::Overflow)?;
         let n = in_page.min(remaining);
         let src_off = written as usize;
         let src_end = src_off
             .checked_add(n as usize)
             .ok_or(KernelError::Overflow)?;
-        let src = bytes.get(src_off..src_end).ok_or(KernelError::InvalidAddress)?;
+        let src = bytes
+            .get(src_off..src_end)
+            .ok_or(KernelError::InvalidAddress)?;
         let dst = phys.checked_add(hhdm).ok_or(KernelError::Overflow)? as *mut u8;
         // SAFETY: `phys` is the physical address backing the mapped,
         // writable user page `cur`; `dst` is its HHDM alias.  `n` bytes
@@ -587,7 +595,10 @@ pub fn self_test() -> KernelResult<()> {
     {
         let rnd = [7u8; 16];
         let img = build_sysv_stack(TOP, LIMIT, &[b"a"], &[], &[], &rnd)?;
-        require!(img.rsp % 16 == 0, "[linux_stack] FAIL: rsp not 16-byte aligned");
+        require!(
+            img.rsp % 16 == 0,
+            "[linux_stack] FAIL: rsp not 16-byte aligned"
+        );
         require!(
             img.rsp >= LIMIT && img.rsp < TOP,
             "[linux_stack] FAIL: rsp outside stack bounds"
@@ -599,7 +610,10 @@ pub fn self_test() -> KernelResult<()> {
         let rnd = [0u8; 16];
         let argv: &[&[u8]] = &[b"prog", b"arg1", b"second"];
         let img = build_sysv_stack(TOP, LIMIT, argv, &[], &[], &rnd)?;
-        require!(read_u64!(&img, img.rsp) == 3, "[linux_stack] FAIL: argc != 3");
+        require!(
+            read_u64!(&img, img.rsp) == 3,
+            "[linux_stack] FAIL: argc != 3"
+        );
         for (i, want) in argv.iter().enumerate() {
             let ptr = read_u64!(&img, img.rsp + 8 + (i as u64) * 8);
             let mut expect = want.to_vec();
@@ -694,7 +708,10 @@ pub fn self_test() -> KernelResult<()> {
     {
         let rnd = [1u8; 16];
         let img = build_sysv_stack(TOP, LIMIT, &[], &[], &[], &rnd)?;
-        require!(read_u64!(&img, img.rsp) == 0, "[linux_stack] FAIL: argc != 0");
+        require!(
+            read_u64!(&img, img.rsp) == 0,
+            "[linux_stack] FAIL: argc != 0"
+        );
         require!(
             read_u64!(&img, img.rsp + 8) == 0,
             "[linux_stack] FAIL: argv NULL missing"
@@ -770,9 +787,15 @@ pub fn self_test() -> KernelResult<()> {
             if ty == AT_NULL {
                 break;
             }
-            require!(at < TOP, "[linux_stack] FAIL: auxv missing AT_NULL (AT_BASE test)");
+            require!(
+                at < TOP,
+                "[linux_stack] FAIL: auxv missing AT_NULL (AT_BASE test)"
+            );
         }
-        require!(found_base, "[linux_stack] FAIL: AT_BASE not present when supplied");
+        require!(
+            found_base,
+            "[linux_stack] FAIL: AT_BASE not present when supplied"
+        );
 
         // Without an AT_BASE input entry, none must appear.
         let img2 = build_sysv_stack(TOP, LIMIT, argv, &[], &[], &rnd)?;
@@ -780,11 +803,17 @@ pub fn self_test() -> KernelResult<()> {
         loop {
             let ty = read_u64!(&img2, at2);
             at2 += 16;
-            require!(ty != AT_BASE, "[linux_stack] FAIL: AT_BASE present for static image");
+            require!(
+                ty != AT_BASE,
+                "[linux_stack] FAIL: AT_BASE present for static image"
+            );
             if ty == AT_NULL {
                 break;
             }
-            require!(at2 < TOP, "[linux_stack] FAIL: auxv missing AT_NULL (static test)");
+            require!(
+                at2 < TOP,
+                "[linux_stack] FAIL: auxv missing AT_NULL (static test)"
+            );
         }
     }
 
@@ -808,9 +837,7 @@ pub fn self_test() -> KernelResult<()> {
         };
 
         // AT_ENTRY is always present (every executable has an entry).
-        let (Some(entry0), Some(entryb)) =
-            (find(&aux0, AT_ENTRY), find(&auxb, AT_ENTRY))
-        else {
+        let (Some(entry0), Some(entryb)) = (find(&aux0, AT_ENTRY), find(&auxb, AT_ENTRY)) else {
             fail!("[linux_stack] FAIL: AT_ENTRY missing from base_auxv");
         };
         require!(
@@ -826,9 +853,7 @@ pub fn self_test() -> KernelResult<()> {
         // AT_PHDR is optional (only when a PT_LOAD covers the header
         // table), but the test ELF does carry it; if present in both, the
         // delta must also equal the bias.
-        if let (Some(phdr0), Some(phdrb)) =
-            (find(&aux0, AT_PHDR), find(&auxb, AT_PHDR))
-        {
+        if let (Some(phdr0), Some(phdrb)) = (find(&aux0, AT_PHDR), find(&auxb, AT_PHDR)) {
             require!(
                 phdrb.wrapping_sub(phdr0) == FAKE_BIAS,
                 "[linux_stack] FAIL: AT_PHDR not shifted by exec_load_bias"

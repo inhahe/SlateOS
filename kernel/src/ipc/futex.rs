@@ -44,13 +44,13 @@
 //!
 //! Lock ordering: `FUTEX_TABLE` → `SCHED` (wake calls `sched::wake()`).
 
-use alloc::collections::{BTreeMap, VecDeque};
 use crate::error::{KernelError, KernelResult};
 use crate::mm::user::read_user_value;
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
-use core::sync::atomic::{AtomicU32, Ordering};
 use crate::sync::Mutex;
+use alloc::collections::{BTreeMap, VecDeque};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -152,12 +152,16 @@ fn remove_all_self_waiters(task: u64) -> usize {
             if bucket.get(i).is_some_and(|w| w.task_id == task) {
                 bucket.remove(i);
                 #[allow(clippy::arithmetic_side_effects)]
-                { removed += 1; }
+                {
+                    removed += 1;
+                }
                 // Next element shifted down into slot `i`.
                 continue;
             }
             #[allow(clippy::arithmetic_side_effects)]
-            { i += 1; }
+            {
+                i += 1;
+            }
         }
     }
     removed
@@ -266,10 +270,11 @@ impl FutexTable {
         // aligned, so we shift down and XOR.  The addr_space (PML4
         // physical address) is page-aligned, so shift it too.
         #[allow(clippy::arithmetic_side_effects)]
-        let hash = addr ^ (addr >> 12) ^ (addr >> 24)
-            ^ addr_space ^ (addr_space >> 12);
+        let hash = addr ^ (addr >> 12) ^ (addr >> 24) ^ addr_space ^ (addr_space >> 12);
         #[allow(clippy::arithmetic_side_effects)]
-        { (hash as usize) & (NUM_BUCKETS - 1) }
+        {
+            (hash as usize) & (NUM_BUCKETS - 1)
+        }
     }
 }
 
@@ -663,7 +668,11 @@ pub fn futex_wait_multiple(keys: &[WaitvKey], timeout_ns: Option<u64>) -> WaitvO
                 MULTI_WOKEN.lock().remove(&current_task);
                 return WaitvOutcome::TimedOut;
             }
-            Some(crate::hrtimer::schedule_ns(dl.saturating_sub(now), timeout_wake, current_task))
+            Some(crate::hrtimer::schedule_ns(
+                dl.saturating_sub(now),
+                timeout_wake,
+                current_task,
+            ))
         } else {
             None
         };
@@ -787,12 +796,16 @@ pub fn futex_wake_bitset(addr: u64, max_wake: u32, bitset: u32) -> u32 {
                     *slot = (removed.task_id, removed.multi_index);
                 }
                 #[allow(clippy::arithmetic_side_effects)]
-                { wake_count += 1; }
+                {
+                    wake_count += 1;
+                }
                 // Don't increment i — the next element shifted down.
                 continue;
             }
             #[allow(clippy::arithmetic_side_effects)]
-            { i += 1; }
+            {
+                i += 1;
+            }
         }
     }
 
@@ -924,10 +937,7 @@ fn requeue_inner(
             #[allow(clippy::indexing_slicing)]
             let bucket = &mut table.buckets[idx1];
             let mut i = 0;
-            while i < bucket.len()
-                && wake_count < max_wake as usize
-                && wake_count < to_wake.len()
-            {
+            while i < bucket.len() && wake_count < max_wake as usize && wake_count < to_wake.len() {
                 if let Some(waiter) = bucket.get(i)
                     && waiter.addr == addr1
                     && waiter.addr_space == addr_space
@@ -1326,7 +1336,11 @@ fn register_pi_owner(addr: u64, addr_space: u64, owner_id: TaskId) {
     let idx = FutexTable::bucket_index(addr, addr_space);
     // SAFETY: idx is masked to NUM_BUCKETS - 1.
     #[allow(clippy::indexing_slicing)]
-    table.owners[idx].push_back(PiOwner { addr, addr_space, owner_id });
+    table.owners[idx].push_back(PiOwner {
+        addr,
+        addr_space,
+        owner_id,
+    });
 }
 
 /// Remove a task's PI ownership record for an address.
@@ -1334,7 +1348,8 @@ fn unregister_pi_owner(table: &mut PiFutexTable, addr: u64, addr_space: u64, own
     let idx = FutexTable::bucket_index(addr, addr_space);
     // SAFETY: idx is masked to NUM_BUCKETS - 1.
     #[allow(clippy::indexing_slicing)]
-    table.owners[idx].retain(|o| !(o.addr == addr && o.addr_space == addr_space && o.owner_id == owner_id));
+    table.owners[idx]
+        .retain(|o| !(o.addr == addr && o.addr_space == addr_space && o.owner_id == owner_id));
 }
 
 /// Recalculate the inherited priority for a task based on all PI
@@ -1346,10 +1361,7 @@ fn unregister_pi_owner(table: &mut PiFutexTable, addr: u64, addr_space: u64, own
 ///
 /// O(owned_locks × waiters_per_lock) — both are typically very small
 /// (1–3 owned locks, 1–10 waiters each).
-fn recalculate_inherited_for_owner(
-    table: &PiFutexTable,
-    owner_id: TaskId,
-) -> Option<u8> {
+fn recalculate_inherited_for_owner(table: &PiFutexTable, owner_id: TaskId) -> Option<u8> {
     let mut best: Option<u8> = None;
 
     // Find all addresses still owned by this task.
@@ -1457,11 +1469,7 @@ fn ownerless_claim_value(word: u32, current_tid: u32) -> Option<u32> {
 /// other thread's CAS *succeeded*, so the system as a whole is making
 /// progress. A peer that hammers the word can starve this caller, but only by
 /// burning its own quantum.
-fn acquire_ownerless_with<L, C>(
-    current_tid: u32,
-    mut load: L,
-    mut cas: C,
-) -> KernelResult<bool>
+fn acquire_ownerless_with<L, C>(current_tid: u32, mut load: L, mut cas: C) -> KernelResult<bool>
 where
     L: FnMut() -> KernelResult<u32>,
     C: FnMut(u32, u32) -> KernelResult<Result<u32, u32>>,
@@ -1576,8 +1584,8 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
     }
 
     // Get our effective priority for the PI donation.
-    let our_priority = sched::get_effective_priority(current_id)
-        .unwrap_or(sched::task::IDLE_PRIORITY);
+    let our_priority =
+        sched::get_effective_priority(current_id).unwrap_or(sched::task::IDLE_PRIORITY);
 
     // Register as a PI waiter under the PI table lock.
     {
@@ -1608,9 +1616,10 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
         let idx = FutexTable::bucket_index(addr, addr_space);
         // SAFETY: idx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
-        if let Some(pos) = table.waiters[idx].iter().position(|w| {
-            w.task_id == current_id && w.addr == addr && w.addr_space == addr_space
-        }) {
+        if let Some(pos) = table.waiters[idx]
+            .iter()
+            .position(|w| w.task_id == current_id && w.addr == addr && w.addr_space == addr_space)
+        {
             table.waiters[idx].remove(pos);
         }
         return Err(e);
@@ -1656,9 +1665,9 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
         // Did unlock_pi transfer ownership to us?
         // SAFETY: idx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
-        let is_owner = table.owners[idx].iter().any(|o| {
-            o.addr == addr && o.addr_space == addr_space && o.owner_id == current_id
-        });
+        let is_owner = table.owners[idx]
+            .iter()
+            .any(|o| o.addr == addr && o.addr_space == addr_space && o.owner_id == current_id);
 
         if is_owner {
             break Ok(());
@@ -1675,9 +1684,10 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
         // Timed out: remove our waiter entry and clean up PI donation.
         // SAFETY: idx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
-        if let Some(pos) = table.waiters[idx].iter().position(|w| {
-            w.task_id == current_id && w.addr == addr && w.addr_space == addr_space
-        }) {
+        if let Some(pos) = table.waiters[idx]
+            .iter()
+            .position(|w| w.task_id == current_id && w.addr == addr && w.addr_space == addr_space)
+        {
             table.waiters[idx].remove(pos);
         }
 
@@ -1871,7 +1881,11 @@ pub fn futex_unlock_pi(addr: u64) -> KernelResult<()> {
         #[allow(clippy::cast_possible_truncation)]
         let new_tid = (new_owner_id as u32) & FUTEX_TID_MASK;
         let new_word = new_tid
-            | if has_more_waiters { FUTEX_WAITERS_BIT } else { 0 };
+            | if has_more_waiters {
+                FUTEX_WAITERS_BIT
+            } else {
+                0
+            };
         let r = crate::mm::user::user_atomic_store_u32(addr, new_word);
 
         // Register the new owner (same addr_space — they're in the same
@@ -2066,8 +2080,7 @@ pub fn exit_robust_list(head_ptr: u64, dying_task: TaskId) {
         Ok(v) => v,
         Err(_) => return,
     };
-    let (pending, pending_pi) =
-        fetch_robust_entry(head_ptr.wrapping_add(16)).unwrap_or((0, false));
+    let (pending, pending_pi) = fetch_robust_entry(head_ptr.wrapping_add(16)).unwrap_or((0, false));
 
     let mut limit = ROBUST_LIST_LIMIT;
     // The list is circular: it terminates when we loop back to the anchor
@@ -2210,7 +2223,11 @@ pub fn exit_pi_owned_futexes(dying_task: TaskId) {
                 let new_tid = (new_id as u32) & FUTEX_TID_MASK;
                 new_tid
                     | FUTEX_OWNER_DIED_BIT
-                    | if handoff.has_more { FUTEX_WAITERS_BIT } else { 0 }
+                    | if handoff.has_more {
+                        FUTEX_WAITERS_BIT
+                    } else {
+                        0
+                    }
             }
             // No waiter: leave OWNER_DIED so the next userspace acquirer of
             // a robust mutex still detects the death.
@@ -2903,7 +2920,10 @@ fn test_requeue_pi() -> KernelResult<()> {
         }
     };
     if affected != 2 {
-        serial_println!("[futex]   FAIL: cmp_requeue_pi affected={} (expected 2)", affected);
+        serial_println!(
+            "[futex]   FAIL: cmp_requeue_pi affected={} (expected 2)",
+            affected
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -2977,7 +2997,10 @@ fn test_robust_transition() -> KernelResult<()> {
     match robust_death_transition(dying, dying, false, false) {
         RobustDeath::SetDied { new, wake } if new == FUTEX_OWNER_DIED_BIT && !wake => {}
         other => {
-            serial_println!("[futex]   FAIL: robust transition (owned, no waiters) {:?}", other);
+            serial_println!(
+                "[futex]   FAIL: robust transition (owned, no waiters) {:?}",
+                other
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -2987,7 +3010,10 @@ fn test_robust_transition() -> KernelResult<()> {
         RobustDeath::SetDied { new, wake }
             if new == (FUTEX_OWNER_DIED_BIT | FUTEX_WAITERS_BIT) && wake => {}
         other => {
-            serial_println!("[futex]   FAIL: robust transition (non-PI waiters) {:?}", other);
+            serial_println!(
+                "[futex]   FAIL: robust transition (non-PI waiters) {:?}",
+                other
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -3055,8 +3081,7 @@ fn test_owner_died_relock() -> KernelResult<()> {
 
     // Dead owner with waiters → claimed, both recovery bits preserved.
     let w = AtomicU32::new(FUTEX_OWNER_DIED_BIT | FUTEX_WAITERS_BIT);
-    if !claim(&w, me)
-        || w.load(Ordering::SeqCst) != (me | FUTEX_OWNER_DIED_BIT | FUTEX_WAITERS_BIT)
+    if !claim(&w, me) || w.load(Ordering::SeqCst) != (me | FUTEX_OWNER_DIED_BIT | FUTEX_WAITERS_BIT)
     {
         serial_println!("[futex]   FAIL: relock OWNER_DIED|WAITERS");
         return Err(KernelError::InternalError);
@@ -3188,9 +3213,7 @@ fn test_pi_owner_death_handoff() -> KernelResult<()> {
     // Release the owner worker and let it (and the waiter) finish.
     PID_EXIT.store(1, Ordering::SeqCst);
     for _ in 0..100 {
-        if PID_OWNED.load(Ordering::SeqCst) == 1
-            && PID_RECOVERED.load(Ordering::SeqCst) != 0
-        {
+        if PID_OWNED.load(Ordering::SeqCst) == 1 && PID_RECOVERED.load(Ordering::SeqCst) != 0 {
             // Both progressed; a few more yields lets them return.
         }
         sched::yield_now();
@@ -3306,13 +3329,22 @@ fn test_wait_multiple() -> KernelResult<()> {
     let wa = AtomicU32::new(7); // != expected 1
     let wb = AtomicU32::new(1);
     let mkeys = [
-        WaitvKey { uaddr: (&raw const wa) as u64, expected: 1 },
-        WaitvKey { uaddr: (&raw const wb) as u64, expected: 1 },
+        WaitvKey {
+            uaddr: (&raw const wa) as u64,
+            expected: 1,
+        },
+        WaitvKey {
+            uaddr: (&raw const wb) as u64,
+            expected: 1,
+        },
     ];
     match futex_wait_multiple(&mkeys, None) {
         WaitvOutcome::Mismatch => {}
         other => {
-            serial_println!("[futex]   FAIL: waitv mismatch = {:?} (expected Mismatch)", other);
+            serial_println!(
+                "[futex]   FAIL: waitv mismatch = {:?} (expected Mismatch)",
+                other
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -3322,8 +3354,14 @@ fn test_wait_multiple() -> KernelResult<()> {
     let xa = AtomicU32::new(1);
     let xb = AtomicU32::new(9); // != expected 1
     let xkeys = [
-        WaitvKey { uaddr: (&raw const xa) as u64, expected: 1 },
-        WaitvKey { uaddr: (&raw const xb) as u64, expected: 1 },
+        WaitvKey {
+            uaddr: (&raw const xa) as u64,
+            expected: 1,
+        },
+        WaitvKey {
+            uaddr: (&raw const xb) as u64,
+            expected: 1,
+        },
     ];
     match futex_wait_multiple(&xkeys, None) {
         WaitvOutcome::Mismatch => {}
@@ -3402,10 +3440,7 @@ fn test_wake_bitset() -> KernelResult<()> {
     // Overlapping mask (A) must wake the waiter.
     let woken_a = futex_wake_bitset(addr, u32::MAX, BITSET_TEST_A);
     if woken_a != 1 {
-        serial_println!(
-            "[futex]   FAIL: overlap wake woke {} (expected 1)",
-            woken_a
-        );
+        serial_println!("[futex]   FAIL: overlap wake woke {} (expected 1)", woken_a);
         return Err(KernelError::InternalError);
     }
     sched::yield_now();
@@ -3442,10 +3477,7 @@ fn test_requeue() -> KernelResult<()> {
     match futex_cmp_requeue(guard_addr, sink_addr, 1, u32::MAX, 6) {
         Err(KernelError::WouldBlock) => {}
         result => {
-            serial_println!(
-                "[futex]   FAIL: cmp_requeue mismatch returned {:?}",
-                result
-            );
+            serial_println!("[futex]   FAIL: cmp_requeue mismatch returned {:?}", result);
             return Err(KernelError::InternalError);
         }
     }
@@ -3571,7 +3603,10 @@ fn test_wake_op() -> KernelResult<()> {
     let enc_match = (1u32 << 28) | (4u32 << 24) | (4u32 << 12);
     let woken = futex_wake_op(a1_addr, a2_addr, u32::MAX, u32::MAX, enc_match)?;
     if woken != 3 {
-        serial_println!("[futex]   FAIL: wake_op matched woke {} (expected 3)", woken);
+        serial_println!(
+            "[futex]   FAIL: wake_op matched woke {} (expected 3)",
+            woken
+        );
         return Err(KernelError::InternalError);
     }
     if a2.load(Ordering::SeqCst) != 5 {
@@ -3777,7 +3812,9 @@ fn test_priority_inheritance() -> KernelResult<()> {
         if l_eff < base_min || l_eff > 24 {
             serial_println!(
                 "[futex]   PI FAIL: L priority not restored, got {} (expected {}-{})",
-                l_eff, base_min, 24
+                l_eff,
+                base_min,
+                24
             );
             return Err(KernelError::InternalError);
         }
@@ -3842,13 +3879,22 @@ fn test_wait_multiple_timeout() -> KernelResult<()> {
     let wa = AtomicU32::new(1);
     let wb = AtomicU32::new(1);
     let keys = [
-        WaitvKey { uaddr: (&raw const wa) as u64, expected: 1 },
-        WaitvKey { uaddr: (&raw const wb) as u64, expected: 1 },
+        WaitvKey {
+            uaddr: (&raw const wa) as u64,
+            expected: 1,
+        },
+        WaitvKey {
+            uaddr: (&raw const wb) as u64,
+            expected: 1,
+        },
     ];
     match futex_wait_multiple(&keys, Some(10_000_000)) {
         WaitvOutcome::TimedOut => {}
         other => {
-            serial_println!("[futex]   FAIL: waitv timeout = {:?} (expected TimedOut)", other);
+            serial_println!(
+                "[futex]   FAIL: waitv timeout = {:?} (expected TimedOut)",
+                other
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -3864,8 +3910,14 @@ fn test_wait_multiple_woken() -> KernelResult<()> {
     MWAITV_WORD_B.store(1, Ordering::SeqCst);
 
     let keys = [
-        WaitvKey { uaddr: (&raw const MWAITV_WORD_A) as u64, expected: 1 },
-        WaitvKey { uaddr: (&raw const MWAITV_WORD_B) as u64, expected: 1 },
+        WaitvKey {
+            uaddr: (&raw const MWAITV_WORD_A) as u64,
+            expected: 1,
+        },
+        WaitvKey {
+            uaddr: (&raw const MWAITV_WORD_B) as u64,
+            expected: 1,
+        },
     ];
     sched::spawn(b"waitv-wk", 16, waitv_multi_waker, 0, 0)?;
     match futex_wait_multiple(&keys, None) {
@@ -3875,7 +3927,10 @@ fn test_wait_multiple_woken() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         other => {
-            serial_println!("[futex]   FAIL: waitv woken = {:?} (expected Woken(1))", other);
+            serial_println!(
+                "[futex]   FAIL: waitv woken = {:?} (expected Woken(1))",
+                other
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -3942,7 +3997,8 @@ fn test_lock_pi_timeout() -> KernelResult<()> {
     if w != owner_tid {
         serial_println!(
             "[futex]   FAIL: after PI timeout word={:#x} (expected owner tid {:#x})",
-            w, owner_tid
+            w,
+            owner_tid
         );
         return Err(KernelError::InternalError);
     }

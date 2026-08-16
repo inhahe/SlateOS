@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -82,7 +82,7 @@ pub struct MonitorCalibration {
     pub monitor_name: String,
     pub profile_type: ProfileType,
     pub status: CalibrationStatus,
-    pub gamma_r: u32,  // Gamma * 100 (e.g., 220 = 2.20).
+    pub gamma_r: u32, // Gamma * 100 (e.g., 220 = 2.20).
     pub gamma_g: u32,
     pub gamma_b: u32,
     pub brightness_target: u32, // cd/m².
@@ -124,16 +124,22 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
-        monitors: alloc::vec![
-            MonitorCalibration {
-                id: 1, monitor_name: String::from("Primary Display"),
-                profile_type: ProfileType::Srgb, status: CalibrationStatus::NotCalibrated,
-                gamma_r: 220, gamma_g: 220, gamma_b: 220,
-                brightness_target: 120, white_point_k: 6500, calibrated_ns: 0,
-            },
-        ],
+        monitors: alloc::vec![MonitorCalibration {
+            id: 1,
+            monitor_name: String::from("Primary Display"),
+            profile_type: ProfileType::Srgb,
+            status: CalibrationStatus::NotCalibrated,
+            gamma_r: 220,
+            gamma_g: 220,
+            gamma_b: 220,
+            brightness_target: 120,
+            white_point_k: 6500,
+            calibrated_ns: 0,
+        },],
         next_id: 2,
         total_calibrations: 0,
         total_profile_changes: 0,
@@ -150,10 +156,16 @@ pub fn add_monitor(name: &str) -> KernelResult<u32> {
         let id = state.next_id;
         state.next_id += 1;
         state.monitors.push(MonitorCalibration {
-            id, monitor_name: String::from(name),
-            profile_type: ProfileType::Srgb, status: CalibrationStatus::NotCalibrated,
-            gamma_r: 220, gamma_g: 220, gamma_b: 220,
-            brightness_target: 120, white_point_k: 6500, calibrated_ns: 0,
+            id,
+            monitor_name: String::from(name),
+            profile_type: ProfileType::Srgb,
+            status: CalibrationStatus::NotCalibrated,
+            gamma_r: 220,
+            gamma_g: 220,
+            gamma_b: 220,
+            brightness_target: 120,
+            white_point_k: 6500,
+            calibrated_ns: 0,
         });
         Ok(id)
     })
@@ -164,7 +176,9 @@ pub fn remove_monitor(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.monitors.len();
         state.monitors.retain(|m| m.id != id);
-        if state.monitors.len() == before { return Err(KernelError::NotFound); }
+        if state.monitors.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -172,7 +186,10 @@ pub fn remove_monitor(id: u32) -> KernelResult<()> {
 /// Set color profile.
 pub fn set_profile(id: u32, profile: ProfileType) -> KernelResult<()> {
     with_state(|state| {
-        let mon = state.monitors.iter_mut().find(|m| m.id == id)
+        let mon = state
+            .monitors
+            .iter_mut()
+            .find(|m| m.id == id)
             .ok_or(KernelError::NotFound)?;
         mon.profile_type = profile;
         state.total_profile_changes += 1;
@@ -183,7 +200,10 @@ pub fn set_profile(id: u32, profile: ProfileType) -> KernelResult<()> {
 /// Set gamma for a monitor (values are gamma * 100, e.g., 220 = 2.20).
 pub fn set_gamma(id: u32, r: u32, g: u32, b: u32) -> KernelResult<()> {
     with_state(|state| {
-        let mon = state.monitors.iter_mut().find(|m| m.id == id)
+        let mon = state
+            .monitors
+            .iter_mut()
+            .find(|m| m.id == id)
             .ok_or(KernelError::NotFound)?;
         mon.gamma_r = r;
         mon.gamma_g = g;
@@ -195,7 +215,10 @@ pub fn set_gamma(id: u32, r: u32, g: u32, b: u32) -> KernelResult<()> {
 /// Set white point (color temperature in Kelvin).
 pub fn set_white_point(id: u32, kelvin: u32) -> KernelResult<()> {
     with_state(|state| {
-        let mon = state.monitors.iter_mut().find(|m| m.id == id)
+        let mon = state
+            .monitors
+            .iter_mut()
+            .find(|m| m.id == id)
             .ok_or(KernelError::NotFound)?;
         mon.white_point_k = kelvin;
         Ok(())
@@ -205,7 +228,10 @@ pub fn set_white_point(id: u32, kelvin: u32) -> KernelResult<()> {
 /// Set brightness target (cd/m²).
 pub fn set_brightness_target(id: u32, cdm2: u32) -> KernelResult<()> {
     with_state(|state| {
-        let mon = state.monitors.iter_mut().find(|m| m.id == id)
+        let mon = state
+            .monitors
+            .iter_mut()
+            .find(|m| m.id == id)
             .ok_or(KernelError::NotFound)?;
         mon.brightness_target = cdm2;
         Ok(())
@@ -216,7 +242,10 @@ pub fn set_brightness_target(id: u32, cdm2: u32) -> KernelResult<()> {
 pub fn calibrate(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let mon = state.monitors.iter_mut().find(|m| m.id == id)
+        let mon = state
+            .monitors
+            .iter_mut()
+            .find(|m| m.id == id)
             .ok_or(KernelError::NotFound)?;
         mon.status = CalibrationStatus::Calibrated;
         mon.calibrated_ns = now;
@@ -227,19 +256,30 @@ pub fn calibrate(id: u32) -> KernelResult<()> {
 
 /// Get monitor calibration.
 pub fn get_monitor(id: u32) -> Option<MonitorCalibration> {
-    STATE.lock().as_ref().and_then(|s| s.monitors.iter().find(|m| m.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.monitors.iter().find(|m| m.id == id).cloned())
 }
 
 /// List all monitors.
 pub fn list_monitors() -> Vec<MonitorCalibration> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.monitors.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.monitors.clone())
 }
 
 /// Statistics: (monitor_count, total_calibrations, total_profile_changes, ops).
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.monitors.len(), s.total_calibrations, s.total_profile_changes, s.ops),
+        Some(s) => (
+            s.monitors.len(),
+            s.total_calibrations,
+            s.total_profile_changes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }

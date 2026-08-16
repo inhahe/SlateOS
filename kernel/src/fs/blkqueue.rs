@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -127,7 +127,9 @@ where
 /// device queue is brought online and the record functions on every I/O event.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         total_submitted: 0,
@@ -146,12 +148,25 @@ pub fn init_defaults() {
 /// [`KernelError::ResourceExhausted`].
 pub fn register_device(device: &str, max_depth: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.devices.len() >= MAX_DEVICES { return Err(KernelError::ResourceExhausted); }
-        if state.devices.iter().any(|d| d.device == device) { return Err(KernelError::AlreadyExists); }
+        if state.devices.len() >= MAX_DEVICES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.devices.iter().any(|d| d.device == device) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.devices.push(DeviceQueue {
-            device: String::from(device), queue_depth: 0, max_depth,
-            submitted: 0, completed: 0, merged: 0, plug_count: 0, unplug_count: 0,
-            plugged: false, congested: false, read_submitted: 0, write_submitted: 0,
+            device: String::from(device),
+            queue_depth: 0,
+            max_depth,
+            submitted: 0,
+            completed: 0,
+            merged: 0,
+            plug_count: 0,
+            unplug_count: 0,
+            plugged: false,
+            congested: false,
+            read_submitted: 0,
+            write_submitted: 0,
         });
         Ok(())
     })
@@ -160,7 +175,10 @@ pub fn register_device(device: &str, max_depth: u32) -> KernelResult<()> {
 /// Submit an I/O request to a device queue.
 pub fn submit(device: &str, op: BlkOp) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         dev.queue_depth += 1;
         if dev.queue_depth > dev.max_depth {
@@ -180,7 +198,10 @@ pub fn submit(device: &str, op: BlkOp) -> KernelResult<()> {
 /// Complete an I/O request.
 pub fn complete(device: &str) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         dev.queue_depth = dev.queue_depth.saturating_sub(1);
         dev.completed += 1;
@@ -192,7 +213,10 @@ pub fn complete(device: &str) -> KernelResult<()> {
 /// Record a request merge (two adjacent I/Os combined).
 pub fn merge(device: &str) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         dev.merged += 1;
         state.total_merged += 1;
@@ -203,7 +227,10 @@ pub fn merge(device: &str) -> KernelResult<()> {
 /// Plug the queue (batch requests before dispatch).
 pub fn plug(device: &str) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         if !dev.plugged {
             dev.plugged = true;
@@ -217,7 +244,10 @@ pub fn plug(device: &str) -> KernelResult<()> {
 /// Unplug the queue (dispatch batched requests).
 pub fn unplug(device: &str) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         if dev.plugged {
             dev.plugged = false;
@@ -229,21 +259,32 @@ pub fn unplug(device: &str) -> KernelResult<()> {
 
 /// Get all device queue stats.
 pub fn device_queues() -> Vec<DeviceQueue> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Get queue for a specific device.
 pub fn queue_for(device: &str) -> Option<DeviceQueue> {
-    STATE.lock().as_ref().and_then(|s| {
-        s.devices.iter().find(|d| d.device == device).cloned()
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.devices.iter().find(|d| d.device == device).cloned())
 }
 
 /// Statistics: (device_count, total_submitted, total_completed, total_merged, total_plugs, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.total_submitted, s.total_completed, s.total_merged, s.total_plugs, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.total_submitted,
+            s.total_completed,
+            s.total_merged,
+            s.total_plugs,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -274,7 +315,10 @@ pub fn self_test() {
     register_device("sda", 128).expect("register sda");
     let d = queue_for("sda").expect("find sda");
     assert_eq!(d.max_depth, 128);
-    assert_eq!((d.queue_depth, d.submitted, d.completed, d.merged), (0, 0, 0, 0));
+    assert_eq!(
+        (d.queue_depth, d.submitted, d.completed, d.merged),
+        (0, 0, 0, 0)
+    );
     assert!(register_device("sda", 128).is_err());
     crate::serial_println!("  [2/8] register: OK");
 

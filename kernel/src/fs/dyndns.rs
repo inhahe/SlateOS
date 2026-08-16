@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -229,7 +229,12 @@ pub fn remove_entry(entry_id: u64) -> KernelResult<()> {
 
 /// Get an entry.
 pub fn get_entry(entry_id: u64) -> KernelResult<DynDnsEntry> {
-    STATE.lock().entries.iter().find(|e| e.id == entry_id).cloned()
+    STATE
+        .lock()
+        .entries
+        .iter()
+        .find(|e| e.id == entry_id)
+        .cloned()
         .ok_or(KernelError::NotFound)
 }
 
@@ -241,7 +246,10 @@ pub fn list_entries() -> Vec<DynDnsEntry> {
 /// Set enabled.
 pub fn set_enabled(entry_id: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let e = state.entries.iter_mut().find(|e| e.id == entry_id)
+    let e = state
+        .entries
+        .iter_mut()
+        .find(|e| e.id == entry_id)
         .ok_or(KernelError::NotFound)?;
     e.enabled = enabled;
     state.changes += 1;
@@ -251,7 +259,10 @@ pub fn set_enabled(entry_id: u64, enabled: bool) -> KernelResult<()> {
 /// Set update interval.
 pub fn set_interval(entry_id: u64, seconds: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let e = state.entries.iter_mut().find(|e| e.id == entry_id)
+    let e = state
+        .entries
+        .iter_mut()
+        .find(|e| e.id == entry_id)
         .ok_or(KernelError::NotFound)?;
     e.interval_s = seconds.clamp(60, 86400);
     state.changes += 1;
@@ -261,7 +272,10 @@ pub fn set_interval(entry_id: u64, seconds: u32) -> KernelResult<()> {
 /// Set custom update URL.
 pub fn set_update_url(entry_id: u64, url: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let e = state.entries.iter_mut().find(|e| e.id == entry_id)
+    let e = state
+        .entries
+        .iter_mut()
+        .find(|e| e.id == entry_id)
         .ok_or(KernelError::NotFound)?;
     e.update_url = String::from(url);
     state.changes += 1;
@@ -271,7 +285,10 @@ pub fn set_update_url(entry_id: u64, url: &str) -> KernelResult<()> {
 /// Simulate an update (records the IP and status).
 pub fn update_now(entry_id: u64, ip: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let e = state.entries.iter_mut().find(|e| e.id == entry_id)
+    let e = state
+        .entries
+        .iter_mut()
+        .find(|e| e.id == entry_id)
         .ok_or(KernelError::NotFound)?;
     e.last_ip = String::from(ip);
     e.last_update_ns = crate::hpet::elapsed_ns();
@@ -285,7 +302,10 @@ pub fn update_now(entry_id: u64, ip: &str) -> KernelResult<()> {
 /// Record a failed update.
 pub fn record_failure(entry_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let e = state.entries.iter_mut().find(|e| e.id == entry_id)
+    let e = state
+        .entries
+        .iter_mut()
+        .find(|e| e.id == entry_id)
         .ok_or(KernelError::NotFound)?;
     e.fail_count += 1;
     e.status = UpdateStatus::Failed;
@@ -348,7 +368,10 @@ pub fn list_forwards() -> Vec<PortForward> {
 /// Set forward active state.
 pub fn set_forward_active(forward_id: u64, active: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let f = state.forwards.iter_mut().find(|f| f.id == forward_id)
+    let f = state
+        .forwards
+        .iter_mut()
+        .find(|f| f.id == forward_id)
         .ok_or(KernelError::NotFound)?;
     f.active = active;
     state.changes += 1;
@@ -420,10 +443,12 @@ pub fn init_defaults() {
 /// Return (entry_count, forward_count, router_detected, ops).
 pub fn stats() -> (usize, usize, bool, u64) {
     let state = STATE.lock();
-    (state.entries.len(),
-     state.forwards.len(),
-     state.router.is_some(),
-     OP_COUNT.load(Ordering::Relaxed))
+    (
+        state.entries.len(),
+        state.forwards.len(),
+        state.router.is_some(),
+        OP_COUNT.load(Ordering::Relaxed),
+    )
 }
 
 pub fn reset_stats() {
@@ -452,7 +477,12 @@ pub fn self_test() -> KernelResult<()> {
     // Test 1: add entries.
     serial_println!("dyndns::self_test 1: add entries");
     let e1 = add_entry("Test1", DynDnsProvider::Dynu, "test.dynu.net", "user1")?;
-    let e2 = add_entry("Test2", DynDnsProvider::DuckDns, "test.duckdns.org", "token123")?;
+    let e2 = add_entry(
+        "Test2",
+        DynDnsProvider::DuckDns,
+        "test.duckdns.org",
+        "token123",
+    )?;
     assert_eq!(list_entries().len(), 2);
 
     // Test 2: configure.
@@ -482,8 +512,22 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 5: port forwards.
     serial_println!("dyndns::self_test 5: port forwards");
-    let f1 = add_forward("SSH", 22, 22, ForwardProtocol::Tcp, "192.168.1.100", NatMethod::Upnp)?;
-    let f2 = add_forward("Web", 8080, 80, ForwardProtocol::Both, "192.168.1.100", NatMethod::Upnp)?;
+    let f1 = add_forward(
+        "SSH",
+        22,
+        22,
+        ForwardProtocol::Tcp,
+        "192.168.1.100",
+        NatMethod::Upnp,
+    )?;
+    let f2 = add_forward(
+        "Web",
+        8080,
+        80,
+        ForwardProtocol::Both,
+        "192.168.1.100",
+        NatMethod::Upnp,
+    )?;
     assert_eq!(list_forwards().len(), 2);
     set_forward_active(f1, false)?;
     remove_forward(f2)?;

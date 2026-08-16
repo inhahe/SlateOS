@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -137,7 +137,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         config: ClipHistoryConfig::default(),
         entries: Vec::new(),
@@ -151,7 +153,9 @@ pub fn init_defaults() {
 /// Record a new clipboard entry.
 pub fn record(clip_type: ClipType, content: &str, source_app: &str) -> KernelResult<u64> {
     with_state(|state| {
-        if !state.config.enabled { return Ok(0); }
+        if !state.config.enabled {
+            return Ok(0);
+        }
 
         let id = state.next_id;
         state.next_id += 1;
@@ -191,7 +195,9 @@ pub fn record(clip_type: ClipType, content: &str, source_app: &str) -> KernelRes
         let total_size: u64 = state.entries.iter().map(|e| e.size_bytes).sum();
         if total_size > state.config.max_size_bytes {
             // Remove oldest non-pinned.
-            while state.entries.iter().map(|e| e.size_bytes).sum::<u64>() > state.config.max_size_bytes {
+            while state.entries.iter().map(|e| e.size_bytes).sum::<u64>()
+                > state.config.max_size_bytes
+            {
                 if let Some(pos) = state.entries.iter().position(|e| !e.pinned) {
                     state.entries.remove(pos);
                 } else {
@@ -207,7 +213,10 @@ pub fn record(clip_type: ClipType, content: &str, source_app: &str) -> KernelRes
 /// Paste from history (returns the content).
 pub fn paste(id: u64) -> KernelResult<String> {
     with_state(|state| {
-        let entry = state.entries.iter_mut().find(|e| e.id == id)
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|e| e.id == id)
             .ok_or(KernelError::NotFound)?;
         entry.paste_count += 1;
         state.total_pastes += 1;
@@ -218,7 +227,10 @@ pub fn paste(id: u64) -> KernelResult<String> {
 /// Pin an entry (won't be evicted).
 pub fn pin(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let entry = state.entries.iter_mut().find(|e| e.id == id)
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|e| e.id == id)
             .ok_or(KernelError::NotFound)?;
         entry.pinned = true;
         Ok(())
@@ -228,7 +240,10 @@ pub fn pin(id: u64) -> KernelResult<()> {
 /// Unpin an entry.
 pub fn unpin(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let entry = state.entries.iter_mut().find(|e| e.id == id)
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|e| e.id == id)
             .ok_or(KernelError::NotFound)?;
         entry.pinned = false;
         Ok(())
@@ -238,7 +253,10 @@ pub fn unpin(id: u64) -> KernelResult<()> {
 /// Delete an entry.
 pub fn delete(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.entries.iter().position(|e| e.id == id)
+        let pos = state
+            .entries
+            .iter()
+            .position(|e| e.id == id)
             .ok_or(KernelError::NotFound)?;
         state.entries.remove(pos);
         Ok(())
@@ -258,14 +276,30 @@ pub fn clear() -> KernelResult<usize> {
 pub fn search(query: &str) -> Vec<ClipEntry> {
     let guard = STATE.lock();
     guard.as_ref().map_or(Vec::new(), |s| {
-        s.entries.iter()
+        s.entries
+            .iter()
             .filter(|e| {
-                let content_lower: String = e.content.chars().map(|c| {
-                    if c.is_ascii_uppercase() { (c as u8 + 32) as char } else { c }
-                }).collect();
-                let query_lower: String = query.chars().map(|c| {
-                    if c.is_ascii_uppercase() { (c as u8 + 32) as char } else { c }
-                }).collect();
+                let content_lower: String = e
+                    .content
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_uppercase() {
+                            (c as u8 + 32) as char
+                        } else {
+                            c
+                        }
+                    })
+                    .collect();
+                let query_lower: String = query
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_uppercase() {
+                            (c as u8 + 32) as char
+                        } else {
+                            c
+                        }
+                    })
+                    .collect();
                 content_lower.contains(&query_lower)
             })
             .cloned()
@@ -277,19 +311,29 @@ pub fn search(query: &str) -> Vec<ClipEntry> {
 pub fn list(count: usize) -> Vec<ClipEntry> {
     let guard = STATE.lock();
     guard.as_ref().map_or(Vec::new(), |s| {
-        let start = if s.entries.len() > count { s.entries.len() - count } else { 0 };
+        let start = if s.entries.len() > count {
+            s.entries.len() - count
+        } else {
+            0
+        };
         s.entries[start..].iter().rev().cloned().collect()
     })
 }
 
 /// Get config.
 pub fn get_config() -> ClipHistoryConfig {
-    STATE.lock().as_ref().map_or(ClipHistoryConfig::default(), |s| s.config.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(ClipHistoryConfig::default(), |s| s.config.clone())
 }
 
 /// Set enabled.
 pub fn set_enabled(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.enabled = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.enabled = enabled;
+        Ok(())
+    })
 }
 
 /// Statistics: (entry_count, pinned_count, total_copies, total_pastes, size_bytes, ops).
@@ -299,7 +343,14 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
         Some(s) => {
             let pinned = s.entries.iter().filter(|e| e.pinned).count();
             let size: u64 = s.entries.iter().map(|e| e.size_bytes).sum();
-            (s.entries.len(), pinned, s.total_copies, s.total_pastes, size, s.ops)
+            (
+                s.entries.len(),
+                pinned,
+                s.total_copies,
+                s.total_pastes,
+                size,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0, 0),
     }

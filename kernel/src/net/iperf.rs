@@ -21,15 +21,15 @@
 //! iperf status                     — show test statistics
 //! ```
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
 use super::ipv6::Ipv6Addr;
+use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -110,11 +110,19 @@ impl ThroughputResult {
 /// Connects to the server, sends data for the specified number of poll
 /// iterations, and calculates throughput.
 #[allow(dead_code)] // Public API.
-pub fn tcp_client_test(host: Ipv4Addr, port: u16, duration_polls: u32) -> KernelResult<ThroughputResult> {
+pub fn tcp_client_test(
+    host: Ipv4Addr,
+    port: u16,
+    duration_polls: u32,
+) -> KernelResult<ThroughputResult> {
     TESTS_RUN.fetch_add(1, Ordering::Relaxed);
     TCP_TESTS.fetch_add(1, Ordering::Relaxed);
 
-    let polls = if duration_polls == 0 { DEFAULT_TEST_POLLS } else { duration_polls };
+    let polls = if duration_polls == 0 {
+        DEFAULT_TEST_POLLS
+    } else {
+        duration_polls
+    };
 
     // Connect to server.
     let handle = super::tcp::connect(crate::netns::ROOT_NS, host.into(), port)?;
@@ -290,8 +298,16 @@ pub fn udp_client_test(
     TESTS_RUN.fetch_add(1, Ordering::Relaxed);
     UDP_TESTS.fetch_add(1, Ordering::Relaxed);
 
-    let count = if packet_count == 0 { 100 } else { packet_count.min(MAX_UDP_PACKETS) };
-    let size = if packet_size == 0 { UDP_SEND_SIZE } else { packet_size.min(1472) };
+    let count = if packet_count == 0 {
+        100
+    } else {
+        packet_count.min(MAX_UDP_PACKETS)
+    };
+    let size = if packet_size == 0 {
+        UDP_SEND_SIZE
+    } else {
+        packet_size.min(1472)
+    };
 
     // Generate payload with sequence numbers.
     let payload = generate_pattern(size);
@@ -356,7 +372,9 @@ pub fn udp_client_test(
     };
 
     let avg_jitter = if sent > 1 {
-        jitter_sum.checked_div(sent.saturating_sub(1) as u64).unwrap_or(0)
+        jitter_sum
+            .checked_div(sent.saturating_sub(1) as u64)
+            .unwrap_or(0)
     } else {
         0
     };
@@ -394,8 +412,16 @@ pub fn udp_client_test_v6(
     TESTS_RUN.fetch_add(1, Ordering::Relaxed);
     UDP_TESTS.fetch_add(1, Ordering::Relaxed);
 
-    let count = if packet_count == 0 { 100 } else { packet_count.min(MAX_UDP_PACKETS) };
-    let size = if packet_size == 0 { UDP_SEND_SIZE } else { packet_size.min(1472) };
+    let count = if packet_count == 0 {
+        100
+    } else {
+        packet_count.min(MAX_UDP_PACKETS)
+    };
+    let size = if packet_size == 0 {
+        UDP_SEND_SIZE
+    } else {
+        packet_size.min(1472)
+    };
 
     let payload = generate_pattern(size);
 
@@ -455,7 +481,9 @@ pub fn udp_client_test_v6(
     };
 
     let avg_jitter = if sent > 1 {
-        jitter_sum.checked_div(sent.saturating_sub(1) as u64).unwrap_or(0)
+        jitter_sum
+            .checked_div(sent.saturating_sub(1) as u64)
+            .unwrap_or(0)
     } else {
         0
     };
@@ -596,8 +624,14 @@ pub fn procfs_content() -> String {
     out.push_str(&format!("TCP tests:       {}\n", s.tcp_tests));
     out.push_str(&format!("UDP tests:       {}\n", s.udp_tests));
     out.push_str(&format!("Server sessions: {}\n", s.server_sessions));
-    out.push_str(&format!("Total TX:        {}\n", format_bytes(s.total_bytes_tx)));
-    out.push_str(&format!("Total RX:        {}\n", format_bytes(s.total_bytes_rx)));
+    out.push_str(&format!(
+        "Total TX:        {}\n",
+        format_bytes(s.total_bytes_tx)
+    ));
+    out.push_str(&format!(
+        "Total RX:        {}\n",
+        format_bytes(s.total_bytes_rx)
+    ));
     out
 }
 

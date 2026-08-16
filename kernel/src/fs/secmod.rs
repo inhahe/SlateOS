@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -141,7 +141,9 @@ where
 /// 150,000 audits.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         modules: Vec::new(),
         total_checks: 0,
@@ -154,12 +156,20 @@ pub fn init_defaults() {
 /// Register a security module.
 pub fn register_module(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.modules.iter().any(|m| m.name == name) { return Err(KernelError::AlreadyExists); }
-        if state.modules.len() >= MAX_MODULES { return Err(KernelError::ResourceExhausted); }
+        if state.modules.iter().any(|m| m.name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if state.modules.len() >= MAX_MODULES {
+            return Err(KernelError::ResourceExhausted);
+        }
         state.modules.push(ModuleStats {
-            name: String::from(name), enabled: true,
-            checks: [0; NUM_HOOKS], denials: [0; NUM_HOOKS],
-            total_checks: 0, total_denials: 0, audit_events: 0,
+            name: String::from(name),
+            enabled: true,
+            checks: [0; NUM_HOOKS],
+            denials: [0; NUM_HOOKS],
+            total_checks: 0,
+            total_denials: 0,
+            audit_events: 0,
         });
         Ok(())
     })
@@ -168,7 +178,10 @@ pub fn register_module(name: &str) -> KernelResult<()> {
 /// Record a security check (allow).
 pub fn record_check(module: &str, hook: HookType) -> KernelResult<()> {
     with_state(|state| {
-        let m = state.modules.iter_mut().find(|m| m.name == module)
+        let m = state
+            .modules
+            .iter_mut()
+            .find(|m| m.name == module)
             .ok_or(KernelError::NotFound)?;
         m.checks[hook.index()] += 1;
         m.total_checks += 1;
@@ -180,7 +193,10 @@ pub fn record_check(module: &str, hook: HookType) -> KernelResult<()> {
 /// Record a denial.
 pub fn record_deny(module: &str, hook: HookType) -> KernelResult<()> {
     with_state(|state| {
-        let m = state.modules.iter_mut().find(|m| m.name == module)
+        let m = state
+            .modules
+            .iter_mut()
+            .find(|m| m.name == module)
             .ok_or(KernelError::NotFound)?;
         m.checks[hook.index()] += 1;
         m.denials[hook.index()] += 1;
@@ -195,7 +211,10 @@ pub fn record_deny(module: &str, hook: HookType) -> KernelResult<()> {
 /// Record an audit event.
 pub fn record_audit(module: &str) -> KernelResult<()> {
     with_state(|state| {
-        let m = state.modules.iter_mut().find(|m| m.name == module)
+        let m = state
+            .modules
+            .iter_mut()
+            .find(|m| m.name == module)
             .ok_or(KernelError::NotFound)?;
         m.audit_events += 1;
         state.total_audits += 1;
@@ -206,7 +225,10 @@ pub fn record_audit(module: &str) -> KernelResult<()> {
 /// Enable/disable a module.
 pub fn set_enabled(module: &str, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let m = state.modules.iter_mut().find(|m| m.name == module)
+        let m = state
+            .modules
+            .iter_mut()
+            .find(|m| m.name == module)
             .ok_or(KernelError::NotFound)?;
         m.enabled = enabled;
         Ok(())
@@ -215,14 +237,23 @@ pub fn set_enabled(module: &str, enabled: bool) -> KernelResult<()> {
 
 /// Per-module stats.
 pub fn per_module() -> Vec<ModuleStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.modules.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.modules.clone())
 }
 
 /// Statistics: (module_count, total_checks, total_denials, total_audits, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.modules.len(), s.total_checks, s.total_denials, s.total_audits, s.ops),
+        Some(s) => (
+            s.modules.len(),
+            s.total_checks,
+            s.total_denials,
+            s.total_audits,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -248,20 +279,29 @@ pub fn self_test() {
     register_module("test_mod").expect("register");
     assert!(register_module("test_mod").is_err());
     assert_eq!(per_module().len(), 1);
-    let m = per_module().into_iter().find(|m| m.name == "test_mod").expect("find");
+    let m = per_module()
+        .into_iter()
+        .find(|m| m.name == "test_mod")
+        .expect("find");
     assert_eq!((m.total_checks, m.total_denials, m.audit_events), (0, 0, 0));
     crate::serial_println!("  [2/8] register: OK");
 
     // 3: Check — per-hook + per-module + global check counters advance.
     record_check("test_mod", HookType::FileOpen).expect("check");
-    let m = per_module().into_iter().find(|m| m.name == "test_mod").expect("p3");
+    let m = per_module()
+        .into_iter()
+        .find(|m| m.name == "test_mod")
+        .expect("p3");
     assert_eq!((m.total_checks, m.checks[0]), (1, 1));
     assert_eq!(stats().1, 1); // total_checks
     crate::serial_println!("  [3/8] check: OK");
 
     // 4: Deny — a denial also counts as a check (both per-hook arrays advance).
     record_deny("test_mod", HookType::FileOpen).expect("deny");
-    let m = per_module().into_iter().find(|m| m.name == "test_mod").expect("p4");
+    let m = per_module()
+        .into_iter()
+        .find(|m| m.name == "test_mod")
+        .expect("p4");
     assert_eq!((m.total_denials, m.denials[0]), (1, 1));
     assert_eq!((m.total_checks, m.checks[0]), (2, 2)); // deny bumps checks too
     assert_eq!(stats().2, 1); // total_denials
@@ -269,14 +309,20 @@ pub fn self_test() {
 
     // 5: Audit — per-module and global audit counters advance.
     record_audit("test_mod").expect("audit");
-    let m = per_module().into_iter().find(|m| m.name == "test_mod").expect("p5");
+    let m = per_module()
+        .into_iter()
+        .find(|m| m.name == "test_mod")
+        .expect("p5");
     assert_eq!(m.audit_events, 1);
     assert_eq!(stats().3, 1); // total_audits
     crate::serial_println!("  [5/8] audit: OK");
 
     // 6: Enable/disable — toggling the module's enabled flag.
     set_enabled("test_mod", false).expect("disable");
-    let m = per_module().into_iter().find(|m| m.name == "test_mod").expect("p6");
+    let m = per_module()
+        .into_iter()
+        .find(|m| m.name == "test_mod")
+        .expect("p6");
     assert!(!m.enabled);
     crate::serial_println!("  [6/8] enable/disable: OK");
 

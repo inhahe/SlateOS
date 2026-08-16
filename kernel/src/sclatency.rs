@@ -57,18 +57,18 @@ const NUM_BUCKETS: usize = 12;
 /// [5] 16-32μs, [6] 32-64μs, [7] 64-128μs, [8] 128-256μs,
 /// [9] 256μs-1ms, [10] 1-10ms, [11] >10ms
 const BUCKET_THRESHOLDS_NS: [u64; NUM_BUCKETS] = [
-    1_000,        // <1μs
-    2_000,        // 1-2μs
-    4_000,        // 2-4μs
-    8_000,        // 4-8μs
-    16_000,       // 8-16μs
-    32_000,       // 16-32μs
-    64_000,       // 32-64μs
-    128_000,      // 64-128μs
-    256_000,      // 128-256μs
-    1_000_000,    // 256μs-1ms
-    10_000_000,   // 1-10ms
-    100_000_000,  // 10-100ms (bucket 11 is >100ms)
+    1_000,       // <1μs
+    2_000,       // 1-2μs
+    4_000,       // 2-4μs
+    8_000,       // 4-8μs
+    16_000,      // 8-16μs
+    32_000,      // 16-32μs
+    64_000,      // 32-64μs
+    128_000,     // 64-128μs
+    256_000,     // 128-256μs
+    1_000_000,   // 256μs-1ms
+    10_000_000,  // 1-10ms
+    100_000_000, // 10-100ms (bucket 11 is >100ms)
 ];
 
 /// Bucket labels for display.
@@ -96,9 +96,18 @@ const MAX_TRACKED_SYSCALLS: usize = 16;
 
 /// Global histogram buckets.
 static BUCKETS: [AtomicU64; NUM_BUCKETS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 /// Total syscalls measured.
@@ -115,18 +124,42 @@ static MAX_CYCLES: AtomicU64 = AtomicU64::new(0);
 
 /// Per-syscall call count (for top-N display).
 static PER_SYSCALL_COUNT: [AtomicU64; MAX_TRACKED_SYSCALLS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 /// Per-syscall cumulative cycles (for per-syscall mean).
 static PER_SYSCALL_CYCLES: [AtomicU64; MAX_TRACKED_SYSCALLS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 /// Whether tracking is enabled.
@@ -146,9 +179,18 @@ static ENABLED: AtomicBool = AtomicBool::new(true);
 /// `PER_SYSCALL_CYCLES`) was already kept in cycles and converted only at
 /// readout.
 static BUCKET_THRESHOLDS_CYCLES: [AtomicU64; NUM_BUCKETS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 /// Whether [`BUCKET_THRESHOLDS_CYCLES`] holds real values.
@@ -188,7 +230,10 @@ pub fn calibrate() {
         return;
     }
 
-    for (slot, &ns) in BUCKET_THRESHOLDS_CYCLES.iter().zip(BUCKET_THRESHOLDS_NS.iter()) {
+    for (slot, &ns) in BUCKET_THRESHOLDS_CYCLES
+        .iter()
+        .zip(BUCKET_THRESHOLDS_NS.iter())
+    {
         // cycles = ns * freq / 1e9.  The multiply is done first to keep the
         // precision that dividing first would throw away, and cannot overflow:
         // the largest threshold is 1e8 ns and a plausible TSC is under 1e10 Hz,
@@ -257,9 +302,15 @@ pub fn exit(start: u64, syscall_nr: u64) {
         if elapsed_cycles >= current_min {
             break;
         }
-        if MIN_CYCLES.compare_exchange_weak(
-            current_min, elapsed_cycles, Ordering::Relaxed, Ordering::Relaxed
-        ).is_ok() {
+        if MIN_CYCLES
+            .compare_exchange_weak(
+                current_min,
+                elapsed_cycles,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
             break;
         }
     }
@@ -270,9 +321,15 @@ pub fn exit(start: u64, syscall_nr: u64) {
         if elapsed_cycles <= current_max {
             break;
         }
-        if MAX_CYCLES.compare_exchange_weak(
-            current_max, elapsed_cycles, Ordering::Relaxed, Ordering::Relaxed
-        ).is_ok() {
+        if MAX_CYCLES
+            .compare_exchange_weak(
+                current_max,
+                elapsed_cycles,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
             break;
         }
     }
@@ -362,7 +419,11 @@ pub fn stats() -> LatencyStats {
     let min_cyc = MIN_CYCLES.load(Ordering::Relaxed);
     let max_cyc = MAX_CYCLES.load(Ordering::Relaxed);
 
-    let min_ns = if min_cyc == u64::MAX { 0 } else { crate::bench::cycles_to_ns(min_cyc) };
+    let min_ns = if min_cyc == u64::MAX {
+        0
+    } else {
+        crate::bench::cycles_to_ns(min_cyc)
+    };
     let max_ns = crate::bench::cycles_to_ns(max_cyc);
     let mean_ns = if total > 0 {
         crate::bench::cycles_to_ns(total_cyc / total)
@@ -476,12 +537,18 @@ pub fn self_test() {
     }
 
     let ns_to_cycles = |ns: u64| -> u64 {
-        ns.saturating_mul(freq).checked_div(1_000_000_000).unwrap_or(u64::MAX)
+        ns.saturating_mul(freq)
+            .checked_div(1_000_000_000)
+            .unwrap_or(u64::MAX)
     };
 
     let mut checked = 0usize;
     for &threshold_ns in &BUCKET_THRESHOLDS_NS {
-        for probe_ns in [threshold_ns.saturating_sub(1), threshold_ns, threshold_ns.saturating_add(1)] {
+        for probe_ns in [
+            threshold_ns.saturating_sub(1),
+            threshold_ns,
+            threshold_ns.saturating_add(1),
+        ] {
             let want = find_bucket(probe_ns);
             let Some(got) = find_bucket_cycles(ns_to_cycles(probe_ns)) else {
                 serial_println!("[sclatency] Self-test FAILED: uncalibrated mid-test");
@@ -512,7 +579,10 @@ pub fn self_test() {
     // Zero must land in bucket 0, and must be reached through the *calibrated*
     // path — this is the value an uncalibrated `cycles_to_ns` used to return
     // for every sample.
-    assert!(find_bucket_cycles(0) == Some(0), "sclatency: 0 cycles must be bucket 0");
+    assert!(
+        find_bucket_cycles(0) == Some(0),
+        "sclatency: 0 cycles must be bucket 0"
+    );
 
     serial_println!(
         "[sclatency] Self-test PASSED ({checked} boundary probes agree with the ns reference, \

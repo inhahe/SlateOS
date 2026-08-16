@@ -39,14 +39,13 @@
 // (`sanitize` is nightly-only, so it is gated on the `kasan_instrumented` cfg
 // that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
 #![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
-
 // Diagnostic/profiling subsystem — all public API for tooling and kshell
 // commands; many helpers may not have call sites in production paths yet.
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::mm::rawmem;
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Poison patterns
@@ -304,7 +303,9 @@ pub fn self_test() {
 
     // Test 1: Poison free fills correctly.
     let mut buf = [0u8; 64];
-    unsafe { poison_free(buf.as_mut_ptr(), buf.len()); }
+    unsafe {
+        poison_free(buf.as_mut_ptr(), buf.len());
+    }
     assert!(buf.iter().all(|&b| b == POISON_FREE));
     serial_println!("[poison]   Free poison fill: OK");
 
@@ -319,23 +320,36 @@ pub fn self_test() {
 
     // Test 4: Redzone fill and verify.
     let mut rz = [0u8; 16];
-    unsafe { poison_redzone(rz.as_mut_ptr(), rz.len()); }
+    unsafe {
+        poison_redzone(rz.as_mut_ptr(), rz.len());
+    }
     assert!(unsafe { verify_redzone(rz.as_ptr(), rz.len()) });
     rz[15] = 0x00; // Corrupt last byte.
     assert!(!unsafe { verify_redzone(rz.as_ptr(), rz.len()) });
     serial_println!("[poison]   Redzone fill + verify: OK");
 
     // Test 5: identify_poison.
-    assert_eq!(identify_poison(0xDEDE_DEDE_DEDE_DEDE), Some("freed memory (use-after-free)"));
-    assert_eq!(identify_poison(0xCDCD_CDCD_CDCD_CDCD), Some("uninitialized memory"));
-    assert_eq!(identify_poison(0xFDFD_FDFD_FDFD_FDFD), Some("red zone (buffer overflow)"));
+    assert_eq!(
+        identify_poison(0xDEDE_DEDE_DEDE_DEDE),
+        Some("freed memory (use-after-free)")
+    );
+    assert_eq!(
+        identify_poison(0xCDCD_CDCD_CDCD_CDCD),
+        Some("uninitialized memory")
+    );
+    assert_eq!(
+        identify_poison(0xFDFD_FDFD_FDFD_FDFD),
+        Some("red zone (buffer overflow)")
+    );
     assert_eq!(identify_poison(0x1234_5678_9ABC_DEF0), None);
     serial_println!("[poison]   identify_poison: OK");
 
     // Test 6: Disabled poisoning skips work.
     disable();
     let mut buf2 = [0u8; 32];
-    unsafe { poison_free(buf2.as_mut_ptr(), buf2.len()); }
+    unsafe {
+        poison_free(buf2.as_mut_ptr(), buf2.len());
+    }
     assert!(buf2.iter().all(|&b| b == 0)); // Should NOT have been filled.
     enable(); // Re-enable.
     serial_println!("[poison]   Disabled bypass: OK");
@@ -344,7 +358,11 @@ pub fn self_test() {
     let st = stats();
     assert!(st.free_bytes > 0);
     assert!(st.violations > 0); // From tests 3 and 4.
-    serial_println!("[poison]   Stats: free_bytes={}, violations={}", st.free_bytes, st.violations);
+    serial_println!(
+        "[poison]   Stats: free_bytes={}, violations={}",
+        st.free_bytes,
+        st.violations
+    );
 
     serial_println!("[poison] Self-test PASSED");
 }

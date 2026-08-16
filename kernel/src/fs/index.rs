@@ -37,9 +37,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
@@ -217,10 +217,7 @@ pub fn rebuild() -> KernelResult<()> {
     let mut by_ext: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
     for (i, entry) in collected.iter().enumerate() {
         if !entry.extension.is_empty() {
-            by_ext
-                .entry(entry.extension.clone())
-                .or_default()
-                .push(i);
+            by_ext.entry(entry.extension.clone()).or_default().push(i);
         }
     }
 
@@ -287,33 +284,34 @@ fn walk_directory(
         match entry.entry_type {
             super::vfs::EntryType::Directory => {
                 if config.include_dirs {
-                    let idx_entry = make_index_entry(
-                        &full_path,
-                        &entry.name,
-                        entry.entry_type,
-                        entry.size,
-                    );
+                    let idx_entry =
+                        make_index_entry(&full_path, &entry.name, entry.entry_type, entry.size);
                     collected.push(idx_entry);
                 }
                 // Recurse into subdirectory.
-                walk_directory(&full_path, config, collected, truncated, depth.saturating_add(1));
+                walk_directory(
+                    &full_path,
+                    config,
+                    collected,
+                    truncated,
+                    depth.saturating_add(1),
+                );
             }
             super::vfs::EntryType::File | super::vfs::EntryType::Symlink => {
                 let ext = extract_extension(&entry.name);
 
                 // Apply extension filter.
                 if !config.extensions.is_empty()
-                    && !config.extensions.iter().any(|e| e.as_slice() == ext.as_slice())
+                    && !config
+                        .extensions
+                        .iter()
+                        .any(|e| e.as_slice() == ext.as_slice())
                 {
                     continue;
                 }
 
-                let idx_entry = make_index_entry(
-                    &full_path,
-                    &entry.name,
-                    entry.entry_type,
-                    entry.size,
-                );
+                let idx_entry =
+                    make_index_entry(&full_path, &entry.name, entry.entry_type, entry.size);
                 collected.push(idx_entry);
             }
             _ => {} // skip VolumeLabel etc.
@@ -383,7 +381,11 @@ pub fn add_entry(path: impl AsRef<Path>) -> KernelResult<()> {
 
     // Check for existing entry with same path → update.
     if let Some(pos) = idx.entries.iter().position(|e| e.path.as_path() == path) {
-        let old_ext = idx.entries.get(pos).map(|e| e.extension.clone()).unwrap_or_default();
+        let old_ext = idx
+            .entries
+            .get(pos)
+            .map(|e| e.extension.clone())
+            .unwrap_or_default();
         // Remove from old extension index.
         if !old_ext.is_empty() {
             if let Some(list) = idx.by_extension.get_mut(&old_ext) {
@@ -836,7 +838,8 @@ pub fn self_test() -> KernelResult<()> {
 
         // search_name (case-insensitive)
         let r1 = search_name("hello");
-        if r1.len() != 1 || r1.first().map(|e| e.path.as_path()) != Some(Path::new("/docs/hello.txt"))
+        if r1.len() != 1
+            || r1.first().map(|e| e.path.as_path()) != Some(Path::new("/docs/hello.txt"))
         {
             serial_println!("[index]   ERROR: search_name('hello') failed");
             return Err(KernelError::InternalError);
@@ -850,7 +853,10 @@ pub fn self_test() -> KernelResult<()> {
         // search_ext
         let r3 = search_ext("txt");
         if r3.len() != 1 {
-            serial_println!("[index]   ERROR: search_ext('txt') expected 1, got {}", r3.len());
+            serial_println!(
+                "[index]   ERROR: search_ext('txt') expected 1, got {}",
+                r3.len()
+            );
             return Err(KernelError::InternalError);
         }
         let r4 = search_ext("rs");
@@ -860,14 +866,20 @@ pub fn self_test() -> KernelResult<()> {
         }
         let r5 = search_ext("jpg");
         if r5.len() != 1 {
-            serial_println!("[index]   ERROR: search_ext('jpg') expected 1, got {}", r5.len());
+            serial_println!(
+                "[index]   ERROR: search_ext('jpg') expected 1, got {}",
+                r5.len()
+            );
             return Err(KernelError::InternalError);
         }
 
         // search_size
         let r6 = search_size(100, 2048);
         if r6.len() != 3 {
-            serial_println!("[index]   ERROR: search_size(100,2048) expected 3, got {}", r6.len());
+            serial_println!(
+                "[index]   ERROR: search_size(100,2048) expected 3, got {}",
+                r6.len()
+            );
             return Err(KernelError::InternalError);
         }
 
@@ -882,7 +894,10 @@ pub fn self_test() -> KernelResult<()> {
         // search_path
         let r8 = search_path("/docs/");
         if r8.len() != 1 {
-            serial_println!("[index]   ERROR: search_path('/docs/') expected 1, got {}", r8.len());
+            serial_println!(
+                "[index]   ERROR: search_path('/docs/') expected 1, got {}",
+                r8.len()
+            );
             return Err(KernelError::InternalError);
         }
 
@@ -891,7 +906,8 @@ pub fn self_test() -> KernelResult<()> {
         // would then match the wrong thing (or nothing).
         let r9 = search_name(b"re\xffport".as_slice());
         if r9.len() != 1
-            || r9.first().map(|e| e.path.as_path()) != Some(Path::new(b"/logs/re\xffport.l\xfeg".as_slice()))
+            || r9.first().map(|e| e.path.as_path())
+                != Some(Path::new(b"/logs/re\xffport.l\xfeg".as_slice()))
         {
             serial_println!("[index]   ERROR: non-UTF-8 name search failed");
             return Err(KernelError::InternalError);
@@ -920,7 +936,10 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         if count() != 4 {
-            serial_println!("[index]   ERROR: count after remove expected 4, got {}", count());
+            serial_println!(
+                "[index]   ERROR: count after remove expected 4, got {}",
+                count()
+            );
             return Err(KernelError::InternalError);
         }
         let gone = search_name("hello");
@@ -956,9 +975,7 @@ pub fn self_test() -> KernelResult<()> {
         }
         if st.total_entries == 0 {
             // No filesystem mounted — not an error, just limited test.
-            serial_println!(
-                "[index]   rebuild OK (0 entries — no filesystem mounted)"
-            );
+            serial_println!("[index]   rebuild OK (0 entries — no filesystem mounted)");
         } else {
             serial_println!(
                 "[index]   rebuild OK ({} entries, {} bytes, {} extensions)",
@@ -976,7 +993,9 @@ pub fn self_test() -> KernelResult<()> {
         if super::Vfs::write_file(test_path, test_data).is_ok() {
             add_entry(test_path)?;
             let results = search_name("_idx_test");
-            let found = results.iter().any(|e| e.path.as_path() == Path::new(test_path));
+            let found = results
+                .iter()
+                .any(|e| e.path.as_path() == Path::new(test_path));
             if !found {
                 serial_println!("[index]   ERROR: VFS add_entry + search failed");
                 let _ = super::Vfs::remove(test_path);

@@ -139,34 +139,154 @@ struct DhcpRequest {
 
 /// IP address pools.
 static POOLS: spin::Mutex<[IpPool; MAX_POOLS]> = spin::Mutex::new([
-    IpPool { active: false, network: [0; 4], mask: [0; 4], gateway: [0; 4], dns: [0; 4], range_start: 0, range_end: 0, ns_id: 0 },
-    IpPool { active: false, network: [0; 4], mask: [0; 4], gateway: [0; 4], dns: [0; 4], range_start: 0, range_end: 0, ns_id: 0 },
-    IpPool { active: false, network: [0; 4], mask: [0; 4], gateway: [0; 4], dns: [0; 4], range_start: 0, range_end: 0, ns_id: 0 },
-    IpPool { active: false, network: [0; 4], mask: [0; 4], gateway: [0; 4], dns: [0; 4], range_start: 0, range_end: 0, ns_id: 0 },
-    IpPool { active: false, network: [0; 4], mask: [0; 4], gateway: [0; 4], dns: [0; 4], range_start: 0, range_end: 0, ns_id: 0 },
-    IpPool { active: false, network: [0; 4], mask: [0; 4], gateway: [0; 4], dns: [0; 4], range_start: 0, range_end: 0, ns_id: 0 },
-    IpPool { active: false, network: [0; 4], mask: [0; 4], gateway: [0; 4], dns: [0; 4], range_start: 0, range_end: 0, ns_id: 0 },
-    IpPool { active: false, network: [0; 4], mask: [0; 4], gateway: [0; 4], dns: [0; 4], range_start: 0, range_end: 0, ns_id: 0 },
+    IpPool {
+        active: false,
+        network: [0; 4],
+        mask: [0; 4],
+        gateway: [0; 4],
+        dns: [0; 4],
+        range_start: 0,
+        range_end: 0,
+        ns_id: 0,
+    },
+    IpPool {
+        active: false,
+        network: [0; 4],
+        mask: [0; 4],
+        gateway: [0; 4],
+        dns: [0; 4],
+        range_start: 0,
+        range_end: 0,
+        ns_id: 0,
+    },
+    IpPool {
+        active: false,
+        network: [0; 4],
+        mask: [0; 4],
+        gateway: [0; 4],
+        dns: [0; 4],
+        range_start: 0,
+        range_end: 0,
+        ns_id: 0,
+    },
+    IpPool {
+        active: false,
+        network: [0; 4],
+        mask: [0; 4],
+        gateway: [0; 4],
+        dns: [0; 4],
+        range_start: 0,
+        range_end: 0,
+        ns_id: 0,
+    },
+    IpPool {
+        active: false,
+        network: [0; 4],
+        mask: [0; 4],
+        gateway: [0; 4],
+        dns: [0; 4],
+        range_start: 0,
+        range_end: 0,
+        ns_id: 0,
+    },
+    IpPool {
+        active: false,
+        network: [0; 4],
+        mask: [0; 4],
+        gateway: [0; 4],
+        dns: [0; 4],
+        range_start: 0,
+        range_end: 0,
+        ns_id: 0,
+    },
+    IpPool {
+        active: false,
+        network: [0; 4],
+        mask: [0; 4],
+        gateway: [0; 4],
+        dns: [0; 4],
+        range_start: 0,
+        range_end: 0,
+        ns_id: 0,
+    },
+    IpPool {
+        active: false,
+        network: [0; 4],
+        mask: [0; 4],
+        gateway: [0; 4],
+        dns: [0; 4],
+        range_start: 0,
+        range_end: 0,
+        ns_id: 0,
+    },
 ]);
 
 /// Active leases.
 static LEASES: spin::Mutex<[Lease; MAX_LEASES]> = spin::Mutex::new([
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
-    EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE, EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
+    EMPTY_LEASE,
 ]);
 
 const EMPTY_LEASE: Lease = Lease {
@@ -178,8 +298,7 @@ const EMPTY_LEASE: Lease = Lease {
 };
 
 /// Whether the DHCP server is enabled.
-static ENABLED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Pool management
@@ -213,8 +332,14 @@ pub fn add_pool(
             serial_println!(
                 "[dhcpd] Pool {}: {}.{}.{}.{}/{} range .{}-.{} (ns {})",
                 i,
-                network[0], network[1], network[2], network[3],
-                mask[3], range_start, range_end, ns_id,
+                network[0],
+                network[1],
+                network[2],
+                network[3],
+                mask[3],
+                range_start,
+                range_end,
+                ns_id,
             );
             return Ok(i);
         }
@@ -225,7 +350,9 @@ pub fn add_pool(
 /// Remove an IP pool and release its leases.
 pub fn remove_pool(pool_idx: usize) -> KernelResult<()> {
     let mut pools = POOLS.lock();
-    let pool = pools.get_mut(pool_idx).ok_or(KernelError::InvalidArgument)?;
+    let pool = pools
+        .get_mut(pool_idx)
+        .ok_or(KernelError::InvalidArgument)?;
     if !pool.active {
         return Err(KernelError::NotFound);
     }
@@ -251,7 +378,8 @@ pub fn add_default_pool() -> KernelResult<usize> {
         [255, 255, 255, 0],
         [10, 88, 0, 1],
         dns.0,
-        2, 254,
+        2,
+        254,
         0, // serve all namespaces
     )
 }
@@ -322,9 +450,8 @@ fn allocate_ip(pool_idx: usize, mac: &[u8; 6]) -> Option<[u8; 4]> {
         if !is_ip_leased(&ip) {
             // Found a free address — create the lease.
             let now = crate::hrtimer::now_ns();
-            let expires = now.saturating_add(
-                (DEFAULT_LEASE_SECS as u64).saturating_mul(1_000_000_000),
-            );
+            let expires =
+                now.saturating_add((DEFAULT_LEASE_SECS as u64).saturating_mul(1_000_000_000));
 
             let mut leases = LEASES.lock();
             for lease in leases.iter_mut() {
@@ -352,8 +479,16 @@ pub fn release_mac(mac: &[u8; 6]) {
         if lease.active && lease.mac == *mac {
             serial_println!(
                 "[dhcpd] Released {}.{}.{}.{} (MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
-                lease.ip[0], lease.ip[1], lease.ip[2], lease.ip[3],
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                lease.ip[0],
+                lease.ip[1],
+                lease.ip[2],
+                lease.ip[3],
+                mac[0],
+                mac[1],
+                mac[2],
+                mac[3],
+                mac[4],
+                mac[5],
             );
             lease.active = false;
         }
@@ -368,7 +503,10 @@ pub fn tick_expire() {
         if lease.active && lease.expires_ns != 0 && now > lease.expires_ns {
             serial_println!(
                 "[dhcpd] Lease expired: {}.{}.{}.{}",
-                lease.ip[0], lease.ip[1], lease.ip[2], lease.ip[3],
+                lease.ip[0],
+                lease.ip[1],
+                lease.ip[2],
+                lease.ip[3],
             );
             lease.active = false;
         }
@@ -510,21 +648,21 @@ fn build_response(
     let mut pkt = Vec::with_capacity(300);
 
     // Fixed fields (236 bytes).
-    pkt.push(BOOTREPLY);   // op
-    pkt.push(1);           // htype (Ethernet)
-    pkt.push(6);           // hlen
-    pkt.push(0);           // hops
+    pkt.push(BOOTREPLY); // op
+    pkt.push(1); // htype (Ethernet)
+    pkt.push(6); // hlen
+    pkt.push(0); // hops
     pkt.extend_from_slice(&xid.to_be_bytes()); // xid
     pkt.extend_from_slice(&[0, 0]); // secs
     pkt.extend_from_slice(&[0, 0]); // flags
     pkt.extend_from_slice(&[0, 0, 0, 0]); // ciaddr
-    pkt.extend_from_slice(your_ip);        // yiaddr
-    pkt.extend_from_slice(server_ip);      // siaddr
+    pkt.extend_from_slice(your_ip); // yiaddr
+    pkt.extend_from_slice(server_ip); // siaddr
     pkt.extend_from_slice(&[0, 0, 0, 0]); // giaddr
-    pkt.extend_from_slice(client_mac);     // chaddr (first 6 bytes)
-    pkt.extend_from_slice(&[0u8; 10]);     // chaddr padding (10 bytes)
-    pkt.extend_from_slice(&[0u8; 64]);     // sname
-    pkt.extend_from_slice(&[0u8; 128]);    // file
+    pkt.extend_from_slice(client_mac); // chaddr (first 6 bytes)
+    pkt.extend_from_slice(&[0u8; 10]); // chaddr padding (10 bytes)
+    pkt.extend_from_slice(&[0u8; 64]); // sname
+    pkt.extend_from_slice(&[0u8; 128]); // file
 
     // Magic cookie.
     pkt.extend_from_slice(&DHCP_MAGIC);
@@ -571,9 +709,14 @@ fn build_response(
 /// Build a DHCP NAK response.
 fn build_nak(xid: u32, client_mac: &[u8; 6], server_ip: &[u8; 4]) -> Vec<u8> {
     build_response(
-        DHCP_NAK, xid, client_mac,
-        &[0, 0, 0, 0], server_ip,
-        &[0, 0, 0, 0], &[0, 0, 0, 0], &[0, 0, 0, 0],
+        DHCP_NAK,
+        xid,
+        client_mac,
+        &[0, 0, 0, 0],
+        server_ip,
+        &[0, 0, 0, 0],
+        &[0, 0, 0, 0],
+        &[0, 0, 0, 0],
         0,
     )
 }
@@ -602,8 +745,12 @@ pub fn process_request(data: &[u8]) -> Option<(Vec<u8>, [u8; 4])> {
             DHCP_DECLINE => "DECLINE",
             _ => "UNKNOWN",
         },
-        req.client_mac[0], req.client_mac[1], req.client_mac[2],
-        req.client_mac[3], req.client_mac[4], req.client_mac[5],
+        req.client_mac[0],
+        req.client_mac[1],
+        req.client_mac[2],
+        req.client_mac[3],
+        req.client_mac[4],
+        req.client_mac[5],
         req.xid,
     );
 
@@ -632,13 +779,22 @@ fn handle_discover(req: &DhcpRequest) -> Option<(Vec<u8>, [u8; 4])> {
             if let Some(pool) = pools.get(pool_idx) {
                 if pool.active {
                     let resp = build_response(
-                        DHCP_OFFER, req.xid, &req.client_mac,
-                        &ip, &pool.gateway, &pool.mask,
-                        &pool.gateway, &pool.dns, DEFAULT_LEASE_SECS,
+                        DHCP_OFFER,
+                        req.xid,
+                        &req.client_mac,
+                        &ip,
+                        &pool.gateway,
+                        &pool.mask,
+                        &pool.gateway,
+                        &pool.dns,
+                        DEFAULT_LEASE_SECS,
                     );
                     serial_println!(
                         "[dhcpd] OFFER {}.{}.{}.{} (existing lease)",
-                        ip[0], ip[1], ip[2], ip[3],
+                        ip[0],
+                        ip[1],
+                        ip[2],
+                        ip[3],
                     );
                     return Some((resp, [255, 255, 255, 255]));
                 }
@@ -664,14 +820,17 @@ fn handle_discover(req: &DhcpRequest) -> Option<(Vec<u8>, [u8; 4])> {
         let (i, gateway, mask, dns) = pool_infos[j];
         if let Some(ip) = allocate_ip(i, &req.client_mac) {
             let resp = build_response(
-                DHCP_OFFER, req.xid, &req.client_mac,
-                &ip, &gateway, &mask, &gateway, &dns,
+                DHCP_OFFER,
+                req.xid,
+                &req.client_mac,
+                &ip,
+                &gateway,
+                &mask,
+                &gateway,
+                &dns,
                 DEFAULT_LEASE_SECS,
             );
-            serial_println!(
-                "[dhcpd] OFFER {}.{}.{}.{}",
-                ip[0], ip[1], ip[2], ip[3],
-            );
+            serial_println!("[dhcpd] OFFER {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3],);
             return Some((resp, [255, 255, 255, 255]));
         }
         // Pool exhausted, try next.
@@ -695,9 +854,8 @@ fn handle_request(req: &DhcpRequest) -> Option<(Vec<u8>, [u8; 4])> {
             if lease.ip == requested {
                 // Renew the lease.
                 let now = crate::hrtimer::now_ns();
-                lease.expires_ns = now.saturating_add(
-                    (DEFAULT_LEASE_SECS as u64).saturating_mul(1_000_000_000),
-                );
+                lease.expires_ns =
+                    now.saturating_add((DEFAULT_LEASE_SECS as u64).saturating_mul(1_000_000_000));
                 let ip = lease.ip;
                 let pool_idx = lease.pool_idx;
                 drop(leases);
@@ -706,14 +864,17 @@ fn handle_request(req: &DhcpRequest) -> Option<(Vec<u8>, [u8; 4])> {
                 if let Some(pool) = pools.get(pool_idx) {
                     if pool.active {
                         let resp = build_response(
-                            DHCP_ACK, req.xid, &req.client_mac,
-                            &ip, &pool.gateway, &pool.mask,
-                            &pool.gateway, &pool.dns, DEFAULT_LEASE_SECS,
+                            DHCP_ACK,
+                            req.xid,
+                            &req.client_mac,
+                            &ip,
+                            &pool.gateway,
+                            &pool.mask,
+                            &pool.gateway,
+                            &pool.dns,
+                            DEFAULT_LEASE_SECS,
                         );
-                        serial_println!(
-                            "[dhcpd] ACK {}.{}.{}.{}",
-                            ip[0], ip[1], ip[2], ip[3],
-                        );
+                        serial_println!("[dhcpd] ACK {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3],);
                         return Some((resp, [255, 255, 255, 255]));
                     }
                 }
@@ -732,7 +893,10 @@ fn handle_request(req: &DhcpRequest) -> Option<(Vec<u8>, [u8; 4])> {
         let resp = build_nak(req.xid, &req.client_mac, &server_ip);
         serial_println!(
             "[dhcpd] NAK (requested {}.{}.{}.{}, no lease)",
-            requested[0], requested[1], requested[2], requested[3],
+            requested[0],
+            requested[1],
+            requested[2],
+            requested[3],
         );
         return Some((resp, [255, 255, 255, 255]));
     }
@@ -764,7 +928,8 @@ pub fn self_test() -> KernelResult<()> {
         [255, 255, 255, 0],
         [192, 168, 100, 1],
         [8, 8, 8, 8],
-        10, 20,
+        10,
+        20,
         0,
     )?;
     assert_eq!(pool_count(), 1);
@@ -839,7 +1004,8 @@ pub fn self_test() -> KernelResult<()> {
     // Test 9: Build and verify response structure.
     {
         let resp = build_response(
-            DHCP_OFFER, 0xAABBCCDD,
+            DHCP_OFFER,
+            0xAABBCCDD,
             &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
             &[192, 168, 1, 100],
             &[192, 168, 1, 1],

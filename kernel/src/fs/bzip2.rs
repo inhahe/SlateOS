@@ -36,9 +36,9 @@
 
 #![allow(dead_code)]
 
+use crate::error::{KernelError, KernelResult};
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // MSB-first bit reader (bzip2 uses big-endian bit ordering)
@@ -50,13 +50,18 @@ use crate::error::{KernelError, KernelResult};
 struct MsbBitReader<'a> {
     data: &'a [u8],
     pos: usize,
-    bit: u8, // bits remaining in current byte (8 = fresh byte)
+    bit: u8,   // bits remaining in current byte (8 = fresh byte)
     live: u32, // bit buffer
 }
 
 impl<'a> MsbBitReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0, bit: 0, live: 0 }
+        Self {
+            data,
+            pos: 0,
+            bit: 0,
+            live: 0,
+        }
     }
 
     /// Read `n` bits (1..=24) and return as u32 (MSB first).
@@ -252,7 +257,9 @@ impl Bz2HuffTable {
 
             if self.max_code[len] >= 0 && code <= self.max_code[len] as u32 {
                 let idx = self.base[len].wrapping_add(code.wrapping_sub(self.min_code[len]));
-                return self.perm.get(idx as usize)
+                return self
+                    .perm
+                    .get(idx as usize)
                     .copied()
                     .ok_or(KernelError::CorruptedData);
             }
@@ -495,7 +502,8 @@ pub fn bunzip2(data: &[u8]) -> KernelResult<Vec<u8>> {
             if stored_crc != stream_crc {
                 crate::serial_println!(
                     "[bzip2] Stream CRC mismatch: stored={:#010x} computed={:#010x}",
-                    stored_crc, stream_crc,
+                    stored_crc,
+                    stream_crc,
                 );
                 return Err(KernelError::CorruptedData);
             }
@@ -616,7 +624,9 @@ fn decode_block(reader: &mut MsbBitReader<'_>, max_block: usize) -> KernelResult
     if computed_crc != block_crc {
         crate::serial_println!(
             "[bzip2] CRC mismatch: stored={:#010x} computed={:#010x} dec={}B",
-            block_crc, computed_crc, block_data.len(),
+            block_crc,
+            computed_crc,
+            block_data.len(),
         );
         return Err(KernelError::CorruptedData);
     }
@@ -731,9 +741,8 @@ fn decode_symbols(
 
             loop {
                 // RUNA adds 1*power, RUNB adds 2*power.
-                run_len = run_len.wrapping_add(
-                    (u32::from(s).wrapping_add(1)).wrapping_mul(run_power)
-                );
+                run_len =
+                    run_len.wrapping_add((u32::from(s).wrapping_add(1)).wrapping_mul(run_power));
                 run_power = run_power.wrapping_mul(2);
 
                 // Advance group position.
@@ -836,7 +845,11 @@ struct MsbBitWriter {
 #[allow(clippy::arithmetic_side_effects)]
 impl MsbBitWriter {
     fn with_capacity(cap: usize) -> Self {
-        Self { data: Vec::with_capacity(cap), current: 0, bits_left: 8 }
+        Self {
+            data: Vec::with_capacity(cap),
+            current: 0,
+            bits_left: 8,
+        }
     }
 
     /// Write `n` bits from `value` (MSB first, 1 ≤ n ≤ 24).
@@ -914,7 +927,9 @@ impl HuffEncoder {
     fn from_lengths(lengths: &[u8], alpha_size: usize) -> Self {
         let mut max_len: u8 = 0;
         for &l in &lengths[..alpha_size] {
-            if l > max_len { max_len = l; }
+            if l > max_len {
+                max_len = l;
+            }
         }
 
         // Count codes at each length.
@@ -956,7 +971,9 @@ impl HuffEncoder {
         // Use safe indexing for the lengths; a missing entry means
         // the symbol wasn't expected, but we fall back to length 0 (no write).
         let len = self.lengths.get(sym).copied().unwrap_or(0);
-        if len == 0 { return; }
+        if len == 0 {
+            return;
+        }
         let code = self.codes.get(sym).copied().unwrap_or(0);
         writer.write_bits(code, len);
     }
@@ -1013,8 +1030,8 @@ fn bwt_forward_fast(data: &[u8]) -> (Vec<u8>, u32) {
         for i in 1..n {
             let curr = sa[i] as usize;
             let prev = sa[i - 1] as usize;
-            let same = rank[curr] == rank[prev]
-                && rank[(curr + step) % n] == rank[(prev + step) % n];
+            let same =
+                rank[curr] == rank[prev] && rank[(curr + step) % n] == rank[(prev + step) % n];
             new_rank[curr] = if same { new_rank[prev] } else { i as i32 };
         }
 
@@ -1268,7 +1285,11 @@ fn build_tables_and_selectors(
     // Initialize: distribute symbols evenly across groups for initial
     // frequency counts.
     let mut table_freqs: Vec<Vec<u32>> = vec![vec![0u32; alpha_size]; n_groups];
-    let syms_per_group = if n_groups > 0 { n_symbols / n_groups } else { n_symbols };
+    let syms_per_group = if n_groups > 0 {
+        n_symbols / n_groups
+    } else {
+        n_symbols
+    };
 
     for (i, &sym) in symbols.iter().enumerate() {
         let group = if syms_per_group > 0 {
@@ -1285,7 +1306,11 @@ fn build_tables_and_selectors(
     // Build initial Huffman tables from these frequencies.
     let mut table_lengths: Vec<Vec<u8>> = Vec::with_capacity(n_groups);
     for g in 0..n_groups {
-        table_lengths.push(compute_code_lengths(&table_freqs[g], alpha_size, MAX_HUF_LEN));
+        table_lengths.push(compute_code_lengths(
+            &table_freqs[g],
+            alpha_size,
+            MAX_HUF_LEN,
+        ));
     }
 
     let mut selectors = vec![0u8; n_selectors];
@@ -1337,8 +1362,7 @@ fn build_tables_and_selectors(
 
         // Rebuild Huffman tables from the new frequencies.
         for g in 0..n_groups {
-            table_lengths[g] =
-                compute_code_lengths(&table_freqs[g], alpha_size, MAX_HUF_LEN);
+            table_lengths[g] = compute_code_lengths(&table_freqs[g], alpha_size, MAX_HUF_LEN);
         }
     }
 
@@ -1425,13 +1449,13 @@ fn write_huffman_lengths(writer: &mut MsbBitWriter, lengths: &[u8], alpha_size: 
     for i in 0..alpha_size {
         let target = lengths[i] as i32;
         while curr < target {
-            writer.write_bit(true);  // 1
+            writer.write_bit(true); // 1
             writer.write_bit(false); // 0 = increment
             curr += 1;
         }
         while curr > target {
-            writer.write_bit(true);  // 1
-            writer.write_bit(true);  // 1 = decrement
+            writer.write_bit(true); // 1
+            writer.write_bit(true); // 1 = decrement
             curr -= 1;
         }
         writer.write_bit(false); // 0 = done, use current length
@@ -1635,9 +1659,7 @@ pub fn self_test() -> KernelResult<()> {
     let bwt_result = bwt_forward(test_input);
     let inverse = bwt_inverse(&bwt_result.0, bwt_result.0.len(), bwt_result.1)?;
     if inverse.as_slice() != test_input {
-        crate::serial_println!(
-            "[bzip2]   FAIL: BWT round-trip mismatch"
-        );
+        crate::serial_println!("[bzip2]   FAIL: BWT round-trip mismatch");
         return Err(KernelError::InternalError);
     }
     crate::serial_println!("[bzip2]   BWT inverse round-trip verified ✓");
@@ -1697,7 +1719,9 @@ pub fn self_test() -> KernelResult<()> {
     let ratio = compressed.len().wrapping_mul(100) / test_str.len();
     crate::serial_println!(
         "[bzip2]   Compression round-trip ({}B → {}B, {}%) ✓",
-        test_str.len(), compressed.len(), ratio
+        test_str.len(),
+        compressed.len(),
+        ratio
     );
 
     // Test 6: Empty input round-trip.
@@ -1727,7 +1751,9 @@ pub fn self_test() -> KernelResult<()> {
     };
     crate::serial_println!(
         "[bzip2]   Repetitive data round-trip ({}B → {}B, {}%) ✓",
-        rle_test.len(), comp7.len(), ratio7
+        rle_test.len(),
+        comp7.len(),
+        ratio7
     );
 
     // Test 8: Single-byte input.
@@ -1756,7 +1782,8 @@ pub fn self_test() -> KernelResult<()> {
     if naive_bwt != fast_bwt || naive_ptr != fast_ptr {
         crate::serial_println!(
             "[bzip2]   FAIL: BWT fast/naive mismatch: ptr {}/{}",
-            naive_ptr, fast_ptr
+            naive_ptr,
+            fast_ptr
         );
         return Err(KernelError::InternalError);
     }

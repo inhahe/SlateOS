@@ -25,9 +25,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -189,7 +189,9 @@ fn add_event(state: &mut State, event_type: LockEventType, method: AuthMethod, s
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let config = LockConfig {
         timeout_secs: 300, // 5 minutes
@@ -289,7 +291,10 @@ pub fn force_unlock() -> KernelResult<()> {
 
 /// Get current lock state.
 pub fn get_state() -> LockState {
-    STATE.lock().as_ref().map_or(LockState::Unlocked, |s| s.lock_state)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(LockState::Unlocked, |s| s.lock_state)
 }
 
 /// Set auto-lock timeout.
@@ -340,14 +345,23 @@ pub fn get_config() -> Option<LockConfig> {
 
 /// Recent lock events.
 pub fn list_events() -> Vec<LockEvent> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.events.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.events.clone())
 }
 
 /// Statistics: (total_locks, total_unlocks, total_failed, total_lockouts, ops).
 pub fn stats() -> (u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.total_locks, s.total_unlocks, s.total_failed, s.total_lockouts, s.ops),
+        Some(s) => (
+            s.total_locks,
+            s.total_unlocks,
+            s.total_failed,
+            s.total_lockouts,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

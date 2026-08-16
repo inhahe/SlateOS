@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -267,7 +267,11 @@ pub fn submit_report(
             },
             timestamp_ns: now,
             description: String::new(),
-            status: if state.config.auto_submit { ReportStatus::Queued } else { ReportStatus::Local },
+            status: if state.config.auto_submit {
+                ReportStatus::Queued
+            } else {
+                ReportStatus::Local
+            },
             app_version: String::new(),
             os_version: String::from("0.1.0"),
         };
@@ -287,7 +291,10 @@ pub fn submit_report(
 /// Add a user description to a report.
 pub fn set_description(id: u32, description: &str) -> KernelResult<()> {
     with_state(|state| {
-        let report = state.reports.iter_mut().find(|r| r.id == id)
+        let report = state
+            .reports
+            .iter_mut()
+            .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         report.description = String::from(description);
         Ok(())
@@ -297,7 +304,10 @@ pub fn set_description(id: u32, description: &str) -> KernelResult<()> {
 /// Delete a crash report.
 pub fn delete_report(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.reports.iter().position(|r| r.id == id)
+        let pos = state
+            .reports
+            .iter()
+            .position(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         state.reports.remove(pos);
         Ok(())
@@ -316,7 +326,10 @@ pub fn clear_reports() -> KernelResult<usize> {
 /// Get a specific report.
 pub fn get_report(id: u32) -> KernelResult<CrashReport> {
     with_state(|state| {
-        state.reports.iter().find(|r| r.id == id)
+        state
+            .reports
+            .iter()
+            .find(|r| r.id == id)
             .cloned()
             .ok_or(KernelError::NotFound)
     })
@@ -340,10 +353,26 @@ pub fn count_by_severity() -> (u32, u32, u32, u32) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let fatal = s.reports.iter().filter(|r| r.severity == CrashSeverity::Fatal).count() as u32;
-            let non_fatal = s.reports.iter().filter(|r| r.severity == CrashSeverity::NonFatal).count() as u32;
-            let hang = s.reports.iter().filter(|r| r.severity == CrashSeverity::Hang).count() as u32;
-            let kernel = s.reports.iter().filter(|r| r.severity == CrashSeverity::KernelPanic).count() as u32;
+            let fatal = s
+                .reports
+                .iter()
+                .filter(|r| r.severity == CrashSeverity::Fatal)
+                .count() as u32;
+            let non_fatal = s
+                .reports
+                .iter()
+                .filter(|r| r.severity == CrashSeverity::NonFatal)
+                .count() as u32;
+            let hang = s
+                .reports
+                .iter()
+                .filter(|r| r.severity == CrashSeverity::Hang)
+                .count() as u32;
+            let kernel = s
+                .reports
+                .iter()
+                .filter(|r| r.severity == CrashSeverity::KernelPanic)
+                .count() as u32;
             (fatal, non_fatal, hang, kernel)
         }
         None => (0, 0, 0, 0),
@@ -379,8 +408,18 @@ pub fn stats() -> (usize, u64, u32, bool, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let fatal = s.reports.iter().filter(|r| r.severity == CrashSeverity::Fatal).count() as u32;
-            (s.reports.len(), s.total_crashes, fatal, s.config.enabled, s.ops)
+            let fatal = s
+                .reports
+                .iter()
+                .filter(|r| r.severity == CrashSeverity::Fatal)
+                .count() as u32;
+            (
+                s.reports.len(),
+                s.total_crashes,
+                fatal,
+                s.config.enabled,
+                s.ops,
+            )
         }
         None => (0, 0, 0, false, 0),
     }
@@ -397,10 +436,16 @@ pub fn self_test() {
 
     // Test 1: Submit a fatal crash report.
     let id1 = submit_report(
-        100, "test_app", CrashSignal::Segfault, CrashSeverity::Fatal,
-        0xDEAD_BEEF, 0x0040_1000, &[0x0040_1000, 0x0040_0F00, 0x0040_0E00],
+        100,
+        "test_app",
+        CrashSignal::Segfault,
+        CrashSeverity::Fatal,
+        0xDEAD_BEEF,
+        0x0040_1000,
+        &[0x0040_1000, 0x0040_0F00, 0x0040_0E00],
         &["libc.so", "libm.so"],
-    ).expect("submit report");
+    )
+    .expect("submit report");
     assert!(id1 > 0);
     crate::serial_println!("  [1/11] submit report: OK");
 
@@ -419,9 +464,16 @@ pub fn self_test() {
 
     // Test 4: Submit another report.
     let id2 = submit_report(
-        200, "browser", CrashSignal::Abort, CrashSeverity::Fatal,
-        0, 0x0050_2000, &[0x0050_2000], &["libweb.so"],
-    ).expect("submit report 2");
+        200,
+        "browser",
+        CrashSignal::Abort,
+        CrashSeverity::Fatal,
+        0,
+        0x0050_2000,
+        &[0x0050_2000],
+        &["libweb.so"],
+    )
+    .expect("submit report 2");
     crate::serial_println!("  [4/11] submit second report: OK");
 
     // Test 5: List reports (newest first).
@@ -443,8 +495,14 @@ pub fn self_test() {
 
     // Test 8: Non-fatal reports are suppressed by default.
     let result = submit_report(
-        300, "editor", CrashSignal::FloatingPoint, CrashSeverity::NonFatal,
-        0, 0, &[], &[],
+        300,
+        "editor",
+        CrashSignal::FloatingPoint,
+        CrashSeverity::NonFatal,
+        0,
+        0,
+        &[],
+        &[],
     );
     assert!(result.is_err());
     crate::serial_println!("  [8/11] non-fatal suppression: OK");
@@ -452,9 +510,16 @@ pub fn self_test() {
     // Test 9: Enable non-fatal reporting.
     set_report_non_fatal(true).expect("enable non-fatal");
     let id3 = submit_report(
-        300, "editor", CrashSignal::FloatingPoint, CrashSeverity::NonFatal,
-        0, 0, &[], &[],
-    ).expect("submit non-fatal");
+        300,
+        "editor",
+        CrashSignal::FloatingPoint,
+        CrashSeverity::NonFatal,
+        0,
+        0,
+        &[],
+        &[],
+    )
+    .expect("submit non-fatal");
     assert!(id3 > 0);
     crate::serial_println!("  [9/11] non-fatal enabled: OK");
 

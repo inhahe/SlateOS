@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -85,8 +85,8 @@ pub struct TraceEvent {
 /// Trace buffer mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferMode {
-    Overwrite,   // Ring buffer, overwrites oldest.
-    OneShot,     // Stop when full.
+    Overwrite, // Ring buffer, overwrites oldest.
+    OneShot,   // Stop when full.
 }
 
 impl BufferMode {
@@ -137,32 +137,58 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         tracepoints: alloc::vec![
             Tracepoint {
-                id: 1, name: String::from("sys_enter"), category: TraceCategory::Syscall,
-                enabled: false, hit_count: 0, description: String::from("Syscall entry"),
+                id: 1,
+                name: String::from("sys_enter"),
+                category: TraceCategory::Syscall,
+                enabled: false,
+                hit_count: 0,
+                description: String::from("Syscall entry"),
             },
             Tracepoint {
-                id: 2, name: String::from("sys_exit"), category: TraceCategory::Syscall,
-                enabled: false, hit_count: 0, description: String::from("Syscall exit"),
+                id: 2,
+                name: String::from("sys_exit"),
+                category: TraceCategory::Syscall,
+                enabled: false,
+                hit_count: 0,
+                description: String::from("Syscall exit"),
             },
             Tracepoint {
-                id: 3, name: String::from("sched_switch"), category: TraceCategory::Sched,
-                enabled: false, hit_count: 0, description: String::from("Context switch"),
+                id: 3,
+                name: String::from("sched_switch"),
+                category: TraceCategory::Sched,
+                enabled: false,
+                hit_count: 0,
+                description: String::from("Context switch"),
             },
             Tracepoint {
-                id: 4, name: String::from("irq_handler"), category: TraceCategory::Irq,
-                enabled: false, hit_count: 0, description: String::from("IRQ handler entry"),
+                id: 4,
+                name: String::from("irq_handler"),
+                category: TraceCategory::Irq,
+                enabled: false,
+                hit_count: 0,
+                description: String::from("IRQ handler entry"),
             },
             Tracepoint {
-                id: 5, name: String::from("vfs_read"), category: TraceCategory::FileIO,
-                enabled: false, hit_count: 0, description: String::from("VFS read"),
+                id: 5,
+                name: String::from("vfs_read"),
+                category: TraceCategory::FileIO,
+                enabled: false,
+                hit_count: 0,
+                description: String::from("VFS read"),
             },
             Tracepoint {
-                id: 6, name: String::from("page_fault"), category: TraceCategory::Memory,
-                enabled: false, hit_count: 0, description: String::from("Page fault handler"),
+                id: 6,
+                name: String::from("page_fault"),
+                category: TraceCategory::Memory,
+                enabled: false,
+                hit_count: 0,
+                description: String::from("Page fault handler"),
             },
         ],
         events: Vec::new(),
@@ -179,13 +205,21 @@ pub fn init_defaults() {
 /// Register a custom tracepoint.
 pub fn register_tracepoint(name: &str, category: TraceCategory, desc: &str) -> KernelResult<u32> {
     with_state(|state| {
-        if state.tracepoints.len() >= MAX_TRACEPOINTS { return Err(KernelError::ResourceExhausted); }
-        if state.tracepoints.iter().any(|t| t.name == name) { return Err(KernelError::AlreadyExists); }
+        if state.tracepoints.len() >= MAX_TRACEPOINTS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.tracepoints.iter().any(|t| t.name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
         let id = state.next_tp_id;
         state.next_tp_id += 1;
         state.tracepoints.push(Tracepoint {
-            id, name: String::from(name), category, enabled: false,
-            hit_count: 0, description: String::from(desc),
+            id,
+            name: String::from(name),
+            category,
+            enabled: false,
+            hit_count: 0,
+            description: String::from(desc),
         });
         Ok(id)
     })
@@ -194,7 +228,10 @@ pub fn register_tracepoint(name: &str, category: TraceCategory, desc: &str) -> K
 /// Enable a tracepoint by name.
 pub fn enable(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let tp = state.tracepoints.iter_mut().find(|t| t.name == name)
+        let tp = state
+            .tracepoints
+            .iter_mut()
+            .find(|t| t.name == name)
             .ok_or(KernelError::NotFound)?;
         tp.enabled = true;
         Ok(())
@@ -204,7 +241,10 @@ pub fn enable(name: &str) -> KernelResult<()> {
 /// Disable a tracepoint by name.
 pub fn disable(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let tp = state.tracepoints.iter_mut().find(|t| t.name == name)
+        let tp = state
+            .tracepoints
+            .iter_mut()
+            .find(|t| t.name == name)
             .ok_or(KernelError::NotFound)?;
         tp.enabled = false;
         Ok(())
@@ -222,25 +262,42 @@ pub fn set_global(enabled: bool) -> KernelResult<()> {
 /// Record a trace event.
 pub fn record(tracepoint_name: &str, cpu: u32, pid: u32, data: &str) -> KernelResult<()> {
     with_state(|state| {
-        if !state.global_enabled { return Ok(()); }
-        let tp = state.tracepoints.iter_mut().find(|t| t.name == tracepoint_name)
+        if !state.global_enabled {
+            return Ok(());
+        }
+        let tp = state
+            .tracepoints
+            .iter_mut()
+            .find(|t| t.name == tracepoint_name)
             .ok_or(KernelError::NotFound)?;
-        if !tp.enabled { return Ok(()); }
+        if !tp.enabled {
+            return Ok(());
+        }
         // Apply PID filter.
         if let Some(filter_pid) = state.filter_pid {
-            if pid != filter_pid { return Ok(()); }
+            if pid != filter_pid {
+                return Ok(());
+            }
         }
         tp.hit_count += 1;
         let tp_id = tp.id;
         if state.events.len() >= MAX_EVENTS {
             match state.buffer_mode {
-                BufferMode::Overwrite => { state.events.remove(0); }
-                BufferMode::OneShot => { state.total_dropped += 1; return Ok(()); }
+                BufferMode::Overwrite => {
+                    state.events.remove(0);
+                }
+                BufferMode::OneShot => {
+                    state.total_dropped += 1;
+                    return Ok(());
+                }
             }
         }
         let now = crate::hpet::elapsed_ns();
         state.events.push(TraceEvent {
-            tracepoint_id: tp_id, timestamp_ns: now, cpu, pid,
+            tracepoint_id: tp_id,
+            timestamp_ns: now,
+            cpu,
+            pid,
             data: String::from(data),
         });
         state.total_events += 1;
@@ -251,7 +308,11 @@ pub fn record(tracepoint_name: &str, cpu: u32, pid: u32, data: &str) -> KernelRe
 /// Read trace buffer.
 pub fn read_buffer(last_n: usize) -> Vec<TraceEvent> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let start = if last_n >= s.events.len() { 0 } else { s.events.len() - last_n };
+        let start = if last_n >= s.events.len() {
+            0
+        } else {
+            s.events.len() - last_n
+        };
         s.events[start..].to_vec()
     })
 }
@@ -266,29 +327,48 @@ pub fn clear_buffer() -> KernelResult<()> {
 
 /// Set buffer mode.
 pub fn set_buffer_mode(mode: BufferMode) -> KernelResult<()> {
-    with_state(|state| { state.buffer_mode = mode; Ok(()) })
+    with_state(|state| {
+        state.buffer_mode = mode;
+        Ok(())
+    })
 }
 
 /// Set PID filter (None = no filter).
 pub fn set_filter_pid(pid: Option<u32>) -> KernelResult<()> {
-    with_state(|state| { state.filter_pid = pid; Ok(()) })
+    with_state(|state| {
+        state.filter_pid = pid;
+        Ok(())
+    })
 }
 
 /// List tracepoints.
 pub fn list_tracepoints() -> Vec<Tracepoint> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.tracepoints.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.tracepoints.clone())
 }
 
 /// Get tracepoint by name.
 pub fn get_tracepoint(name: &str) -> Option<Tracepoint> {
-    STATE.lock().as_ref().and_then(|s| s.tracepoints.iter().find(|t| t.name == name).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.tracepoints.iter().find(|t| t.name == name).cloned())
 }
 
 /// Statistics: (tracepoint_count, event_count, total_events, total_dropped, global_enabled, ops).
 pub fn stats() -> (usize, usize, u64, u64, bool, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.tracepoints.len(), s.events.len(), s.total_events, s.total_dropped, s.global_enabled, s.ops),
+        Some(s) => (
+            s.tracepoints.len(),
+            s.events.len(),
+            s.total_events,
+            s.total_dropped,
+            s.global_enabled,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, false, 0),
     }
 }

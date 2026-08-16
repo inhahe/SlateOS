@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -103,7 +103,9 @@ where
 /// unmerges, and scans pages.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         processes: Vec::new(),
         pages_shared: 0,
@@ -122,10 +124,18 @@ pub fn init_defaults() {
 /// Register a process for KSM tracking.
 pub fn register_process(pid: u32, name: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.processes.iter().any(|p| p.pid == pid) { return Err(KernelError::AlreadyExists); }
-        if state.processes.len() >= MAX_PROCESSES { return Err(KernelError::ResourceExhausted); }
+        if state.processes.iter().any(|p| p.pid == pid) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if state.processes.len() >= MAX_PROCESSES {
+            return Err(KernelError::ResourceExhausted);
+        }
         state.processes.push(ProcessKsmStats {
-            pid, name: String::from(name), shared_pages: 0, unshared_pages: 0, volatile_pages: 0,
+            pid,
+            name: String::from(name),
+            shared_pages: 0,
+            unshared_pages: 0,
+            volatile_pages: 0,
         });
         Ok(())
     })
@@ -156,7 +166,9 @@ pub fn record_unmerge() -> KernelResult<()> {
 pub fn record_scan(pages: u64, full_scan: bool) -> KernelResult<()> {
     with_state(|state| {
         state.pages_scanned += pages;
-        if full_scan { state.full_scans += 1; }
+        if full_scan {
+            state.full_scans += 1;
+        }
         Ok(())
     })
 }
@@ -164,7 +176,10 @@ pub fn record_scan(pages: u64, full_scan: bool) -> KernelResult<()> {
 /// Update per-process sharing counts.
 pub fn update_process(pid: u32, shared: u64, unshared: u64, volatile: u64) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.processes.iter_mut().find(|p| p.pid == pid)
+        let p = state
+            .processes
+            .iter_mut()
+            .find(|p| p.pid == pid)
             .ok_or(KernelError::NotFound)?;
         p.shared_pages = shared;
         p.unshared_pages = unshared;
@@ -175,14 +190,24 @@ pub fn update_process(pid: u32, shared: u64, unshared: u64, volatile: u64) -> Ke
 
 /// Per-process stats.
 pub fn per_process() -> Vec<ProcessKsmStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.processes.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.processes.clone())
 }
 
 /// Statistics: (pages_shared, pages_sharing, merges, unmerges, bytes_saved, ops).
 pub fn stats() -> (u64, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.pages_shared, s.pages_sharing, s.merges, s.unmerges, s.bytes_saved, s.ops),
+        Some(s) => (
+            s.pages_shared,
+            s.pages_sharing,
+            s.merges,
+            s.unmerges,
+            s.bytes_saved,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -247,8 +272,15 @@ pub fn self_test() {
 
     // 6: Update process sets per-process sharing counts exactly.
     update_process(200, 100, 500, 10).expect("update");
-    let p = per_process().iter().find(|p| p.pid == 200).cloned().expect("p200");
-    assert_eq!((p.shared_pages, p.unshared_pages, p.volatile_pages), (100, 500, 10));
+    let p = per_process()
+        .iter()
+        .find(|p| p.pid == 200)
+        .cloned()
+        .expect("p200");
+    assert_eq!(
+        (p.shared_pages, p.unshared_pages, p.volatile_pages),
+        (100, 500, 10)
+    );
     crate::serial_println!("  [6/8] update: OK");
 
     // 7: Unregistered process → NotFound.
@@ -257,7 +289,10 @@ pub fn self_test() {
 
     // 8: Aggregate stats equal the exact sums of the operations above.
     let (shared, sharing, merges, unmerges, saved, ops) = stats();
-    assert_eq!((shared, sharing, merges, unmerges, saved), (1, 2, 2, 1, 16384));
+    assert_eq!(
+        (shared, sharing, merges, unmerges, saved),
+        (1, 2, 2, 1, 16384)
+    );
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

@@ -274,7 +274,14 @@ pub fn create<S: AsRef<Path> + ?Sized, D: AsRef<Path> + ?Sized>(
 
     // Collect source tree.
     let mut source_entries = Vec::new();
-    collect_entries(src, src, &mut source_entries, 0, opts.max_depth, &opts.exclude)?;
+    collect_entries(
+        src,
+        src,
+        &mut source_entries,
+        0,
+        opts.max_depth,
+        &opts.exclude,
+    )?;
 
     // Load previous manifest for incremental mode.
     let prev_manifest = if opts.mode == BackupMode::Incremental {
@@ -285,7 +292,8 @@ pub fn create<S: AsRef<Path> + ?Sized, D: AsRef<Path> + ?Sized>(
 
     // Build lookup of previous entries by path for quick comparison.
     let prev_index: BTreeMap<&Path, &ManifestEntry> = if let Some(ref m) = prev_manifest {
-        m.entries.iter()
+        m.entries
+            .iter()
             .filter(|e| e.entry_type == "file")
             .map(|e| (e.path.as_path(), e))
             .collect()
@@ -296,12 +304,15 @@ pub fn create<S: AsRef<Path> + ?Sized, D: AsRef<Path> + ?Sized>(
     // Create backup subdirectory for this run.
     let backup_dir = dst.join(&manifest_id);
     if !opts.dry_run {
-        Vfs::mkdir(&backup_dir).inspect_err(|&e| {
-            if matches!(e, KernelError::AlreadyExists) {
-            }
-        }).or_else(|e| {
-            if matches!(e, KernelError::AlreadyExists) { Ok(()) } else { Err(e) }
-        })?;
+        Vfs::mkdir(&backup_dir)
+            .inspect_err(|&e| if matches!(e, KernelError::AlreadyExists) {})
+            .or_else(|e| {
+                if matches!(e, KernelError::AlreadyExists) {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
     }
 
     // Process each entry.
@@ -317,9 +328,9 @@ pub fn create<S: AsRef<Path> + ?Sized, D: AsRef<Path> + ?Sized>(
                     Ok(()) => result.dirs_created = result.dirs_created.saturating_add(1),
                     Err(KernelError::AlreadyExists) => {}
                     Err(e) => {
-                        result.errors.push(
-                            alloc::format!("mkdir {}: {:?}", dst_path.display(), e),
-                        );
+                        result
+                            .errors
+                            .push(alloc::format!("mkdir {}: {:?}", dst_path.display(), e));
                         continue;
                     }
                 }
@@ -365,9 +376,9 @@ pub fn create<S: AsRef<Path> + ?Sized, D: AsRef<Path> + ?Sized>(
                     result.bytes_copied = result.bytes_copied.saturating_add(bytes);
                 }
                 Err(e) => {
-                    result.errors.push(
-                        alloc::format!("copy {}: {:?}", entry.path.display(), e),
-                    );
+                    result
+                        .errors
+                        .push(alloc::format!("copy {}: {:?}", entry.path.display(), e));
                     continue;
                 }
             }
@@ -439,7 +450,9 @@ pub fn restore<R: AsRef<Path> + ?Sized, D: AsRef<Path> + ?Sized>(
         // Apply path filter if set.  Component-aligned, so restoring only
         // `docs` does not also restore `docsets`.
         if !opts.filter_paths.is_empty()
-            && !opts.filter_paths.iter()
+            && !opts
+                .filter_paths
+                .iter()
                 .any(|p| crate::fs::pathutil::path_in_subtree(&entry.path, p))
         {
             continue;
@@ -455,9 +468,9 @@ pub fn restore<R: AsRef<Path> + ?Sized, D: AsRef<Path> + ?Sized>(
                     Ok(()) => result.dirs_created = result.dirs_created.saturating_add(1),
                     Err(KernelError::AlreadyExists) => {}
                     Err(e) => {
-                        result.errors.push(
-                            alloc::format!("mkdir {}: {:?}", dst_path.display(), e),
-                        );
+                        result
+                            .errors
+                            .push(alloc::format!("mkdir {}: {:?}", dst_path.display(), e));
                     }
                 }
             } else {
@@ -489,16 +502,18 @@ pub fn restore<R: AsRef<Path> + ?Sized, D: AsRef<Path> + ?Sized>(
                             result.verify_failures = result.verify_failures.saturating_add(1);
                             result.errors.push(alloc::format!(
                                 "verify {}: expected {}, got {}",
-                                entry.path.display(), entry.hash, hex,
+                                entry.path.display(),
+                                entry.hash,
+                                hex,
                             ));
                         }
                     }
                 }
             }
             Err(e) => {
-                result.errors.push(
-                    alloc::format!("restore {}: {:?}", entry.path.display(), e),
-                );
+                result
+                    .errors
+                    .push(alloc::format!("restore {}: {:?}", entry.path.display(), e));
             }
         }
     }
@@ -601,7 +616,9 @@ pub fn verify<R: AsRef<Path> + ?Sized>(
 
     serial_println!(
         "[backup] Verify {}: {} ok, {} failed",
-        manifest.id, ok_count, fail_count,
+        manifest.id,
+        ok_count,
+        fail_count,
     );
 
     Ok((ok_count, fail_count, failures))
@@ -726,9 +743,7 @@ fn unesc_text(bytes: &[u8]) -> Option<String> {
 /// `/` would walk out of the backup root, so it is checked against the shape
 /// [`generate_id`] actually produces rather than trusted.
 fn is_valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// Build the path of a named manifest, rejecting an ID that could escape the
@@ -745,7 +760,8 @@ fn manifest_path_for(backup_root: &Path, id: &str) -> KernelResult<PathBuf> {
 /// Uses the extension rather than a byte suffix so that a file *called*
 /// `.manifest` - a legal dotfile with no extension - is not mistaken for one.
 fn is_manifest_name(name: &Path) -> bool {
-    name.extension().is_some_and(|e| e.as_bytes() == b"manifest")
+    name.extension()
+        .is_some_and(|e| e.as_bytes() == b"manifest")
 }
 
 /// Whether a manifest entry path is safe to join onto a destination.
@@ -948,7 +964,10 @@ fn collect_entries(
 
         // Check exclusions against the real path being visited, which is what
         // the operator sees and types.
-        if exclude.iter().any(|ex| crate::fs::pathutil::path_in_subtree(&full, ex)) {
+        if exclude
+            .iter()
+            .any(|ex| crate::fs::pathutil::path_in_subtree(&full, ex))
+        {
             continue;
         }
 
@@ -980,7 +999,14 @@ fn collect_entries(
                     hash: String::new(),
                     entry_type: String::from("dir"),
                 });
-                collect_entries(root, &full, out, depth.saturating_add(1), max_depth, exclude)?;
+                collect_entries(
+                    root,
+                    &full,
+                    out,
+                    depth.saturating_add(1),
+                    max_depth,
+                    exclude,
+                )?;
             }
             _ => {} // Skip symlinks etc.
         }
@@ -1102,7 +1128,10 @@ fn test_manifest_hostile_names() {
     assert_eq!(parsed.source, PathBuf::from(b"/sr\xfec".as_slice()));
     assert_eq!(parsed.mode, BackupMode::Incremental);
     assert_eq!(parsed.entries.len(), 2);
-    assert_eq!(parsed.entries[0].path, PathBuf::from(b"re\xffport.txt".as_slice()));
+    assert_eq!(
+        parsed.entries[0].path,
+        PathBuf::from(b"re\xffport.txt".as_slice())
+    );
     assert_eq!(parsed.entries[1].path, PathBuf::from("we|ird\nname"));
 
     // Path traversal: an absolute entry path would *replace* the restore
@@ -1162,7 +1191,11 @@ fn test_full_backup() {
 
     let opts = BackupOptions::default();
     let result = create("/tmp/bkp_src", "/tmp/bkp_dst", &opts).expect("backup");
-    assert!(result.files_copied >= 2, "should copy 2 files, got {}", result.files_copied);
+    assert!(
+        result.files_copied >= 2,
+        "should copy 2 files, got {}",
+        result.files_copied
+    );
     assert!(result.dirs_created >= 1, "should create at least 1 dir");
 
     // Verify files exist in backup.
@@ -1207,7 +1240,11 @@ fn test_incremental_backup() {
     // a.txt changed → copied; b.txt and c.txt unchanged → skipped
     assert!(result.files_copied >= 1, "should copy changed file");
     // Some files should be skipped.
-    assert!(result.files_skipped >= 1, "should skip unchanged files, skipped={}", result.files_skipped);
+    assert!(
+        result.files_skipped >= 1,
+        "should skip unchanged files, skipped={}",
+        result.files_skipped
+    );
 
     // Cleanup.
     let _ = Vfs::remove("/tmp/bkp_src2/a.txt");
@@ -1225,7 +1262,8 @@ fn test_restore() {
     Vfs::write_file("/tmp/bkp_rsrc/data.txt", b"restore me").expect("write");
 
     let _ = Vfs::mkdir("/tmp/bkp_rdst");
-    let result = create("/tmp/bkp_rsrc", "/tmp/bkp_rdst", &BackupOptions::default()).expect("backup");
+    let result =
+        create("/tmp/bkp_rsrc", "/tmp/bkp_rdst", &BackupOptions::default()).expect("backup");
 
     // Restore to a new location.
     let _ = Vfs::mkdir("/tmp/bkp_restored");
@@ -1234,7 +1272,8 @@ fn test_restore() {
         "/tmp/bkp_restored",
         Some(&result.manifest_id),
         &RestoreOptions::default(),
-    ).expect("restore");
+    )
+    .expect("restore");
 
     assert!(restore_result.files_restored >= 1, "should restore file");
     assert_eq!(restore_result.verify_failures, 0, "no verify failures");
@@ -1257,7 +1296,8 @@ fn test_verify() {
     Vfs::write_file("/tmp/bkp_vsrc/v.txt", b"verify content").expect("write");
 
     let _ = Vfs::mkdir("/tmp/bkp_vdst");
-    let result = create("/tmp/bkp_vsrc", "/tmp/bkp_vdst", &BackupOptions::default()).expect("backup");
+    let result =
+        create("/tmp/bkp_vsrc", "/tmp/bkp_vdst", &BackupOptions::default()).expect("backup");
 
     // Verify should pass.
     let (ok, fail, _) = verify("/tmp/bkp_vdst", Some(&result.manifest_id)).expect("verify");
@@ -1276,7 +1316,10 @@ fn test_list() {
     // Use bkp_rdst which should have exactly one manifest.
     if let Ok(backups) = list("/tmp/bkp_rdst") {
         assert!(!backups.is_empty(), "should find backups");
-        assert!(backups[0].id.starts_with("bkp_"), "id should start with bkp_");
+        assert!(
+            backups[0].id.starts_with("bkp_"),
+            "id should start with bkp_"
+        );
     }
     // Even if earlier dirs were cleaned, list on empty dir shouldn't panic.
     let _ = Vfs::mkdir("/tmp/bkp_empty_list");

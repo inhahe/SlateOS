@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -252,11 +252,7 @@ static CONNECT_COUNT: AtomicU64 = AtomicU64::new(0);
 // ---------------------------------------------------------------------------
 
 /// Add or update a network interface.
-pub fn update_interface(
-    name: &str,
-    iface_type: InterfaceType,
-    mac: &str,
-) -> KernelResult<()> {
+pub fn update_interface(name: &str, iface_type: InterfaceType, mac: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
     if let Some(iface) = state.interfaces.iter_mut().find(|i| i.name == name) {
         iface.iface_type = iface_type;
@@ -297,7 +293,10 @@ pub fn remove_interface(name: &str) -> KernelResult<()> {
 /// Set interface connection state.
 pub fn set_state(name: &str, conn_state: ConnectionState) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let iface = state.interfaces.iter_mut().find(|i| i.name == name)
+    let iface = state
+        .interfaces
+        .iter_mut()
+        .find(|i| i.name == name)
         .ok_or(KernelError::NotFound)?;
     iface.state = conn_state;
     Ok(())
@@ -306,7 +305,10 @@ pub fn set_state(name: &str, conn_state: ConnectionState) -> KernelResult<()> {
 /// Set interface IP address.
 pub fn set_ip(name: &str, ipv4: &str, gateway: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let iface = state.interfaces.iter_mut().find(|i| i.name == name)
+    let iface = state
+        .interfaces
+        .iter_mut()
+        .find(|i| i.name == name)
         .ok_or(KernelError::NotFound)?;
     iface.ipv4 = String::from(ipv4);
     iface.gateway = String::from(gateway);
@@ -316,7 +318,10 @@ pub fn set_ip(name: &str, ipv4: &str, gateway: &str) -> KernelResult<()> {
 /// Set WiFi status for an interface.
 pub fn set_wifi_status(name: &str, ssid: &str, signal: u8) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let iface = state.interfaces.iter_mut().find(|i| i.name == name)
+    let iface = state
+        .interfaces
+        .iter_mut()
+        .find(|i| i.name == name)
         .ok_or(KernelError::NotFound)?;
     iface.ssid = String::from(ssid);
     iface.signal = signal.min(100);
@@ -326,7 +331,10 @@ pub fn set_wifi_status(name: &str, ssid: &str, signal: u8) -> KernelResult<()> {
 /// Set link speed.
 pub fn set_speed(name: &str, mbps: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let iface = state.interfaces.iter_mut().find(|i| i.name == name)
+    let iface = state
+        .interfaces
+        .iter_mut()
+        .find(|i| i.name == name)
         .ok_or(KernelError::NotFound)?;
     iface.speed_mbps = mbps;
     Ok(())
@@ -339,13 +347,20 @@ pub fn list_interfaces() -> Vec<NetworkInterface> {
 
 /// Get interface by name.
 pub fn get_interface(name: &str) -> Option<NetworkInterface> {
-    STATE.lock().interfaces.iter().find(|i| i.name == name).cloned()
+    STATE
+        .lock()
+        .interfaces
+        .iter()
+        .find(|i| i.name == name)
+        .cloned()
 }
 
 /// Get the primary connected interface (first connected one).
 pub fn primary_interface() -> Option<NetworkInterface> {
     let state = STATE.lock();
-    state.interfaces.iter()
+    state
+        .interfaces
+        .iter()
         .find(|i| i.state == ConnectionState::Connected)
         .cloned()
 }
@@ -416,11 +431,18 @@ pub fn wifi_networks() -> Vec<WifiNetwork> {
 pub fn connect_wifi(ssid: &str, _password: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
     // Look up signal before taking mutable borrow on interfaces.
-    let signal = state.wifi_networks.iter().find(|n| n.ssid == ssid)
+    let signal = state
+        .wifi_networks
+        .iter()
+        .find(|n| n.ssid == ssid)
         .map(|n| n.signal)
         .ok_or(KernelError::NotFound)?;
     // Find the WiFi interface and update it.
-    if let Some(iface) = state.interfaces.iter_mut().find(|i| i.iface_type == InterfaceType::Wifi) {
+    if let Some(iface) = state
+        .interfaces
+        .iter_mut()
+        .find(|i| i.iface_type == InterfaceType::Wifi)
+    {
         iface.state = ConnectionState::Connected;
         iface.ssid = String::from(ssid);
         iface.signal = signal;
@@ -432,7 +454,11 @@ pub fn connect_wifi(ssid: &str, _password: &str) -> KernelResult<()> {
 /// Disconnect WiFi.
 pub fn disconnect_wifi() -> KernelResult<()> {
     let mut state = STATE.lock();
-    if let Some(iface) = state.interfaces.iter_mut().find(|i| i.iface_type == InterfaceType::Wifi) {
+    if let Some(iface) = state
+        .interfaces
+        .iter_mut()
+        .find(|i| i.iface_type == InterfaceType::Wifi)
+    {
         iface.state = ConnectionState::Disconnected;
         iface.ssid.clear();
         iface.signal = 0;
@@ -472,7 +498,9 @@ pub fn forget_profile(ssid: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
     let len = state.profiles.len();
     state.profiles.retain(|p| p.ssid != ssid);
-    if state.profiles.len() == len { return Err(KernelError::NotFound); }
+    if state.profiles.len() == len {
+        return Err(KernelError::NotFound);
+    }
     Ok(())
 }
 
@@ -508,7 +536,9 @@ pub fn set_dns_auto() {
 
 /// Set manual DNS servers.
 pub fn set_dns_manual(servers: &[&str]) -> KernelResult<()> {
-    if servers.is_empty() { return Err(KernelError::InvalidArgument); }
+    if servers.is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
     let mut state = STATE.lock();
     state.dns_mode = DnsMode::Manual;
     state.manual_dns = servers.iter().map(|s| String::from(*s)).collect();

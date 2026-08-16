@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -35,10 +35,10 @@ use crate::error::{KernelError, KernelResult};
 /// OOM policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OomPolicy {
-    Kill,         // Kill highest-scoring process.
-    Panic,        // Kernel panic on OOM.
-    Reap,         // Reap caches first, then kill.
-    Disabled,     // Never kill.
+    Kill,     // Kill highest-scoring process.
+    Panic,    // Kernel panic on OOM.
+    Reap,     // Reap caches first, then kill.
+    Disabled, // Never kill.
 }
 
 impl OomPolicy {
@@ -57,8 +57,8 @@ impl OomPolicy {
 pub struct OomScore {
     pub pid: u32,
     pub process_name: String,
-    pub score: i32,          // 0..1000 (higher = more likely to kill).
-    pub adj: i32,            // User adjustment (-1000..1000).
+    pub score: i32, // 0..1000 (higher = more likely to kill).
+    pub adj: i32,   // User adjustment (-1000..1000).
     pub memory_bytes: u64,
     pub exempt: bool,
 }
@@ -119,7 +119,9 @@ pub fn init_defaults() {
     // DEFERRED PROPER FIX: wire register_process() to the real process table so
     // /proc/oomkiller reflects actual processes and their memory footprints.
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         scores: Vec::new(),
         history: Vec::new(),
@@ -133,7 +135,10 @@ pub fn init_defaults() {
 
 /// Get OOM score for a process.
 pub fn get_score(pid: u32) -> Option<OomScore> {
-    STATE.lock().as_ref().and_then(|s| s.scores.iter().find(|p| p.pid == pid).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.scores.iter().find(|p| p.pid == pid).cloned())
 }
 
 /// List all scores, sorted by effective score descending.
@@ -155,7 +160,10 @@ pub fn adjust_score(pid: u32, adj: i32) -> KernelResult<()> {
         if adj < -1000 || adj > 1000 {
             return Err(KernelError::InvalidArgument);
         }
-        let score = state.scores.iter_mut().find(|p| p.pid == pid)
+        let score = state
+            .scores
+            .iter_mut()
+            .find(|p| p.pid == pid)
             .ok_or(KernelError::NotFound)?;
         score.adj = adj;
         Ok(())
@@ -165,10 +173,15 @@ pub fn adjust_score(pid: u32, adj: i32) -> KernelResult<()> {
 /// Set a process as exempt from OOM killing.
 pub fn set_exempt(pid: u32, exempt: bool) -> KernelResult<()> {
     with_state(|state| {
-        let score = state.scores.iter_mut().find(|p| p.pid == pid)
+        let score = state
+            .scores
+            .iter_mut()
+            .find(|p| p.pid == pid)
             .ok_or(KernelError::NotFound)?;
         score.exempt = exempt;
-        if exempt { score.adj = -1000; }
+        if exempt {
+            score.adj = -1000;
+        }
         Ok(())
     })
 }
@@ -176,13 +189,21 @@ pub fn set_exempt(pid: u32, exempt: bool) -> KernelResult<()> {
 /// Register a process for OOM scoring.
 pub fn register_process(pid: u32, name: &str, memory: u64) -> KernelResult<()> {
     with_state(|state| {
-        if state.scores.len() >= MAX_SCORES { return Err(KernelError::ResourceExhausted); }
-        if state.scores.iter().any(|p| p.pid == pid) { return Err(KernelError::AlreadyExists); }
+        if state.scores.len() >= MAX_SCORES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.scores.iter().any(|p| p.pid == pid) {
+            return Err(KernelError::AlreadyExists);
+        }
         // Base score proportional to memory (crude: memory_bytes / 1024, capped at 1000).
         let base = ((memory / 1024) as i32).min(1000);
         state.scores.push(OomScore {
-            pid, process_name: String::from(name), score: base,
-            adj: 0, memory_bytes: memory, exempt: false,
+            pid,
+            process_name: String::from(name),
+            score: base,
+            adj: 0,
+            memory_bytes: memory,
+            exempt: false,
         });
         Ok(())
     })
@@ -195,7 +216,9 @@ pub fn select_victim() -> KernelResult<OomScore> {
         if state.policy == OomPolicy::Disabled {
             return Err(KernelError::PermissionDenied);
         }
-        state.scores.iter()
+        state
+            .scores
+            .iter()
             .filter(|p| !p.exempt)
             .max_by_key(|p| (p.score + p.adj).max(0))
             .cloned()
@@ -206,15 +229,22 @@ pub fn select_victim() -> KernelResult<OomScore> {
 /// Simulate killing a process (removes it and records).
 pub fn kill(pid: u32) -> KernelResult<u64> {
     with_state(|state| {
-        let idx = state.scores.iter().position(|p| p.pid == pid)
+        let idx = state
+            .scores
+            .iter()
+            .position(|p| p.pid == pid)
             .ok_or(KernelError::NotFound)?;
         let victim = state.scores.remove(idx);
         let now = crate::hpet::elapsed_ns();
-        if state.history.len() >= MAX_HISTORY { state.history.remove(0); }
+        if state.history.len() >= MAX_HISTORY {
+            state.history.remove(0);
+        }
         state.history.push(OomKillRecord {
-            pid: victim.pid, process_name: victim.process_name,
+            pid: victim.pid,
+            process_name: victim.process_name,
             score: victim.score + victim.adj,
-            memory_freed: victim.memory_bytes, timestamp_ns: now,
+            memory_freed: victim.memory_bytes,
+            timestamp_ns: now,
         });
         state.total_kills += 1;
         state.total_memory_freed += victim.memory_bytes;
@@ -224,12 +254,18 @@ pub fn kill(pid: u32) -> KernelResult<u64> {
 
 /// Get kill history.
 pub fn kill_history() -> Vec<OomKillRecord> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.history.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.history.clone())
 }
 
 /// Set OOM policy.
 pub fn set_policy(policy: OomPolicy) -> KernelResult<()> {
-    with_state(|state| { state.policy = policy; Ok(()) })
+    with_state(|state| {
+        state.policy = policy;
+        Ok(())
+    })
 }
 
 /// Get OOM policy.
@@ -241,7 +277,13 @@ pub fn get_policy() -> OomPolicy {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.scores.len(), s.total_kills, s.total_memory_freed, s.total_invocations, s.ops),
+        Some(s) => (
+            s.scores.len(),
+            s.total_kills,
+            s.total_memory_freed,
+            s.total_invocations,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -265,8 +307,8 @@ pub fn self_test() {
 
     // 2: Register processes via the real API. Base score is derived from the
     //    supplied memory footprint (memory / 1024, capped at 1000).
-    register_process(1, "init", 4096).expect("reg init");      // base 4
-    register_process(100, "sshd", 16384).expect("reg sshd");   // base 16
+    register_process(1, "init", 4096).expect("reg init"); // base 4
+    register_process(100, "sshd", 16384).expect("reg sshd"); // base 16
     register_process(200, "browser", 524288).expect("reg br"); // base 512
     register_process(300, "game", 1048576).expect("reg game"); // base 1000 (capped)
     set_exempt(1, true).expect("exempt init");

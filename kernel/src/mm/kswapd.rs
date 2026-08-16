@@ -49,9 +49,9 @@
 //! - Linux `mm/vmscan.c` — kswapd and direct reclaim
 //! - FreeBSD `vm/vm_pageout.c` — page daemon
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::error::KernelResult;
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // State
@@ -106,8 +106,7 @@ pub fn wake_kswapd() {
 /// Returns the number of frames below which kswapd should wake.
 #[must_use]
 fn watermark_low() -> usize {
-    crate::sysctl::get(crate::sysctl::PARAM_MM_MIN_FREE_PAGES)
-        .unwrap_or(32) as usize
+    crate::sysctl::get(crate::sysctl::PARAM_MM_MIN_FREE_PAGES).unwrap_or(32) as usize
 }
 
 /// High watermark = 2× low watermark.
@@ -178,9 +177,7 @@ extern "C" fn kswapd_entry(_arg: u64) {
         // swallow the wake, delaying reclaim by up to a full interval.
         if !WAKE_FLAG.load(Ordering::Acquire) {
             let now = crate::apic::tick_count();
-            crate::sched::sleep_until_tick_interruptible(
-                now.saturating_add(CHECK_INTERVAL_TICKS),
-            );
+            crate::sched::sleep_until_tick_interruptible(now.saturating_add(CHECK_INTERVAL_TICKS));
 
             // After waking (either from timeout or explicit wake),
             // check if there's actually work to do.
@@ -204,8 +201,8 @@ extern "C" fn kswapd_entry(_arg: u64) {
         super::pressure::notify(super::pressure::PressureLevel::Low);
 
         let high = watermark_high();
-        let batch_size = crate::sysctl::get(crate::sysctl::PARAM_MM_SWAP_BATCH_SIZE)
-            .unwrap_or(4) as usize;
+        let batch_size =
+            crate::sysctl::get(crate::sysctl::PARAM_MM_SWAP_BATCH_SIZE).unwrap_or(4) as usize;
         let batch_size = if batch_size == 0 { 4 } else { batch_size };
 
         let mut cycle_reclaimed = 0usize;
@@ -248,9 +245,14 @@ extern "C" fn kswapd_entry(_arg: u64) {
                 free_now,
                 high,
             );
-            crate::klog!(Info, "mm.kswapd",
+            crate::klog!(
+                Info,
+                "mm.kswapd",
                 "reclaim cycle #{}: freed={} pages, free_now={}, high_wm={}",
-                cycle, cycle_reclaimed, free_now, high
+                cycle,
+                cycle_reclaimed,
+                free_now,
+                high
             );
         }
 
@@ -288,21 +290,12 @@ pub fn spawn() -> KernelResult<()> {
     let pml4 = super::page_table::active_pml4_phys();
     let priority = crate::sched::task::DEFAULT_PRIORITY.saturating_add(4);
 
-    let tid = crate::sched::spawn(
-        b"kswapd",
-        priority,
-        kswapd_entry,
-        0,
-        pml4,
-    )?;
+    let tid = crate::sched::spawn(b"kswapd", priority, kswapd_entry, 0, pml4)?;
 
     TASK_ID.store(tid, Ordering::Release);
     SPAWNED.store(true, Ordering::Release);
 
-    serial_println!(
-        "[kswapd] Spawned as task {} (priority {})",
-        tid, priority,
-    );
+    serial_println!("[kswapd] Spawned as task {} (priority {})", tid, priority,);
 
     Ok(())
 }
@@ -327,10 +320,7 @@ pub fn self_test() {
     assert!(low > 0, "low watermark must be > 0");
     assert!(high >= low, "high watermark must be >= low watermark");
     assert_eq!(high, low.saturating_mul(2), "high = 2× low");
-    serial_println!(
-        "[kswapd]   Watermarks: low={}, high={} (OK)",
-        low, high,
-    );
+    serial_println!("[kswapd]   Watermarks: low={}, high={} (OK)", low, high,);
 
     // -- Wake flag --
     WAKE_FLAG.store(false, Ordering::Release);
@@ -345,7 +335,8 @@ pub fn self_test() {
     let _total = total_reclaimed();
     serial_println!(
         "[kswapd]   Counters: cycles={}, total_reclaimed={} (OK)",
-        _cycles, _total,
+        _cycles,
+        _total,
     );
 
     // -- Running check --

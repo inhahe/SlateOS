@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 use tzrules::Tz;
 
 use crate::error::{KernelError, KernelResult};
@@ -127,9 +127,9 @@ impl DateOrder {
 /// Date separator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DateSeparator {
-    Slash,  // /
-    Dash,   // -
-    Dot,    // .
+    Slash, // /
+    Dash,  // -
+    Dot,   // .
 }
 
 impl DateSeparator {
@@ -415,9 +415,15 @@ static CHANGE_COUNT: AtomicU64 = AtomicU64::new(0);
 // Configuration getters/setters
 // ---------------------------------------------------------------------------
 
-pub fn config() -> LocaleConfig { STATE.lock().config.clone() }
-pub fn language() -> String { STATE.lock().config.language.clone() }
-pub fn timezone_id() -> String { STATE.lock().config.timezone.clone() }
+pub fn config() -> LocaleConfig {
+    STATE.lock().config.clone()
+}
+pub fn language() -> String {
+    STATE.lock().config.language.clone()
+}
+pub fn timezone_id() -> String {
+    STATE.lock().config.timezone.clone()
+}
 
 pub fn set_language(tag: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
@@ -498,7 +504,9 @@ pub fn set_paper_a4(v: bool) {
 /// something this function is entitled to assume.
 pub fn timezone_offset_minutes_at(utc_secs: i64) -> i16 {
     let state = STATE.lock();
-    state.timezones.iter()
+    state
+        .timezones
+        .iter()
         .find(|t| t.id == state.config.timezone)
         .map_or(0, |t| t.offset_minutes_at(utc_secs))
 }
@@ -531,8 +539,12 @@ pub fn now_utc_secs() -> i64 {
 
 pub fn add_language(tag: &str, native: &str, english: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    if state.languages.len() >= MAX_LANGUAGES { return Err(KernelError::ResourceExhausted); }
-    if state.languages.iter().any(|l| l.tag == tag) { return Err(KernelError::AlreadyExists); }
+    if state.languages.len() >= MAX_LANGUAGES {
+        return Err(KernelError::ResourceExhausted);
+    }
+    if state.languages.iter().any(|l| l.tag == tag) {
+        return Err(KernelError::AlreadyExists);
+    }
     state.languages.push(Language {
         tag: String::from(tag),
         native_name: String::from(native),
@@ -545,11 +557,15 @@ pub fn remove_language(tag: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
     let len = state.languages.len();
     state.languages.retain(|l| l.tag != tag);
-    if state.languages.len() == len { return Err(KernelError::NotFound); }
+    if state.languages.len() == len {
+        return Err(KernelError::NotFound);
+    }
     Ok(())
 }
 
-pub fn list_languages() -> Vec<Language> { STATE.lock().languages.clone() }
+pub fn list_languages() -> Vec<Language> {
+    STATE.lock().languages.clone()
+}
 
 // ---------------------------------------------------------------------------
 // Timezone management
@@ -562,10 +578,16 @@ pub fn list_languages() -> Vec<Language> { STATE.lock().languages.clone() }
 /// at the point it can still be reported instead of silently reading as UTC
 /// every time anyone asks for the time.
 pub fn add_timezone(id: &str, name: &str, posix_tz: &str) -> KernelResult<()> {
-    if Tz::parse(posix_tz.as_bytes()).is_none() { return Err(KernelError::InvalidArgument); }
+    if Tz::parse(posix_tz.as_bytes()).is_none() {
+        return Err(KernelError::InvalidArgument);
+    }
     let mut state = STATE.lock();
-    if state.timezones.len() >= MAX_TIMEZONES { return Err(KernelError::ResourceExhausted); }
-    if state.timezones.iter().any(|t| t.id == id) { return Err(KernelError::AlreadyExists); }
+    if state.timezones.len() >= MAX_TIMEZONES {
+        return Err(KernelError::ResourceExhausted);
+    }
+    if state.timezones.iter().any(|t| t.id == id) {
+        return Err(KernelError::AlreadyExists);
+    }
     state.timezones.push(Timezone {
         id: String::from(id),
         display_name: String::from(name),
@@ -574,7 +596,9 @@ pub fn add_timezone(id: &str, name: &str, posix_tz: &str) -> KernelResult<()> {
     Ok(())
 }
 
-pub fn list_timezones() -> Vec<Timezone> { STATE.lock().timezones.clone() }
+pub fn list_timezones() -> Vec<Timezone> {
+    STATE.lock().timezones.clone()
+}
 
 // ---------------------------------------------------------------------------
 // Defaults
@@ -582,7 +606,9 @@ pub fn list_timezones() -> Vec<Timezone> { STATE.lock().timezones.clone() }
 
 pub fn init_defaults() {
     let mut state = STATE.lock();
-    if !state.languages.is_empty() { return; }
+    if !state.languages.is_empty() {
+        return;
+    }
 
     // Common languages.
     let langs = [
@@ -594,10 +620,26 @@ pub fn init_defaults() {
         ("pt-BR", "Portugu\u{00ea}s (BR)", "Portuguese (Brazil)"),
         ("ja-JP", "\u{65e5}\u{672c}\u{8a9e}", "Japanese"),
         ("ko-KR", "\u{d55c}\u{ad6d}\u{c5b4}", "Korean"),
-        ("zh-CN", "\u{4e2d}\u{6587}(\u{7b80}\u{4f53})", "Chinese (Simplified)"),
-        ("ru-RU", "\u{0420}\u{0443}\u{0441}\u{0441}\u{043a}\u{0438}\u{0439}", "Russian"),
-        ("ar-SA", "\u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064a}\u{0629}", "Arabic"),
-        ("hi-IN", "\u{0939}\u{093f}\u{0928}\u{094d}\u{0926}\u{0940}", "Hindi"),
+        (
+            "zh-CN",
+            "\u{4e2d}\u{6587}(\u{7b80}\u{4f53})",
+            "Chinese (Simplified)",
+        ),
+        (
+            "ru-RU",
+            "\u{0420}\u{0443}\u{0441}\u{0441}\u{043a}\u{0438}\u{0439}",
+            "Russian",
+        ),
+        (
+            "ar-SA",
+            "\u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064a}\u{0629}",
+            "Arabic",
+        ),
+        (
+            "hi-IN",
+            "\u{0939}\u{093f}\u{0928}\u{094d}\u{0926}\u{0940}",
+            "Hindi",
+        ),
     ];
     for &(tag, native, english) in &langs {
         state.languages.push(Language {
@@ -618,12 +660,32 @@ pub fn init_defaults() {
     // abbreviation below is alphabetic.
     let tzs = [
         ("UTC", "UTC", "UTC0"),
-        ("America/New_York", "Eastern Time (US)", "EST5EDT,M3.2.0,M11.1.0"),
-        ("America/Chicago", "Central Time (US)", "CST6CDT,M3.2.0,M11.1.0"),
-        ("America/Denver", "Mountain Time (US)", "MST7MDT,M3.2.0,M11.1.0"),
-        ("America/Los_Angeles", "Pacific Time (US)", "PST8PDT,M3.2.0,M11.1.0"),
+        (
+            "America/New_York",
+            "Eastern Time (US)",
+            "EST5EDT,M3.2.0,M11.1.0",
+        ),
+        (
+            "America/Chicago",
+            "Central Time (US)",
+            "CST6CDT,M3.2.0,M11.1.0",
+        ),
+        (
+            "America/Denver",
+            "Mountain Time (US)",
+            "MST7MDT,M3.2.0,M11.1.0",
+        ),
+        (
+            "America/Los_Angeles",
+            "Pacific Time (US)",
+            "PST8PDT,M3.2.0,M11.1.0",
+        ),
         ("Europe/London", "GMT / BST", "GMT0BST,M3.5.0/1,M10.5.0"),
-        ("Europe/Berlin", "Central European Time", "CET-1CEST,M3.5.0,M10.5.0/3"),
+        (
+            "Europe/Berlin",
+            "Central European Time",
+            "CET-1CEST,M3.5.0,M10.5.0/3",
+        ),
         // Russia abolished DST in 2011 and settled on permanent UTC+3 in 2014.
         ("Europe/Moscow", "Moscow Time", "MSK-3"),
         ("Asia/Tokyo", "Japan Standard Time", "JST-9"),
@@ -631,7 +693,11 @@ pub fn init_defaults() {
         // India is UTC+5:30 — the half-hour a whole-hour offset cannot express.
         ("Asia/Kolkata", "India Standard Time", "IST-5:30"),
         // Southern hemisphere: DST starts in October and ends in April.
-        ("Australia/Sydney", "Australian Eastern Time", "AEST-10AEDT,M10.1.0,M4.1.0/3"),
+        (
+            "Australia/Sydney",
+            "Australian Eastern Time",
+            "AEST-10AEDT,M10.1.0,M4.1.0/3",
+        ),
     ];
     for &(id, name, posix_tz) in &tzs {
         state.timezones.push(Timezone {
@@ -650,10 +716,16 @@ pub fn init_defaults() {
 
 pub fn stats() -> (usize, usize, u64) {
     let state = STATE.lock();
-    (state.languages.len(), state.timezones.len(), CHANGE_COUNT.load(Ordering::Relaxed))
+    (
+        state.languages.len(),
+        state.timezones.len(),
+        CHANGE_COUNT.load(Ordering::Relaxed),
+    )
 }
 
-pub fn reset_stats() { CHANGE_COUNT.store(0, Ordering::Relaxed); }
+pub fn reset_stats() {
+    CHANGE_COUNT.store(0, Ordering::Relaxed);
+}
 
 pub fn clear_all() {
     let mut state = STATE.lock();
@@ -732,7 +804,10 @@ pub fn self_test() -> KernelResult<()> {
     // The half-hour zone a whole-hour offset cannot represent at all.
     set_timezone("Asia/Kolkata")?;
     assert_eq!(timezone_offset_minutes_at(NOON_JAN), 330);
-    assert_eq!(format_utc_offset(timezone_offset_minutes_at(NOON_JAN)), "+05:30");
+    assert_eq!(
+        format_utc_offset(timezone_offset_minutes_at(NOON_JAN)),
+        "+05:30"
+    );
 
     // Formatting is integer-only in both directions.
     assert_eq!(format_utc_offset(0), "+00:00");
@@ -744,13 +819,19 @@ pub fn self_test() -> KernelResult<()> {
         assert!(tz.rule().is_some());
     }
     let tzs2 = list_timezones();
-    let ny = tzs2.iter().find(|t| t.id == "America/New_York").ok_or(KernelError::NotFound)?;
+    let ny = tzs2
+        .iter()
+        .find(|t| t.id == "America/New_York")
+        .ok_or(KernelError::NotFound)?;
     assert!(ny.observes_dst());
     assert!(!ny.is_dst_at(NOON_JAN));
     assert!(ny.is_dst_at(NOON_JUL));
     assert_eq!(ny.abbrev_at(NOON_JAN), "EST");
     assert_eq!(ny.abbrev_at(NOON_JUL), "EDT");
-    let tokyo = tzs2.iter().find(|t| t.id == "Asia/Tokyo").ok_or(KernelError::NotFound)?;
+    let tokyo = tzs2
+        .iter()
+        .find(|t| t.id == "Asia/Tokyo")
+        .ok_or(KernelError::NotFound)?;
     assert!(!tokyo.observes_dst());
 
     // A malformed rule is rejected at install time rather than silently

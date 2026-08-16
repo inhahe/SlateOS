@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -208,7 +208,10 @@ pub fn create_session(
 
         // If multi-session is off and user already has a session, reject.
         if !state.config.multi_session
-            && state.sessions.iter().any(|s| s.uid == uid && s.state != SessionState::Closing)
+            && state
+                .sessions
+                .iter()
+                .any(|s| s.uid == uid && s.state != SessionState::Closing)
         {
             return Err(KernelError::AlreadyExists);
         }
@@ -244,14 +247,21 @@ pub fn create_session(
 /// Destroy a session (logout).
 pub fn destroy_session(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.sessions.iter().position(|s| s.id == id)
+        let pos = state
+            .sessions
+            .iter()
+            .position(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         let was_active = state.sessions[pos].is_active;
         state.sessions.remove(pos);
 
         // If the destroyed session was active, promote another.
         if was_active {
-            if let Some(s) = state.sessions.iter_mut().find(|s| s.state != SessionState::Closing) {
+            if let Some(s) = state
+                .sessions
+                .iter_mut()
+                .find(|s| s.state != SessionState::Closing)
+            {
                 s.is_active = true;
                 s.state = SessionState::Active;
             }
@@ -263,7 +273,10 @@ pub fn destroy_session(id: u32) -> KernelResult<()> {
 /// Lock the active session's screen.
 pub fn lock_session() -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.is_active)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.is_active)
             .ok_or(KernelError::NotFound)?;
         session.state = SessionState::Locked;
         state.lock_count += 1;
@@ -274,12 +287,19 @@ pub fn lock_session() -> KernelResult<()> {
 /// Unlock a locked session.
 pub fn unlock_session(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         if session.state != SessionState::Locked {
             return Err(KernelError::InvalidArgument);
         }
-        session.state = if session.is_active { SessionState::Active } else { SessionState::Background };
+        session.state = if session.is_active {
+            SessionState::Active
+        } else {
+            SessionState::Background
+        };
         Ok(())
     })
 }
@@ -288,7 +308,10 @@ pub fn unlock_session(id: u32) -> KernelResult<()> {
 pub fn switch_session(id: u32) -> KernelResult<()> {
     with_state(|state| {
         // Verify target exists and is not closing.
-        let target_pos = state.sessions.iter().position(|s| s.id == id)
+        let target_pos = state
+            .sessions
+            .iter()
+            .position(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         if state.sessions[target_pos].state == SessionState::Closing {
             return Err(KernelError::InvalidArgument);
@@ -317,7 +340,9 @@ pub fn switch_session(id: u32) -> KernelResult<()> {
 /// Get the currently active session.
 pub fn active_session() -> Option<Session> {
     let guard = STATE.lock();
-    guard.as_ref().and_then(|s| s.sessions.iter().find(|sess| sess.is_active).cloned())
+    guard
+        .as_ref()
+        .and_then(|s| s.sessions.iter().find(|sess| sess.is_active).cloned())
 }
 
 /// List all sessions.
@@ -332,7 +357,10 @@ pub fn list_sessions() -> Vec<Session> {
 /// Get a session by ID.
 pub fn get_session(id: u32) -> KernelResult<Session> {
     with_state(|state| {
-        state.sessions.iter().find(|s| s.id == id)
+        state
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
             .cloned()
             .ok_or(KernelError::NotFound)
     })
@@ -414,10 +442,18 @@ pub fn stats() -> (usize, u64, u64, u32, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let active_uid = s.sessions.iter()
+            let active_uid = s
+                .sessions
+                .iter()
                 .find(|sess| sess.is_active)
                 .map_or(0, |sess| sess.uid);
-            (s.sessions.len(), s.login_count, s.lock_count, active_uid, s.ops)
+            (
+                s.sessions.len(),
+                s.login_count,
+                s.lock_count,
+                active_uid,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }
@@ -433,7 +469,8 @@ pub fn self_test() {
     init_defaults();
 
     // Test 1: Create a session.
-    let id1 = create_session(1000, "alice", SessionType::Graphical, ":0", "tty1").expect("create session");
+    let id1 = create_session(1000, "alice", SessionType::Graphical, ":0", "tty1")
+        .expect("create session");
     assert!(id1 > 0);
     crate::serial_println!("  [1/11] create session: OK");
 
@@ -444,7 +481,8 @@ pub fn self_test() {
     crate::serial_println!("  [2/11] active session: OK");
 
     // Test 3: Create second session, first becomes background.
-    let id2 = create_session(1001, "bob", SessionType::Console, ":1", "tty2").expect("create session 2");
+    let id2 =
+        create_session(1001, "bob", SessionType::Console, ":1", "tty2").expect("create session 2");
     let s1 = get_session(id1).expect("get session 1");
     assert_eq!(s1.state, SessionState::Background);
     assert!(!s1.is_active);

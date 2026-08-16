@@ -255,9 +255,7 @@ impl<'a> Parser<'a> {
                                     self.expect(b'u')?;
                                     let cp2 = self.parse_hex4()?;
                                     if (0xDC00..=0xDFFF).contains(&cp2) {
-                                        let full = 0x10000
-                                            + ((cp - 0xD800) << 10)
-                                            + (cp2 - 0xDC00);
+                                        let full = 0x10000 + ((cp - 0xD800) << 10) + (cp2 - 0xDC00);
                                         if let Some(c) = char::from_u32(full) {
                                             s.push(c);
                                         } else {
@@ -291,8 +289,7 @@ impl<'a> Parser<'a> {
                             return Err(KernelError::InvalidArgument);
                         };
                         for _ in 0..needed {
-                            let cont = self.advance()
-                                .ok_or(KernelError::InvalidArgument)?;
+                            let cont = self.advance().ok_or(KernelError::InvalidArgument)?;
                             if cont & 0xC0 != 0x80 {
                                 return Err(KernelError::InvalidArgument);
                             }
@@ -342,7 +339,8 @@ impl<'a> Parser<'a> {
         while let Some(b) = self.peek() {
             if b >= b'0' && b <= b'9' {
                 let d = i64::from(b - b'0');
-                val = val.checked_mul(10)
+                val = val
+                    .checked_mul(10)
                     .and_then(|v| v.checked_add(d))
                     .ok_or(KernelError::InvalidArgument)?;
                 self.advance();
@@ -573,10 +571,7 @@ pub fn self_test() -> KernelResult<()> {
             JsonValue::Str(String::from("a\"b"))
         );
         // Unicode escape.
-        assert_eq!(
-            parse_str(r#""\u0041""#)?,
-            JsonValue::Str(String::from("A"))
-        );
+        assert_eq!(parse_str(r#""\u0041""#)?, JsonValue::Str(String::from("A")));
         serial_println!("[json]   strings: OK");
     }
 
@@ -631,10 +626,7 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(config.get_i64("size"), Some(1024));
         let layers = v.get_array("layers").expect("layers");
         assert_eq!(layers.len(), 1);
-        assert_eq!(
-            layers[0].get_str("digest"),
-            Some("sha256:def456")
-        );
+        assert_eq!(layers[0].get_str("digest"), Some("sha256:def456"));
         serial_println!("[json]   nested (OCI-like): OK");
     }
 

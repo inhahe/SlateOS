@@ -29,10 +29,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::{vec, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::KernelResult;
 use crate::fs::Vfs;
@@ -235,18 +235,22 @@ fn check_space() -> CheckResult {
                 CheckResult {
                     name: String::from("Disk Space"),
                     status: HealthStatus::Critical,
-                    message: alloc::format!("{}% used ({} free of {})",
+                    message: alloc::format!(
+                        "{}% used ({} free of {})",
                         used_pct,
                         crate::fs::usage::format_size(free),
                         crate::fs::usage::format_size(total),
                     ),
-                    recommendation: Some(String::from("Run 'reclaim' to free space or delete unused files")),
+                    recommendation: Some(String::from(
+                        "Run 'reclaim' to free space or delete unused files",
+                    )),
                 }
             } else if used_pct >= 85 {
                 CheckResult {
                     name: String::from("Disk Space"),
                     status: HealthStatus::Warning,
-                    message: alloc::format!("{}% used ({} free of {})",
+                    message: alloc::format!(
+                        "{}% used ({} free of {})",
                         used_pct,
                         crate::fs::usage::format_size(free),
                         crate::fs::usage::format_size(total),
@@ -257,7 +261,8 @@ fn check_space() -> CheckResult {
                 CheckResult {
                     name: String::from("Disk Space"),
                     status: HealthStatus::Healthy,
-                    message: alloc::format!("{}% used ({} free of {})",
+                    message: alloc::format!(
+                        "{}% used ({} free of {})",
                         used_pct,
                         crate::fs::usage::format_size(free),
                         crate::fs::usage::format_size(total),
@@ -293,7 +298,9 @@ fn check_journal() -> CheckResult {
             name: String::from("Journal"),
             status: HealthStatus::Warning,
             message: alloc::format!("{} entries (seq {})", entry_count, max_seq),
-            recommendation: Some(String::from("Journal near capacity; old entries being evicted")),
+            recommendation: Some(String::from(
+                "Journal near capacity; old entries being evicted",
+            )),
         }
     } else {
         CheckResult {
@@ -325,16 +332,28 @@ fn check_cache() -> CheckResult {
         CheckResult {
             name: String::from("Buffer Cache"),
             status: HealthStatus::Warning,
-            message: alloc::format!("{}% hit rate ({} hits / {} total, {} dirty)",
-                hit_rate, stats.hits, total_ops, stats.entries_dirty),
-            recommendation: Some(String::from("Low cache hit rate; consider increasing cache size")),
+            message: alloc::format!(
+                "{}% hit rate ({} hits / {} total, {} dirty)",
+                hit_rate,
+                stats.hits,
+                total_ops,
+                stats.entries_dirty
+            ),
+            recommendation: Some(String::from(
+                "Low cache hit rate; consider increasing cache size",
+            )),
         }
     } else {
         CheckResult {
             name: String::from("Buffer Cache"),
             status: HealthStatus::Healthy,
-            message: alloc::format!("{}% hit rate ({} hits / {} total, {} dirty)",
-                hit_rate, stats.hits, total_ops, stats.entries_dirty),
+            message: alloc::format!(
+                "{}% hit rate ({} hits / {} total, {} dirty)",
+                hit_rate,
+                stats.hits,
+                total_ops,
+                stats.entries_dirty
+            ),
             recommendation: None,
         }
     }
@@ -350,7 +369,9 @@ fn check_handles() -> CheckResult {
             name: String::from("File Handles"),
             status: HealthStatus::Warning,
             message: alloc::format!("{} open handles", open),
-            recommendation: Some(String::from("High number of open file handles; check for leaks")),
+            recommendation: Some(String::from(
+                "High number of open file handles; check for leaks",
+            )),
         }
     } else {
         CheckResult {
@@ -371,7 +392,9 @@ fn check_quotas() -> CheckResult {
             name: String::from("Quotas"),
             status: HealthStatus::Critical,
             message: alloc::format!("{} user(s) over hard quota limit", stats.over_hard),
-            recommendation: Some(String::from("Users over hard quota cannot write; free space or increase limits")),
+            recommendation: Some(String::from(
+                "Users over hard quota cannot write; free space or increase limits",
+            )),
         }
     } else if stats.over_soft > 0 {
         CheckResult {
@@ -398,8 +421,12 @@ fn check_integrity() -> CheckResult {
         CheckResult {
             name: String::from("Integrity"),
             status: HealthStatus::Healthy,
-            message: alloc::format!("{} file(s) baselined ({} baselines, {} verifies)",
-                stats.baseline_entries, stats.baseline_count, stats.verify_count),
+            message: alloc::format!(
+                "{} file(s) baselined ({} baselines, {} verifies)",
+                stats.baseline_entries,
+                stats.baseline_count,
+                stats.verify_count
+            ),
             recommendation: None,
         }
     } else {
@@ -449,9 +476,12 @@ fn check_tmpwatch() -> CheckResult {
     CheckResult {
         name: String::from("Tmpwatch"),
         status: HealthStatus::Healthy,
-        message: alloc::format!("{} runs, {} files cleaned, {} freed",
-            stats.runs, stats.total_files_removed,
-            crate::fs::usage::format_size(stats.total_bytes_freed)),
+        message: alloc::format!(
+            "{} runs, {} files cleaned, {} freed",
+            stats.runs,
+            stats.total_files_removed,
+            crate::fs::usage::format_size(stats.total_bytes_freed)
+        ),
         recommendation: None,
     }
 }
@@ -463,9 +493,11 @@ fn check_reclaim() -> CheckResult {
     CheckResult {
         name: String::from("Reclaim"),
         status: HealthStatus::Healthy,
-        message: alloc::format!("{} runs, {} reclaimed",
+        message: alloc::format!(
+            "{} runs, {} reclaimed",
             stats.trigger_count,
-            crate::fs::usage::format_size(stats.total_bytes_freed)),
+            crate::fs::usage::format_size(stats.total_bytes_freed)
+        ),
         recommendation: None,
     }
 }
@@ -496,10 +528,22 @@ fn test_check_all() {
 }
 
 fn test_status_merge() {
-    assert_eq!(HealthStatus::Healthy.merge(HealthStatus::Healthy), HealthStatus::Healthy);
-    assert_eq!(HealthStatus::Healthy.merge(HealthStatus::Warning), HealthStatus::Warning);
-    assert_eq!(HealthStatus::Warning.merge(HealthStatus::Critical), HealthStatus::Critical);
-    assert_eq!(HealthStatus::Critical.merge(HealthStatus::Healthy), HealthStatus::Critical);
+    assert_eq!(
+        HealthStatus::Healthy.merge(HealthStatus::Healthy),
+        HealthStatus::Healthy
+    );
+    assert_eq!(
+        HealthStatus::Healthy.merge(HealthStatus::Warning),
+        HealthStatus::Warning
+    );
+    assert_eq!(
+        HealthStatus::Warning.merge(HealthStatus::Critical),
+        HealthStatus::Critical
+    );
+    assert_eq!(
+        HealthStatus::Critical.merge(HealthStatus::Healthy),
+        HealthStatus::Critical
+    );
 
     serial_println!("[health]   status merge: ok");
 }

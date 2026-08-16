@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -245,22 +245,34 @@ pub fn global_config() -> KernelResult<GlobalNotifConfig> {
 
 /// Set lock screen notifications.
 pub fn set_show_on_lock_screen(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.global.show_on_lock_screen = enabled; Ok(()) })
+    with_state(|state| {
+        state.global.show_on_lock_screen = enabled;
+        Ok(())
+    })
 }
 
 /// Set global notification sounds.
 pub fn set_sounds_enabled(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.global.sounds_enabled = enabled; Ok(()) })
+    with_state(|state| {
+        state.global.sounds_enabled = enabled;
+        Ok(())
+    })
 }
 
 /// Set notification count in status bar.
 pub fn set_show_count(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.global.show_count = enabled; Ok(()) })
+    with_state(|state| {
+        state.global.show_count = enabled;
+        Ok(())
+    })
 }
 
 /// Set auto-dismiss timeout.
 pub fn set_dismiss_timeout(seconds: u32) -> KernelResult<()> {
-    with_state(|state| { state.global.dismiss_timeout_seconds = seconds; Ok(()) })
+    with_state(|state| {
+        state.global.dismiss_timeout_seconds = seconds;
+        Ok(())
+    })
 }
 
 /// Set max visible notifications.
@@ -268,12 +280,18 @@ pub fn set_max_visible(count: u32) -> KernelResult<()> {
     if count == 0 || count > 20 {
         return Err(KernelError::InvalidArgument);
     }
-    with_state(|state| { state.global.max_visible = count; Ok(()) })
+    with_state(|state| {
+        state.global.max_visible = count;
+        Ok(())
+    })
 }
 
 /// Set notification position.
 pub fn set_position(pos: NotifPosition) -> KernelResult<()> {
-    with_state(|state| { state.global.position = pos; Ok(()) })
+    with_state(|state| {
+        state.global.position = pos;
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +327,10 @@ pub fn get_app_pref(app_id: &str) -> KernelResult<AppNotifPref> {
 pub fn set_app_enabled(app_id: &str, enabled: bool) -> KernelResult<()> {
     ensure_app_pref(app_id)?;
     with_state(|state| {
-        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id)
+        let pref = state
+            .app_prefs
+            .iter_mut()
+            .find(|p| p.app_id == app_id)
             .ok_or(KernelError::NotFound)?;
         pref.enabled = enabled;
         Ok(())
@@ -320,7 +341,10 @@ pub fn set_app_enabled(app_id: &str, enabled: bool) -> KernelResult<()> {
 pub fn set_banner_style(app_id: &str, style: BannerStyle) -> KernelResult<()> {
     ensure_app_pref(app_id)?;
     with_state(|state| {
-        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id)
+        let pref = state
+            .app_prefs
+            .iter_mut()
+            .find(|p| p.app_id == app_id)
             .ok_or(KernelError::NotFound)?;
         pref.banner_style = style;
         Ok(())
@@ -331,7 +355,10 @@ pub fn set_banner_style(app_id: &str, style: BannerStyle) -> KernelResult<()> {
 pub fn set_app_sound(app_id: &str, enabled: bool) -> KernelResult<()> {
     ensure_app_pref(app_id)?;
     with_state(|state| {
-        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id)
+        let pref = state
+            .app_prefs
+            .iter_mut()
+            .find(|p| p.app_id == app_id)
             .ok_or(KernelError::NotFound)?;
         pref.sound = enabled;
         Ok(())
@@ -342,7 +369,10 @@ pub fn set_app_sound(app_id: &str, enabled: bool) -> KernelResult<()> {
 pub fn set_app_priority(app_id: &str, priority: NotifPriority) -> KernelResult<()> {
     ensure_app_pref(app_id)?;
     with_state(|state| {
-        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id)
+        let pref = state
+            .app_prefs
+            .iter_mut()
+            .find(|p| p.app_id == app_id)
             .ok_or(KernelError::NotFound)?;
         pref.priority = priority;
         Ok(())
@@ -353,7 +383,10 @@ pub fn set_app_priority(app_id: &str, priority: NotifPriority) -> KernelResult<(
 pub fn set_app_lock_screen(app_id: &str, vis: LockScreenVisibility) -> KernelResult<()> {
     ensure_app_pref(app_id)?;
     with_state(|state| {
-        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id)
+        let pref = state
+            .app_prefs
+            .iter_mut()
+            .find(|p| p.app_id == app_id)
             .ok_or(KernelError::NotFound)?;
         pref.lock_screen = vis;
         Ok(())
@@ -364,7 +397,10 @@ pub fn set_app_lock_screen(app_id: &str, vis: LockScreenVisibility) -> KernelRes
 pub fn set_dnd_override(app_id: &str, allowed: bool) -> KernelResult<()> {
     ensure_app_pref(app_id)?;
     with_state(|state| {
-        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id)
+        let pref = state
+            .app_prefs
+            .iter_mut()
+            .find(|p| p.app_id == app_id)
             .ok_or(KernelError::NotFound)?;
         pref.dnd_override = allowed;
         Ok(())
@@ -375,7 +411,10 @@ pub fn set_dnd_override(app_id: &str, allowed: bool) -> KernelResult<()> {
 pub fn set_app_group(app_id: &str, group: bool) -> KernelResult<()> {
     ensure_app_pref(app_id)?;
     with_state(|state| {
-        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id)
+        let pref = state
+            .app_prefs
+            .iter_mut()
+            .find(|p| p.app_id == app_id)
             .ok_or(KernelError::NotFound)?;
         pref.group = group;
         Ok(())
@@ -397,7 +436,9 @@ pub fn remove_app_pref(app_id: &str) -> KernelResult<()> {
 /// List all app preferences.
 pub fn list_app_prefs() -> Vec<AppNotifPref> {
     let guard = STATE.lock();
-    guard.as_ref().map_or_else(Vec::new, |s| s.app_prefs.clone())
+    guard
+        .as_ref()
+        .map_or_else(Vec::new, |s| s.app_prefs.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -536,7 +577,10 @@ pub fn self_test() {
     // Test 3: position.
     {
         set_position(NotifPosition::BottomRight).unwrap();
-        assert_eq!(global_config().unwrap().position, NotifPosition::BottomRight);
+        assert_eq!(
+            global_config().unwrap().position,
+            NotifPosition::BottomRight
+        );
         set_position(NotifPosition::TopRight).unwrap();
     }
     serial_println!("[notifprefs]  3/11 position OK");
@@ -553,7 +597,10 @@ pub fn self_test() {
     // Test 5: modify banner style.
     {
         set_banner_style("firefox", BannerStyle::Brief).unwrap();
-        assert_eq!(get_app_pref("firefox").unwrap().banner_style, BannerStyle::Brief);
+        assert_eq!(
+            get_app_pref("firefox").unwrap().banner_style,
+            BannerStyle::Brief
+        );
     }
     serial_println!("[notifprefs]  5/11 banner style OK");
 
@@ -568,14 +615,20 @@ pub fn self_test() {
     // Test 7: priority.
     {
         set_app_priority("firefox", NotifPriority::High).unwrap();
-        assert_eq!(get_app_pref("firefox").unwrap().priority, NotifPriority::High);
+        assert_eq!(
+            get_app_pref("firefox").unwrap().priority,
+            NotifPriority::High
+        );
     }
     serial_println!("[notifprefs]  7/11 priority OK");
 
     // Test 8: lock screen.
     {
         set_app_lock_screen("firefox", LockScreenVisibility::Hidden).unwrap();
-        assert_eq!(get_app_pref("firefox").unwrap().lock_screen, LockScreenVisibility::Hidden);
+        assert_eq!(
+            get_app_pref("firefox").unwrap().lock_screen,
+            LockScreenVisibility::Hidden
+        );
     }
     serial_println!("[notifprefs]  8/11 lock screen OK");
 

@@ -17,15 +17,15 @@
 //! 4. Process runs until all threads exit or it's killed.
 //! 5. `destroy()` — reclaim address space, capability table, notify parent.
 
-use alloc::collections::BTreeMap;
-use alloc::string::String;
-use alloc::vec::Vec;
-use crate::cap::{self, CapTable, Rights, ResourceType};
+use crate::cap::{self, CapTable, ResourceType, Rights};
 use crate::error::{KernelError, KernelResult};
 use crate::mm::vma::{Vma, VmaKind};
 use crate::sched::task::TaskId;
 use crate::serial_println;
 use crate::sync::Mutex;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -1237,8 +1237,7 @@ pub const LINUX_IOPRIO_DATA_MASK: i32 = (1 << LINUX_IOPRIO_CLASS_SHIFT) - 1;
 /// class at priority 4 (the middle of the BE band).  Matches
 /// what `ionice -p $$` prints on a stock Linux task that has
 /// never called `ioprio_set`.
-pub const LINUX_IOPRIO_DEFAULT: i32 =
-    (LINUX_IOPRIO_CLASS_BE << LINUX_IOPRIO_CLASS_SHIFT) | 4;
+pub const LINUX_IOPRIO_DEFAULT: i32 = (LINUX_IOPRIO_CLASS_BE << LINUX_IOPRIO_CLASS_SHIFT) | 4;
 
 /// Securebit: uid 0 does not grant capabilities (bit 0).
 pub const LINUX_SECBIT_NOROOT: u32 = 1 << 0;
@@ -1274,8 +1273,7 @@ pub const LINUX_SECURE_ALL_LOCKS: u32 = LINUX_SECBIT_NOROOT_LOCKED
 
 /// Union of all defined securebits — any bit outside this mask in
 /// `PR_SET_SECUREBITS arg2` is `EINVAL`.
-pub const LINUX_SECURE_ALL_FLAGS: u32 =
-    LINUX_SECURE_ALL_BITS | LINUX_SECURE_ALL_LOCKS;
+pub const LINUX_SECURE_ALL_FLAGS: u32 = LINUX_SECURE_ALL_BITS | LINUX_SECURE_ALL_LOCKS;
 
 /// Linux's compile-time `DEFAULT_TIMER_SLACK_NS` — the timer-slack
 /// value every fresh `task_struct` starts with on Linux (and which
@@ -1452,8 +1450,7 @@ pub const LINUX_PR_MDWE_NO_INHERIT: u32 = 2;
 
 /// Bitmask of all defined MDWE bits — anything else in
 /// `PR_SET_MDWE arg2` is `EINVAL`.
-pub const LINUX_PR_MDWE_VALID_MASK: u32 =
-    LINUX_PR_MDWE_REFUSE_EXEC_GAIN | LINUX_PR_MDWE_NO_INHERIT;
+pub const LINUX_PR_MDWE_VALID_MASK: u32 = LINUX_PR_MDWE_REFUSE_EXEC_GAIN | LINUX_PR_MDWE_NO_INHERIT;
 
 /// `prctl(PR_MCE_KILL)` policy: kill the process **after** the
 /// kernel's recovery attempt fails.
@@ -1514,7 +1511,8 @@ pub fn create(name: &str, parent: ProcessId) -> ProcessId {
         Err(e) => {
             crate::serial_println!(
                 "[proc] WARNING: PML4 alloc failed for '{}': {:?} — using kernel AS",
-                name, e
+                name,
+                e
             );
         }
     }
@@ -1971,9 +1969,7 @@ pub fn fork_create(
 /// Called after the binary is loaded and the initial thread is spawned.
 pub fn set_running(pid: ProcessId) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.state = ProcessState::Running;
     Ok(())
@@ -1982,9 +1978,7 @@ pub fn set_running(pid: ProcessId) -> KernelResult<()> {
 /// Add a thread to a process.
 pub fn add_thread(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.threads.push(task_id);
     Ok(())
@@ -2036,9 +2030,7 @@ pub fn remove_thread(
     acct: ThreadExitAccounting,
 ) -> KernelResult<(bool, Option<TaskId>, Option<TaskId>)> {
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.threads.retain(|&t| t != task_id);
 
@@ -2121,9 +2113,7 @@ pub fn grant_capability(
     rights: Rights,
 ) -> KernelResult<cap::table::CapHandle> {
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     let result = proc.cap_table.insert(resource_type, resource_id, rights);
 
@@ -2148,9 +2138,7 @@ pub fn check_capability(
     required: Rights,
 ) -> KernelResult<()> {
     let table = PROCESS_TABLE.lock();
-    let proc = table
-        .get(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     match proc.cap_table.check_rights(handle, required) {
         Ok(_) => Ok(()),
@@ -2178,14 +2166,9 @@ pub fn check_capability(
 ///
 /// - `NoSuchProcess` — PID not found.
 /// - `InvalidCapability` — one of the handles is invalid or revoked.
-pub fn remove_caps(
-    pid: ProcessId,
-    handles: &[u64],
-) -> KernelResult<Vec<cap::table::CapEntry>> {
+pub fn remove_caps(pid: ProcessId, handles: &[u64]) -> KernelResult<Vec<cap::table::CapEntry>> {
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     // Validate all first.
     for &raw in handles {
@@ -2230,9 +2213,7 @@ pub fn insert_caps(
     entries: &[(crate::cap::ResourceType, u64, Rights)],
 ) -> KernelResult<Vec<u64>> {
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     let mut new_handles = Vec::new();
     for &(resource_type, resource_id, rights) in entries {
@@ -2301,9 +2282,7 @@ pub fn set_cwd(pid: ProcessId, new_cwd: Vec<u8>) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
     proc.cwd = new_cwd;
     Ok(())
 }
@@ -2345,9 +2324,7 @@ pub fn set_exe_path(pid: ProcessId, path: Vec<u8>) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
     proc.exe_path = path;
     Ok(())
 }
@@ -2472,12 +2449,7 @@ pub fn get_rlimit(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
 ///   `new_cur > new_max`.
 /// - [`KernelError::PermissionDenied`] if `new_max` exceeds the
 ///   existing hard limit.
-pub fn set_rlimit(
-    pid: ProcessId,
-    resource: u32,
-    new_cur: u64,
-    new_max: u64,
-) -> KernelResult<()> {
+pub fn set_rlimit(pid: ProcessId, resource: u32, new_cur: u64, new_max: u64) -> KernelResult<()> {
     if resource >= NUM_RLIMITS {
         return Err(KernelError::InvalidArgument);
     }
@@ -2485,9 +2457,7 @@ pub fn set_rlimit(
         return Err(KernelError::InvalidArgument);
     }
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
     let (_, old_max) = proc.rlimits[resource as usize];
     if new_max > old_max {
         return Err(KernelError::PermissionDenied);
@@ -2597,8 +2567,7 @@ pub fn get_sid(pid: ProcessId) -> Option<ProcessId> {
 /// Every function below that needs both reads what it needs from the process
 /// table, drops that lock, and only then touches this one — so the two can
 /// never deadlock against each other regardless of caller.
-static CTTY_FG_PGRP: Mutex<BTreeMap<ProcessId, ProcessId>> =
-    Mutex::new(BTreeMap::new());
+static CTTY_FG_PGRP: Mutex<BTreeMap<ProcessId, ProcessId>> = Mutex::new(BTreeMap::new());
 
 /// Drop session `sid`'s controlling terminal, if it had one.
 ///
@@ -2809,11 +2778,7 @@ pub fn ctty_is_background(pid: ProcessId) -> bool {
 ///
 /// # Errors
 /// Returns ESRCH / EPERM per the rules above.
-pub fn set_pgid(
-    caller: ProcessId,
-    target: ProcessId,
-    pgid: ProcessId,
-) -> KernelResult<()> {
+pub fn set_pgid(caller: ProcessId, target: ProcessId, pgid: ProcessId) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
 
     // Rule 1: target must exist.
@@ -2977,10 +2942,7 @@ fn pgrp_orphan_state(pgid: ProcessId) -> (bool, bool) {
         // A guardian is a live parent outside this group but in the same
         // session.  Any guardian means the group is not orphaned.
         if let Some(p) = table.get(&m.parent) {
-            if p.pid != m.pid
-                && p.pgid != pgid
-                && p.sid == m.sid
-                && p.state != ProcessState::Zombie
+            if p.pid != m.pid && p.pgid != pgid && p.sid == m.sid && p.state != ProcessState::Zombie
             {
                 return (false, has_stopped);
             }
@@ -3178,7 +3140,10 @@ pub fn set_sched_reset_on_fork(pid: ProcessId, on: bool) -> Option<bool> {
 /// default (SCHED_OTHER demands priority 0).
 #[must_use]
 pub fn get_sched_priority(pid: ProcessId) -> Option<i32> {
-    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_sched_priority)
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| p.linux_sched_priority)
 }
 
 /// Install a new sched priority for `pid`, returning the prior
@@ -3317,7 +3282,10 @@ pub fn set_no_new_privs(pid: ProcessId, val: u32) -> Option<u32> {
 /// default (not a subreaper).
 #[must_use]
 pub fn get_child_subreaper(pid: ProcessId) -> Option<u32> {
-    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_child_subreaper)
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| p.linux_child_subreaper)
 }
 
 /// Install the child-subreaper flag for `pid`, returning the prior
@@ -3364,7 +3332,10 @@ pub fn set_thp_disable(pid: ProcessId, val: u32) -> Option<u32> {
 /// (50_000 ns).
 #[must_use]
 pub fn get_timer_slack_ns(pid: ProcessId) -> Option<u64> {
-    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_timer_slack_ns)
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| p.linux_timer_slack_ns)
 }
 
 /// Install the timer-slack value for `pid`, returning the prior
@@ -3754,9 +3725,7 @@ pub fn try_get_rlimit(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
 ///   exceed `rlimits[9].0` (the RLIMIT_AS soft limit).
 pub fn linux_as_charge(pid: ProcessId, bytes: u64) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
     let soft = proc.rlimits[RLIMIT_AS_INDEX].0;
     // saturating_add gives a deterministic large value rather than
     // wrapping; in practice the soft limit will always be the deciding
@@ -3815,7 +3784,10 @@ pub fn set_brk_region(pid: ProcessId, start: u64) {
 /// Read `(brk_start, brk_current)` for `pid`, or `None` if unknown.
 #[must_use]
 pub fn get_brk(pid: ProcessId) -> Option<(u64, u64)> {
-    PROCESS_TABLE.lock().get(&pid).map(|p| (p.brk_start, p.brk_current))
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| (p.brk_start, p.brk_current))
 }
 
 /// Update the current program break for `pid` to `new_brk`.
@@ -3877,9 +3849,7 @@ pub fn io_counters(pid: ProcessId) -> Option<(u64, u64, u64, u64)> {
 /// (e.g., by the last exiting thread or by a kill operation).
 pub fn set_exit_code(pid: ProcessId, code: i32) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.exit_code = Some(code);
     Ok(())
@@ -3908,10 +3878,7 @@ pub type JcWaiters = (Option<TaskId>, Option<TaskId>);
 /// pid (captured before the second mutable borrow).  Factored out so
 /// [`record_jc_stopped`] and [`record_jc_continued`] share identical wake
 /// semantics.
-fn take_jc_waiters(
-    table: &mut BTreeMap<ProcessId, Process>,
-    pid: ProcessId,
-) -> JcWaiters {
+fn take_jc_waiters(table: &mut BTreeMap<ProcessId, Process>, pid: ProcessId) -> JcWaiters {
     let (wake, parent) = match table.get_mut(&pid) {
         Some(proc) => (proc.wait_task.take(), proc.parent),
         None => return (None, None),
@@ -3995,11 +3962,7 @@ pub fn take_jc_report(pid: ProcessId) -> Option<JobControlEvent> {
 /// `want_stopped` selects `Stopped` reports (wait4 `WUNTRACED` / waitid
 /// `WSTOPPED`); `want_continued` selects `Continued` (`WCONTINUED`).
 #[inline]
-fn jc_event_matches(
-    ev: Option<JobControlEvent>,
-    want_stopped: bool,
-    want_continued: bool,
-) -> bool {
+fn jc_event_matches(ev: Option<JobControlEvent>, want_stopped: bool, want_continued: bool) -> bool {
     match ev {
         Some(JobControlEvent::Stopped(_)) => want_stopped,
         Some(JobControlEvent::Continued) => want_continued,
@@ -4026,7 +3989,9 @@ pub fn jc_report_for_child(
     consume: bool,
 ) -> KernelResult<Option<JobControlEvent>> {
     let mut table = PROCESS_TABLE.lock();
-    let proc = table.get_mut(&child_pid).ok_or(KernelError::NoSuchProcess)?;
+    let proc = table
+        .get_mut(&child_pid)
+        .ok_or(KernelError::NoSuchProcess)?;
     if proc.parent != parent_pid {
         return Err(KernelError::PermissionDenied);
     }
@@ -4069,7 +4034,13 @@ pub fn jc_report_group(
     want_continued: bool,
     consume: bool,
 ) -> KernelResult<Option<(ProcessId, JobControlEvent)>> {
-    jc_report_matching(parent_pid, Some(pgid), want_stopped, want_continued, consume)
+    jc_report_matching(
+        parent_pid,
+        Some(pgid),
+        want_stopped,
+        want_continued,
+        consume,
+    )
 }
 
 /// Shared body of [`jc_report_any_child`] / [`jc_report_group`]. When
@@ -4127,14 +4098,9 @@ fn jc_report_matching(
 ///
 /// The parent can call `SYS_PROCESS_CRASH_INFO` to get full details
 /// (exception code, faulting RIP, auxiliary value).
-pub fn set_crash_info(
-    pid: ProcessId,
-    info: CrashInfo,
-) -> KernelResult<()> {
+pub fn set_crash_info(pid: ProcessId, info: CrashInfo) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.exit_code = Some(crash_exit_code(info.exception_code));
     proc.crash_info = Some(info);
@@ -4216,10 +4182,7 @@ impl ExitInfo {
 ///
 /// The caller must be the parent of the child process (or PID 0 for
 /// kernel-spawned processes).
-pub fn try_reap(
-    parent_pid: ProcessId,
-    child_pid: ProcessId,
-) -> KernelResult<Option<ExitInfo>> {
+pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Option<ExitInfo>> {
     // Phase 1: Under PROCESS_TABLE lock — verify state, extract
     // process info, and remove from table.  We must extract all
     // fields needed for cleanup before dropping the lock.
@@ -4233,9 +4196,7 @@ pub fn try_reap(
 
     {
         let mut table = PROCESS_TABLE.lock();
-        let proc = table
-            .get(&child_pid)
-            .ok_or(KernelError::NoSuchProcess)?;
+        let proc = table.get(&child_pid).ok_or(KernelError::NoSuchProcess)?;
 
         // Verify parent relationship.
         if proc.parent != parent_pid {
@@ -4255,26 +4216,14 @@ pub fn try_reap(
         // its threads have already folded their ticks into `acct_*`; we also
         // carry up the child's own children-time (its reaped grandchildren),
         // mirroring Linux's `wait_task_zombie` accumulation.
-        let child_user = proc
-            .acct_user_ticks
-            .saturating_add(proc.child_user_ticks);
-        let child_sys = proc
-            .acct_sys_ticks
-            .saturating_add(proc.child_sys_ticks);
+        let child_user = proc.acct_user_ticks.saturating_add(proc.child_user_ticks);
+        let child_sys = proc.acct_sys_ticks.saturating_add(proc.child_sys_ticks);
         // Same carry-up for page faults (ru_minflt/ru_majflt children).
-        let child_min = proc
-            .acct_min_flt
-            .saturating_add(proc.child_min_flt);
-        let child_maj = proc
-            .acct_maj_flt
-            .saturating_add(proc.child_maj_flt);
+        let child_min = proc.acct_min_flt.saturating_add(proc.child_min_flt);
+        let child_maj = proc.acct_maj_flt.saturating_add(proc.child_maj_flt);
         // Same carry-up for context switches (ru_nvcsw/ru_nivcsw children).
-        let child_nv = proc
-            .acct_nvcsw
-            .saturating_add(proc.child_nvcsw);
-        let child_niv = proc
-            .acct_nivcsw
-            .saturating_add(proc.child_nivcsw);
+        let child_nv = proc.acct_nvcsw.saturating_add(proc.child_nvcsw);
+        let child_niv = proc.acct_nivcsw.saturating_add(proc.child_nivcsw);
 
         // Extract the IPC handle list and initial fds before removing.
         let mut removed = table.remove(&child_pid);
@@ -4291,18 +4240,12 @@ pub fn try_reap(
         // is removed (parent is a distinct table entry).  Absent for a
         // kernel-spawned child whose parent (pid 0) isn't in the table.
         if let Some(parent) = table.get_mut(&parent_pid) {
-            parent.child_user_ticks =
-                parent.child_user_ticks.saturating_add(child_user);
-            parent.child_sys_ticks =
-                parent.child_sys_ticks.saturating_add(child_sys);
-            parent.child_min_flt =
-                parent.child_min_flt.saturating_add(child_min);
-            parent.child_maj_flt =
-                parent.child_maj_flt.saturating_add(child_maj);
-            parent.child_nvcsw =
-                parent.child_nvcsw.saturating_add(child_nv);
-            parent.child_nivcsw =
-                parent.child_nivcsw.saturating_add(child_niv);
+            parent.child_user_ticks = parent.child_user_ticks.saturating_add(child_user);
+            parent.child_sys_ticks = parent.child_sys_ticks.saturating_add(child_sys);
+            parent.child_min_flt = parent.child_min_flt.saturating_add(child_min);
+            parent.child_maj_flt = parent.child_maj_flt.saturating_add(child_maj);
+            parent.child_nvcsw = parent.child_nvcsw.saturating_add(child_nv);
+            parent.child_nivcsw = parent.child_nivcsw.saturating_add(child_niv);
         }
 
         let info = ExitInfo { exit_code, crash };
@@ -4334,9 +4277,7 @@ pub fn try_reap(
 /// Mirrors [`try_reap`] but without a known child PID.  Cleanup is done
 /// outside the `PROCESS_TABLE` lock (same two-phase pattern) to avoid
 /// lock-ordering hazards.
-pub fn try_reap_any(
-    parent_pid: ProcessId,
-) -> KernelResult<Option<(ProcessId, ExitInfo)>> {
+pub fn try_reap_any(parent_pid: ProcessId) -> KernelResult<Option<(ProcessId, ExitInfo)>> {
     reap_any_matching(parent_pid, None)
 }
 
@@ -4400,11 +4341,18 @@ fn reap_any_matching(
         };
 
         // Extract the zombie's info and remove it from the table.
-        let (exit_code, crash, pml4_phys, child_user, child_sys, child_min, child_maj,
-             child_nv, child_niv) = {
-            let proc = table
-                .get(&child_pid)
-                .ok_or(KernelError::NoSuchProcess)?;
+        let (
+            exit_code,
+            crash,
+            pml4_phys,
+            child_user,
+            child_sys,
+            child_min,
+            child_maj,
+            child_nv,
+            child_niv,
+        ) = {
+            let proc = table.get(&child_pid).ok_or(KernelError::NoSuchProcess)?;
             (
                 proc.exit_code.unwrap_or(0),
                 proc.crash_info,
@@ -4435,18 +4383,12 @@ fn reap_any_matching(
         // Credit the parent's children-time accumulator (parent_pid is a
         // distinct entry from the just-removed child).
         if let Some(parent) = table.get_mut(&parent_pid) {
-            parent.child_user_ticks =
-                parent.child_user_ticks.saturating_add(child_user);
-            parent.child_sys_ticks =
-                parent.child_sys_ticks.saturating_add(child_sys);
-            parent.child_min_flt =
-                parent.child_min_flt.saturating_add(child_min);
-            parent.child_maj_flt =
-                parent.child_maj_flt.saturating_add(child_maj);
-            parent.child_nvcsw =
-                parent.child_nvcsw.saturating_add(child_nv);
-            parent.child_nivcsw =
-                parent.child_nivcsw.saturating_add(child_niv);
+            parent.child_user_ticks = parent.child_user_ticks.saturating_add(child_user);
+            parent.child_sys_ticks = parent.child_sys_ticks.saturating_add(child_sys);
+            parent.child_min_flt = parent.child_min_flt.saturating_add(child_min);
+            parent.child_maj_flt = parent.child_maj_flt.saturating_add(child_maj);
+            parent.child_nvcsw = parent.child_nvcsw.saturating_add(child_nv);
+            parent.child_nivcsw = parent.child_nivcsw.saturating_add(child_niv);
         }
 
         let info = ExitInfo { exit_code, crash };
@@ -4498,9 +4440,7 @@ pub fn peek_exit(
 /// `(pid, ExitInfo, uid)` without reaping.  `Err(NoChildProcess)` if the
 /// parent has no children at all (→ `ECHILD`); `Ok(None)` if it has
 /// children but none are zombies yet.
-pub fn peek_exit_any(
-    parent_pid: ProcessId,
-) -> KernelResult<Option<(ProcessId, ExitInfo, u32)>> {
+pub fn peek_exit_any(parent_pid: ProcessId) -> KernelResult<Option<(ProcessId, ExitInfo, u32)>> {
     peek_exit_matching(parent_pid, None)
 }
 
@@ -4563,9 +4503,7 @@ pub fn process_uid(pid: ProcessId) -> Option<u32> {
 /// when a service has completed startup.
 pub fn set_ready(pid: ProcessId) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.ready = true;
     Ok(())
@@ -4578,9 +4516,7 @@ pub fn set_ready(pid: ProcessId) -> KernelResult<()> {
 /// `Err(NoSuchProcess)` if the PID is not found.
 pub fn is_ready(pid: ProcessId) -> KernelResult<bool> {
     let table = PROCESS_TABLE.lock();
-    let proc = table
-        .get(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     Ok(proc.ready)
 }
@@ -4646,9 +4582,7 @@ pub fn add_vma(pid: ProcessId, vma: Vma) -> KernelResult<()> {
     use crate::mm::page_table::VirtAddr;
 
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     // Validate alignment.  VMAs are tracked at 4 KiB (hardware-page)
     // granularity, not 16 KiB: standard glibc binaries link their
@@ -4673,7 +4607,8 @@ pub fn add_vma(pid: ProcessId, vma: Vma) -> KernelResult<()> {
     }
 
     // Insert sorted by start address.
-    let pos = proc.vmas
+    let pos = proc
+        .vmas
         .binary_search_by_key(&vma.start, |v| v.start)
         .unwrap_or_else(|p| p);
     proc.vmas.insert(pos, vma);
@@ -4738,7 +4673,15 @@ pub fn reserve_unmapped_area(
         .vmas
         .binary_search_by_key(&base, |v| v.start)
         .unwrap_or_else(|p| p);
-    proc.vmas.insert(pos, Vma { start: base, end, kind, flags });
+    proc.vmas.insert(
+        pos,
+        Vma {
+            start: base,
+            end,
+            kind,
+            flags,
+        },
+    );
     Some(base)
 }
 
@@ -4875,7 +4818,11 @@ fn vma_subrange(
     flags: crate::mm::page_table::PageFlags,
 ) -> Vma {
     let kind = match orig.kind {
-        VmaKind::FileBacked { handle, file_offset, file_id } => VmaKind::FileBacked {
+        VmaKind::FileBacked {
+            handle,
+            file_offset,
+            file_id,
+        } => VmaKind::FileBacked {
             handle,
             // new_start >= orig.start by construction; wrapping_sub keeps
             // the arithmetic lint satisfied without a panic path.
@@ -4886,7 +4833,12 @@ fn vma_subrange(
         },
         other => other,
     };
-    Vma { start: new_start, end: new_end, kind, flags }
+    Vma {
+        start: new_start,
+        end: new_end,
+        kind,
+        flags,
+    }
 }
 
 /// Change the page-protection flags recorded on every VMA intersecting
@@ -5198,9 +5150,7 @@ fn resolve_subpaged_fault(
     subpages: &[Option<SubpageFill>; crate::mm::page_table::HW_PAGES_PER_FRAME],
 ) -> bool {
     use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
-    use crate::mm::page_table::{
-        self, PageFlags, VirtAddr, HW_PAGES_PER_FRAME, HW_PAGE_SIZE,
-    };
+    use crate::mm::page_table::{self, HW_PAGE_SIZE, HW_PAGES_PER_FRAME, PageFlags, VirtAddr};
 
     let hhdm = match page_table::hhdm() {
         Some(h) => h,
@@ -5266,10 +5216,7 @@ fn resolve_subpaged_fault(
         // freshly allocated, or shared but this particular subpage is
         // currently unmapped, so nothing else writes it concurrently.
         let buf = unsafe {
-            core::slice::from_raw_parts_mut(
-                (sub_phys.wrapping_add(hhdm)) as *mut u8,
-                HW_PAGE_SIZE,
-            )
+            core::slice::from_raw_parts_mut((sub_phys.wrapping_add(hhdm)) as *mut u8, HW_PAGE_SIZE)
         };
         // Zero first: defends against stale bytes in a reused frame and
         // tail-zero-fills a short file read (matching Linux page semantics).
@@ -5445,9 +5392,11 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // Guard/Fixed faults are never resolvable here.
     let file_backing = match vma.kind {
         VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk => None,
-        VmaKind::FileBacked { handle, file_offset, file_id } => {
-            Some((handle, file_offset, file_id))
-        }
+        VmaKind::FileBacked {
+            handle,
+            file_offset,
+            file_id,
+        } => Some((handle, file_offset, file_id)),
         VmaKind::Guard | VmaKind::Fixed => return false,
     };
 
@@ -5461,9 +5410,8 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // backs all four 4 KiB subpages with one shared physical frame but gives
     // each its own PTE permissions and file backing.
     if !(vma_start <= frame_base && vma_end >= frame_end) {
-        use crate::mm::page_table::{HW_PAGES_PER_FRAME, HW_PAGE_SIZE};
-        let mut subpages: [Option<SubpageFill>; HW_PAGES_PER_FRAME] =
-            [None; HW_PAGES_PER_FRAME];
+        use crate::mm::page_table::{HW_PAGE_SIZE, HW_PAGES_PER_FRAME};
+        let mut subpages: [Option<SubpageFill>; HW_PAGES_PER_FRAME] = [None; HW_PAGES_PER_FRAME];
         for (i, slot) in subpages.iter_mut().enumerate() {
             #[allow(clippy::arithmetic_side_effects)]
             let sub_va = frame_base + (i as u64) * (HW_PAGE_SIZE as u64);
@@ -5474,7 +5422,9 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
                 #[allow(clippy::arithmetic_side_effects)]
                 Err(j) => j - 1,
             };
-            let Some(sv) = proc.vmas.get(sidx) else { continue };
+            let Some(sv) = proc.vmas.get(sidx) else {
+                continue;
+            };
             if !sv.contains(sub_va) {
                 continue;
             }
@@ -5485,13 +5435,21 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
                 continue;
             }
             *slot = match sv.kind {
-                VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk => {
-                    Some(SubpageFill { flags: sv.flags, file: None })
-                }
-                VmaKind::FileBacked { handle, file_offset, .. } => {
+                VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk => Some(SubpageFill {
+                    flags: sv.flags,
+                    file: None,
+                }),
+                VmaKind::FileBacked {
+                    handle,
+                    file_offset,
+                    ..
+                } => {
                     #[allow(clippy::arithmetic_side_effects)]
                     let off = file_offset + (sub_va - sv.start);
-                    Some(SubpageFill { flags: sv.flags, file: Some((handle, off)) })
+                    Some(SubpageFill {
+                        flags: sv.flags,
+                        file: Some((handle, off)),
+                    })
                 }
                 // A Guard/Fixed subpage is left unmapped (None).
                 VmaKind::Guard | VmaKind::Fixed => None,
@@ -5539,7 +5497,13 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
         let align_mask = (FRAME_SIZE as u64).wrapping_sub(1);
         if page_file_off & align_mask == 0 {
             return resolve_file_cached(
-                pml4_phys, frame_base, flags, file_id, handle, page_file_off, pid,
+                pml4_phys,
+                frame_base,
+                flags,
+                file_id,
+                handle,
+                page_file_off,
+                pid,
             );
         }
     }
@@ -5602,9 +5566,7 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // Map the frame.
     // SAFETY: pml4_phys is the process's valid PML4, phys_frame is
     // freshly allocated, virt is within a VMA that permits this mapping.
-    let map_result = unsafe {
-        page_table::map_frame(pml4_phys, virt, phys_frame, flags)
-    };
+    let map_result = unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, flags) };
 
     if map_result.is_err() {
         // Map failed — free the frame.
@@ -5637,7 +5599,13 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // longer saturates the (slow) serial port. An unconditional serial_println
     // here previously starved the hard-lockup kick and made boots crawl/appear
     // hung (see known-issues.md, i6300esb watchdog capture 2026-07-14).
-    crate::klog!(Trace, "mm.fault", "demand-paged user frame pid={} at {:#x}", pid, frame_base);
+    crate::klog!(
+        Trace,
+        "mm.fault",
+        "demand-paged user frame pid={} at {:#x}",
+        pid,
+        frame_base
+    );
     true
 }
 
@@ -5721,9 +5689,13 @@ fn resolve_file_cached(
     // Trace-level (hot path): see the demand-page site above. Kept in the dmesg
     // ring buffer, off serial by default, to avoid the per-fault serial storm.
     crate::klog!(
-        Trace, "mm.fault",
+        Trace,
+        "mm.fault",
         "page-cache mapped pid={} at {:#x} (file {:?} off {:#x})",
-        pid, frame_base, file_id, page_file_off
+        pid,
+        frame_base,
+        file_id,
+        page_file_off
     );
     true
 }
@@ -5734,9 +5706,7 @@ fn resolve_file_cached(
 /// this task.  Only one waiter per process.
 pub fn set_wait_task(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.wait_task = Some(task_id);
     Ok(())
@@ -6028,9 +5998,11 @@ pub fn register_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle_r
 pub fn deregister_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle_raw: u64) {
     let mut table = PROCESS_TABLE.lock();
     if let Some(proc) = table.get_mut(&pid) {
-        if let Some(pos) = proc.ipc_handles.iter().position(|&(rt, h)| {
-            rt == resource_type && h == handle_raw
-        }) {
+        if let Some(pos) = proc
+            .ipc_handles
+            .iter()
+            .position(|&(rt, h)| rt == resource_type && h == handle_raw)
+        {
             proc.ipc_handles.swap_remove(pos);
         }
     }
@@ -6134,8 +6106,14 @@ pub fn set_initial_args(
     // retrieves these via SYS_PROCESS_GET_ARGS, each string gets a
     // null terminator appended (len + 1 per entry).  We must account
     // for that here so the size check is consistent.
-    let total: usize = argv.iter().map(|a| a.len().saturating_add(1)).sum::<usize>()
-        + envp.iter().map(|e| e.len().saturating_add(1)).sum::<usize>();
+    let total: usize = argv
+        .iter()
+        .map(|a| a.len().saturating_add(1))
+        .sum::<usize>()
+        + envp
+            .iter()
+            .map(|e| e.len().saturating_add(1))
+            .sum::<usize>();
     if total > MAX_ARGS_BYTES {
         return Err(KernelError::InvalidArgument);
     }
@@ -6280,10 +6258,7 @@ pub fn linux_fd_install_stdio(pid: ProcessId) -> KernelResult<()> {
 ///
 /// - [`KernelError::NoSuchProcess`] if `pid` does not refer to a live
 ///   process.
-pub fn set_linux_saved_auxv(
-    pid: ProcessId,
-    auxv: alloc::vec::Vec<u8>,
-) -> KernelResult<()> {
+pub fn set_linux_saved_auxv(pid: ProcessId, auxv: alloc::vec::Vec<u8>) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
     proc.linux_saved_auxv = Some(auxv);
@@ -6340,9 +6315,7 @@ pub fn clear_linux_saved_auxv(pid: ProcessId) {
 /// a fresh stdio-only table via [`linux_fd_install_stdio`].  Returns
 /// `None` only if `pid` does not refer to a live process at all.
 #[must_use]
-pub fn linux_fd_exec_cloexec(
-    pid: ProcessId,
-) -> Option<alloc::vec::Vec<super::linux_fd::FdEntry>> {
+pub fn linux_fd_exec_cloexec(pid: ProcessId) -> Option<alloc::vec::Vec<super::linux_fd::FdEntry>> {
     use super::linux_fd::FdEntry;
 
     let mut table = PROCESS_TABLE.lock();
@@ -6368,11 +6341,7 @@ pub fn linux_fd_exec_cloexec(
         // `excluded_fd` is irrelevant here — the cloexec entries are
         // already gone from the table, so we just scan what remains.
         // Use -1 (never a valid fd) to mean "exclude nothing extra".
-        let still_referenced = fd_table.is_handle_referenced(
-            entry.kind,
-            entry.raw_handle,
-            -1,
-        );
+        let still_referenced = fd_table.is_handle_referenced(entry.kind, entry.raw_handle, -1);
         if !still_referenced {
             to_close.push(entry);
         }
@@ -6384,10 +6353,7 @@ pub fn linux_fd_exec_cloexec(
 /// Look up `fd` in the Linux fd table.  Returns `None` if the process
 /// does not have a Linux fd table or if `fd` is unused/out-of-range.
 #[must_use]
-pub fn linux_fd_lookup(
-    pid: ProcessId,
-    fd: i32,
-) -> Option<super::linux_fd::FdEntry> {
+pub fn linux_fd_lookup(pid: ProcessId, fd: i32) -> Option<super::linux_fd::FdEntry> {
     let table = PROCESS_TABLE.lock();
     let proc = table.get(&pid)?;
     let fd_table = proc.linux_fd_table.as_ref()?;
@@ -6473,10 +6439,7 @@ pub fn linux_fd_install_at(
 /// handle.  Returns `None` if the process has no Linux fd table or
 /// `fd` was already closed.
 #[must_use]
-pub fn linux_fd_take(
-    pid: ProcessId,
-    fd: i32,
-) -> Option<super::linux_fd::FdEntry> {
+pub fn linux_fd_take(pid: ProcessId, fd: i32) -> Option<super::linux_fd::FdEntry> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid)?;
     let fd_table = proc.linux_fd_table.as_mut()?;
@@ -6494,8 +6457,12 @@ pub fn linux_fd_is_handle_referenced(
     excluded_fd: i32,
 ) -> bool {
     let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid) else { return false };
-    let Some(fd_table) = proc.linux_fd_table.as_ref() else { return false };
+    let Some(proc) = table.get(&pid) else {
+        return false;
+    };
+    let Some(fd_table) = proc.linux_fd_table.as_ref() else {
+        return false;
+    };
     fd_table.is_handle_referenced(kind, raw_handle, excluded_fd)
 }
 
@@ -6510,11 +6477,7 @@ pub fn linux_fd_is_handle_referenced(
 /// - [`KernelError::InvalidHandle`] if the process has no Linux fd
 ///   table or `oldfd` is not open.
 /// - [`KernelError::TooManyOpenFiles`] if the table is full.
-pub fn linux_fd_dup(
-    pid: ProcessId,
-    oldfd: i32,
-    min_fd: i32,
-) -> KernelResult<i32> {
+pub fn linux_fd_dup(pid: ProcessId, oldfd: i32, min_fd: i32) -> KernelResult<i32> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
     let fd_table = proc
@@ -6557,11 +6520,7 @@ pub fn linux_fd_dup2(
 ///   live process.
 /// - [`KernelError::InvalidHandle`] if `fd` is not open or the
 ///   process has no Linux fd table.
-pub fn linux_fd_set_fd_flags(
-    pid: ProcessId,
-    fd: i32,
-    fd_flags: u32,
-) -> KernelResult<()> {
+pub fn linux_fd_set_fd_flags(pid: ProcessId, fd: i32, fd_flags: u32) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
     let fd_table = proc
@@ -6577,11 +6536,7 @@ pub fn linux_fd_set_fd_flags(
 /// # Errors
 ///
 /// As [`linux_fd_set_fd_flags`].
-pub fn linux_fd_set_status_flags(
-    pid: ProcessId,
-    fd: i32,
-    new_flags: u32,
-) -> KernelResult<()> {
+pub fn linux_fd_set_status_flags(pid: ProcessId, fd: i32, new_flags: u32) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
     let fd_table = proc
@@ -6617,9 +6572,7 @@ pub fn linux_fd_get_owner(pid: ProcessId, fd: i32) -> KernelResult<i32> {
 /// (i.e. it is a native-ABI process whose fd table lives in userspace and
 /// is therefore not kernel-visible).  Backs `/proc/<pid>/fd/`.
 #[must_use]
-pub fn linux_fd_list(
-    pid: ProcessId,
-) -> Option<alloc::vec::Vec<(i32, super::linux_fd::FdEntry)>> {
+pub fn linux_fd_list(pid: ProcessId) -> Option<alloc::vec::Vec<(i32, super::linux_fd::FdEntry)>> {
     let table = PROCESS_TABLE.lock();
     let proc = table.get(&pid)?;
     let fd_table = proc.linux_fd_table.as_ref()?;
@@ -6693,7 +6646,8 @@ pub fn has_capability_for(
 ) -> bool {
     let table = PROCESS_TABLE.lock();
     if let Some(proc) = table.get(&pid) {
-        proc.cap_table.has_resource(resource_type, resource_id, required_rights)
+        proc.cap_table
+            .has_resource(resource_type, resource_id, required_rights)
     } else {
         false
     }
@@ -6711,7 +6665,8 @@ pub fn has_capability_type(
 ) -> bool {
     let table = PROCESS_TABLE.lock();
     if let Some(proc) = table.get(&pid) {
-        proc.cap_table.has_capability_type(resource_type, required_rights)
+        proc.cap_table
+            .has_capability_type(resource_type, required_rights)
     } else {
         false
     }
@@ -6754,14 +6709,9 @@ pub fn get_credentials(pid: ProcessId) -> Option<ProcessCredentials> {
 /// caller) should call this.  The authorization check is the
 /// caller's responsibility.
 #[allow(dead_code)] // Public API — called when login/user management lands.
-pub fn set_credentials(
-    pid: ProcessId,
-    credentials: ProcessCredentials,
-) -> KernelResult<()> {
+pub fn set_credentials(pid: ProcessId, credentials: ProcessCredentials) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get_mut(&pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.credentials = credentials;
     Ok(())
@@ -6812,9 +6762,7 @@ pub fn process_child_ticks(pid: ProcessId) -> (u64, u64) {
 #[must_use]
 pub fn process_acct_faults(pid: ProcessId) -> Option<(u64, u64)> {
     let table = PROCESS_TABLE.lock();
-    table
-        .get(&pid)
-        .map(|p| (p.acct_min_flt, p.acct_maj_flt))
+    table.get(&pid).map(|p| (p.acct_min_flt, p.acct_maj_flt))
 }
 
 /// Get a process's accumulated children page faults (from reaped
@@ -6840,9 +6788,7 @@ pub fn process_child_faults(pid: ProcessId) -> (u64, u64) {
 #[must_use]
 pub fn process_acct_ctxsw(pid: ProcessId) -> Option<(u64, u64)> {
     let table = PROCESS_TABLE.lock();
-    table
-        .get(&pid)
-        .map(|p| (p.acct_nvcsw, p.acct_nivcsw))
+    table.get(&pid).map(|p| (p.acct_nvcsw, p.acct_nivcsw))
 }
 
 /// Get a process's accumulated children context switches (from reaped
@@ -6937,7 +6883,15 @@ fn test_prot_none() -> KernelResult<()> {
     let base: u64 = 0x0000_0030_0000_0000; // 192 GiB, clear of other windows
     let end = base.saturating_add(frame);
     let none_flags = PageFlags::PRESENT | PageFlags::NO_EXECUTE;
-    if let Err(e) = add_vma(pid, Vma { start: base, end, kind: VmaKind::Anonymous, flags: none_flags }) {
+    if let Err(e) = add_vma(
+        pid,
+        Vma {
+            start: base,
+            end,
+            kind: VmaKind::Anonymous,
+            flags: none_flags,
+        },
+    ) {
         serial_println!("[proc]   FAIL: prot-none add_vma {:?}", e);
         destroy(pid);
         return Err(KernelError::InternalError);
@@ -7028,7 +6982,8 @@ fn test_reset_linux_state_for_exec() -> KernelResult<()> {
         serial_println!(
             "[proc]   FAIL: set_keepcaps did not coherently set securebits bit 4 \
              (keepcaps={:?} securebits={:?})",
-            get_keepcaps(pid), get_securebits(pid),
+            get_keepcaps(pid),
+            get_securebits(pid),
         );
         destroy(pid);
         return Err(KernelError::InternalError);
@@ -7047,7 +7002,9 @@ fn test_reset_linux_state_for_exec() -> KernelResult<()> {
         serial_println!(
             "[proc]   FAIL: exec reset did not clear membarrier/dumpable/keepcaps/securebits \
              (membarrier={:?} dumpable={:?} keepcaps={:?} securebits={:?})",
-            membarrier_state(pid), get_dumpable(pid), get_keepcaps(pid),
+            membarrier_state(pid),
+            get_dumpable(pid),
+            get_keepcaps(pid),
             get_securebits(pid),
         );
         destroy(pid);
@@ -7065,8 +7022,11 @@ fn test_reset_linux_state_for_exec() -> KernelResult<()> {
         serial_println!(
             "[proc]   FAIL: exec reset clobbered a preserved field \
              (thp={:?} pdeathsig={:?} persona={:?} nnp={:?} subreaper={:?})",
-            get_thp_disable(pid), get_pdeathsig(pid), get_personality(pid),
-            get_no_new_privs(pid), get_child_subreaper(pid),
+            get_thp_disable(pid),
+            get_pdeathsig(pid),
+            get_personality(pid),
+            get_no_new_privs(pid),
+            get_child_subreaper(pid),
         );
         destroy(pid);
         return Err(KernelError::InternalError);
@@ -7127,7 +7087,14 @@ fn test_reserve_unmapped_area() -> KernelResult<()> {
     let flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::WRITABLE;
 
     // (1) First reservation → window base, with a registered Anonymous VMA.
-    let a = reserve_unmapped_area(pid, frame, region_start, region_end, VmaKind::Anonymous, flags);
+    let a = reserve_unmapped_area(
+        pid,
+        frame,
+        region_start,
+        region_end,
+        VmaKind::Anonymous,
+        flags,
+    );
     if a != Some(region_start) {
         serial_println!("[proc]   FAIL: first reserve should land at window base");
         destroy(pid);
@@ -7146,7 +7113,14 @@ fn test_reserve_unmapped_area() -> KernelResult<()> {
     }
 
     // (2) Second same-size reservation → immediately after the first.
-    let b = reserve_unmapped_area(pid, frame, region_start, region_end, VmaKind::Anonymous, flags);
+    let b = reserve_unmapped_area(
+        pid,
+        frame,
+        region_start,
+        region_end,
+        VmaKind::Anonymous,
+        flags,
+    );
     if b != Some(region_start.saturating_add(frame)) {
         serial_println!("[proc]   FAIL: second reserve should follow the first (no overlap)");
         destroy(pid);
@@ -7159,7 +7133,14 @@ fn test_reserve_unmapped_area() -> KernelResult<()> {
         destroy(pid);
         return Err(KernelError::InternalError);
     }
-    let c = reserve_unmapped_area(pid, frame, region_start, region_end, VmaKind::Anonymous, flags);
+    let c = reserve_unmapped_area(
+        pid,
+        frame,
+        region_start,
+        region_end,
+        VmaKind::Anonymous,
+        flags,
+    );
     if c != Some(region_start) {
         serial_println!("[proc]   FAIL: reserve should reuse the freed hole at base");
         destroy(pid);
@@ -7192,8 +7173,15 @@ fn test_reserve_unmapped_area() -> KernelResult<()> {
     destroy(pid);
 
     // (5) Unknown pid → None.
-    if reserve_unmapped_area(pid, frame, region_start, region_end, VmaKind::Anonymous, flags)
-        .is_some()
+    if reserve_unmapped_area(
+        pid,
+        frame,
+        region_start,
+        region_end,
+        VmaKind::Anonymous,
+        flags,
+    )
+    .is_some()
     {
         serial_println!("[proc]   FAIL: unknown pid should yield None");
         return Err(KernelError::InternalError);
@@ -7253,9 +7241,7 @@ fn test_job_control_state() -> KernelResult<()> {
     }
 
     // take consumes the report exactly once.
-    if take_jc_report(pid) != Some(JobControlEvent::Continued)
-        || take_jc_report(pid).is_some()
-    {
+    if take_jc_report(pid) != Some(JobControlEvent::Continued) || take_jc_report(pid).is_some() {
         serial_println!("[proc]   FAIL: take did not consume report once");
         destroy(pid);
         return Err(KernelError::InternalError);
@@ -7264,8 +7250,7 @@ fn test_job_control_state() -> KernelResult<()> {
     destroy(pid);
 
     // Unknown pid: queries are None/false, records are NoSuchProcess.
-    if is_stopped(pid) || peek_jc_report(pid).is_some() || take_jc_report(pid).is_some()
-    {
+    if is_stopped(pid) || peek_jc_report(pid).is_some() || take_jc_report(pid).is_some() {
         serial_println!("[proc]   FAIL: reaped pid reports job-control state");
         return Err(KernelError::InternalError);
     }
@@ -7298,8 +7283,7 @@ fn test_job_control_state() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     // Peek (consume=false) leaves the report; report stays after.
-    if jc_report_for_child(parent, child, true, false, false)?
-        != Some(JobControlEvent::Stopped(19))
+    if jc_report_for_child(parent, child, true, false, false)? != Some(JobControlEvent::Stopped(19))
         || peek_jc_report(child) != Some(JobControlEvent::Stopped(19))
     {
         serial_println!("[proc]   FAIL: non-consuming jc check cleared report");
@@ -7339,8 +7323,7 @@ fn test_job_control_state() -> KernelResult<()> {
     }
     destroy(child);
     // No children at all → NoChildProcess (ECHILD).
-    if jc_report_any_child(parent, true, true, false) != Err(KernelError::NoChildProcess)
-    {
+    if jc_report_any_child(parent, true, true, false) != Err(KernelError::NoChildProcess) {
         serial_println!("[proc]   FAIL: childless any-child scan not ECHILD");
         destroy(parent);
         return Err(KernelError::InternalError);
@@ -7395,7 +7378,10 @@ fn test_process_groups() -> KernelResult<()> {
     // leader (sid==parent), and pgid==child creates a new group.
     set_pgid(parent, child, child)?;
     if get_pgid(child) != Some(child) {
-        return fail("set_pgid did not move child into new group", &[parent, child]);
+        return fail(
+            "set_pgid did not move child into new group",
+            &[parent, child],
+        );
     }
     // The parent's group lost the child; the child's new group has it.
     if pids_in_group(parent) != alloc::vec![parent] {
@@ -7421,13 +7407,19 @@ fn test_process_groups() -> KernelResult<()> {
     let stranger = create("pg-stranger", 0);
     set_running(stranger)?;
     if set_pgid(parent, stranger, stranger) != Err(KernelError::NoSuchProcess) {
-        return fail("set_pgid on non-child should ESRCH", &[parent, child, stranger]);
+        return fail(
+            "set_pgid on non-child should ESRCH",
+            &[parent, child, stranger],
+        );
     }
 
     // setpgid error: cannot join a group that doesn't exist in the
     // session. Move the child to a group id that no live process holds.
     if set_pgid(parent, child, 7_654_321) != Err(KernelError::PermissionDenied) {
-        return fail("joining a nonexistent group should EPERM", &[parent, child, stranger]);
+        return fail(
+            "joining a nonexistent group should EPERM",
+            &[parent, child, stranger],
+        );
     }
 
     // setsid: fork a second child (inherits parent's group → NOT a group
@@ -7435,19 +7427,20 @@ fn test_process_groups() -> KernelResult<()> {
     let child2 = fork_create(parent, 0, Vec::new(), Vec::new())?;
     set_running(child2)?;
     let new_sid = setsid(child2)?;
-    if new_sid != child2
-        || get_sid(child2) != Some(child2)
-        || get_pgid(child2) != Some(child2)
-    {
-        return fail("setsid did not make child2 a session/group leader",
-            &[parent, child, stranger, child2]);
+    if new_sid != child2 || get_sid(child2) != Some(child2) || get_pgid(child2) != Some(child2) {
+        return fail(
+            "setsid did not make child2 a session/group leader",
+            &[parent, child, stranger, child2],
+        );
     }
 
     // setsid error: a group leader cannot start a new session. `child` was
     // made a group leader (pgid==child) above → EPERM.
     if setsid(child) != Err(KernelError::PermissionDenied) {
-        return fail("setsid on a group leader should EPERM",
-            &[parent, child, stranger, child2]);
+        return fail(
+            "setsid on a group leader should EPERM",
+            &[parent, child, stranger, child2],
+        );
     }
 
     destroy(child2);
@@ -7489,7 +7482,10 @@ fn test_controlling_terminal() -> KernelResult<()> {
     let shell = create("ctty-shell", 0);
     set_running(shell)?;
     if ctty_get_fg_pgrp(shell) != Err(KernelError::NotSupported) {
-        return fail("fresh session should have no controlling terminal", &[shell]);
+        return fail(
+            "fresh session should have no controlling terminal",
+            &[shell],
+        );
     }
     if ctty_set_fg_pgrp(shell, shell) != Err(KernelError::NotSupported) {
         return fail("tcsetpgrp with no terminal should be ENOTTY", &[shell]);
@@ -7504,7 +7500,10 @@ fn test_controlling_terminal() -> KernelResult<()> {
     //     shell's own group the foreground one.
     ctty_acquire(shell)?;
     if ctty_get_fg_pgrp(shell) != Ok(shell) {
-        return fail("tcgetpgrp did not report the claimed foreground group", &[shell]);
+        return fail(
+            "tcgetpgrp did not report the claimed foreground group",
+            &[shell],
+        );
     }
 
     // (3) THE POINT: a job in the same session sees the *same* value,
@@ -7512,27 +7511,42 @@ fn test_controlling_terminal() -> KernelResult<()> {
     let job = fork_create(shell, 0, Vec::new(), Vec::new())?;
     set_running(job)?;
     if ctty_get_fg_pgrp(job) != Ok(shell) {
-        return fail("a second process in the session read a different fg group", &[shell, job]);
+        return fail(
+            "a second process in the session read a different fg group",
+            &[shell, job],
+        );
     }
 
     // Put the job in its own group, as a shell does before running it, and
     // check the background predicate both ways round.
     set_pgid(shell, job, job)?;
     if !ctty_is_background(job) {
-        return fail("a job outside the fg group should be background", &[shell, job]);
+        return fail(
+            "a job outside the fg group should be background",
+            &[shell, job],
+        );
     }
     if ctty_is_background(shell) {
-        return fail("the fg group's own members should not be background", &[shell, job]);
+        return fail(
+            "the fg group's own members should not be background",
+            &[shell, job],
+        );
     }
 
     // Hand the terminal to the job — the foreground/background verdict must
     // flip for *both* processes off one write.
     ctty_set_fg_pgrp(shell, job)?;
     if ctty_get_fg_pgrp(job) != Ok(job) || ctty_get_fg_pgrp(shell) != Ok(job) {
-        return fail("tcsetpgrp was not visible to both session members", &[shell, job]);
+        return fail(
+            "tcsetpgrp was not visible to both session members",
+            &[shell, job],
+        );
     }
     if ctty_is_background(job) || !ctty_is_background(shell) {
-        return fail("foreground/background did not flip after the handoff", &[shell, job]);
+        return fail(
+            "foreground/background did not flip after the handoff",
+            &[shell, job],
+        );
     }
 
     // (4) Argument gates: pgid 0 is not a group, and handing the terminal to
@@ -7553,30 +7567,48 @@ fn test_controlling_terminal() -> KernelResult<()> {
     let stranger = create("ctty-stranger", 0);
     set_running(stranger)?;
     if ctty_set_fg_pgrp(shell, stranger) != Err(KernelError::PermissionDenied) {
-        return fail("tcsetpgrp to another session's group should be EPERM", &[shell, job, stranger]);
+        return fail(
+            "tcsetpgrp to another session's group should be EPERM",
+            &[shell, job, stranger],
+        );
     }
     if ctty_get_fg_pgrp(stranger) != Err(KernelError::NotSupported) {
-        return fail("another session saw our controlling terminal", &[shell, job, stranger]);
+        return fail(
+            "another session saw our controlling terminal",
+            &[shell, job, stranger],
+        );
     }
     if ctty_is_background(stranger) {
-        return fail("a process with no terminal cannot be in its background", &[shell, job, stranger]);
+        return fail(
+            "a process with no terminal cannot be in its background",
+            &[shell, job, stranger],
+        );
     }
     // Nor may the stranger simply claim the console out from under us, even
     // though it is a session leader in good standing: the console is taken.
     if ctty_acquire(stranger) != Err(KernelError::PermissionDenied) {
-        return fail("a second session claimed the console", &[shell, job, stranger]);
+        return fail(
+            "a second session claimed the console",
+            &[shell, job, stranger],
+        );
     }
     // And a non-leader may not claim at all. `job` is in the shell's session
     // (sid == shell), so it fails the leader test rather than the free test.
     if ctty_acquire(job) != Err(KernelError::PermissionDenied) {
-        return fail("a non-session-leader claimed the console", &[shell, job, stranger]);
+        return fail(
+            "a non-session-leader claimed the console",
+            &[shell, job, stranger],
+        );
     }
     // Re-claiming a terminal our session already holds succeeds and must NOT
     // reset the foreground group — a program calling TIOCSCTTY defensively
     // at startup must not yank the terminal back from the foreground job.
     ctty_acquire(shell)?;
     if ctty_get_fg_pgrp(shell) != Ok(job) {
-        return fail("a redundant TIOCSCTTY reset the foreground group", &[shell, job, stranger]);
+        return fail(
+            "a redundant TIOCSCTTY reset the foreground group",
+            &[shell, job, stranger],
+        );
     }
 
     // (6) A zombie group member does not keep the group eligible. Kill the
@@ -7584,13 +7616,18 @@ fn test_controlling_terminal() -> KernelResult<()> {
     //     (The shell keeps the terminal it already holds — releasing it is
     //     the shell's job, not the kernel's.)
     add_thread(job, 91_010)?;
-    let (became_zombie, _wake, _any) =
-        remove_thread(job, 91_010, ThreadExitAccounting::default())?;
+    let (became_zombie, _wake, _any) = remove_thread(job, 91_010, ThreadExitAccounting::default())?;
     if !became_zombie || state(job) != Some(ProcessState::Zombie) {
-        return fail("could not park the job as a zombie", &[shell, job, stranger]);
+        return fail(
+            "could not park the job as a zombie",
+            &[shell, job, stranger],
+        );
     }
     if ctty_set_fg_pgrp(shell, job) != Err(KernelError::PermissionDenied) {
-        return fail("tcsetpgrp to an all-zombie group should be EPERM", &[shell, job, stranger]);
+        return fail(
+            "tcsetpgrp to an all-zombie group should be EPERM",
+            &[shell, job, stranger],
+        );
     }
 
     // (7) `setsid` leaves the new session with no controlling terminal, and
@@ -7600,10 +7637,16 @@ fn test_controlling_terminal() -> KernelResult<()> {
     set_running(daemon)?;
     setsid(daemon)?;
     if ctty_get_fg_pgrp(daemon) != Err(KernelError::NotSupported) {
-        return fail("setsid did not drop the controlling terminal", &[shell, job, stranger, daemon]);
+        return fail(
+            "setsid did not drop the controlling terminal",
+            &[shell, job, stranger, daemon],
+        );
     }
     if ctty_get_fg_pgrp(shell) != Ok(shell) {
-        return fail("setsid disturbed the old session's terminal", &[shell, job, stranger, daemon]);
+        return fail(
+            "setsid disturbed the old session's terminal",
+            &[shell, job, stranger, daemon],
+        );
     }
 
     // (9) `TIOCNOTTY`: only the session leader may release, and the release
@@ -7611,28 +7654,39 @@ fn test_controlling_terminal() -> KernelResult<()> {
     //     `daemon` is in its own session with no terminal, so it gets ENOTTY
     //     rather than a permission verdict about someone else's terminal.
     if ctty_release(daemon) != Err(KernelError::NotSupported) {
-        return fail("TIOCNOTTY with no terminal should be ENOTTY", &[shell, job, stranger, daemon]);
+        return fail(
+            "TIOCNOTTY with no terminal should be ENOTTY",
+            &[shell, job, stranger, daemon],
+        );
     }
     let rejoined = fork_create(shell, 0, Vec::new(), Vec::new())?;
     set_running(rejoined)?;
     if ctty_release(rejoined) != Err(KernelError::PermissionDenied) {
-        return fail("a non-leader released the session's terminal",
-            &[shell, job, stranger, daemon, rejoined]);
+        return fail(
+            "a non-leader released the session's terminal",
+            &[shell, job, stranger, daemon, rejoined],
+        );
     }
     if ctty_release(shell) != Ok(shell) {
-        return fail("TIOCNOTTY did not report the foreground group it dropped",
-            &[shell, job, stranger, daemon, rejoined]);
+        return fail(
+            "TIOCNOTTY did not report the foreground group it dropped",
+            &[shell, job, stranger, daemon, rejoined],
+        );
     }
     // Gone for the whole session, not just the leader.
     if ctty_get_fg_pgrp(rejoined) != Err(KernelError::NotSupported) {
-        return fail("TIOCNOTTY left the terminal attached for other members",
-            &[shell, job, stranger, daemon, rejoined]);
+        return fail(
+            "TIOCNOTTY left the terminal attached for other members",
+            &[shell, job, stranger, daemon, rejoined],
+        );
     }
     // Released means free: another session may now claim it.
     ctty_acquire(stranger)?;
     if ctty_get_fg_pgrp(stranger) != Ok(stranger) {
-        return fail("the console was not reclaimable after TIOCNOTTY",
-            &[shell, job, stranger, daemon, rejoined]);
+        return fail(
+            "the console was not reclaimable after TIOCNOTTY",
+            &[shell, job, stranger, daemon, rejoined],
+        );
     }
 
     // (10) The association is released when the session's last member goes.
@@ -7689,7 +7743,10 @@ fn test_orphaned_pgrp() -> KernelResult<()> {
         return fail("guarded group reported orphaned", &[shell, job]);
     }
     if guarded_child_pgrps(shell) != alloc::vec![job] {
-        return fail("guarded_child_pgrps did not list the job group", &[shell, job]);
+        return fail(
+            "guarded_child_pgrps did not list the job group",
+            &[shell, job],
+        );
     }
 
     // Stop the job. A *guarded* stopped group must still not be orphaned.
@@ -7783,9 +7840,7 @@ fn test_mmap_commit_policy() -> KernelResult<()> {
     destroy(pid);
 
     // Unknown pid is a silent None for both accessors.
-    if get_mmap_commit_policy(pid).is_some()
-        || set_mmap_commit_policy(pid, ForceLazy).is_some()
-    {
+    if get_mmap_commit_policy(pid).is_some() || set_mmap_commit_policy(pid, ForceLazy).is_some() {
         serial_println!("[proc]   FAIL: unknown pid should yield None");
         return Err(KernelError::InternalError);
     }
@@ -7912,12 +7967,7 @@ fn test_thread_lifecycle() -> KernelResult<()> {
 fn test_capability_integration() -> KernelResult<()> {
     let pid = create("cap-test", 0);
 
-    let handle = grant_capability(
-        pid,
-        ResourceType::Channel,
-        42,
-        Rights::READ | Rights::WRITE,
-    )?;
+    let handle = grant_capability(pid, ResourceType::Channel, 42, Rights::READ | Rights::WRITE)?;
 
     // Check should pass for READ.
     check_capability(pid, handle, Rights::READ)?;
@@ -7926,10 +7976,7 @@ fn test_capability_integration() -> KernelResult<()> {
     match check_capability(pid, handle, Rights::EXECUTE) {
         Err(KernelError::PermissionDenied) => {} // Expected.
         other => {
-            serial_println!(
-                "[proc]   FAIL: execute check should fail: {:?}",
-                other
-            );
+            serial_println!("[proc]   FAIL: execute check should fail: {:?}", other);
             destroy(pid);
             return Err(KernelError::InternalError);
         }
@@ -8007,7 +8054,12 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         grandchild,
         970,
         ThreadExitAccounting {
-            user_ticks: 2, sys_ticks: 1, min_flt: 3, maj_flt: 1, nvcsw: 6, nivcsw: 4,
+            user_ticks: 2,
+            sys_ticks: 1,
+            min_flt: 3,
+            maj_flt: 1,
+            nvcsw: 6,
+            nivcsw: 4,
         },
     )?;
     if !gc_zombie {
@@ -8022,8 +8074,10 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
     // through both the raw accessor and process_cpu_ticks (no live
     // threads remain, so the total is exactly the accumulator).
     if process_acct_ticks(grandchild) != Some((2, 1)) {
-        serial_println!("[proc]   FAIL: grandchild acct ticks != (2,1): {:?}",
-            process_acct_ticks(grandchild));
+        serial_println!(
+            "[proc]   FAIL: grandchild acct ticks != (2,1): {:?}",
+            process_acct_ticks(grandchild)
+        );
         destroy(grandchild);
         destroy(child);
         destroy(parent);
@@ -8038,8 +8092,10 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
     }
     // Same property for the page-fault accumulator.
     if process_acct_faults(grandchild) != Some((3, 1)) {
-        serial_println!("[proc]   FAIL: grandchild acct faults != (3,1): {:?}",
-            process_acct_faults(grandchild));
+        serial_println!(
+            "[proc]   FAIL: grandchild acct faults != (3,1): {:?}",
+            process_acct_faults(grandchild)
+        );
         destroy(grandchild);
         destroy(child);
         destroy(parent);
@@ -8054,8 +8110,10 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
     }
     // Same property for the context-switch accumulator.
     if process_acct_ctxsw(grandchild) != Some((6, 4)) {
-        serial_println!("[proc]   FAIL: grandchild acct ctxsw != (6,4): {:?}",
-            process_acct_ctxsw(grandchild));
+        serial_println!(
+            "[proc]   FAIL: grandchild acct ctxsw != (6,4): {:?}",
+            process_acct_ctxsw(grandchild)
+        );
         destroy(grandchild);
         destroy(child);
         destroy(parent);
@@ -8082,22 +8140,28 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         }
     }
     if process_child_ticks(child) != (2, 1) {
-        serial_println!("[proc]   FAIL: child children-time != (2,1): {:?}",
-            process_child_ticks(child));
+        serial_println!(
+            "[proc]   FAIL: child children-time != (2,1): {:?}",
+            process_child_ticks(child)
+        );
         destroy(child);
         destroy(parent);
         return Err(KernelError::InternalError);
     }
     if process_child_faults(child) != (3, 1) {
-        serial_println!("[proc]   FAIL: child children-faults != (3,1): {:?}",
-            process_child_faults(child));
+        serial_println!(
+            "[proc]   FAIL: child children-faults != (3,1): {:?}",
+            process_child_faults(child)
+        );
         destroy(child);
         destroy(parent);
         return Err(KernelError::InternalError);
     }
     if process_child_ctxsw(child) != (6, 4) {
-        serial_println!("[proc]   FAIL: child children-ctxsw != (6,4): {:?}",
-            process_child_ctxsw(child));
+        serial_println!(
+            "[proc]   FAIL: child children-ctxsw != (6,4): {:?}",
+            process_child_ctxsw(child)
+        );
         destroy(child);
         destroy(parent);
         return Err(KernelError::InternalError);
@@ -8112,7 +8176,12 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         child,
         971,
         ThreadExitAccounting {
-            user_ticks: 5, sys_ticks: 3, min_flt: 4, maj_flt: 2, nvcsw: 7, nivcsw: 5,
+            user_ticks: 5,
+            sys_ticks: 3,
+            min_flt: 4,
+            maj_flt: 2,
+            nvcsw: 7,
+            nivcsw: 5,
         },
     )?;
     if !c_zombie {
@@ -8130,28 +8199,36 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         }
     }
     if process_child_ticks(parent) != (7, 4) {
-        serial_println!("[proc]   FAIL: parent children-time != (7,4): {:?}",
-            process_child_ticks(parent));
+        serial_println!(
+            "[proc]   FAIL: parent children-time != (7,4): {:?}",
+            process_child_ticks(parent)
+        );
         destroy(parent);
         return Err(KernelError::InternalError);
     }
     // Parent children-faults: child's own (4,2) + child's children (3,1) = (7,3).
     if process_child_faults(parent) != (7, 3) {
-        serial_println!("[proc]   FAIL: parent children-faults != (7,3): {:?}",
-            process_child_faults(parent));
+        serial_println!(
+            "[proc]   FAIL: parent children-faults != (7,3): {:?}",
+            process_child_faults(parent)
+        );
         destroy(parent);
         return Err(KernelError::InternalError);
     }
     // Parent children-ctxsw: child's own (7,5) + child's children (6,4) = (13,9).
     if process_child_ctxsw(parent) != (13, 9) {
-        serial_println!("[proc]   FAIL: parent children-ctxsw != (13,9): {:?}",
-            process_child_ctxsw(parent));
+        serial_println!(
+            "[proc]   FAIL: parent children-ctxsw != (13,9): {:?}",
+            process_child_ctxsw(parent)
+        );
         destroy(parent);
         return Err(KernelError::InternalError);
     }
 
     destroy(parent);
-    serial_println!("[proc]   CPU-time + fault + ctxsw accounting (exited-thread fold + children carry-up): OK");
+    serial_println!(
+        "[proc]   CPU-time + fault + ctxsw accounting (exited-thread fold + children carry-up): OK"
+    );
     Ok(())
 }
 
@@ -8168,7 +8245,10 @@ fn test_reap_zombie() -> KernelResult<()> {
     match try_reap(parent_pid, child_pid)? {
         None => {} // Expected: child still running.
         Some(info) => {
-            serial_println!("[proc]   FAIL: reap should return None (still running), got {}", info.exit_code);
+            serial_println!(
+                "[proc]   FAIL: reap should return None (still running), got {}",
+                info.exit_code
+            );
             destroy(child_pid);
             destroy(parent_pid);
             return Err(KernelError::InternalError);
@@ -8196,8 +8276,10 @@ fn test_reap_zombie() -> KernelResult<()> {
             }
         }
         other => {
-            serial_println!("[proc]   FAIL: reap should return exit_code=42, got {:?}",
-                other.map(|i| i.exit_code));
+            serial_println!(
+                "[proc]   FAIL: reap should return exit_code=42, got {:?}",
+                other.map(|i| i.exit_code)
+            );
             destroy(parent_pid);
             return Err(KernelError::InternalError);
         }
@@ -8271,7 +8353,10 @@ fn test_reap_zombie() -> KernelResult<()> {
         let proc = table.get(&crash_child).expect("crash child exists");
         let code = proc.exit_code.unwrap_or(0);
         if code >= 0 {
-            serial_println!("[proc]   FAIL: crash exit code should be negative, got {}", code);
+            serial_println!(
+                "[proc]   FAIL: crash exit code should be negative, got {}",
+                code
+            );
             drop(table);
             destroy(crash_child);
             destroy(crash_parent);
@@ -8297,7 +8382,10 @@ fn test_reap_zombie() -> KernelResult<()> {
     match try_reap(crash_parent, crash_child)? {
         Some(exit_info) => {
             if exit_info.exit_code != -8 {
-                serial_println!("[proc]   FAIL: reap crash exit_code should be -8, got {}", exit_info.exit_code);
+                serial_println!(
+                    "[proc]   FAIL: reap crash exit_code should be -8, got {}",
+                    exit_info.exit_code
+                );
                 destroy(crash_parent);
                 return Err(KernelError::InternalError);
             }
@@ -8400,7 +8488,10 @@ fn test_reap_any() -> KernelResult<()> {
     match try_reap_any(parent_pid)? {
         None => {} // Expected.
         Some((p, _)) => {
-            serial_println!("[proc]   FAIL: reap_any should still block (child_a alive), reaped {}", p);
+            serial_println!(
+                "[proc]   FAIL: reap_any should still block (child_a alive), reaped {}",
+                p
+            );
             destroy(child_a);
             destroy(parent_pid);
             return Err(KernelError::InternalError);
@@ -8419,8 +8510,10 @@ fn test_reap_any() -> KernelResult<()> {
     match try_reap_any(parent_pid)? {
         Some((reaped, _)) if reaped == child_a => {}
         other => {
-            serial_println!("[proc]   FAIL: reap_any should reap child_a, got {:?}",
-                other.map(|(p, _)| p));
+            serial_println!(
+                "[proc]   FAIL: reap_any should reap child_a, got {:?}",
+                other.map(|(p, _)| p)
+            );
             destroy(parent_pid);
             return Err(KernelError::InternalError);
         }
@@ -8430,8 +8523,10 @@ fn test_reap_any() -> KernelResult<()> {
     match try_reap_any(parent_pid) {
         Err(KernelError::NoChildProcess) => {} // Expected.
         other => {
-            serial_println!("[proc]   FAIL: reap_any after all reaped should be NoChildProcess, got {:?}",
-                other.map(|o| o.map(|(p, _)| p)));
+            serial_println!(
+                "[proc]   FAIL: reap_any after all reaped should be NoChildProcess, got {:?}",
+                other.map(|o| o.map(|(p, _)| p))
+            );
             destroy(parent_pid);
             return Err(KernelError::InternalError);
         }

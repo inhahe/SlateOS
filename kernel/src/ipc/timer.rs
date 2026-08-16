@@ -31,8 +31,8 @@
 // debug accessors that aren't all wired up to syscalls yet.
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Timer table — fixed-size, lock-free for ISR access
@@ -104,7 +104,11 @@ pub fn create(duration_ns: u64, flags: u64) -> crate::error::KernelResult<u64> {
 
     let now = crate::apic::tick_count();
     let deadline = now.saturating_add(ticks);
-    let interval = if flags & TIMER_PERIODIC != 0 { ticks } else { 0 };
+    let interval = if flags & TIMER_PERIODIC != 0 {
+        ticks
+    } else {
+        0
+    };
 
     let handle = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
 

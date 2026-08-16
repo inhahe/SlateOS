@@ -311,14 +311,7 @@ impl Registry {
 
     /// Register a new parameter.  Returns false if the registry is full
     /// or the ID is already registered.
-    fn register(
-        &mut self,
-        id: u16,
-        name: &'static str,
-        default: u64,
-        min: u64,
-        max: u64,
-    ) -> bool {
+    fn register(&mut self, id: u16, name: &'static str, default: u64, min: u64, max: u64) -> bool {
         // Check for duplicate ID.
         for p in self.params.iter().take(self.count) {
             if p.active && p.id == id {
@@ -412,15 +405,15 @@ pub fn init() {
     reg.register(
         PARAM_MM_MAX_STACK_FRAMES,
         "mm.max_stack_frames",
-        256,    // 4 MiB default
-        16,     // 256 KiB minimum
-        4096,   // 64 MiB maximum
+        256,  // 4 MiB default
+        16,   // 256 KiB minimum
+        4096, // 64 MiB maximum
     );
 
     reg.register(
         PARAM_MM_LAZY_DEFAULT,
         "mm.lazy_default",
-        0,  // 0 = committed (default per design spec)
+        0, // 0 = committed (default per design spec)
         0,
         1,
     );
@@ -428,7 +421,7 @@ pub fn init() {
     reg.register(
         PARAM_MM_OOM_POLICY,
         "mm.oom_policy",
-        0,  // Kill largest
+        0, // Kill largest
         0,
         2,
     );
@@ -436,7 +429,7 @@ pub fn init() {
     reg.register(
         PARAM_MM_ZERO_ON_ALLOC,
         "mm.zero_on_alloc",
-        0,  // Zero on allocation (secure default)
+        0, // Zero on allocation (secure default)
         0,
         1,
     );
@@ -452,8 +445,8 @@ pub fn init() {
     reg.register(
         PARAM_MM_MIN_FREE_PAGES,
         "mm.min_free_pages",
-        32, // 512 KiB of free memory at 16 KiB/page
-        4,  // Minimum: 64 KiB
+        32,   // 512 KiB of free memory at 16 KiB/page
+        4,    // Minimum: 64 KiB
         1024, // Maximum: 16 MiB
     );
 
@@ -468,15 +461,15 @@ pub fn init() {
     reg.register(
         PARAM_MM_ALLOC_TRACE,
         "mm.alloc_trace",
-        0,  // Disabled (zero-cost single atomic load per alloc/free)
+        0, // Disabled (zero-cost single atomic load per alloc/free)
         0,
-        1,  // 1 = enabled
+        1, // 1 = enabled
     );
 
     reg.register(
         PARAM_MM_LINUX_LAZY_DEFAULT,
         "mm.linux_lazy_default",
-        1,  // 1 = lazy/overcommit (Linux programs assume overcommit)
+        1, // 1 = lazy/overcommit (Linux programs assume overcommit)
         0,
         1,
     );
@@ -487,7 +480,7 @@ pub fn init() {
     reg.register(
         PARAM_SCHED_INTERACTIVE_THRESHOLD,
         "sched.interactive_threshold",
-        5,  // 5 ticks = 50 ms
+        5, // 5 ticks = 50 ms
         1,
         100,
     );
@@ -495,7 +488,7 @@ pub fn init() {
     reg.register(
         PARAM_SCHED_INTERACTIVE_BOOST,
         "sched.interactive_boost",
-        2,  // 2 priority levels
+        2, // 2 priority levels
         0,
         8,
     );
@@ -503,32 +496,32 @@ pub fn init() {
     reg.register(
         PARAM_SCHED_STARVATION_THRESHOLD,
         "sched.starvation_threshold",
-        200,    // 200 ticks = 2 seconds at 100 Hz
-        0,      // 0 = disable anti-starvation
-        1000,   // 10 seconds max
+        200,  // 200 ticks = 2 seconds at 100 Hz
+        0,    // 0 = disable anti-starvation
+        1000, // 10 seconds max
     );
 
     reg.register(
         PARAM_SCHED_BACKEND,
         "sched.backend",
-        0,  // PriorityRoundRobin (default)
-        0,  // min: PriorityRR
-        2,  // max: Deadline
+        0, // PriorityRoundRobin (default)
+        0, // min: PriorityRR
+        2, // max: Deadline
     );
 
     // Filesystem / buffer cache parameters.
     reg.register(
         PARAM_FS_READAHEAD_MAX,
         "fs.readahead_max",
-        128,    // 64 KiB default
+        128, // 64 KiB default
         1,
-        1024,   // 512 KiB maximum
+        1024, // 512 KiB maximum
     );
 
     reg.register(
         PARAM_FS_READAHEAD_INITIAL,
         "fs.readahead_initial",
-        4,      // 2 KiB default
+        4, // 2 KiB default
         1,
         64,
     );
@@ -536,24 +529,24 @@ pub fn init() {
     reg.register(
         PARAM_FS_DIRTY_EXPIRE_SECS,
         "fs.dirty_expire_secs",
-        5,      // 5 seconds
-        1,      // 1 second minimum
-        60,     // 60 seconds maximum
+        5,  // 5 seconds
+        1,  // 1 second minimum
+        60, // 60 seconds maximum
     );
 
     // Cgroup parameters.
     reg.register(
         PARAM_CGROUP_CPU_PERIOD,
         "cgroup.cpu_period",
-        100,    // 1 second at 100 Hz timer
-        10,     // 100 ms minimum (10 ticks)
-        1000,   // 10 seconds maximum
+        100,  // 1 second at 100 Hz timer
+        10,   // 100 ms minimum (10 ticks)
+        1000, // 10 seconds maximum
     );
 
     reg.register(
         PARAM_CGROUP_IO_OPS_MAX,
         "cgroup.io_ops_max_default",
-        0,      // Unlimited — explicitly set per-group
+        0, // Unlimited — explicitly set per-group
         0,
         1_000_000,
     );
@@ -561,7 +554,7 @@ pub fn init() {
     reg.register(
         PARAM_CGROUP_IO_BYTES_MAX,
         "cgroup.io_bytes_max_default",
-        0,      // Unlimited — explicitly set per-group (in frames)
+        0, // Unlimited — explicitly set per-group (in frames)
         0,
         u64::MAX,
     );
@@ -622,10 +615,7 @@ pub fn set(id: u16, value: u64) -> Option<u64> {
         // statement's `;`, so the log below runs lock-free.
         let info = REGISTRY.lock().find(id);
         if let Some(info) = info {
-            serial_println!(
-                "[sysctl] {} = {} (was {})",
-                info.name, value, old
-            );
+            serial_println!("[sysctl] {} = {} (was {})", info.name, value, old);
         }
         // Propagate the new value to the owning subsystem.
         notify_subsystem(id, value);
@@ -889,11 +879,11 @@ pub fn apply_memory_profile(profile_id: u8) -> bool {
     // - Development (2): 300 ticks (3s) — balanced for many tasks
     // - Gaming (3): 100 ticks (1s) — very aggressive, protect frame rate
     let starv_threshold: u64 = match profile_id {
-        0 => 200,   // Desktop
-        1 => 500,   // Server
-        2 => 300,   // Development
-        3 => 100,   // Gaming
-        _ => 200,   // Fallback
+        0 => 200, // Desktop
+        1 => 500, // Server
+        2 => 300, // Development
+        3 => 100, // Gaming
+        _ => 200, // Fallback
     };
 
     let ok = set(PARAM_MM_MAX_STACK_FRAMES, preset.max_stack_frames).is_some()

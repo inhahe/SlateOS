@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -177,7 +177,9 @@ where
 /// until a real catalog/repository source is wired to populate it.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     *guard = Some(State {
         apps: Vec::new(),
@@ -192,7 +194,14 @@ pub fn init_defaults() {
 }
 
 /// Add an app to the store catalog.
-pub fn add_app(name: &str, developer: &str, description: &str, category: AppCategory, version: &str, size_kb: u64) -> KernelResult<u32> {
+pub fn add_app(
+    name: &str,
+    developer: &str,
+    description: &str,
+    category: AppCategory,
+    version: &str,
+    size_kb: u64,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.apps.len() >= MAX_APPS {
             return Err(KernelError::ResourceExhausted);
@@ -200,11 +209,18 @@ pub fn add_app(name: &str, developer: &str, description: &str, category: AppCate
         let id = state.next_app_id;
         state.next_app_id += 1;
         state.apps.push(StoreApp {
-            id, name: String::from(name), developer: String::from(developer),
-            description: String::from(description), category,
-            version: String::from(version), installed_version: String::new(),
-            size_kb, state: InstallState::Available,
-            rating: 0, download_count: 0, added_ns: crate::hpet::elapsed_ns(),
+            id,
+            name: String::from(name),
+            developer: String::from(developer),
+            description: String::from(description),
+            category,
+            version: String::from(version),
+            installed_version: String::new(),
+            size_kb,
+            state: InstallState::Available,
+            rating: 0,
+            download_count: 0,
+            added_ns: crate::hpet::elapsed_ns(),
         });
         Ok(id)
     })
@@ -213,7 +229,10 @@ pub fn add_app(name: &str, developer: &str, description: &str, category: AppCate
 /// Install an app.
 pub fn install(app_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let app = state.apps.iter_mut().find(|a| a.id == app_id)
+        let app = state
+            .apps
+            .iter_mut()
+            .find(|a| a.id == app_id)
             .ok_or(KernelError::NotFound)?;
         if app.state == InstallState::Installed {
             return Err(KernelError::AlreadyExists);
@@ -229,7 +248,10 @@ pub fn install(app_id: u32) -> KernelResult<()> {
 /// Uninstall an app.
 pub fn uninstall(app_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let app = state.apps.iter_mut().find(|a| a.id == app_id)
+        let app = state
+            .apps
+            .iter_mut()
+            .find(|a| a.id == app_id)
             .ok_or(KernelError::NotFound)?;
         if app.state != InstallState::Installed && app.state != InstallState::UpdateAvailable {
             return Err(KernelError::InvalidArgument);
@@ -258,7 +280,10 @@ pub fn check_updates() -> KernelResult<Vec<u32>> {
 /// Update an app to latest version.
 pub fn update_app(app_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let app = state.apps.iter_mut().find(|a| a.id == app_id)
+        let app = state
+            .apps
+            .iter_mut()
+            .find(|a| a.id == app_id)
             .ok_or(KernelError::NotFound)?;
         if app.state != InstallState::UpdateAvailable && app.state != InstallState::Installed {
             return Err(KernelError::InvalidArgument);
@@ -273,7 +298,10 @@ pub fn update_app(app_id: u32) -> KernelResult<()> {
 /// Set the store version for an app (simulates new version published).
 pub fn publish_version(app_id: u32, new_version: &str) -> KernelResult<()> {
     with_state(|state| {
-        let app = state.apps.iter_mut().find(|a| a.id == app_id)
+        let app = state
+            .apps
+            .iter_mut()
+            .find(|a| a.id == app_id)
             .ok_or(KernelError::NotFound)?;
         app.version = String::from(new_version);
         Ok(())
@@ -284,9 +312,12 @@ pub fn publish_version(app_id: u32, new_version: &str) -> KernelResult<()> {
 pub fn search(query: &str) -> Vec<StoreApp> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let q = query.to_ascii_lowercase();
-        s.apps.iter()
-            .filter(|a| a.name.to_ascii_lowercase().contains(&q)
-                || a.description.to_ascii_lowercase().contains(&q))
+        s.apps
+            .iter()
+            .filter(|a| {
+                a.name.to_ascii_lowercase().contains(&q)
+                    || a.description.to_ascii_lowercase().contains(&q)
+            })
             .cloned()
             .collect()
     })
@@ -295,14 +326,24 @@ pub fn search(query: &str) -> Vec<StoreApp> {
 /// List apps by category.
 pub fn list_by_category(category: AppCategory) -> Vec<StoreApp> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.apps.iter().filter(|a| a.category == category).cloned().collect()
+        s.apps
+            .iter()
+            .filter(|a| a.category == category)
+            .cloned()
+            .collect()
     })
 }
 
 /// List installed apps.
 pub fn list_installed() -> Vec<StoreApp> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.apps.iter().filter(|a| a.state == InstallState::Installed || a.state == InstallState::UpdateAvailable).cloned().collect()
+        s.apps
+            .iter()
+            .filter(|a| {
+                a.state == InstallState::Installed || a.state == InstallState::UpdateAvailable
+            })
+            .cloned()
+            .collect()
     })
 }
 
@@ -314,7 +355,12 @@ pub fn list_apps() -> Vec<StoreApp> {
 /// Get app by ID.
 pub fn get_app(id: u32) -> KernelResult<StoreApp> {
     with_state(|state| {
-        state.apps.iter().find(|a| a.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .apps
+            .iter()
+            .find(|a| a.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -331,12 +377,19 @@ pub fn add_review(app_id: u32, user: &str, rating: u8, comment: &str) -> KernelR
         let id = state.next_review_id;
         state.next_review_id += 1;
         state.reviews.push(AppReview {
-            id, app_id, user: String::from(user),
-            rating: r, comment: String::from(comment),
+            id,
+            app_id,
+            user: String::from(user),
+            rating: r,
+            comment: String::from(comment),
             timestamp_ns: crate::hpet::elapsed_ns(),
         });
         // Update app rating (simple average).
-        let app_reviews: Vec<&AppReview> = state.reviews.iter().filter(|rev| rev.app_id == app_id).collect();
+        let app_reviews: Vec<&AppReview> = state
+            .reviews
+            .iter()
+            .filter(|rev| rev.app_id == app_id)
+            .collect();
         let total: u32 = app_reviews.iter().map(|rev| u32::from(rev.rating)).sum();
         let count = app_reviews.len() as u32;
         if count > 0 {
@@ -351,14 +404,21 @@ pub fn add_review(app_id: u32, user: &str, rating: u8, comment: &str) -> KernelR
 /// List reviews for an app.
 pub fn list_reviews(app_id: u32) -> Vec<AppReview> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.reviews.iter().filter(|r| r.app_id == app_id).cloned().collect()
+        s.reviews
+            .iter()
+            .filter(|r| r.app_id == app_id)
+            .cloned()
+            .collect()
     })
 }
 
 /// Remove an app from catalog.
 pub fn remove_app(app_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.apps.iter().position(|a| a.id == app_id)
+        let pos = state
+            .apps
+            .iter()
+            .position(|a| a.id == app_id)
             .ok_or(KernelError::NotFound)?;
         state.apps.remove(pos);
         state.reviews.retain(|r| r.app_id != app_id);
@@ -371,8 +431,20 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let installed = s.apps.iter().filter(|a| a.state == InstallState::Installed || a.state == InstallState::UpdateAvailable).count();
-            (s.apps.len(), installed, s.total_installs, s.total_updates, s.ops)
+            let installed = s
+                .apps
+                .iter()
+                .filter(|a| {
+                    a.state == InstallState::Installed || a.state == InstallState::UpdateAvailable
+                })
+                .count();
+            (
+                s.apps.len(),
+                installed,
+                s.total_installs,
+                s.total_updates,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }
@@ -394,13 +466,33 @@ pub fn self_test() {
     // 1: Empty defaults, then build a catalog via the real add_app API (each app
     // honestly starts at rating 0 / download_count 0 — no fabricated metrics).
     assert!(list_apps().is_empty());
-    let id1 = add_app("Text Editor Pro", "DevTools Inc",
+    let id1 = add_app(
+        "Text Editor Pro",
+        "DevTools Inc",
         "Advanced text editor with syntax highlighting",
-        AppCategory::Development, "2.1.0", 15360).expect("add1");
-    add_app("Image Viewer", "PixelCraft", "Fast image viewer with format support",
-        AppCategory::Graphics, "1.5.0", 8192).expect("add2");
-    add_app("File Manager Plus", "SystemUtils", "Dual-pane file manager with tabs",
-        AppCategory::Utilities, "3.0.0", 12288).expect("add3");
+        AppCategory::Development,
+        "2.1.0",
+        15360,
+    )
+    .expect("add1");
+    add_app(
+        "Image Viewer",
+        "PixelCraft",
+        "Fast image viewer with format support",
+        AppCategory::Graphics,
+        "1.5.0",
+        8192,
+    )
+    .expect("add2");
+    add_app(
+        "File Manager Plus",
+        "SystemUtils",
+        "Dual-pane file manager with tabs",
+        AppCategory::Utilities,
+        "3.0.0",
+        12288,
+    )
+    .expect("add3");
     assert_eq!(id1, 1);
     let apps = list_apps();
     assert_eq!(apps.len(), 3);

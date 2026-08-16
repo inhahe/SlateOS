@@ -43,14 +43,14 @@
 //!
 //! `EVENTFD_TABLE` → `SCHED` (read/write may call `sched::wake()`).
 
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
+use super::waiters::{WaiterSet, wake_all};
 use crate::error::{KernelError, KernelResult};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
-use super::waiters::{wake_all, WaiterSet};
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -149,8 +149,7 @@ impl EventFd {
 /// Global table of all live eventfds.
 ///
 /// Lock ordering: `EVENTFD_TABLE` → `SCHED`.
-static EVENTFD_TABLE: Mutex<BTreeMap<EventFdId, EventFd>> =
-    Mutex::new(BTreeMap::new());
+static EVENTFD_TABLE: Mutex<BTreeMap<EventFdId, EventFd>> = Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
 // Signal-interruptible blocking helpers
@@ -175,8 +174,7 @@ fn current_user_pid() -> u64 {
 ///
 /// Always `false` for `pid == 0` (kernel task — no signal context).
 fn deliverable_signal_pending(pid: u64) -> bool {
-    pid != 0
-        && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
+    pid != 0 && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
 }
 
 /// Park the current task for an eventfd wait, interruptibly for user processes.
@@ -408,22 +406,16 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
 
     let pid = current_user_pid();
     let task = sched::current_task_id();
-    let timer_handle = crate::hrtimer::schedule_ns(
-        timeout_ns,
-        timeout_wake,
-        task,
-    );
+    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task);
 
     // Block loop.
     loop {
         {
             let mut table = EVENTFD_TABLE.lock();
-            let efd = table
-                .get_mut(&handle.id())
-                .ok_or_else(|| {
-                    crate::hrtimer::cancel(timer_handle);
-                    KernelError::InvalidHandle
-                })?;
+            let efd = table.get_mut(&handle.id()).ok_or_else(|| {
+                crate::hrtimer::cancel(timer_handle);
+                KernelError::InvalidHandle
+            })?;
 
             // Deregister first: neither a timer wake nor a signal wake clears
             // the entry, and every path below either returns or re-registers.
@@ -636,22 +628,16 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
 
     let pid = current_user_pid();
     let task = sched::current_task_id();
-    let timer_handle = crate::hrtimer::schedule_ns(
-        timeout_ns,
-        timeout_wake,
-        task,
-    );
+    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task);
 
     // Block loop.
     loop {
         {
             let mut table = EVENTFD_TABLE.lock();
-            let efd = table
-                .get_mut(&handle.id())
-                .ok_or_else(|| {
-                    crate::hrtimer::cancel(timer_handle);
-                    KernelError::InvalidHandle
-                })?;
+            let efd = table.get_mut(&handle.id()).ok_or_else(|| {
+                crate::hrtimer::cancel(timer_handle);
+                KernelError::InvalidHandle
+            })?;
 
             // Deregister first: neither a timer wake nor a signal wake clears
             // the entry, and every path below either returns or re-registers.
@@ -1011,7 +997,13 @@ fn test_timeout_signaled() -> KernelResult<()> {
     let handle = create(0);
 
     // Spawn reader that will block with a generous 5 s timeout.
-    sched::spawn(b"efd-to-test", 16, eventfd_timeout_reader_task, handle.raw(), 0)?;
+    sched::spawn(
+        b"efd-to-test",
+        16,
+        eventfd_timeout_reader_task,
+        handle.raw(),
+        0,
+    )?;
 
     // Let reader run and block.
     sched::yield_now();
@@ -1046,8 +1038,7 @@ fn test_timeout_signaled() -> KernelResult<()> {
 }
 
 /// Result counter for blocking test.
-static EVENTFD_TEST_RESULT: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+static EVENTFD_TEST_RESULT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Task for the blocking read test.
 extern "C" fn eventfd_reader_task(handle_raw: u64) {
@@ -1090,8 +1081,7 @@ fn test_blocking_read() -> KernelResult<()> {
 }
 
 /// Number of multi-waiter readers that consumed one semaphore unit.
-static EVENTFD_MULTI_DATA_OK: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+static EVENTFD_MULTI_DATA_OK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Number of multi-waiter readers released by the final `close()`.
 static EVENTFD_MULTI_CLOSE_OK: core::sync::atomic::AtomicU32 =
@@ -1292,10 +1282,7 @@ fn test_dup_refcount() -> KernelResult<()> {
     match try_read(h2) {
         Err(KernelError::InvalidHandle) => {}
         other => {
-            serial_println!(
-                "[eventfd]   FAIL: after final close, try_read: {:?}",
-                other
-            );
+            serial_println!("[eventfd]   FAIL: after final close, try_read: {:?}", other);
             return Err(KernelError::InternalError);
         }
     }

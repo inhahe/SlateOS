@@ -31,9 +31,9 @@
 //! design.txt: "make a snapshot or restore from snapshot feature, with
 //! branching like a VM does? options for what to include in the snapshot?"
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::cas::Hash256;
@@ -290,10 +290,13 @@ pub fn record_version(path: impl AsRef<Path>) -> KernelResult<Option<Hash256>> {
     // Insert the version entry.
     // Scope the mutable borrow of inner.files so we can update counters after.
     {
-        let fh = inner.files.entry(path.to_path_buf()).or_insert(FileHistory {
-            versions: Vec::new(),
-            next_version: 0,
-        });
+        let fh = inner
+            .files
+            .entry(path.to_path_buf())
+            .or_insert(FileHistory {
+                versions: Vec::new(),
+                next_version: 0,
+            });
 
         let version = fh.next_version;
         fh.next_version = fh.next_version.saturating_add(1);
@@ -326,7 +329,9 @@ pub fn record_version(path: impl AsRef<Path>) -> KernelResult<Option<Hash256>> {
         count
     };
     inner.total_entries = inner.total_entries.saturating_sub(per_file_evicted);
-    inner.evicted_versions = inner.evicted_versions.saturating_add(per_file_evicted as u64);
+    inner.evicted_versions = inner
+        .evicted_versions
+        .saturating_add(per_file_evicted as u64);
 
     // Global eviction if over total limit.
     while inner.total_entries > max_total {
@@ -390,7 +395,8 @@ pub fn record_version(path: impl AsRef<Path>) -> KernelResult<Option<Hash256>> {
 /// Returns an empty list if the file has no history.
 pub fn get_history(path: impl AsRef<Path>) -> Vec<VersionEntry> {
     let inner = HISTORY.lock();
-    inner.files
+    inner
+        .files
         .get(path.as_ref())
         .map(|fh| fh.versions.clone())
         .unwrap_or_default()
@@ -402,7 +408,8 @@ pub fn get_history(path: impl AsRef<Path>) -> Vec<VersionEntry> {
 #[allow(dead_code)]
 pub fn latest_version(path: impl AsRef<Path>) -> Option<VersionEntry> {
     let inner = HISTORY.lock();
-    inner.files
+    inner
+        .files
         .get(path.as_ref())
         .and_then(|fh| fh.versions.last().cloned())
 }
@@ -561,7 +568,10 @@ pub fn self_test() -> KernelResult<()> {
         // Should now have 2 versions.
         let history = get_history(test_path);
         if history.len() != 2 {
-            serial_println!("[history]   ERROR: expected 2 versions, got {}", history.len());
+            serial_println!(
+                "[history]   ERROR: expected 2 versions, got {}",
+                history.len()
+            );
             Vfs::remove(test_path).ok();
             return Err(KernelError::InternalError);
         }
@@ -641,7 +651,10 @@ pub fn self_test() -> KernelResult<()> {
         // Should only have 3 versions (the 3 most recent).
         let history = get_history(test_path);
         if history.len() > 3 {
-            serial_println!("[history]   ERROR: expected <= 3 versions after eviction, got {}", history.len());
+            serial_println!(
+                "[history]   ERROR: expected <= 3 versions after eviction, got {}",
+                history.len()
+            );
             // Restore config.
             HISTORY.lock().config = old_config;
             clear_file(test_path);
@@ -649,7 +662,10 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        serial_println!("[history]   eviction OK (kept {}/6 versions)", history.len());
+        serial_println!(
+            "[history]   eviction OK (kept {}/6 versions)",
+            history.len()
+        );
 
         // Restore config.
         HISTORY.lock().config = old_config;
@@ -664,8 +680,12 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[history]   ERROR: record_count should be >= 1");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[history]   stats OK (records: {}, restores: {}, evicted: {})",
-            st.record_count, st.restore_count, st.evicted_versions);
+        serial_println!(
+            "[history]   stats OK (records: {}, restores: {}, evicted: {})",
+            st.record_count,
+            st.restore_count,
+            st.evicted_versions
+        );
     }
 
     // --- Test 5: clear all ---
@@ -722,7 +742,10 @@ pub fn self_test() -> KernelResult<()> {
 
         // Write v1 — first write, no prior file to version.
         if let Err(e) = Vfs::write_file(test_path, v1) {
-            serial_println!("[history]   SKIP auto-version test: cannot write to root: {:?}", e);
+            serial_println!(
+                "[history]   SKIP auto-version test: cannot write to root: {:?}",
+                e
+            );
             set_auto_version(old_auto);
         } else {
             // History should be empty (no prior content to save).
@@ -755,7 +778,10 @@ pub fn self_test() -> KernelResult<()> {
                         return Err(KernelError::InternalError);
                     }
                     Err(e) => {
-                        serial_println!("[history]   ERROR: cannot read auto-recorded data: {:?}", e);
+                        serial_println!(
+                            "[history]   ERROR: cannot read auto-recorded data: {:?}",
+                            e
+                        );
                         clear_file(test_path);
                         Vfs::remove(test_path).ok();
                         set_auto_version(old_auto);

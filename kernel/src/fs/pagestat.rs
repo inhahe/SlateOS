@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -140,12 +140,19 @@ where
 /// brings each zone online and the record functions on every page alloc/free.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     // The order histogram has one bucket per buddy-allocator order; this is real
     // structure, so create all MAX_ORDER buckets but with zeroed counters.
     let mut order_stats = Vec::new();
     for o in 0..MAX_ORDER as u32 {
-        order_stats.push(OrderStats { order: o, allocs: 0, frees: 0, fails: 0 });
+        order_stats.push(OrderStats {
+            order: o,
+            allocs: 0,
+            frees: 0,
+            fails: 0,
+        });
     }
     *guard = Some(State {
         zones: Vec::new(),
@@ -193,7 +200,10 @@ pub fn register_zone(zone: Zone, total_pages: u64) -> KernelResult<()> {
 /// Declare a zone's huge-page pool: total, free, and reserved counts.
 pub fn set_hugepages(zone: Zone, total: u64, free: u64, reserved: u64) -> KernelResult<()> {
     with_state(|state| {
-        let zs = state.zones.iter_mut().find(|z| z.zone == zone)
+        let zs = state
+            .zones
+            .iter_mut()
+            .find(|z| z.zone == zone)
             .ok_or(KernelError::NotFound)?;
         zs.hugepages_total = total;
         zs.hugepages_free = free;
@@ -205,19 +215,26 @@ pub fn set_hugepages(zone: Zone, total: u64, free: u64, reserved: u64) -> Kernel
 /// Record a page allocation.
 pub fn record_alloc(zone: Zone, order: u32) -> KernelResult<()> {
     with_state(|state| {
-        let zs = state.zones.iter_mut().find(|z| z.zone == zone)
+        let zs = state
+            .zones
+            .iter_mut()
+            .find(|z| z.zone == zone)
             .ok_or(KernelError::NotFound)?;
         let pages = 1u64 << order.min(11);
         if zs.free_pages < pages {
             zs.failed += 1;
             state.total_fails += 1;
-            if let Some(os) = state.order_stats.get_mut(order.min(11) as usize) { os.fails += 1; }
+            if let Some(os) = state.order_stats.get_mut(order.min(11) as usize) {
+                os.fails += 1;
+            }
             return Err(KernelError::OutOfMemory);
         }
         zs.allocated += 1;
         zs.free_pages -= pages;
         state.total_allocs += 1;
-        if let Some(os) = state.order_stats.get_mut(order.min(11) as usize) { os.allocs += 1; }
+        if let Some(os) = state.order_stats.get_mut(order.min(11) as usize) {
+            os.allocs += 1;
+        }
         Ok(())
     })
 }
@@ -225,13 +242,18 @@ pub fn record_alloc(zone: Zone, order: u32) -> KernelResult<()> {
 /// Record a page free.
 pub fn record_free(zone: Zone, order: u32) -> KernelResult<()> {
     with_state(|state| {
-        let zs = state.zones.iter_mut().find(|z| z.zone == zone)
+        let zs = state
+            .zones
+            .iter_mut()
+            .find(|z| z.zone == zone)
             .ok_or(KernelError::NotFound)?;
         let pages = 1u64 << order.min(11);
         zs.freed += 1;
         zs.free_pages += pages;
         state.total_frees += 1;
-        if let Some(os) = state.order_stats.get_mut(order.min(11) as usize) { os.frees += 1; }
+        if let Some(os) = state.order_stats.get_mut(order.min(11) as usize) {
+            os.frees += 1;
+        }
         Ok(())
     })
 }
@@ -239,7 +261,10 @@ pub fn record_free(zone: Zone, order: u32) -> KernelResult<()> {
 /// Record page reclamation.
 pub fn record_reclaim(zone: Zone, pages: u64) -> KernelResult<()> {
     with_state(|state| {
-        let zs = state.zones.iter_mut().find(|z| z.zone == zone)
+        let zs = state
+            .zones
+            .iter_mut()
+            .find(|z| z.zone == zone)
             .ok_or(KernelError::NotFound)?;
         zs.reclaimed += pages;
         zs.free_pages += pages;
@@ -250,12 +275,18 @@ pub fn record_reclaim(zone: Zone, pages: u64) -> KernelResult<()> {
 
 /// Get per-zone statistics.
 pub fn zone_stats() -> Vec<ZoneStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.zones.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.zones.clone())
 }
 
 /// Get order histogram.
 pub fn order_histogram() -> Vec<OrderStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.order_stats.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.order_stats.clone())
 }
 
 /// Get total huge page info: (total, free, reserved).
@@ -272,7 +303,14 @@ pub fn hugepage_info() -> (u64, u64, u64) {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.zones.len(), s.total_allocs, s.total_frees, s.total_reclaims, s.total_fails, s.ops),
+        Some(s) => (
+            s.zones.len(),
+            s.total_allocs,
+            s.total_frees,
+            s.total_reclaims,
+            s.total_fails,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -298,7 +336,11 @@ pub fn self_test() {
     assert_eq!((z0, a0, f0, r0, fa0), (0, 0, 0, 0, 0));
     let hist0 = order_histogram();
     assert_eq!(hist0.len(), 12);
-    assert!(hist0.iter().all(|o| o.allocs == 0 && o.frees == 0 && o.fails == 0));
+    assert!(
+        hist0
+            .iter()
+            .all(|o| o.allocs == 0 && o.frees == 0 && o.fails == 0)
+    );
     assert_eq!(hugepage_info(), (0, 0, 0));
     crate::serial_println!("  [1/8] empty init: OK");
 
@@ -307,14 +349,25 @@ pub fn self_test() {
     register_zone(Zone::Dma, 256).expect("reg dma");
     assert!(register_zone(Zone::Normal, 1).is_err()); // AlreadyExists
     assert_eq!(zone_stats().len(), 2);
-    let normal = zone_stats().iter().find(|z| z.zone == Zone::Normal).cloned().expect("normal");
-    assert_eq!((normal.total_pages, normal.free_pages, normal.allocated), (1000, 1000, 0));
+    let normal = zone_stats()
+        .iter()
+        .find(|z| z.zone == Zone::Normal)
+        .cloned()
+        .expect("normal");
+    assert_eq!(
+        (normal.total_pages, normal.free_pages, normal.allocated),
+        (1000, 1000, 0)
+    );
     crate::serial_println!("  [2/8] register: OK");
 
     // 3: Alloc — allocated up, free_pages down by 2^order, histogram bucket up.
     record_alloc(Zone::Normal, 0).expect("alloc o0"); // 1 page
     record_alloc(Zone::Normal, 2).expect("alloc o2"); // 4 pages
-    let normal = zone_stats().iter().find(|z| z.zone == Zone::Normal).cloned().expect("normal");
+    let normal = zone_stats()
+        .iter()
+        .find(|z| z.zone == Zone::Normal)
+        .cloned()
+        .expect("normal");
     assert_eq!(normal.allocated, 2);
     assert_eq!(normal.free_pages, 1000 - 1 - 4);
     assert_eq!(order_histogram()[0].allocs, 1);
@@ -323,7 +376,11 @@ pub fn self_test() {
 
     // 4: Free — freed up, free_pages restored, histogram free bucket up.
     record_free(Zone::Normal, 0).expect("free o0");
-    let normal = zone_stats().iter().find(|z| z.zone == Zone::Normal).cloned().expect("normal");
+    let normal = zone_stats()
+        .iter()
+        .find(|z| z.zone == Zone::Normal)
+        .cloned()
+        .expect("normal");
     assert_eq!(normal.freed, 1);
     assert_eq!(normal.free_pages, 1000 - 4); // freed the 1-page alloc back
     assert_eq!(order_histogram()[0].frees, 1);
@@ -331,7 +388,11 @@ pub fn self_test() {
 
     // 5: Reclaim adds pages back to the zone exactly.
     record_reclaim(Zone::Dma, 100).expect("reclaim");
-    let dma = zone_stats().iter().find(|z| z.zone == Zone::Dma).cloned().expect("dma");
+    let dma = zone_stats()
+        .iter()
+        .find(|z| z.zone == Zone::Dma)
+        .cloned()
+        .expect("dma");
     assert_eq!(dma.reclaimed, 100);
     assert_eq!(dma.free_pages, 256 + 100);
     crate::serial_println!("  [5/8] reclaim: OK");
@@ -340,7 +401,11 @@ pub fn self_test() {
     //    OOM phantom allocation.
     register_zone(Zone::Dma32, 1).expect("reg dma32");
     assert!(record_alloc(Zone::Dma32, 5).is_err()); // needs 32 pages, only 1 free
-    let dma32 = zone_stats().iter().find(|z| z.zone == Zone::Dma32).cloned().expect("dma32");
+    let dma32 = zone_stats()
+        .iter()
+        .find(|z| z.zone == Zone::Dma32)
+        .cloned()
+        .expect("dma32");
     assert_eq!(dma32.failed, 1);
     assert_eq!(dma32.allocated, 0);
     crate::serial_println!("  [6/8] alloc fail: OK");
@@ -355,10 +420,10 @@ pub fn self_test() {
     // 8: Aggregate totals equal the exact sums of the operations above.
     let (zones, allocs, frees, reclaims, fails, ops) = stats();
     assert_eq!(zones, 3);
-    assert_eq!(allocs, 2);     // 2 successful allocs
-    assert_eq!(frees, 1);      // 1 free
+    assert_eq!(allocs, 2); // 2 successful allocs
+    assert_eq!(frees, 1); // 1 free
     assert_eq!(reclaims, 100); // 100 pages reclaimed
-    assert_eq!(fails, 1);      // 1 failed alloc
+    assert_eq!(fails, 1); // 1 failed alloc
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

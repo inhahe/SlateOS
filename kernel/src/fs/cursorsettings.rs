@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -48,8 +48,8 @@ const MAX_SIZES: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorShape {
     Default,
-    Pointer,       // Hand/link
-    Text,          // I-beam
+    Pointer, // Hand/link
+    Text,    // I-beam
     Crosshair,
     Move,
     ResizeNS,
@@ -57,14 +57,14 @@ pub enum CursorShape {
     ResizeNWSE,
     ResizeNESW,
     Wait,
-    Progress,      // Arrow + spinner
+    Progress, // Arrow + spinner
     NotAllowed,
-    Help,          // Arrow + question mark
+    Help, // Arrow + question mark
     Grab,
     Grabbing,
     ZoomIn,
     ZoomOut,
-    Cell,          // Spreadsheet cell selection
+    Cell, // Spreadsheet cell selection
     ContextMenu,
     Custom,
 }
@@ -122,11 +122,25 @@ impl CursorShape {
 
     /// All standard shapes.
     pub const ALL: &'static [CursorShape] = &[
-        Self::Default, Self::Pointer, Self::Text, Self::Crosshair,
-        Self::Move, Self::ResizeNS, Self::ResizeEW, Self::ResizeNWSE,
-        Self::ResizeNESW, Self::Wait, Self::Progress, Self::NotAllowed,
-        Self::Help, Self::Grab, Self::Grabbing, Self::ZoomIn,
-        Self::ZoomOut, Self::Cell, Self::ContextMenu,
+        Self::Default,
+        Self::Pointer,
+        Self::Text,
+        Self::Crosshair,
+        Self::Move,
+        Self::ResizeNS,
+        Self::ResizeEW,
+        Self::ResizeNWSE,
+        Self::ResizeNESW,
+        Self::Wait,
+        Self::Progress,
+        Self::NotAllowed,
+        Self::Help,
+        Self::Grab,
+        Self::Grabbing,
+        Self::ZoomIn,
+        Self::ZoomOut,
+        Self::Cell,
+        Self::ContextMenu,
     ];
 }
 
@@ -334,7 +348,9 @@ pub fn unregister_theme(name: &str) -> KernelResult<()> {
     }
     // If active theme was removed, fall back to first available.
     if state.config.active_theme == name {
-        state.config.active_theme = state.themes.first()
+        state.config.active_theme = state
+            .themes
+            .first()
             .map(|t| t.name.clone())
             .unwrap_or_default();
     }
@@ -343,9 +359,19 @@ pub fn unregister_theme(name: &str) -> KernelResult<()> {
 }
 
 /// Add a cursor image to a theme.
-pub fn add_cursor(theme: &str, shape: CursorShape, hotspot_x: u32, hotspot_y: u32, frames: u32, interval_ms: u32) -> KernelResult<()> {
+pub fn add_cursor(
+    theme: &str,
+    shape: CursorShape,
+    hotspot_x: u32,
+    hotspot_y: u32,
+    frames: u32,
+    interval_ms: u32,
+) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let t = state.themes.iter_mut().find(|t| t.name == theme)
+    let t = state
+        .themes
+        .iter_mut()
+        .find(|t| t.name == theme)
         .ok_or(KernelError::NotFound)?;
     if t.cursors.len() >= MAX_CURSORS {
         return Err(KernelError::ResourceExhausted);
@@ -369,7 +395,13 @@ pub fn list_themes() -> Vec<CursorTheme> {
 
 /// Get a theme by name.
 pub fn get_theme(name: &str) -> KernelResult<CursorTheme> {
-    STATE.lock().themes.iter().find(|t| t.name == name).cloned().ok_or(KernelError::NotFound)
+    STATE
+        .lock()
+        .themes
+        .iter()
+        .find(|t| t.name == name)
+        .cloned()
+        .ok_or(KernelError::NotFound)
 }
 
 /// Set the active cursor theme.
@@ -387,14 +419,21 @@ pub fn set_active_theme(name: &str) -> KernelResult<()> {
 pub fn active_theme() -> KernelResult<CursorTheme> {
     let state = STATE.lock();
     let name = &state.config.active_theme;
-    state.themes.iter().find(|t| t.name == *name).cloned().ok_or(KernelError::NotFound)
+    state
+        .themes
+        .iter()
+        .find(|t| t.name == *name)
+        .cloned()
+        .ok_or(KernelError::NotFound)
 }
 
 /// Get cursor image for a specific shape from the active theme.
 pub fn cursor_for(shape: CursorShape) -> Option<CursorImage> {
     let state = STATE.lock();
     let name = &state.config.active_theme;
-    state.themes.iter()
+    state
+        .themes
+        .iter()
         .find(|t| t.name == *name)
         .and_then(|t| t.cursors.iter().find(|c| c.shape == shape).cloned())
 }
@@ -403,7 +442,9 @@ pub fn cursor_for(shape: CursorShape) -> Option<CursorImage> {
 // Pointer settings
 // ---------------------------------------------------------------------------
 
-pub fn config() -> PointerConfig { STATE.lock().config.clone() }
+pub fn config() -> PointerConfig {
+    STATE.lock().config.clone()
+}
 
 pub fn set_speed(speed: i8) {
     STATE.lock().config.speed = speed.clamp(-10, 10);
@@ -477,7 +518,9 @@ pub fn available_sizes() -> Vec<u32> {
 /// Initialize default themes and settings.
 pub fn init_defaults() {
     let mut state = STATE.lock();
-    if !state.themes.is_empty() { return; }
+    if !state.themes.is_empty() {
+        return;
+    }
 
     // Default theme with standard cursors.
     let mut default_cursors = Vec::new();
@@ -486,8 +529,16 @@ pub fn init_defaults() {
             shape,
             hotspot_x: if shape == CursorShape::Default { 1 } else { 12 },
             hotspot_y: if shape == CursorShape::Default { 1 } else { 12 },
-            frames: if shape == CursorShape::Wait || shape == CursorShape::Progress { 8 } else { 1 },
-            frame_interval_ms: if shape == CursorShape::Wait || shape == CursorShape::Progress { 100 } else { 0 },
+            frames: if shape == CursorShape::Wait || shape == CursorShape::Progress {
+                8
+            } else {
+                1
+            },
+            frame_interval_ms: if shape == CursorShape::Wait || shape == CursorShape::Progress {
+                100
+            } else {
+                0
+            },
         });
     }
     state.themes.push(CursorTheme {
@@ -505,8 +556,16 @@ pub fn init_defaults() {
             shape,
             hotspot_x: if shape == CursorShape::Default { 1 } else { 16 },
             hotspot_y: if shape == CursorShape::Default { 1 } else { 16 },
-            frames: if shape == CursorShape::Wait || shape == CursorShape::Progress { 12 } else { 1 },
-            frame_interval_ms: if shape == CursorShape::Wait || shape == CursorShape::Progress { 80 } else { 0 },
+            frames: if shape == CursorShape::Wait || shape == CursorShape::Progress {
+                12
+            } else {
+                1
+            },
+            frame_interval_ms: if shape == CursorShape::Wait || shape == CursorShape::Progress {
+                80
+            } else {
+                0
+            },
         });
     }
     state.themes.push(CursorTheme {
@@ -531,7 +590,9 @@ pub fn stats() -> (usize, u64) {
     (state.themes.len(), CHANGE_COUNT.load(Ordering::Relaxed))
 }
 
-pub fn reset_stats() { CHANGE_COUNT.store(0, Ordering::Relaxed); }
+pub fn reset_stats() {
+    CHANGE_COUNT.store(0, Ordering::Relaxed);
+}
 
 pub fn clear_all() {
     let mut state = STATE.lock();

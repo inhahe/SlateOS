@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -134,12 +134,19 @@ where
 }
 
 fn recommended_scale(physical_dpi: u32) -> u32 {
-    if physical_dpi <= 96 { 100 }
-    else if physical_dpi <= 120 { 125 }
-    else if physical_dpi <= 144 { 150 }
-    else if physical_dpi <= 192 { 200 }
-    else if physical_dpi <= 288 { 300 }
-    else { 400 }
+    if physical_dpi <= 96 {
+        100
+    } else if physical_dpi <= 120 {
+        125
+    } else if physical_dpi <= 144 {
+        150
+    } else if physical_dpi <= 192 {
+        200
+    } else if physical_dpi <= 288 {
+        300
+    } else {
+        400
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -148,13 +155,18 @@ fn recommended_scale(physical_dpi: u32) -> u32 {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let display = DisplayScale {
-        id: 1, display_name: String::from("Primary Display"),
-        scale_percent: 100, recommended_percent: 100,
+        id: 1,
+        display_name: String::from("Primary Display"),
+        scale_percent: 100,
+        recommended_percent: 100,
         method: ScalingMethod::Integer,
-        physical_dpi: 96, effective_dpi: 96,
+        physical_dpi: 96,
+        effective_dpi: 96,
     };
 
     *guard = Some(State {
@@ -177,8 +189,10 @@ pub fn register_display(name: &str, physical_dpi: u32) -> KernelResult<u32> {
         let id = state.next_id;
         state.next_id += 1;
         state.displays.push(DisplayScale {
-            id, display_name: String::from(name),
-            scale_percent: rec, recommended_percent: rec,
+            id,
+            display_name: String::from(name),
+            scale_percent: rec,
+            recommended_percent: rec,
             method: state.global_method,
             physical_dpi,
             effective_dpi: physical_dpi * rec / 100,
@@ -190,7 +204,10 @@ pub fn register_display(name: &str, physical_dpi: u32) -> KernelResult<u32> {
 /// Set scaling for a display.
 pub fn set_scale(display_id: u32, percent: u32) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         d.scale_percent = percent.clamp(50, 500);
         d.effective_dpi = d.physical_dpi * d.scale_percent / 100;
@@ -202,7 +219,10 @@ pub fn set_scale(display_id: u32, percent: u32) -> KernelResult<()> {
 /// Set scaling method for a display.
 pub fn set_method(display_id: u32, method: ScalingMethod) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         d.method = method;
         Ok(())
@@ -218,7 +238,11 @@ pub fn set_global_method(method: ScalingMethod) -> KernelResult<()> {
 }
 
 /// Add app DPI override.
-pub fn set_app_override(app_name: &str, awareness: DpiAwareness, override_percent: u32) -> KernelResult<()> {
+pub fn set_app_override(
+    app_name: &str,
+    awareness: DpiAwareness,
+    override_percent: u32,
+) -> KernelResult<()> {
     with_state(|state| {
         if let Some(existing) = state.overrides.iter_mut().find(|o| o.app_name == app_name) {
             existing.awareness = awareness;
@@ -229,7 +253,8 @@ pub fn set_app_override(app_name: &str, awareness: DpiAwareness, override_percen
             }
             state.overrides.push(AppDpiOverride {
                 app_name: String::from(app_name),
-                awareness, override_percent,
+                awareness,
+                override_percent,
             });
         }
         Ok(())
@@ -239,7 +264,10 @@ pub fn set_app_override(app_name: &str, awareness: DpiAwareness, override_percen
 /// Remove app DPI override.
 pub fn remove_app_override(app_name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.overrides.iter().position(|o| o.app_name == app_name)
+        let pos = state
+            .overrides
+            .iter()
+            .position(|o| o.app_name == app_name)
             .ok_or(KernelError::NotFound)?;
         state.overrides.remove(pos);
         Ok(())
@@ -248,19 +276,30 @@ pub fn remove_app_override(app_name: &str) -> KernelResult<()> {
 
 /// List all displays.
 pub fn list_displays() -> Vec<DisplayScale> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.displays.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.displays.clone())
 }
 
 /// Get display scale.
 pub fn get_display(id: u32) -> KernelResult<DisplayScale> {
     with_state(|state| {
-        state.displays.iter().find(|d| d.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .displays
+            .iter()
+            .find(|d| d.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// List app overrides.
 pub fn list_overrides() -> Vec<AppDpiOverride> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.overrides.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.overrides.clone())
 }
 
 /// Statistics: (display_count, override_count, total_changes, ops).

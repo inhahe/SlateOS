@@ -267,20 +267,35 @@ impl SigInfo {
     /// A user-directed signal (`kill(2)`): `SI_USER` with the sender identity.
     #[must_use]
     pub const fn user(sender_pid: u32, sender_uid: u32) -> Self {
-        Self { code: si_code::SI_USER, sender_pid, sender_uid, value: 0 }
+        Self {
+            code: si_code::SI_USER,
+            sender_pid,
+            sender_uid,
+            value: 0,
+        }
     }
 
     /// A thread-directed signal (`tkill`/`tgkill`, i.e. `raise`/`pthread_kill`):
     /// `SI_TKILL` with the sender identity.
     #[must_use]
     pub const fn tkill(sender_pid: u32, sender_uid: u32) -> Self {
-        Self { code: si_code::SI_TKILL, sender_pid, sender_uid, value: 0 }
+        Self {
+            code: si_code::SI_TKILL,
+            sender_pid,
+            sender_uid,
+            value: 0,
+        }
     }
 
     /// A kernel-generated signal (timer expiry): `SI_KERNEL`, no sender.
     #[must_use]
     pub const fn kernel() -> Self {
-        Self { code: si_code::SI_KERNEL, sender_pid: 0, sender_uid: 0, value: 0 }
+        Self {
+            code: si_code::SI_KERNEL,
+            sender_pid: 0,
+            sender_uid: 0,
+            value: 0,
+        }
     }
 
     /// A `SIGCHLD` for a child that exited normally: `CLD_EXITED` with the
@@ -333,8 +348,7 @@ impl Default for SignalState {
 }
 
 /// All per-process signal state, keyed by process ID.
-static SIGNAL_STATES: Mutex<BTreeMap<ProcessId, SignalState>> =
-    Mutex::new(BTreeMap::new());
+static SIGNAL_STATES: Mutex<BTreeMap<ProcessId, SignalState>> = Mutex::new(BTreeMap::new());
 
 /// Count of pending signals across all processes.
 ///
@@ -402,9 +416,7 @@ fn with_states<R>(f: impl FnOnce(&mut BTreeMap<ProcessId, SignalState>) -> R) ->
 
 /// Run `f` with the [`SIGNALFD_WAITERS`] lock held and interrupts disabled.
 #[inline]
-fn with_waiters<R>(
-    f: impl FnOnce(&mut BTreeMap<ProcessId, Vec<SignalFdWaiter>>) -> R,
-) -> R {
+fn with_waiters<R>(f: impl FnOnce(&mut BTreeMap<ProcessId, Vec<SignalFdWaiter>>) -> R) -> R {
     crate::cpu::without_interrupts(|| {
         let mut waiters = SIGNALFD_WAITERS.lock();
         f(&mut waiters)
@@ -1090,7 +1102,10 @@ fn test_siginfo_record() -> KernelResult<()> {
     match take_deliverable_info(p) {
         Some((11, info)) => {
             check(info.code == si_code::SI_USER, "default code SI_USER")?;
-            check(info.sender_pid == 0 && info.sender_uid == 0, "default no sender")?;
+            check(
+                info.sender_pid == 0 && info.sender_uid == 0,
+                "default no sender",
+            )?;
         }
         other => {
             serial_println!("[signal]   FAIL: expected (11, SI_USER), got {other:?}");
@@ -1103,10 +1118,16 @@ fn test_siginfo_record() -> KernelResult<()> {
     set_pending_info(p, 12, SigInfo::kernel());
     clear_pending(p, signal_bit(12).unwrap_or(0));
     check(pending(p) == 0, "cleared 12")?;
-    check(set_pending_info(p, 12, SigInfo::user(7, 7)), "12 newly again")?;
+    check(
+        set_pending_info(p, 12, SigInfo::user(7, 7)),
+        "12 newly again",
+    )?;
     match take_deliverable_info(p) {
         Some((12, info)) => {
-            check(info.code == si_code::SI_USER && info.sender_pid == 7, "fresh info after clear")?;
+            check(
+                info.code == si_code::SI_USER && info.sender_pid == 7,
+                "fresh info after clear",
+            )?;
         }
         other => {
             serial_println!("[signal]   FAIL: expected (12, SI_USER/7), got {other:?}");
@@ -1156,12 +1177,21 @@ fn test_signal_validity() -> KernelResult<()> {
 }
 
 fn test_default_actions() -> KernelResult<()> {
-    check(default_action(9) == DefaultAction::Terminate, "SIGKILL term")?;
-    check(default_action(15) == DefaultAction::Terminate, "SIGTERM term")?;
+    check(
+        default_action(9) == DefaultAction::Terminate,
+        "SIGKILL term",
+    )?;
+    check(
+        default_action(15) == DefaultAction::Terminate,
+        "SIGTERM term",
+    )?;
     check(default_action(17) == DefaultAction::Ignore, "SIGCHLD ign")?;
     check(default_action(28) == DefaultAction::Ignore, "SIGWINCH ign")?;
     check(default_action(19) == DefaultAction::Stop, "SIGSTOP stop")?;
-    check(default_action(18) == DefaultAction::Continue, "SIGCONT cont")?;
+    check(
+        default_action(18) == DefaultAction::Continue,
+        "SIGCONT cont",
+    )?;
     check(default_action(34) == DefaultAction::Terminate, "RT term")?;
     serial_println!("[signal]   default-action table: OK");
     Ok(())
@@ -1207,8 +1237,7 @@ fn test_blocked_masking() -> KernelResult<()> {
     check(take_deliverable(p) == Some(5), "unblocked deliverable")?;
     // SIGKILL/SIGSTOP cannot be blocked.
     let p2 = TEST_PID_BASE + 30;
-    let requested =
-        (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1)) | (1u64 << 0);
+    let requested = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1)) | (1u64 << 0);
     set_blocked(p2, requested);
     check(blocked(p2) == (1u64 << 0), "KILL/STOP unblockable")?;
     remove(p);
@@ -1227,10 +1256,19 @@ fn test_classify_post() -> KernelResult<()> {
         classify_post(p, 15) == PostDecision::Terminate(128 + 15),
         "no-tramp SIGTERM terminate",
     )?;
-    check(classify_post(p, 17) == PostDecision::Drop, "no-tramp SIGCHLD drop")?;
+    check(
+        classify_post(p, 17) == PostDecision::Drop,
+        "no-tramp SIGCHLD drop",
+    )?;
     register_trampoline(p, 0x4000);
-    check(classify_post(p, 15) == PostDecision::Deliver, "tramp SIGTERM deliver")?;
-    check(pending(p) & (1 << 14) == (1 << 14), "SIGTERM pending after deliver")?;
+    check(
+        classify_post(p, 15) == PostDecision::Deliver,
+        "tramp SIGTERM deliver",
+    )?;
+    check(
+        pending(p) & (1 << 14) == (1 << 14),
+        "SIGTERM pending after deliver",
+    )?;
     check(
         classify_post(p, SIGKILL) == PostDecision::Terminate(128 + 9),
         "SIGKILL terminate even with tramp",
@@ -1317,7 +1355,10 @@ fn test_on_exec() -> KernelResult<()> {
     on_exec(p);
     check(!has_trampoline(p), "exec clears trampoline")?;
     check(blocked(p) == 0, "exec clears blocked mask")?;
-    check(pending(p) & (1 << 11) == (1 << 11), "exec preserves pending")?;
+    check(
+        pending(p) & (1 << 11) == (1 << 11),
+        "exec preserves pending",
+    )?;
     remove(p);
     serial_println!("[signal]   on_exec semantics: OK");
     Ok(())
@@ -1348,19 +1389,28 @@ fn test_signalfd_dequeue() -> KernelResult<()> {
     set_pending(p, 5);
     set_pending(p, 10);
     let fd_mask = (1u64 << 4) | (1u64 << 6); // signals 5 and 7
-    check(has_pending_in_mask(p, fd_mask), "signal 5 visible to fd mask")?;
+    check(
+        has_pending_in_mask(p, fd_mask),
+        "signal 5 visible to fd mask",
+    )?;
     check(
         !has_pending_in_mask(p, 1u64 << 6),
         "signal 7 not pending → mask {7} not readable",
     )?;
     // Dequeue: only signal 5 is in the mask (10 is not), so 5 comes out
     // and 10 stays pending.
-    check(take_pending_in_mask(p, fd_mask) == Some(5), "dequeue 5 from fd mask")?;
+    check(
+        take_pending_in_mask(p, fd_mask) == Some(5),
+        "dequeue 5 from fd mask",
+    )?;
     check(
         take_pending_in_mask(p, fd_mask).is_none(),
         "no further masked signal after 5 consumed",
     )?;
-    check(pending(p) & (1u64 << 9) == (1u64 << 9), "signal 10 still pending")?;
+    check(
+        pending(p) & (1u64 << 9) == (1u64 << 9),
+        "signal 10 still pending",
+    )?;
     // Dequeue ignores the blocked mask (unlike take_deliverable).
     set_blocked(p, 1u64 << 9); // block signal 10
     check(
@@ -1393,7 +1443,10 @@ fn test_signalfd_waiter_registry() -> KernelResult<()> {
 
     // Signal 5's bit matches only task_a.
     let woken = take_matching_signalfd_waiters(p, mask_a);
-    check(woken.len() == 1 && woken.first() == Some(&task_a), "bit{5} takes only task_a")?;
+    check(
+        woken.len() == 1 && woken.first() == Some(&task_a),
+        "bit{5} takes only task_a",
+    )?;
     // task_a is now gone; re-taking the same bit yields nothing.
     check(
         take_matching_signalfd_waiters(p, mask_a).is_empty(),
@@ -1403,7 +1456,10 @@ fn test_signalfd_waiter_registry() -> KernelResult<()> {
     // Idempotent re-registration updates the mask rather than duplicating.
     register_signalfd_waiter(p, task_b, mask_a | mask_b);
     let woken = take_matching_signalfd_waiters(p, mask_a);
-    check(woken.len() == 1 && woken.first() == Some(&task_b), "remask wakes task_b on bit{5}")?;
+    check(
+        woken.len() == 1 && woken.first() == Some(&task_b),
+        "remask wakes task_b on bit{5}",
+    )?;
 
     // Deregister of an already-taken / unknown task is a harmless no-op,
     // and the registry entry for p is cleaned up once empty.
@@ -1426,7 +1482,10 @@ fn test_take_all_waiters() -> KernelResult<()> {
     let task_c: TaskId = 0xC3;
 
     // Empty registry drains to nothing.
-    check(take_all_waiters(p).is_empty(), "empty pid drains to nothing")?;
+    check(
+        take_all_waiters(p).is_empty(),
+        "empty pid drains to nothing",
+    )?;
 
     // Disjoint masks (including one that covers no real signal) all drain —
     // the point of wake_all_waiters is that the mask is ignored. task_b's
@@ -1437,7 +1496,10 @@ fn test_take_all_waiters() -> KernelResult<()> {
 
     let mut drained = take_all_waiters(p);
     drained.sort_unstable();
-    check(drained == [task_a, task_b, task_c], "all three waiters drained")?;
+    check(
+        drained == [task_a, task_b, task_c],
+        "all three waiters drained",
+    )?;
 
     // Registry is empty afterwards (entry removed), so a re-drain is empty
     // and a mask-based take finds nothing either.

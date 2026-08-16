@@ -119,8 +119,7 @@ static ACCOUNTING: Mutex<[AccountingEntry; MAX_ADDRESS_SPACES]> =
 ///
 /// Set by [`set_kernel_pml4`] during boot.  Mappings into this address
 /// space are NOT tracked (kernel memory is shared, not per-process).
-static KERNEL_PML4: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static KERNEL_PML4: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Initialization
@@ -207,9 +206,7 @@ pub fn destroy_address_space(pml4_phys: u64) {
 #[inline]
 #[allow(dead_code)] // Public API for page fault handler.
 pub fn try_charge(pml4_phys: u64, n: u64) -> bool {
-    if pml4_phys == 0
-        || pml4_phys == KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed)
-    {
+    if pml4_phys == 0 || pml4_phys == KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed) {
         return true; // Kernel mappings always allowed.
     }
 
@@ -239,9 +236,7 @@ pub fn try_charge(pml4_phys: u64, n: u64) -> bool {
 #[inline]
 pub fn charge(pml4_phys: u64, n: u64) {
     // Skip kernel mappings (boot-time identity maps, HHDM, etc.).
-    if pml4_phys == 0
-        || pml4_phys == KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed)
-    {
+    if pml4_phys == 0 || pml4_phys == KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed) {
         return;
     }
 
@@ -267,9 +262,7 @@ pub fn charge(pml4_phys: u64, n: u64) {
 /// Skips accounting for the kernel address space.
 #[inline]
 pub fn uncharge(pml4_phys: u64, n: u64) {
-    if pml4_phys == 0
-        || pml4_phys == KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed)
-    {
+    if pml4_phys == 0 || pml4_phys == KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed) {
         return;
     }
 
@@ -378,14 +371,16 @@ impl AddressSpaceStats {
     #[must_use]
     #[allow(dead_code)] // Public API for procfs/diagnostics.
     pub fn rss_bytes(&self) -> u64 {
-        self.rss_frames.saturating_mul(super::frame::FRAME_SIZE as u64)
+        self.rss_frames
+            .saturating_mul(super::frame::FRAME_SIZE as u64)
     }
 
     /// Peak RSS in bytes.
     #[must_use]
     // Backs the Linux getrusage(2) ru_maxrss field (peak resident set size).
     pub fn peak_rss_bytes(&self) -> u64 {
-        self.peak_rss_frames.saturating_mul(super::frame::FRAME_SIZE as u64)
+        self.peak_rss_frames
+            .saturating_mul(super::frame::FRAME_SIZE as u64)
     }
 }
 
@@ -451,7 +446,8 @@ pub fn largest_rss() -> Option<AddressSpaceStats> {
 #[allow(dead_code)] // Public API for procfs/OOM diagnostics.
 pub fn all_stats() -> alloc::vec::Vec<AddressSpaceStats> {
     let table = ACCOUNTING.lock_irqsave();
-    table.iter()
+    table
+        .iter()
         .filter(|e| e.pml4_phys != 0)
         .map(|e| AddressSpaceStats {
             pml4_phys: e.pml4_phys,
@@ -515,7 +511,10 @@ pub fn self_test() {
     // Saturating uncharge below zero.
     uncharge(pml4_a, 100);
     let stats_a = query(pml4_a).expect("query(a) returned None");
-    assert_eq!(stats_a.rss_frames, 0, "a.rss should be 0 after over-uncharge");
+    assert_eq!(
+        stats_a.rss_frames, 0,
+        "a.rss should be 0 after over-uncharge"
+    );
     serial_println!("[accounting]   Uncharge: OK (saturating)");
 
     // -- 4. Largest RSS --
@@ -569,15 +568,27 @@ pub fn self_test() {
     assert_eq!(lim, Some(30), "limit should be 30");
 
     // a has RSS=20 (from earlier).  try_charge(a, 5) should succeed (25<=30).
-    assert!(try_charge(pml4_a, 5), "try_charge(a,5) should succeed (20+5<=30)");
+    assert!(
+        try_charge(pml4_a, 5),
+        "try_charge(a,5) should succeed (20+5<=30)"
+    );
     // try_charge(a, 15) should fail (20+15=35>30).
-    assert!(!try_charge(pml4_a, 15), "try_charge(a,15) should fail (20+15>30)");
+    assert!(
+        !try_charge(pml4_a, 15),
+        "try_charge(a,15) should fail (20+15>30)"
+    );
     // Exact boundary: try_charge(a, 10) should succeed (20+10=30).
-    assert!(try_charge(pml4_a, 10), "try_charge(a,10) should succeed (20+10=30)");
+    assert!(
+        try_charge(pml4_a, 10),
+        "try_charge(a,10) should succeed (20+10=30)"
+    );
 
     // Unlimited (0) should always allow.
     assert!(set_rss_limit(pml4_a, 0), "clear limit failed");
-    assert!(try_charge(pml4_a, 1000), "unlimited should allow any charge");
+    assert!(
+        try_charge(pml4_a, 1000),
+        "unlimited should allow any charge"
+    );
 
     // b has no limit → try_charge always succeeds.
     assert!(try_charge(pml4_b, 1000), "no limit should allow any charge");

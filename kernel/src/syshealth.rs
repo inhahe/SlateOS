@@ -32,11 +32,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
-use crate::sync::PreemptSpinMutex as Mutex;
-
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -293,7 +292,9 @@ pub fn check() -> HealthSnapshot {
         state.history.push(snapshot.clone());
 
         #[allow(clippy::arithmetic_side_effects)]
-        { state.total_checks += 1; }
+        {
+            state.total_checks += 1;
+        }
     }
 
     snapshot
@@ -324,7 +325,9 @@ fn check_memory(config: &HealthConfig, metrics: &mut Vec<HealthMetric>, overall:
     // Calculate percentage, avoiding overflow.
     let percent = if total_pages > 0 {
         #[allow(clippy::arithmetic_side_effects)]
-        { (used_pages * 100) / total_pages }
+        {
+            (used_pages * 100) / total_pages
+        }
     } else {
         0
     };
@@ -352,8 +355,10 @@ fn check_memory(config: &HealthConfig, metrics: &mut Vec<HealthMetric>, overall:
         crit_threshold: u64::from(config.memory_crit_percent),
         unit: "%",
         level,
-        message: format!("{}% used ({} MiB / {} MiB, {} MiB free)",
-            percent, used_mib, total_mib, free_mib),
+        message: format!(
+            "{}% used ({} MiB / {} MiB, {} MiB free)",
+            percent, used_mib, total_mib, free_mib
+        ),
     });
 }
 
@@ -386,16 +391,25 @@ fn check_load(config: &HealthConfig, metrics: &mut Vec<HealthMetric>, overall: &
         crit_threshold: u64::from(config.load_crit_per_cpu_x100),
         unit: "x100/cpu",
         level,
-        message: format!("load avg: {}.{:02} / {}.{:02} / {}.{:02} ({} CPUs)",
-            load1 / 100, load1 % 100,
-            load5 / 100, load5 % 100,
-            load15 / 100, load15 % 100,
-            ncpus),
+        message: format!(
+            "load avg: {}.{:02} / {}.{:02} / {}.{:02} ({} CPUs)",
+            load1 / 100,
+            load1 % 100,
+            load5 / 100,
+            load5 % 100,
+            load15 / 100,
+            load15 % 100,
+            ncpus
+        ),
     });
 }
 
 /// Check CPU temperature.
-fn check_temperature(config: &HealthConfig, metrics: &mut Vec<HealthMetric>, overall: &mut HealthLevel) {
+fn check_temperature(
+    config: &HealthConfig,
+    metrics: &mut Vec<HealthMetric>,
+    overall: &mut HealthLevel,
+) {
     let therm = crate::thermal::info();
     if !therm.supported {
         // Thermal sensor not available.
@@ -459,7 +473,11 @@ fn emit_health_events(snapshot: &HealthSnapshot, now: u64) {
         }
 
         // Check cooldown.
-        let cooled_down = match state.last_warn_times.iter().find(|(n, _)| *n == metric.name) {
+        let cooled_down = match state
+            .last_warn_times
+            .iter()
+            .find(|(n, _)| *n == metric.name)
+        {
             Some(&(_, last_t)) => now.saturating_sub(last_t) >= WARNING_COOLDOWN_NS,
             None => true,
         };
@@ -469,7 +487,11 @@ fn emit_health_events(snapshot: &HealthSnapshot, now: u64) {
         }
 
         // Update last warning time.
-        if let Some(entry) = state.last_warn_times.iter_mut().find(|(n, _)| *n == metric.name) {
+        if let Some(entry) = state
+            .last_warn_times
+            .iter_mut()
+            .find(|(n, _)| *n == metric.name)
+        {
             entry.1 = now;
         } else {
             state.last_warn_times.push((metric.name.clone(), now));
@@ -478,17 +500,33 @@ fn emit_health_events(snapshot: &HealthSnapshot, now: u64) {
         match metric.level {
             HealthLevel::Warning => {
                 #[allow(clippy::arithmetic_side_effects)]
-                { state.total_warnings += 1; }
-                crate::syslog!("system.health", Warning,
+                {
+                    state.total_warnings += 1;
+                }
+                crate::syslog!(
+                    "system.health",
+                    Warning,
                     "{}: {} (threshold: {} {})",
-                    metric.name, metric.message, metric.warn_threshold, metric.unit);
+                    metric.name,
+                    metric.message,
+                    metric.warn_threshold,
+                    metric.unit
+                );
             }
             HealthLevel::Critical => {
                 #[allow(clippy::arithmetic_side_effects)]
-                { state.total_criticals += 1; }
-                crate::syslog!("system.health", Error,
+                {
+                    state.total_criticals += 1;
+                }
+                crate::syslog!(
+                    "system.health",
+                    Error,
                     "CRITICAL {}: {} (threshold: {} {})",
-                    metric.name, metric.message, metric.crit_threshold, metric.unit);
+                    metric.name,
+                    metric.message,
+                    metric.crit_threshold,
+                    metric.unit
+                );
             }
             _ => {}
         }
@@ -506,7 +544,10 @@ pub fn current() -> Option<HealthSnapshot> {
 
 /// Get the current overall health level.
 pub fn overall_health() -> HealthLevel {
-    STATE.lock().current.as_ref()
+    STATE
+        .lock()
+        .current
+        .as_ref()
         .map(|s| s.overall)
         .unwrap_or(HealthLevel::Unknown)
 }
@@ -519,7 +560,11 @@ pub fn history() -> Vec<HealthSnapshot> {
 /// Get total check/warning/critical counts.
 pub fn stats() -> (u64, u64, u64) {
     let state = STATE.lock();
-    (state.total_checks, state.total_warnings, state.total_criticals)
+    (
+        state.total_checks,
+        state.total_warnings,
+        state.total_criticals,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -553,17 +598,28 @@ pub fn procfs_content() -> String {
 
     if let Some(ref snap) = state.current {
         out.push_str(&format!("Overall: {}\n", snap.overall.label()));
-        out.push_str(&format!("Last check: {} ns since boot\n\n", snap.timestamp_ns));
+        out.push_str(&format!(
+            "Last check: {} ns since boot\n\n",
+            snap.timestamp_ns
+        ));
 
-        out.push_str(&format!("{:<15} {:<10} {:<10} {}\n",
-            "Metric", "Level", "Value", "Details"));
-        out.push_str(&format!("{:-<15} {:-<10} {:-<10} {:-<30}\n", "", "", "", ""));
+        out.push_str(&format!(
+            "{:<15} {:<10} {:<10} {}\n",
+            "Metric", "Level", "Value", "Details"
+        ));
+        out.push_str(&format!(
+            "{:-<15} {:-<10} {:-<10} {:-<30}\n",
+            "", "", "", ""
+        ));
 
         for m in &snap.metrics {
-            out.push_str(&format!("{:<15} {:<10} {:<10} {}\n",
-                m.name, m.level.label(),
+            out.push_str(&format!(
+                "{:<15} {:<10} {:<10} {}\n",
+                m.name,
+                m.level.label(),
                 format!("{} {}", m.value, m.unit),
-                m.message));
+                m.message
+            ));
         }
     } else {
         out.push_str("No health check performed yet.\n");
@@ -592,11 +648,15 @@ pub fn self_test() -> bool {
             if $cond {
                 crate::serial_println!("  [PASS] {}", $name);
                 #[allow(clippy::arithmetic_side_effects)]
-                { passed += 1; }
+                {
+                    passed += 1;
+                }
             } else {
                 crate::serial_println!("  [FAIL] {}", $name);
                 #[allow(clippy::arithmetic_side_effects)]
-                { failed += 1; }
+                {
+                    failed += 1;
+                }
             }
         };
     }
@@ -616,14 +676,19 @@ pub fn self_test() -> bool {
 
     // Test 2: No snapshot before first check.
     check!("no snapshot before check", current().is_none());
-    check!("overall is Unknown before check", overall_health() == HealthLevel::Unknown);
+    check!(
+        "overall is Unknown before check",
+        overall_health() == HealthLevel::Unknown
+    );
 
     // Test 3: Run a health check.
     let snap = check();
     check!("check returns snapshot", true);
     check!("snapshot has metrics", !snap.metrics.is_empty());
-    check!("overall is not Unknown after check",
-        snap.overall != HealthLevel::Unknown);
+    check!(
+        "overall is not Unknown after check",
+        snap.overall != HealthLevel::Unknown
+    );
 
     // Test 4: Current snapshot available after check.
     let cur = current();
@@ -671,7 +736,10 @@ pub fn self_test() -> bool {
     // Test 12: Disable/enable.
     set_enabled(false);
     let snap = check();
-    check!("disabled check returns Unknown", snap.overall == HealthLevel::Unknown);
+    check!(
+        "disabled check returns Unknown",
+        snap.overall == HealthLevel::Unknown
+    );
     check!("disabled check has no metrics", snap.metrics.is_empty());
 
     set_enabled(true);
@@ -681,8 +749,15 @@ pub fn self_test() -> bool {
     // Test 13: Procfs output.
     let content = procfs_content();
     check!("procfs content is non-empty", content.len() > 50);
-    check!("procfs contains 'System Health'", content.contains("System Health"));
+    check!(
+        "procfs contains 'System Health'",
+        content.contains("System Health")
+    );
 
-    crate::serial_println!("[syshealth] Tests complete: {} passed, {} failed", passed, failed);
+    crate::serial_println!(
+        "[syshealth] Tests complete: {} passed, {} failed",
+        passed,
+        failed
+    );
     failed == 0
 }

@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -104,7 +104,9 @@ where
 /// write/read/discard.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         next_id: 0,
@@ -119,13 +121,23 @@ pub fn init_defaults() {
 /// Create a ZRAM device.
 pub fn create_device(name: &str, disk_size: u64) -> KernelResult<u32> {
     with_state(|state| {
-        if state.devices.len() >= MAX_DEVICES { return Err(KernelError::ResourceExhausted); }
+        if state.devices.len() >= MAX_DEVICES {
+            return Err(KernelError::ResourceExhausted);
+        }
         let id = state.next_id;
         state.next_id += 1;
         state.devices.push(ZramDevice {
-            dev_id: id, name: String::from(name), disk_size,
-            orig_data_size: 0, compr_data_size: 0, mem_used: 0,
-            reads: 0, writes: 0, discards: 0, zero_pages: 0, same_pages: 0,
+            dev_id: id,
+            name: String::from(name),
+            disk_size,
+            orig_data_size: 0,
+            compr_data_size: 0,
+            mem_used: 0,
+            reads: 0,
+            writes: 0,
+            discards: 0,
+            zero_pages: 0,
+            same_pages: 0,
         });
         Ok(id)
     })
@@ -134,7 +146,10 @@ pub fn create_device(name: &str, disk_size: u64) -> KernelResult<u32> {
 /// Remove a ZRAM device.
 pub fn remove_device(dev_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.devices.iter().position(|d| d.dev_id == dev_id)
+        let idx = state
+            .devices
+            .iter()
+            .position(|d| d.dev_id == dev_id)
             .ok_or(KernelError::NotFound)?;
         state.devices.remove(idx);
         Ok(())
@@ -144,13 +159,18 @@ pub fn remove_device(dev_id: u32) -> KernelResult<()> {
 /// Record a compressed write.
 pub fn record_write(dev_id: u32, orig_bytes: u64, compr_bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.devices.iter_mut().find(|d| d.dev_id == dev_id)
+        let d = state
+            .devices
+            .iter_mut()
+            .find(|d| d.dev_id == dev_id)
             .ok_or(KernelError::NotFound)?;
         d.writes += 1;
         d.orig_data_size += orig_bytes;
         d.compr_data_size += compr_bytes;
         d.mem_used += compr_bytes;
-        if orig_bytes == 0 { d.zero_pages += 1; }
+        if orig_bytes == 0 {
+            d.zero_pages += 1;
+        }
         state.total_orig += orig_bytes;
         state.total_compr += compr_bytes;
         state.total_writes += 1;
@@ -161,7 +181,10 @@ pub fn record_write(dev_id: u32, orig_bytes: u64, compr_bytes: u64) -> KernelRes
 /// Record a read.
 pub fn record_read(dev_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.devices.iter_mut().find(|d| d.dev_id == dev_id)
+        let d = state
+            .devices
+            .iter_mut()
+            .find(|d| d.dev_id == dev_id)
             .ok_or(KernelError::NotFound)?;
         d.reads += 1;
         state.total_reads += 1;
@@ -172,7 +195,10 @@ pub fn record_read(dev_id: u32) -> KernelResult<()> {
 /// Record a discard (page freed from ZRAM).
 pub fn record_discard(dev_id: u32, bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.devices.iter_mut().find(|d| d.dev_id == dev_id)
+        let d = state
+            .devices
+            .iter_mut()
+            .find(|d| d.dev_id == dev_id)
             .ok_or(KernelError::NotFound)?;
         d.discards += 1;
         d.mem_used = d.mem_used.saturating_sub(bytes);
@@ -182,24 +208,41 @@ pub fn record_discard(dev_id: u32, bytes: u64) -> KernelResult<()> {
 
 /// Per-device stats.
 pub fn per_device() -> Vec<ZramDevice> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Compression ratio (x100 for integer precision). Higher = better.
 pub fn compression_ratio_x100(dev_id: u32) -> u64 {
     let guard = STATE.lock();
-    guard.as_ref().and_then(|s| {
-        s.devices.iter().find(|d| d.dev_id == dev_id).map(|d| {
-            if d.compr_data_size > 0 { d.orig_data_size * 100 / d.compr_data_size } else { 0 }
+    guard
+        .as_ref()
+        .and_then(|s| {
+            s.devices.iter().find(|d| d.dev_id == dev_id).map(|d| {
+                if d.compr_data_size > 0 {
+                    d.orig_data_size * 100 / d.compr_data_size
+                } else {
+                    0
+                }
+            })
         })
-    }).unwrap_or(0)
+        .unwrap_or(0)
 }
 
 /// Statistics: (device_count, total_orig, total_compr, total_reads, total_writes, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.total_orig, s.total_compr, s.total_reads, s.total_writes, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.total_orig,
+            s.total_compr,
+            s.total_reads,
+            s.total_writes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -228,14 +271,23 @@ pub fn self_test() {
     // 2: Create device — zeroed counters, disk_size preserved.
     let id = create_device("zram0", 2_000_000_000).expect("create");
     assert_eq!(per_device().len(), 1);
-    let d = per_device().into_iter().find(|d| d.dev_id == id).expect("find");
+    let d = per_device()
+        .into_iter()
+        .find(|d| d.dev_id == id)
+        .expect("find");
     assert_eq!(d.disk_size, 2_000_000_000);
-    assert_eq!((d.orig_data_size, d.compr_data_size, d.reads, d.writes), (0, 0, 0, 0));
+    assert_eq!(
+        (d.orig_data_size, d.compr_data_size, d.reads, d.writes),
+        (0, 0, 0, 0)
+    );
     crate::serial_println!("  [2/8] create: OK");
 
     // 3: Write — counts and sizes accumulate; mem_used grows by compressed size.
     record_write(id, 4096, 2048).expect("write");
-    let d = per_device().into_iter().find(|d| d.dev_id == id).expect("find");
+    let d = per_device()
+        .into_iter()
+        .find(|d| d.dev_id == id)
+        .expect("find");
     assert_eq!(d.writes, 1);
     assert_eq!(d.orig_data_size, 4096);
     assert_eq!(d.compr_data_size, 2048);
@@ -244,17 +296,26 @@ pub fn self_test() {
 
     // 4: Read.
     record_read(id).expect("read");
-    let d = per_device().into_iter().find(|d| d.dev_id == id).expect("find");
+    let d = per_device()
+        .into_iter()
+        .find(|d| d.dev_id == id)
+        .expect("find");
     assert_eq!(d.reads, 1);
     crate::serial_println!("  [4/8] read: OK");
 
     // 5: Discard — mem_used drops by the freed bytes (saturating).
     record_discard(id, 1024).expect("discard");
-    let d = per_device().into_iter().find(|d| d.dev_id == id).expect("find");
+    let d = per_device()
+        .into_iter()
+        .find(|d| d.dev_id == id)
+        .expect("find");
     assert_eq!(d.discards, 1);
     assert_eq!(d.mem_used, 1024); // 2048 - 1024
     record_discard(id, 99_999).expect("over_discard"); // saturates, no underflow
-    let d = per_device().into_iter().find(|d| d.dev_id == id).expect("find");
+    let d = per_device()
+        .into_iter()
+        .find(|d| d.dev_id == id)
+        .expect("find");
     assert_eq!(d.mem_used, 0);
     crate::serial_println!("  [5/8] discard: OK");
 

@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -143,7 +143,9 @@ fn reason_index(r: MigReason) -> usize {
 /// task migration.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         cpus: Vec::new(),
         tasks: Vec::new(),
@@ -162,22 +164,37 @@ pub fn init_defaults() {
 /// (the task-level and aggregate counters still advance).
 pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.cpus.iter().any(|c| c.cpu_id == cpu_id) { return Err(KernelError::AlreadyExists); }
-        if state.cpus.len() >= MAX_CPUS { return Err(KernelError::ResourceExhausted); }
+        if state.cpus.iter().any(|c| c.cpu_id == cpu_id) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if state.cpus.len() >= MAX_CPUS {
+            return Err(KernelError::ResourceExhausted);
+        }
         state.cpus.push(CpuMigStats {
-            cpu_id, migrations_in: 0, migrations_out: 0, numa_crosses: 0,
+            cpu_id,
+            migrations_in: 0,
+            migrations_out: 0,
+            numa_crosses: 0,
         });
         Ok(())
     })
 }
 
 /// Record a task migration.
-pub fn record(pid: u32, from_cpu: u32, to_cpu: u32, reason: MigReason, is_numa: bool) -> KernelResult<()> {
+pub fn record(
+    pid: u32,
+    from_cpu: u32,
+    to_cpu: u32,
+    reason: MigReason,
+    is_numa: bool,
+) -> KernelResult<()> {
     with_state(|state| {
         // Update CPU counters.
         if let Some(c) = state.cpus.iter_mut().find(|c| c.cpu_id == from_cpu) {
             c.migrations_out += 1;
-            if is_numa { c.numa_crosses += 1; }
+            if is_numa {
+                c.numa_crosses += 1;
+            }
         }
         if let Some(c) = state.cpus.iter_mut().find(|c| c.cpu_id == to_cpu) {
             c.migrations_in += 1;
@@ -186,10 +203,14 @@ pub fn record(pid: u32, from_cpu: u32, to_cpu: u32, reason: MigReason, is_numa: 
         if let Some(t) = state.tasks.iter_mut().find(|t| t.pid == pid) {
             t.migrations += 1;
             t.last_cpu = to_cpu;
-            if is_numa { t.numa_crosses += 1; }
+            if is_numa {
+                t.numa_crosses += 1;
+            }
         }
         state.total_migrations += 1;
-        if is_numa { state.total_numa_crosses += 1; }
+        if is_numa {
+            state.total_numa_crosses += 1;
+        }
         state.reason_counts[reason_index(reason)] += 1;
         Ok(())
     })
@@ -198,10 +219,18 @@ pub fn record(pid: u32, from_cpu: u32, to_cpu: u32, reason: MigReason, is_numa: 
 /// Register a task for migration tracking.
 pub fn register_task(pid: u32, name: &str, cpu: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.tasks.iter().any(|t| t.pid == pid) { return Err(KernelError::AlreadyExists); }
-        if state.tasks.len() >= MAX_TASKS { return Err(KernelError::ResourceExhausted); }
+        if state.tasks.iter().any(|t| t.pid == pid) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if state.tasks.len() >= MAX_TASKS {
+            return Err(KernelError::ResourceExhausted);
+        }
         state.tasks.push(TaskMigInfo {
-            pid, name: String::from(name), migrations: 0, numa_crosses: 0, last_cpu: cpu,
+            pid,
+            name: String::from(name),
+            migrations: 0,
+            numa_crosses: 0,
+            last_cpu: cpu,
         });
         Ok(())
     })
@@ -240,7 +269,13 @@ pub fn reason_stats() -> [(MigReason, u64); 6] {
 pub fn stats() -> (usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.cpus.len(), s.tasks.len(), s.total_migrations, s.total_numa_crosses, s.ops),
+        Some(s) => (
+            s.cpus.len(),
+            s.tasks.len(),
+            s.total_migrations,
+            s.total_numa_crosses,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -278,23 +313,43 @@ pub fn self_test() {
 
     // 3: Record migration (exact, from zero).
     record(200, 0, 1, MigReason::LoadBalance, false).expect("migrate");
-    let t = hot_tasks(10).iter().find(|t| t.pid == 200).cloned().expect("task");
+    let t = hot_tasks(10)
+        .iter()
+        .find(|t| t.pid == 200)
+        .cloned()
+        .expect("task");
     assert_eq!(t.migrations, 1);
     assert_eq!(t.last_cpu, 1);
     crate::serial_println!("  [3/8] migration: OK");
 
     // 4: NUMA crossing bumps the task's numa counter exactly.
     record(200, 1, 2, MigReason::WakeAffine, true).expect("numa");
-    let t = hot_tasks(10).iter().find(|t| t.pid == 200).cloned().expect("task");
+    let t = hot_tasks(10)
+        .iter()
+        .find(|t| t.pid == 200)
+        .cloned()
+        .expect("task");
     assert_eq!(t.numa_crosses, 1);
     assert_eq!(t.migrations, 2);
     crate::serial_println!("  [4/8] numa cross: OK");
 
     // 5: Per-CPU counters reflect exactly the two migrations above.
     //    Migration 1: out cpu0, in cpu1. Migration 2: out cpu1 (numa), in cpu2.
-    let cpu0 = per_cpu().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
-    let cpu1 = per_cpu().iter().find(|c| c.cpu_id == 1).cloned().expect("cpu1");
-    let cpu2 = per_cpu().iter().find(|c| c.cpu_id == 2).cloned().expect("cpu2");
+    let cpu0 = per_cpu()
+        .iter()
+        .find(|c| c.cpu_id == 0)
+        .cloned()
+        .expect("cpu0");
+    let cpu1 = per_cpu()
+        .iter()
+        .find(|c| c.cpu_id == 1)
+        .cloned()
+        .expect("cpu1");
+    let cpu2 = per_cpu()
+        .iter()
+        .find(|c| c.cpu_id == 2)
+        .cloned()
+        .expect("cpu2");
     assert_eq!(cpu0.migrations_out, 1);
     assert_eq!(cpu1.migrations_in, 1);
     assert_eq!(cpu1.migrations_out, 1);

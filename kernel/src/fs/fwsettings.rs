@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -211,31 +211,67 @@ pub fn init_defaults() {
     let default_rules = alloc::vec![
         // Allow DHCP client.
         FwRule {
-            id: 1, name: String::from("Allow DHCP"),
-            direction: Direction::Both, protocol: Protocol::Udp,
-            port: 67, port_end: 68, source: String::new(), dest: String::new(),
-            action: RuleAction::Allow, zone: None, enabled: true, hits: 0, priority: 10,
+            id: 1,
+            name: String::from("Allow DHCP"),
+            direction: Direction::Both,
+            protocol: Protocol::Udp,
+            port: 67,
+            port_end: 68,
+            source: String::new(),
+            dest: String::new(),
+            action: RuleAction::Allow,
+            zone: None,
+            enabled: true,
+            hits: 0,
+            priority: 10,
         },
         // Allow DNS.
         FwRule {
-            id: 2, name: String::from("Allow DNS"),
-            direction: Direction::Outbound, protocol: Protocol::Udp,
-            port: 53, port_end: 0, source: String::new(), dest: String::new(),
-            action: RuleAction::Allow, zone: None, enabled: true, hits: 0, priority: 10,
+            id: 2,
+            name: String::from("Allow DNS"),
+            direction: Direction::Outbound,
+            protocol: Protocol::Udp,
+            port: 53,
+            port_end: 0,
+            source: String::new(),
+            dest: String::new(),
+            action: RuleAction::Allow,
+            zone: None,
+            enabled: true,
+            hits: 0,
+            priority: 10,
         },
         // Allow ICMP ping.
         FwRule {
-            id: 3, name: String::from("Allow Ping"),
-            direction: Direction::Both, protocol: Protocol::Icmp,
-            port: 0, port_end: 0, source: String::new(), dest: String::new(),
-            action: RuleAction::Allow, zone: Some(NetworkZone::Home), enabled: true, hits: 0, priority: 20,
+            id: 3,
+            name: String::from("Allow Ping"),
+            direction: Direction::Both,
+            protocol: Protocol::Icmp,
+            port: 0,
+            port_end: 0,
+            source: String::new(),
+            dest: String::new(),
+            action: RuleAction::Allow,
+            zone: Some(NetworkZone::Home),
+            enabled: true,
+            hits: 0,
+            priority: 20,
         },
         // Block inbound on public.
         FwRule {
-            id: 4, name: String::from("Block Public Inbound"),
-            direction: Direction::Inbound, protocol: Protocol::Any,
-            port: 0, port_end: 0, source: String::new(), dest: String::new(),
-            action: RuleAction::Block, zone: Some(NetworkZone::Public), enabled: true, hits: 0, priority: 100,
+            id: 4,
+            name: String::from("Block Public Inbound"),
+            direction: Direction::Inbound,
+            protocol: Protocol::Any,
+            port: 0,
+            port_end: 0,
+            source: String::new(),
+            dest: String::new(),
+            action: RuleAction::Block,
+            zone: Some(NetworkZone::Public),
+            enabled: true,
+            hits: 0,
+            priority: 100,
         },
     ];
 
@@ -374,7 +410,9 @@ pub fn remove_rule(id: u64) -> KernelResult<()> {
 /// Enable or disable a rule.
 pub fn set_rule_enabled(id: u64, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let rule = state.rules.iter_mut()
+        let rule = state
+            .rules
+            .iter_mut()
             .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         rule.enabled = enabled;
@@ -385,7 +423,9 @@ pub fn set_rule_enabled(id: u64, enabled: bool) -> KernelResult<()> {
 /// Set rule priority.
 pub fn set_rule_priority(id: u64, priority: u32) -> KernelResult<()> {
     with_state(|state| {
-        let rule = state.rules.iter_mut()
+        let rule = state
+            .rules
+            .iter_mut()
             .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         rule.priority = priority;
@@ -396,7 +436,9 @@ pub fn set_rule_priority(id: u64, priority: u32) -> KernelResult<()> {
 /// Set rule zone filter.
 pub fn set_rule_zone(id: u64, zone: Option<NetworkZone>) -> KernelResult<()> {
     with_state(|state| {
-        let rule = state.rules.iter_mut()
+        let rule = state
+            .rules
+            .iter_mut()
             .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         rule.zone = zone;
@@ -408,7 +450,9 @@ pub fn set_rule_zone(id: u64, zone: Option<NetworkZone>) -> KernelResult<()> {
 pub fn get_rule(id: u64) -> KernelResult<FwRule> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.rules.iter()
+    state
+        .rules
+        .iter()
         .find(|r| r.id == id)
         .cloned()
         .ok_or(KernelError::NotFound)
@@ -429,7 +473,11 @@ pub fn list_rules() -> Vec<FwRule> {
 // ---------------------------------------------------------------------------
 
 /// Set application network permission.
-pub fn set_app_permission(app_id: &str, allow_outbound: bool, allow_inbound: bool) -> KernelResult<()> {
+pub fn set_app_permission(
+    app_id: &str,
+    allow_outbound: bool,
+    allow_inbound: bool,
+) -> KernelResult<()> {
     if app_id.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -468,7 +516,9 @@ pub fn remove_app_permission(app_id: &str) -> KernelResult<()> {
 /// List application permissions.
 pub fn list_app_permissions() -> Vec<AppPermission> {
     let guard = STATE.lock();
-    guard.as_ref().map_or_else(Vec::new, |s| s.app_perms.clone())
+    guard
+        .as_ref()
+        .map_or_else(Vec::new, |s| s.app_perms.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -571,7 +621,14 @@ pub fn check_allowed(
 pub fn stats() -> (usize, usize, u64, u64, bool, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.rules.len(), s.app_perms.len(), s.total_blocked, s.total_allowed, s.enabled, s.ops),
+        Some(s) => (
+            s.rules.len(),
+            s.app_perms.len(),
+            s.total_blocked,
+            s.total_allowed,
+            s.enabled,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, false, 0),
     }
 }
@@ -617,7 +674,14 @@ pub fn self_test() {
 
     // Test 4: add rule.
     {
-        let id = add_rule("Allow SSH", Direction::Inbound, Protocol::Tcp, 22, RuleAction::Allow).unwrap();
+        let id = add_rule(
+            "Allow SSH",
+            Direction::Inbound,
+            Protocol::Tcp,
+            22,
+            RuleAction::Allow,
+        )
+        .unwrap();
         let rule = get_rule(id).unwrap();
         assert_eq!(rule.name, "Allow SSH");
         assert_eq!(rule.port, 22);
@@ -636,7 +700,14 @@ pub fn self_test() {
 
     // Test 6: rule enable/disable.
     {
-        let id = add_rule("Test Rule", Direction::Outbound, Protocol::Tcp, 443, RuleAction::Allow).unwrap();
+        let id = add_rule(
+            "Test Rule",
+            Direction::Outbound,
+            Protocol::Tcp,
+            443,
+            RuleAction::Allow,
+        )
+        .unwrap();
         set_rule_enabled(id, false).unwrap();
         assert!(!get_rule(id).unwrap().enabled);
         set_rule_enabled(id, true).unwrap();

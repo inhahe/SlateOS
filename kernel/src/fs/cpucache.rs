@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -106,8 +106,15 @@ where
 
 fn empty_level(level: CacheLevel) -> CacheLevelInfo {
     CacheLevelInfo {
-        level, size_kb: 0, line_size: 0, ways: 0, sets: 0, shared_cpus: 0,
-        hits: 0, misses: 0, evictions: 0,
+        level,
+        size_kb: 0,
+        line_size: 0,
+        ways: 0,
+        sets: 0,
+        shared_cpus: 0,
+        hits: 0,
+        misses: 0,
+        evictions: 0,
     }
 }
 
@@ -130,7 +137,9 @@ fn empty_level(level: CacheLevel) -> CacheLevelInfo {
 /// across the levels.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         caches: [
             empty_level(CacheLevel::L1d),
@@ -150,7 +159,14 @@ pub fn init_defaults() {
 /// associativity ways, sets, and the number of CPUs sharing the cache) without
 /// touching its hit/miss/eviction counters. Intended to be called by the
 /// CPUID cache-topology probe at startup.
-pub fn set_geometry(level: CacheLevel, size_kb: u32, line_size: u32, ways: u32, sets: u32, shared_cpus: u32) -> KernelResult<()> {
+pub fn set_geometry(
+    level: CacheLevel,
+    size_kb: u32,
+    line_size: u32,
+    ways: u32,
+    sets: u32,
+    shared_cpus: u32,
+) -> KernelResult<()> {
     with_state(|state| {
         let c = &mut state.caches[level.index()];
         c.size_kb = size_kb;
@@ -190,7 +206,10 @@ pub fn record_eviction(level: CacheLevel) -> KernelResult<()> {
 
 /// Cache topology/info.
 pub fn topology() -> Vec<CacheLevelInfo> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.caches.to_vec())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.caches.to_vec())
 }
 
 /// Hit rate for a cache level, percentage * 100.
@@ -200,7 +219,9 @@ pub fn hit_rate(level: CacheLevel) -> u64 {
         Some(s) => {
             let c = &s.caches[level.index()];
             let total = c.hits + c.misses;
-            if total == 0 { return 0; }
+            if total == 0 {
+                return 0;
+            }
             c.hits * 10000 / total
         }
         None => 0,
@@ -213,7 +234,9 @@ pub fn overall_hit_rate() -> u64 {
     match guard.as_ref() {
         Some(s) => {
             let total = s.total_hits + s.total_misses;
-            if total == 0 { return 0; }
+            if total == 0 {
+                return 0;
+            }
             s.total_hits * 10000 / total
         }
         None => 0,
@@ -244,7 +267,10 @@ pub fn self_test() {
     let topo = topology();
     assert_eq!(topo.len(), 4);
     for c in &topo {
-        assert_eq!((c.size_kb, c.line_size, c.ways, c.sets, c.shared_cpus), (0, 0, 0, 0, 0));
+        assert_eq!(
+            (c.size_kb, c.line_size, c.ways, c.sets, c.shared_cpus),
+            (0, 0, 0, 0, 0)
+        );
         assert_eq!((c.hits, c.misses, c.evictions), (0, 0, 0));
     }
     let (l0, h0, m0, _) = stats();
@@ -256,12 +282,17 @@ pub fn self_test() {
     //    without touching its counters.
     set_geometry(CacheLevel::L1d, 32, 64, 8, 64, 1).expect("geometry");
     let c = topology()[CacheLevel::L1d.index()].clone();
-    assert_eq!((c.size_kb, c.line_size, c.ways, c.sets, c.shared_cpus), (32, 64, 8, 64, 1));
+    assert_eq!(
+        (c.size_kb, c.line_size, c.ways, c.sets, c.shared_cpus),
+        (32, 64, 8, 64, 1)
+    );
     assert_eq!((c.hits, c.misses), (0, 0));
     crate::serial_println!("  [2/8] geometry: OK");
 
     // 3: Hits — three L1d hits advance the level and the global total.
-    for _ in 0..3 { record_hit(CacheLevel::L1d).expect("hit"); }
+    for _ in 0..3 {
+        record_hit(CacheLevel::L1d).expect("hit");
+    }
     assert_eq!(topology()[CacheLevel::L1d.index()].hits, 3);
     assert_eq!(stats().1, 3); // total_hits
     crate::serial_println!("  [3/8] hit: OK");

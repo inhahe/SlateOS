@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -121,7 +121,9 @@ where
 /// record functions on every swap-in/swap-out.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         areas: Vec::new(),
         total_swap_in: 0,
@@ -133,14 +135,31 @@ pub fn init_defaults() {
 }
 
 /// Register a swap area.
-pub fn register(name: &str, swap_type: SwapType, total_pages: u64, priority: i32) -> KernelResult<()> {
+pub fn register(
+    name: &str,
+    swap_type: SwapType,
+    total_pages: u64,
+    priority: i32,
+) -> KernelResult<()> {
     with_state(|state| {
-        if state.areas.len() >= MAX_AREAS { return Err(KernelError::ResourceExhausted); }
-        if state.areas.iter().any(|a| a.name == name) { return Err(KernelError::AlreadyExists); }
+        if state.areas.len() >= MAX_AREAS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.areas.iter().any(|a| a.name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.areas.push(SwapAreaStats {
-            name: String::from(name), swap_type, total_pages, used_pages: 0,
-            swap_in_count: 0, swap_in_pages: 0, swap_in_ns: 0,
-            swap_out_count: 0, swap_out_pages: 0, swap_out_ns: 0, priority,
+            name: String::from(name),
+            swap_type,
+            total_pages,
+            used_pages: 0,
+            swap_in_count: 0,
+            swap_in_pages: 0,
+            swap_in_ns: 0,
+            swap_out_count: 0,
+            swap_out_pages: 0,
+            swap_out_ns: 0,
+            priority,
         });
         Ok(())
     })
@@ -149,7 +168,10 @@ pub fn register(name: &str, swap_type: SwapType, total_pages: u64, priority: i32
 /// Record swap-in.
 pub fn record_in(name: &str, pages: u64, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let a = state.areas.iter_mut().find(|a| a.name == name)
+        let a = state
+            .areas
+            .iter_mut()
+            .find(|a| a.name == name)
             .ok_or(KernelError::NotFound)?;
         a.swap_in_count += 1;
         a.swap_in_pages += pages;
@@ -164,13 +186,18 @@ pub fn record_in(name: &str, pages: u64, ns: u64) -> KernelResult<()> {
 /// Record swap-out.
 pub fn record_out(name: &str, pages: u64, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let a = state.areas.iter_mut().find(|a| a.name == name)
+        let a = state
+            .areas
+            .iter_mut()
+            .find(|a| a.name == name)
             .ok_or(KernelError::NotFound)?;
         a.swap_out_count += 1;
         a.swap_out_pages += pages;
         a.swap_out_ns += ns;
         a.used_pages += pages;
-        if a.used_pages > a.total_pages { a.used_pages = a.total_pages; }
+        if a.used_pages > a.total_pages {
+            a.used_pages = a.total_pages;
+        }
         state.total_swap_out += 1;
         state.total_swap_out_pages += pages;
         Ok(())
@@ -179,14 +206,24 @@ pub fn record_out(name: &str, pages: u64, ns: u64) -> KernelResult<()> {
 
 /// Per-area stats.
 pub fn per_area() -> Vec<SwapAreaStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.areas.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.areas.clone())
 }
 
 /// Statistics: (area_count, total_swap_in, total_swap_out, total_in_pages, total_out_pages, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.areas.len(), s.total_swap_in, s.total_swap_out, s.total_swap_in_pages, s.total_swap_out_pages, s.ops),
+        Some(s) => (
+            s.areas.len(),
+            s.total_swap_in,
+            s.total_swap_out,
+            s.total_swap_in_pages,
+            s.total_swap_out_pages,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -214,7 +251,10 @@ pub fn self_test() {
 
     // 2: Register — zeroed counters, type/total/priority preserved; dup fails.
     register("/swapfile", SwapType::File, 500_000, -2).expect("register");
-    let a = per_area().into_iter().find(|a| a.name == "/swapfile").expect("find");
+    let a = per_area()
+        .into_iter()
+        .find(|a| a.name == "/swapfile")
+        .expect("find");
     assert_eq!(a.swap_type, SwapType::File);
     assert_eq!(a.total_pages, 500_000);
     assert_eq!(a.priority, -2);
@@ -224,7 +264,10 @@ pub fn self_test() {
 
     // 3: Swap out — count/pages/latency rise, used_pages grows.
     record_out("/swapfile", 100, 5000).expect("out");
-    let a = per_area().into_iter().find(|a| a.name == "/swapfile").expect("find");
+    let a = per_area()
+        .into_iter()
+        .find(|a| a.name == "/swapfile")
+        .expect("find");
     assert_eq!(a.swap_out_count, 1);
     assert_eq!(a.swap_out_pages, 100);
     assert_eq!(a.swap_out_ns, 5000);
@@ -233,7 +276,10 @@ pub fn self_test() {
 
     // 4: Swap in — used_pages drops by the paged-in count.
     record_in("/swapfile", 50, 3000).expect("in");
-    let a = per_area().into_iter().find(|a| a.name == "/swapfile").expect("find");
+    let a = per_area()
+        .into_iter()
+        .find(|a| a.name == "/swapfile")
+        .expect("find");
     assert_eq!(a.swap_in_count, 1);
     assert_eq!(a.swap_in_pages, 50);
     assert_eq!(a.swap_in_ns, 3000);
@@ -243,13 +289,19 @@ pub fn self_test() {
     // 5: Swap-in underflow guard — paging in more than resident saturates to 0,
     // never underflows.
     record_in("/swapfile", 9999, 1).expect("in_over");
-    let a = per_area().into_iter().find(|a| a.name == "/swapfile").expect("find");
+    let a = per_area()
+        .into_iter()
+        .find(|a| a.name == "/swapfile")
+        .expect("find");
     assert_eq!(a.used_pages, 0);
     crate::serial_println!("  [5/8] swap-in underflow guard: OK");
 
     // 6: Saturation — used_pages is clamped to total_pages on swap-out.
     record_out("/swapfile", 1_000_000, 100).expect("out_big");
-    let a = per_area().into_iter().find(|a| a.name == "/swapfile").expect("find");
+    let a = per_area()
+        .into_iter()
+        .find(|a| a.name == "/swapfile")
+        .expect("find");
     assert_eq!(a.used_pages, a.total_pages); // clamped to 500_000
     crate::serial_println!("  [6/8] saturation: OK");
 

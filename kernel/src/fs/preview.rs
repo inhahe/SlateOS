@@ -300,8 +300,10 @@ fn generate_for_mime(
         generate_audio_preview(path, mime, width, height)
     } else if mime == "application/pdf" {
         generate_pdf_preview(path, width, height)
-    } else if mime == "application/zip" || mime == "application/x-tar"
-        || mime == "application/gzip" || mime == "application/x-7z-compressed"
+    } else if mime == "application/zip"
+        || mime == "application/x-tar"
+        || mime == "application/gzip"
+        || mime == "application/x-7z-compressed"
     {
         generate_archive_preview(path, mime, width, height)
     } else {
@@ -342,7 +344,8 @@ fn generate_image_preview(
 
     for y in 0..height {
         for x in 0..width {
-            let offset = ((y as usize).saturating_mul(width as usize) + x as usize).saturating_mul(4);
+            let offset =
+                ((y as usize).saturating_mul(width as usize) + x as usize).saturating_mul(4);
             if offset.saturating_add(3) < pixels.len() {
                 // Blue-ish gradient for images.
                 let r = ((x as f32 / width as f32) * 100.0 * aspect) as u8;
@@ -372,12 +375,8 @@ fn extract_image_dimensions(header: &[u8], mime: &str) -> (u32, u32) {
         "image/png" => {
             // PNG: IHDR at offset 16, width(4 bytes BE) + height(4 bytes BE).
             if header.len() >= 24 {
-                let w = u32::from_be_bytes([
-                    header[16], header[17], header[18], header[19],
-                ]);
-                let h = u32::from_be_bytes([
-                    header[20], header[21], header[22], header[23],
-                ]);
+                let w = u32::from_be_bytes([header[16], header[17], header[18], header[19]]);
+                let h = u32::from_be_bytes([header[20], header[21], header[22], header[23]]);
                 (w, h)
             } else {
                 (0, 0)
@@ -407,12 +406,9 @@ fn extract_image_dimensions(header: &[u8], mime: &str) -> (u32, u32) {
         "image/bmp" => {
             // BMP: width at offset 18 (LE i32), height at offset 22 (LE i32).
             if header.len() >= 26 {
-                let w = i32::from_le_bytes([
-                    header[18], header[19], header[20], header[21],
-                ]) as u32;
-                let h = (i32::from_le_bytes([
-                    header[22], header[23], header[24], header[25],
-                ])).unsigned_abs();
+                let w = i32::from_le_bytes([header[18], header[19], header[20], header[21]]) as u32;
+                let h = (i32::from_le_bytes([header[22], header[23], header[24], header[25]]))
+                    .unsigned_abs();
                 (w, h)
             } else {
                 (0, 0)
@@ -439,9 +435,7 @@ fn generate_text_preview(
     let text = core::str::from_utf8(&data).unwrap_or("");
 
     // Extract first N lines.
-    let lines: Vec<&str> = text.lines()
-        .take(MAX_TEXT_LINES)
-        .collect();
+    let lines: Vec<&str> = text.lines().take(MAX_TEXT_LINES).collect();
 
     // Generate a text preview image (dark background, light text).
     let pixel_count = (width as usize).saturating_mul(height as usize);
@@ -485,7 +479,8 @@ fn generate_text_preview(
                     let px = x_start.saturating_add(dx);
                     let py = y_start.saturating_add(dy);
                     if px < width && py < height {
-                        let offset = ((py as usize).saturating_mul(width as usize) + px as usize).saturating_mul(4);
+                        let offset = ((py as usize).saturating_mul(width as usize) + px as usize)
+                            .saturating_mul(4);
                         if offset.saturating_add(3) < pixels.len() {
                             pixels[offset] = 200;
                             pixels[offset + 1] = 200;
@@ -521,7 +516,9 @@ fn generate_audio_preview(
 
     // Check for ID3v2 APIC frame (simplified check).
     let has_art = header.len() >= 10
-        && header[0] == b'I' && header[1] == b'D' && header[2] == b'3'
+        && header[0] == b'I'
+        && header[1] == b'D'
+        && header[2] == b'3'
         && header.windows(4).any(|w| w == b"APIC");
 
     if has_art {
@@ -534,19 +531,15 @@ fn generate_audio_preview(
 }
 
 /// Generate a music note icon as placeholder for audio.
-fn generate_music_icon(
-    path: &Path,
-    mime: &str,
-    width: u32,
-    height: u32,
-) -> KernelResult<Preview> {
+fn generate_music_icon(path: &Path, mime: &str, width: u32, height: u32) -> KernelResult<Preview> {
     let pixel_count = (width as usize).saturating_mul(height as usize);
     let mut pixels = vec![0u8; pixel_count.saturating_mul(4)];
 
     // Purple gradient background for audio files.
     for y in 0..height {
         for x in 0..width {
-            let offset = ((y as usize).saturating_mul(width as usize) + x as usize).saturating_mul(4);
+            let offset =
+                ((y as usize).saturating_mul(width as usize) + x as usize).saturating_mul(4);
             if offset.saturating_add(3) < pixels.len() {
                 pixels[offset] = 80;
                 pixels[offset + 1] = 40;
@@ -564,11 +557,14 @@ fn generate_music_icon(
     for dy in 0..note_radius {
         for dx in 0..note_radius {
             // Note head (oval).
-            if dx.saturating_mul(dx) + dy.saturating_mul(dy) <= note_radius.saturating_mul(note_radius) {
+            if dx.saturating_mul(dx) + dy.saturating_mul(dy)
+                <= note_radius.saturating_mul(note_radius)
+            {
                 let px = cx.saturating_sub(note_radius / 2).saturating_add(dx);
                 let py = cy.saturating_add(dy);
                 if px < width && py < height {
-                    let offset = ((py as usize).saturating_mul(width as usize) + px as usize).saturating_mul(4);
+                    let offset = ((py as usize).saturating_mul(width as usize) + px as usize)
+                        .saturating_mul(4);
                     if offset.saturating_add(3) < pixels.len() {
                         pixels[offset] = 255;
                         pixels[offset + 1] = 255;
@@ -591,11 +587,7 @@ fn generate_music_icon(
 }
 
 /// Generate preview for PDF files (first page rendering).
-fn generate_pdf_preview(
-    path: &Path,
-    width: u32,
-    height: u32,
-) -> KernelResult<Preview> {
+fn generate_pdf_preview(path: &Path, width: u32, height: u32) -> KernelResult<Preview> {
     // PDF rendering requires a full PDF decoder. For now, generate a
     // document icon with "PDF" text indicator.
     let pixel_count = (width as usize).saturating_mul(height as usize);
@@ -604,7 +596,8 @@ fn generate_pdf_preview(
     // White background with red header (PDF brand color).
     for y in 0..height {
         for x in 0..width {
-            let offset = ((y as usize).saturating_mul(width as usize) + x as usize).saturating_mul(4);
+            let offset =
+                ((y as usize).saturating_mul(width as usize) + x as usize).saturating_mul(4);
             if offset.saturating_add(3) < pixels.len() {
                 if y < height / 6 {
                     // Red header bar.
@@ -628,7 +621,8 @@ fn generate_pdf_preview(
         let line_end = width.saturating_mul(3) / 4;
         if y_pos < height {
             for x in width / 8..line_end {
-                let offset = ((y_pos as usize).saturating_mul(width as usize) + x as usize).saturating_mul(4);
+                let offset = ((y_pos as usize).saturating_mul(width as usize) + x as usize)
+                    .saturating_mul(4);
                 if offset.saturating_add(3) < pixels.len() {
                     pixels[offset] = 180;
                     pixels[offset + 1] = 180;
@@ -664,7 +658,8 @@ fn generate_archive_preview(
     // Yellow-ish background (archive/folder color).
     for y in 0..height {
         for x in 0..width {
-            let offset = ((y as usize).saturating_mul(width as usize) + x as usize).saturating_mul(4);
+            let offset =
+                ((y as usize).saturating_mul(width as usize) + x as usize).saturating_mul(4);
             if offset.saturating_add(3) < pixels.len() {
                 pixels[offset] = 60;
                 pixels[offset + 1] = 55;
@@ -681,7 +676,8 @@ fn generate_archive_preview(
         for x in 4..width.saturating_sub(4) {
             let y = y_start + stripe_height / 2;
             if y < height {
-                let offset = ((y as usize).saturating_mul(width as usize) + x as usize).saturating_mul(4);
+                let offset =
+                    ((y as usize).saturating_mul(width as usize) + x as usize).saturating_mul(4);
                 if offset.saturating_add(3) < pixels.len() {
                     pixels[offset] = 220;
                     pixels[offset + 1] = 200;
@@ -703,19 +699,15 @@ fn generate_archive_preview(
 }
 
 /// Generate a generic placeholder icon.
-fn generate_placeholder(
-    path: &Path,
-    mime: &str,
-    width: u32,
-    height: u32,
-) -> KernelResult<Preview> {
+fn generate_placeholder(path: &Path, mime: &str, width: u32, height: u32) -> KernelResult<Preview> {
     let pixel_count = (width as usize).saturating_mul(height as usize);
     let mut pixels = vec![0u8; pixel_count.saturating_mul(4)];
 
     // Gray gradient background.
     for y in 0..height {
         for x in 0..width {
-            let offset = ((y as usize).saturating_mul(width as usize) + x as usize).saturating_mul(4);
+            let offset =
+                ((y as usize).saturating_mul(width as usize) + x as usize).saturating_mul(4);
             if offset.saturating_add(3) < pixels.len() {
                 let gray = 100u8.saturating_add(((y as f32 / height as f32) * 80.0) as u8);
                 pixels[offset] = gray;
@@ -871,7 +863,8 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 6: placeholder generation.
     {
-        let preview = generate_placeholder(Path::new("/test.bin"), "application/octet-stream", 48, 48)?;
+        let preview =
+            generate_placeholder(Path::new("/test.bin"), "application/octet-stream", 48, 48)?;
         assert_eq!(preview.width, 48);
         assert_eq!(preview.height, 48);
         assert_eq!(preview.pixels.len(), 48 * 48 * 4);

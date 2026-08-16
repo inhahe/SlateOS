@@ -57,10 +57,10 @@
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 // ---------------------------------------------------------------------------
 // Handle
@@ -162,8 +162,7 @@ impl MemFd {
 // Global table
 // ---------------------------------------------------------------------------
 
-static MEMFD_TABLE: Mutex<BTreeMap<MemFdId, MemFd>> =
-    Mutex::new(BTreeMap::new());
+static MEMFD_TABLE: Mutex<BTreeMap<MemFdId, MemFd>> = Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -376,13 +375,12 @@ pub fn seek(handle: MemFdHandle, pos: i64, whence: u32) -> KernelResult<u64> {
     let new_off: i64 = match whence {
         SEEK_SET => pos,
         SEEK_CUR => {
-            let cur = i64::try_from(mf.offset)
-                .map_err(|_| KernelError::InvalidArgument)?;
+            let cur = i64::try_from(mf.offset).map_err(|_| KernelError::InvalidArgument)?;
             cur.checked_add(pos).ok_or(KernelError::InvalidArgument)?
         }
         SEEK_END => {
-            let end = i64::try_from(mf.data.len() as u64)
-                .map_err(|_| KernelError::InvalidArgument)?;
+            let end =
+                i64::try_from(mf.data.len() as u64).map_err(|_| KernelError::InvalidArgument)?;
             end.checked_add(pos).ok_or(KernelError::InvalidArgument)?
         }
         _ => return Err(KernelError::InvalidArgument),
@@ -416,8 +414,7 @@ pub fn truncate(handle: MemFdHandle, new_size: u64) -> KernelResult<()> {
     if new_size > cur && mf.seals & F_SEAL_GROW != 0 {
         return Err(KernelError::PermissionDenied);
     }
-    let new_usize = usize::try_from(new_size)
-        .map_err(|_| KernelError::InvalidArgument)?;
+    let new_usize = usize::try_from(new_size).map_err(|_| KernelError::InvalidArgument)?;
     mf.data.resize(new_usize, 0);
     Ok(())
 }
@@ -766,7 +763,10 @@ fn test_poll_status_ready() -> KernelResult<()> {
     let h = create_with_flags(b"po".to_vec(), false);
     let s = poll_status(h);
     if s & 0x0001 == 0 || s & 0x0004 == 0 {
-        serial_println!("[memfd]   FAIL: poll_status missing POLLIN|POLLOUT: {:#x}", s);
+        serial_println!(
+            "[memfd]   FAIL: poll_status missing POLLIN|POLLOUT: {:#x}",
+            s
+        );
         close(h);
         return Err(KernelError::InternalError);
     }

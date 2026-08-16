@@ -149,9 +149,9 @@ pub fn check() {
             continue;
         }
 
-        let current = HEARTBEATS.get(cpu)
-            .map_or(0, |h| h.load(Ordering::Relaxed));
-        let last = LAST_SEEN.get(cpu)
+        let current = HEARTBEATS.get(cpu).map_or(0, |h| h.load(Ordering::Relaxed));
+        let last = LAST_SEEN
+            .get(cpu)
             .map_or(0, |ls| ls.load(Ordering::Relaxed));
 
         if current == last {
@@ -161,8 +161,7 @@ pub fn check() {
                 #[allow(clippy::arithmetic_side_effects)]
                 if count + 1 >= stale_threshold {
                     // Soft lockup detected!
-                    let warned = WARNED.get(cpu)
-                        .map_or(0, |w| w.load(Ordering::Relaxed));
+                    let warned = WARNED.get(cpu).map_or(0, |w| w.load(Ordering::Relaxed));
                     if warned == 0 {
                         serial_println!(
                             "[watchdog] SOFT LOCKUP on CPU {} (heartbeat stuck at {}, \
@@ -276,7 +275,8 @@ pub fn self_test() {
     heartbeat();
     // Run check — should see advancement, no warning.
     check();
-    let stale = STALE_COUNT.get(cpu)
+    let stale = STALE_COUNT
+        .get(cpu)
         .map_or(u64::MAX, |sc| sc.load(Ordering::Relaxed));
     assert_eq!(stale, 0, "no false positive when heartbeat advances");
     serial_println!("[watchdog]   No false positive: OK");
@@ -286,9 +286,10 @@ pub fn self_test() {
     // Disable interrupts so the timer ISR doesn't advance the heartbeat
     // between setting up the test state and calling check().
     // SAFETY: cli/sti are valid in ring 0; we restore interrupts after the check below.
-    unsafe { crate::cpu::cli(); }
-    let frozen = HEARTBEATS.get(cpu)
-        .map_or(0, |h| h.load(Ordering::Relaxed));
+    unsafe {
+        crate::cpu::cli();
+    }
+    let frozen = HEARTBEATS.get(cpu).map_or(0, |h| h.load(Ordering::Relaxed));
     if let Some(ls) = LAST_SEEN.get(cpu) {
         ls.store(frozen, Ordering::Relaxed);
     }
@@ -297,11 +298,17 @@ pub fn self_test() {
     }
     // Run check — heartbeat unchanged, stale count should increment.
     check();
-    let stale_after = STALE_COUNT.get(cpu)
+    let stale_after = STALE_COUNT
+        .get(cpu)
         .map_or(0, |sc| sc.load(Ordering::Relaxed));
     // SAFETY: restoring interrupts disabled by cli() above.
-    unsafe { crate::cpu::sti(); }
-    assert_eq!(stale_after, 1, "stale count should be 1 after one stale check");
+    unsafe {
+        crate::cpu::sti();
+    }
+    assert_eq!(
+        stale_after, 1,
+        "stale count should be 1 after one stale check"
+    );
     serial_println!("[watchdog]   Stale detection: OK");
 
     // Clean up: advance heartbeat so we don't trigger a real warning.

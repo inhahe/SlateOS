@@ -21,11 +21,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -126,11 +126,18 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
-        engines: alloc::vec![
-            InputEngine { id: 1, name: String::from("Direct Input"), engine_type: EngineType::Direct, language: String::from("en"), enabled: true, commit_count: 0 },
-        ],
+        engines: alloc::vec![InputEngine {
+            id: 1,
+            name: String::from("Direct Input"),
+            engine_type: EngineType::Direct,
+            language: String::from("en"),
+            enabled: true,
+            commit_count: 0
+        },],
         active_engine_id: 1,
         composition: CompositionState {
             preedit: String::new(),
@@ -154,8 +161,12 @@ pub fn add_engine(name: &str, engine_type: EngineType, language: &str) -> Kernel
         let id = state.next_id;
         state.next_id += 1;
         state.engines.push(InputEngine {
-            id, name: String::from(name), engine_type,
-            language: String::from(language), enabled: true, commit_count: 0,
+            id,
+            name: String::from(name),
+            engine_type,
+            language: String::from(language),
+            enabled: true,
+            commit_count: 0,
         });
         Ok(id)
     })
@@ -164,7 +175,9 @@ pub fn add_engine(name: &str, engine_type: EngineType, language: &str) -> Kernel
 /// Remove an engine.
 pub fn remove_engine(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if id == 1 { return Err(KernelError::PermissionDenied); } // Can't remove Direct
+        if id == 1 {
+            return Err(KernelError::PermissionDenied);
+        } // Can't remove Direct
         let before = state.engines.len();
         state.engines.retain(|e| e.id != id);
         if state.engines.len() == before {
@@ -196,18 +209,25 @@ pub fn switch_engine(id: u32) -> KernelResult<()> {
 /// Cycle to next engine.
 pub fn cycle_engine() -> KernelResult<String> {
     with_state(|state| {
-        let enabled: Vec<u32> = state.engines.iter()
+        let enabled: Vec<u32> = state
+            .engines
+            .iter()
             .filter(|e| e.enabled)
             .map(|e| e.id)
             .collect();
         if enabled.is_empty() {
             return Err(KernelError::NotFound);
         }
-        let current_idx = enabled.iter().position(|&id| id == state.active_engine_id).unwrap_or(0);
+        let current_idx = enabled
+            .iter()
+            .position(|&id| id == state.active_engine_id)
+            .unwrap_or(0);
         let next_idx = (current_idx + 1) % enabled.len();
         state.active_engine_id = enabled[next_idx];
         state.total_switches += 1;
-        let name = state.engines.iter()
+        let name = state
+            .engines
+            .iter()
             .find(|e| e.id == state.active_engine_id)
             .map_or(String::new(), |e| e.name.clone());
         Ok(name)
@@ -221,7 +241,10 @@ pub fn start_composition(text: &str) -> KernelResult<()> {
         state.composition.composing = true;
         // Generate mock candidates based on engine type.
         state.composition.candidates.clear();
-        let engine = state.engines.iter().find(|e| e.id == state.active_engine_id);
+        let engine = state
+            .engines
+            .iter()
+            .find(|e| e.id == state.active_engine_id);
         if let Some(e) = engine {
             match e.engine_type {
                 EngineType::Direct => {
@@ -257,11 +280,18 @@ pub fn commit() -> KernelResult<String> {
         if !state.composition.composing || state.composition.candidates.is_empty() {
             return Ok(state.composition.preedit.clone());
         }
-        let text = state.composition.candidates.get(state.composition.selected)
+        let text = state
+            .composition
+            .candidates
+            .get(state.composition.selected)
             .cloned()
             .unwrap_or_else(|| state.composition.preedit.clone());
         // Update engine stats.
-        if let Some(e) = state.engines.iter_mut().find(|e| e.id == state.active_engine_id) {
+        if let Some(e) = state
+            .engines
+            .iter_mut()
+            .find(|e| e.id == state.active_engine_id)
+        {
             e.commit_count += 1;
         }
         state.total_commits += 1;
@@ -290,14 +320,24 @@ pub fn get_composition() -> Option<CompositionState> {
 
 /// List engines.
 pub fn list_engines() -> Vec<InputEngine> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.engines.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.engines.clone())
 }
 
 /// Get active engine name.
 pub fn active_engine_name() -> String {
-    STATE.lock().as_ref().and_then(|s| {
-        s.engines.iter().find(|e| e.id == s.active_engine_id).map(|e| e.name.clone())
-    }).unwrap_or_default()
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| {
+            s.engines
+                .iter()
+                .find(|e| e.id == s.active_engine_id)
+                .map(|e| e.name.clone())
+        })
+        .unwrap_or_default()
 }
 
 /// Statistics: (engine_count, total_commits, total_switches, ops).

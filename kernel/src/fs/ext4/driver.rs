@@ -16,9 +16,8 @@ use crate::serial_println;
 
 use super::io::BlockReader;
 use super::ondisk::{
-    Ext4DirEntry2, Ext4ExtentHeader, Ext4Extent, Ext4GroupDesc, Ext4Inode,
-    EXT4_EXTENT_MAGIC, EXT4_ROOT_INO,
-    file_type, inode_flags,
+    EXT4_EXTENT_MAGIC, EXT4_ROOT_INO, Ext4DirEntry2, Ext4Extent, Ext4ExtentHeader, Ext4GroupDesc,
+    Ext4Inode, file_type, inode_flags,
 };
 use super::superblock::{self, ParsedSuperblock};
 
@@ -269,7 +268,9 @@ impl ExtentCache {
         let mut inner = self.inner.lock();
 
         // Phase 1: immutable scan to find matching entry index + result.
-        let found = inner.entries.iter()
+        let found = inner
+            .entries
+            .iter()
             .enumerate()
             .find(|(_, e)| {
                 e.valid
@@ -303,19 +304,15 @@ impl ExtentCache {
     /// Insert a full extent range into the cache.
     ///
     /// Interior-mutable: safe to call through `&self`.
-    fn insert(
-        &self,
-        inode: u32,
-        logical_start: u64,
-        physical_start: u64,
-        length: u64,
-    ) {
+    fn insert(&self, inode: u32, logical_start: u64, physical_start: u64, length: u64) {
         let mut inner = self.inner.lock();
         inner.counter = inner.counter.wrapping_add(1);
         let c = inner.counter;
 
         // Check for existing entry covering the same range (update).
-        let existing = inner.entries.iter()
+        let existing = inner
+            .entries
+            .iter()
             .position(|e| e.valid && e.inode == inode && e.logical_start == logical_start);
 
         if let Some(idx) = existing {
@@ -343,7 +340,9 @@ impl ExtentCache {
         }
 
         // Evict LRU: find entry with lowest last_access.
-        let lru_idx = inner.entries.iter()
+        let lru_idx = inner
+            .entries
+            .iter()
             .enumerate()
             .min_by_key(|(_, e)| e.last_access)
             .map(|(i, _)| i)
@@ -455,7 +454,9 @@ impl InodeCache {
     /// Returns a copy of the inode if cached, or `None` on miss.
     fn lookup(&self, inode_nr: u32) -> Option<Ext4Inode> {
         let mut inner = self.inner.lock();
-        let found = inner.entries.iter()
+        let found = inner
+            .entries
+            .iter()
             .enumerate()
             .find(|(_, e)| e.valid && e.inode_nr == inode_nr)
             .map(|(i, e)| (i, e.inode));
@@ -484,7 +485,9 @@ impl InodeCache {
         let c = inner.counter;
 
         // Check for existing entry (update in place).
-        let existing = inner.entries.iter()
+        let existing = inner
+            .entries
+            .iter()
             .position(|e| e.valid && e.inode_nr == inode_nr);
         if let Some(idx) = existing {
             if let Some(e) = inner.entries.get_mut(idx) {
@@ -507,7 +510,9 @@ impl InodeCache {
         }
 
         // Evict LRU.
-        let lru_idx = inner.entries.iter()
+        let lru_idx = inner
+            .entries
+            .iter()
             .enumerate()
             .min_by_key(|(_, e)| e.last_access)
             .map(|(i, _)| i)
@@ -581,10 +586,7 @@ impl Ext4Driver {
         // just to read the superblock bytes.  After parsing, we create the
         // real reader with the correct ext4 block size.
         let temp_reader = BlockReader::new(device, 512)?;
-        let sb_bytes = temp_reader.read_bytes(
-            superblock::superblock_device_offset(),
-            1024,
-        )?;
+        let sb_bytes = temp_reader.read_bytes(superblock::superblock_device_offset(), 1024)?;
 
         // Step 2: Parse and validate the superblock.
         let sb = superblock::parse(&sb_bytes)?;
@@ -668,8 +670,7 @@ impl Ext4Driver {
             return Ok(());
         }
 
-        let needs_recovery =
-            (self.sb.raw.s_feature_incompat & incompat::RECOVER) != 0;
+        let needs_recovery = (self.sb.raw.s_feature_incompat & incompat::RECOVER) != 0;
 
         if !needs_recovery {
             serial_println!("[ext4] Journal present, no recovery needed.");
@@ -698,7 +699,8 @@ impl Ext4Driver {
 
         serial_println!(
             "[ext4] Journal inode {}: {} blocks",
-            journal_ino, journal_blocks.len()
+            journal_ino,
+            journal_blocks.len()
         );
 
         // Open the journal and replay any committed transactions.
@@ -829,8 +831,7 @@ impl Ext4Driver {
                 let extent = read_struct::<Ext4Extent>(ext_bytes)?;
 
                 let logical = u64::from(extent.ee_block);
-                let phys = u64::from(extent.ee_start_lo)
-                    | (u64::from(extent.ee_start_hi) << 32);
+                let phys = u64::from(extent.ee_start_lo) | (u64::from(extent.ee_start_hi) << 32);
                 let len = u64::from(extent.ee_len & 0x7FFF);
 
                 if phys != 0 && len > 0 {
@@ -850,8 +851,7 @@ impl Ext4Driver {
                 let idx = read_struct::<super::ondisk::Ext4ExtentIdx>(idx_bytes)?;
 
                 // Reconstruct 48-bit physical block from lo+hi halves.
-                let child_block = u64::from(idx.ei_leaf_lo)
-                    | (u64::from(idx.ei_leaf_hi) << 32);
+                let child_block = u64::from(idx.ei_leaf_lo) | (u64::from(idx.ei_leaf_hi) << 32);
 
                 let mut child_data = vec![0u8; block_size];
                 self.reader.read_block(child_block, &mut child_data)?;
@@ -920,12 +920,13 @@ impl Ext4Driver {
         let index = self.sb.inode_index_in_group(inode_nr);
 
         // Get the inode table block for this group.
-        let gd = self.group_descs.get(group as usize)
+        let gd = self
+            .group_descs
+            .get(group as usize)
             .ok_or(KernelError::InvalidArgument)?;
 
         let inode_table_block = if self.sb.is_64bit {
-            u64::from(gd.bg_inode_table_lo)
-                | (u64::from(gd.bg_inode_table_hi) << 32)
+            u64::from(gd.bg_inode_table_lo) | (u64::from(gd.bg_inode_table_hi) << 32)
         } else {
             u64::from(gd.bg_inode_table_lo)
         };
@@ -933,15 +934,12 @@ impl Ext4Driver {
         // Calculate the byte offset of this inode on disk.
         let inode_byte_offset = inode_table_block
             .saturating_mul(u64::from(self.sb.block_size))
-            .saturating_add(
-                u64::from(index).saturating_mul(u64::from(self.sb.inode_size))
-            );
+            .saturating_add(u64::from(index).saturating_mul(u64::from(self.sb.inode_size)));
 
         // Read the inode bytes.
-        let inode_bytes = self.reader.read_bytes(
-            inode_byte_offset,
-            self.sb.inode_size as usize,
-        )?;
+        let inode_bytes = self
+            .reader
+            .read_bytes(inode_byte_offset, self.sb.inode_size as usize)?;
 
         // Parse the core 128-byte inode.
         if inode_bytes.len() < core::mem::size_of::<Ext4Inode>() {
@@ -952,12 +950,7 @@ impl Ext4Driver {
 
         // Validate inode checksum (if metadata checksumming enabled).
         if self.sb.has_metadata_csum {
-            validate_inode_checksum(
-                &self.sb,
-                inode_nr,
-                &inode,
-                &inode_bytes,
-            )?;
+            validate_inode_checksum(&self.sb, inode_nr, &inode, &inode_bytes)?;
         }
 
         // Cache for future lookups.
@@ -980,23 +973,23 @@ impl Ext4Driver {
         let group = self.sb.inode_group(inode_nr);
         let index = self.sb.inode_index_in_group(inode_nr);
 
-        let gd = self.group_descs.get(group as usize)
+        let gd = self
+            .group_descs
+            .get(group as usize)
             .ok_or(KernelError::InvalidArgument)?;
 
         let inode_table_block = if self.sb.is_64bit {
-            u64::from(gd.bg_inode_table_lo)
-                | (u64::from(gd.bg_inode_table_hi) << 32)
+            u64::from(gd.bg_inode_table_lo) | (u64::from(gd.bg_inode_table_hi) << 32)
         } else {
             u64::from(gd.bg_inode_table_lo)
         };
 
         let inode_byte_offset = inode_table_block
             .saturating_mul(u64::from(self.sb.block_size))
-            .saturating_add(
-                u64::from(index).saturating_mul(u64::from(self.sb.inode_size))
-            );
+            .saturating_add(u64::from(index).saturating_mul(u64::from(self.sb.inode_size)));
 
-        self.reader.read_bytes(inode_byte_offset, self.sb.inode_size as usize)
+        self.reader
+            .read_bytes(inode_byte_offset, self.sb.inode_size as usize)
     }
 
     /// Parse inline xattrs from raw inode bytes.
@@ -1019,7 +1012,8 @@ impl Ext4Driver {
         }
 
         // Read i_extra_isize from the raw bytes at offset 0x80 (2 bytes, LE).
-        let i_extra_isize = raw.get(0x80..0x82)
+        let i_extra_isize = raw
+            .get(0x80..0x82)
             .and_then(|s| <[u8; 2]>::try_from(s).ok())
             .map_or(0u16, u16::from_le_bytes) as usize;
 
@@ -1032,7 +1026,8 @@ impl Ext4Driver {
         }
 
         // Check the magic number.
-        let magic = raw.get(ibody_start..ibody_start.saturating_add(4))
+        let magic = raw
+            .get(ibody_start..ibody_start.saturating_add(4))
             .and_then(|s| <[u8; 4]>::try_from(s).ok())
             .map_or(0u32, u32::from_le_bytes);
 
@@ -1087,9 +1082,7 @@ impl Ext4Driver {
             let val_start = entries_start.saturating_add(entry.e_value_offs as usize);
             let val_end = val_start.saturating_add(entry.e_value_size as usize);
             let value = if entry.e_value_size > 0 && val_end <= area_end {
-                raw.get(val_start..val_end)
-                    .unwrap_or(&[])
-                    .to_vec()
+                raw.get(val_start..val_end).unwrap_or(&[]).to_vec()
             } else {
                 Vec::new()
             };
@@ -1116,7 +1109,11 @@ impl Ext4Driver {
     /// This method reads from both locations and merges them.  External
     /// attrs take precedence if the same key appears in both (shouldn't
     /// happen in practice, but defensive).
-    pub fn read_all_xattrs(&self, inode_nr: u32, inode: &Ext4Inode) -> KernelResult<Vec<(String, Vec<u8>)>> {
+    pub fn read_all_xattrs(
+        &self,
+        inode_nr: u32,
+        inode: &Ext4Inode,
+    ) -> KernelResult<Vec<(String, Vec<u8>)>> {
         // Read inline xattrs first.
         let mut attrs = match self.read_inode_raw(inode_nr) {
             Ok(raw) => self.parse_inline_xattrs(&raw),
@@ -1185,8 +1182,7 @@ impl Ext4Driver {
         };
 
         let data_len = file_size.min(60) as usize;
-        let data = raw_bytes.get(..data_len)
-            .ok_or(KernelError::IoError)?;
+        let data = raw_bytes.get(..data_len).ok_or(KernelError::IoError)?;
 
         Ok(Vec::from(data))
     }
@@ -1228,7 +1224,8 @@ impl Ext4Driver {
         if (inode.i_flags & inode_flags::EXTENTS) != 0 {
             // Extent-based: efficient tree walk.
             let first_logical = offset / block_size;
-            let last_logical = (offset.saturating_add(actual_len as u64).saturating_sub(1)) / block_size;
+            let last_logical =
+                (offset.saturating_add(actual_len as u64).saturating_sub(1)) / block_size;
 
             let block_bytes = inode_block_as_bytes(inode);
             let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
@@ -1259,7 +1256,8 @@ impl Ext4Driver {
         } else {
             // Indirect-block-based: read each logical block via lookup.
             let first_logical = offset / block_size;
-            let last_logical = (offset.saturating_add(actual_len as u64).saturating_sub(1)) / block_size;
+            let last_logical =
+                (offset.saturating_add(actual_len as u64).saturating_sub(1)) / block_size;
 
             let mut result = Vec::with_capacity(actual_len);
             let mut block_buf = vec![0u8; block_size_usize];
@@ -1291,9 +1289,8 @@ impl Ext4Driver {
                 } else {
                     0
                 };
-                let copy_end = block_size_usize.min(
-                    (offset.saturating_add(actual_len as u64) - block_start_byte) as usize,
-                );
+                let copy_end = block_size_usize
+                    .min((offset.saturating_add(actual_len as u64) - block_start_byte) as usize);
 
                 if let Some(slice) = block_buf.get(copy_start..copy_end) {
                     result.extend_from_slice(slice);
@@ -1325,12 +1322,7 @@ impl Ext4Driver {
                 let mut block_start: usize = 0;
                 while block_start.saturating_add(bs) <= data.len() {
                     if let Some(block) = data.get(block_start..block_start.saturating_add(bs)) {
-                        validate_dirent_checksum(
-                            &self.sb,
-                            dir_ino,
-                            dir_inode.i_generation,
-                            block,
-                        )?;
+                        validate_dirent_checksum(&self.sb, dir_ino, dir_inode.i_generation, block)?;
                     }
                     block_start = block_start.saturating_add(bs);
                 }
@@ -1358,9 +1350,7 @@ impl Ext4Driver {
         // Try htree-accelerated lookup if the directory uses hash indexing.
         // This avoids reading all directory blocks for large directories.
         if dir_inode.i_flags & inode_flags::INDEX != 0 {
-            if let Ok(Some((child_ino, ftype))) =
-                super::htree::htree_lookup(self, dir_ino, name)
-            {
+            if let Ok(Some((child_ino, ftype))) = super::htree::htree_lookup(self, dir_ino, name) {
                 // Cache the result for next time.
                 self.dcache.insert(dir_ino, name, child_ino, ftype);
                 return Ok(child_ino);
@@ -1427,14 +1417,15 @@ impl Ext4Driver {
         // Handle absolute vs relative paths.  `Path::components` already
         // drops empty components, so a leading `/` needs no stripping —
         // it only selects the starting inode.
-        let mut current_ino = if path.is_absolute() { EXT4_ROOT_INO } else { start_ino };
+        let mut current_ino = if path.is_absolute() {
+            EXT4_ROOT_INO
+        } else {
+            start_ino
+        };
 
         // Collect components so we can index into them for building
         // remaining paths when we encounter a symlink.
-        let components: Vec<&Path> = path
-            .components()
-            .filter(|c| c.as_bytes() != b".")
-            .collect();
+        let components: Vec<&Path> = path.components().filter(|c| c.as_bytes() != b".").collect();
 
         if components.is_empty() {
             return Ok(current_ino);
@@ -1531,21 +1522,20 @@ impl Ext4Driver {
         let group = self.sb.inode_group(inode_nr);
         let index = self.sb.inode_index_in_group(inode_nr);
 
-        let gd = self.group_descs.get(group as usize)
+        let gd = self
+            .group_descs
+            .get(group as usize)
             .ok_or(KernelError::InvalidArgument)?;
 
         let inode_table_block = if self.sb.is_64bit {
-            u64::from(gd.bg_inode_table_lo)
-                | (u64::from(gd.bg_inode_table_hi) << 32)
+            u64::from(gd.bg_inode_table_lo) | (u64::from(gd.bg_inode_table_hi) << 32)
         } else {
             u64::from(gd.bg_inode_table_lo)
         };
 
         let inode_byte_offset = inode_table_block
             .saturating_mul(u64::from(self.sb.block_size))
-            .saturating_add(
-                u64::from(index).saturating_mul(u64::from(self.sb.inode_size))
-            );
+            .saturating_add(u64::from(index).saturating_mul(u64::from(self.sb.inode_size)));
 
         // Build the full on-disk inode image.
         let inode_sz = self.sb.inode_size as usize;
@@ -1589,19 +1579,18 @@ impl Ext4Driver {
     fn zero_ondisk_inode(&self, inode_nr: u32) -> KernelResult<()> {
         let group = self.sb.inode_group(inode_nr);
         let index = self.sb.inode_index_in_group(inode_nr);
-        let gd = self.group_descs.get(group as usize)
+        let gd = self
+            .group_descs
+            .get(group as usize)
             .ok_or(KernelError::InvalidArgument)?;
         let inode_table_block = if self.sb.is_64bit {
-            u64::from(gd.bg_inode_table_lo)
-                | (u64::from(gd.bg_inode_table_hi) << 32)
+            u64::from(gd.bg_inode_table_lo) | (u64::from(gd.bg_inode_table_hi) << 32)
         } else {
             u64::from(gd.bg_inode_table_lo)
         };
         let offset = inode_table_block
             .saturating_mul(u64::from(self.sb.block_size))
-            .saturating_add(
-                u64::from(index).saturating_mul(u64::from(self.sb.inode_size))
-            );
+            .saturating_add(u64::from(index).saturating_mul(u64::from(self.sb.inode_size)));
         let zeros = vec![0u8; self.sb.inode_size as usize];
         self.reader.write_bytes(offset, &zeros)
     }
@@ -1613,22 +1602,22 @@ impl Ext4Driver {
     fn write_extra_isize(&self, inode_nr: u32, extra_isize: u16) -> KernelResult<()> {
         let group = self.sb.inode_group(inode_nr);
         let index = self.sb.inode_index_in_group(inode_nr);
-        let gd = self.group_descs.get(group as usize)
+        let gd = self
+            .group_descs
+            .get(group as usize)
             .ok_or(KernelError::InvalidArgument)?;
         let inode_table_block = if self.sb.is_64bit {
-            u64::from(gd.bg_inode_table_lo)
-                | (u64::from(gd.bg_inode_table_hi) << 32)
+            u64::from(gd.bg_inode_table_lo) | (u64::from(gd.bg_inode_table_hi) << 32)
         } else {
             u64::from(gd.bg_inode_table_lo)
         };
         let inode_offset = inode_table_block
             .saturating_mul(u64::from(self.sb.block_size))
-            .saturating_add(
-                u64::from(index).saturating_mul(u64::from(self.sb.inode_size))
-            );
+            .saturating_add(u64::from(index).saturating_mul(u64::from(self.sb.inode_size)));
         // i_extra_isize is at offset 0x80 (u16, little-endian).
         let field_offset = inode_offset.saturating_add(0x80);
-        self.reader.write_bytes(field_offset, &extra_isize.to_le_bytes())
+        self.reader
+            .write_bytes(field_offset, &extra_isize.to_le_bytes())
     }
 
     /// Write the `i_crtime` (creation/birth time) field at offset 0x90.
@@ -1655,19 +1644,18 @@ impl Ext4Driver {
         }
         let group = self.sb.inode_group(inode_nr);
         let index = self.sb.inode_index_in_group(inode_nr);
-        let gd = self.group_descs.get(group as usize)
+        let gd = self
+            .group_descs
+            .get(group as usize)
             .ok_or(KernelError::InvalidArgument)?;
         let inode_table_block = if self.sb.is_64bit {
-            u64::from(gd.bg_inode_table_lo)
-                | (u64::from(gd.bg_inode_table_hi) << 32)
+            u64::from(gd.bg_inode_table_lo) | (u64::from(gd.bg_inode_table_hi) << 32)
         } else {
             u64::from(gd.bg_inode_table_lo)
         };
         let inode_offset = inode_table_block
             .saturating_mul(u64::from(self.sb.block_size))
-            .saturating_add(
-                u64::from(index).saturating_mul(u64::from(self.sb.inode_size))
-            );
+            .saturating_add(u64::from(index).saturating_mul(u64::from(self.sb.inode_size)));
         // i_crtime is at offset 0x90 (u32, little-endian).  i_crtime_extra at
         // 0x94 stays 0 (no sub-second creation precision) — already zeroed by
         // zero_ondisk_inode, which Linux treats as "no extra epoch bits".
@@ -1684,16 +1672,12 @@ impl Ext4Driver {
         if self.sb.has_metadata_csum {
             let mut buf = Vec::from(struct_as_bytes(&self.sb.raw));
             stamp_superblock_checksum(&mut buf);
-            self.reader.write_bytes(
-                super::superblock::superblock_device_offset(),
-                &buf,
-            )
+            self.reader
+                .write_bytes(super::superblock::superblock_device_offset(), &buf)
         } else {
             let sb_bytes = struct_as_bytes(&self.sb.raw);
-            self.reader.write_bytes(
-                super::superblock::superblock_device_offset(),
-                sb_bytes,
-            )
+            self.reader
+                .write_bytes(super::superblock::superblock_device_offset(), sb_bytes)
         }
     }
 
@@ -1706,9 +1690,7 @@ impl Ext4Driver {
         let gdt_start = self.sb.group_desc_offset(0);
 
         for (i, gd) in self.group_descs.iter().enumerate() {
-            let offset = gdt_start.saturating_add(
-                (i as u64).saturating_mul(gd_size as u64)
-            );
+            let offset = gdt_start.saturating_add((i as u64).saturating_mul(gd_size as u64));
             let gd_bytes = struct_as_bytes(gd);
             let write_len = gd_bytes.len().min(gd_size);
 
@@ -1734,11 +1716,7 @@ impl Ext4Driver {
     /// to the allocated blocks.
     ///
     /// Returns the modified inode (caller should write it with `write_inode`).
-    pub fn write_file_data(
-        &mut self,
-        inode: &mut Ext4Inode,
-        data: &[u8],
-    ) -> KernelResult<()> {
+    pub fn write_file_data(&mut self, inode: &mut Ext4Inode, data: &[u8]) -> KernelResult<()> {
         let block_size = self.sb.block_size as usize;
 
         if data.is_empty() {
@@ -1752,10 +1730,7 @@ impl Ext4Driver {
         }
 
         // Calculate blocks needed.
-        let blocks_needed = data.len()
-            .saturating_add(block_size)
-            .saturating_sub(1)
-            / block_size;
+        let blocks_needed = data.len().saturating_add(block_size).saturating_sub(1) / block_size;
 
         // Try to allocate contiguous blocks.
         // Goal: start of the inode's block group for locality.
@@ -1783,7 +1758,8 @@ impl Ext4Driver {
             }
             // Regular-file data bypasses the buffer cache; directory/symlink
             // content stays on it (§38). write_file_data serves both.
-            self.reader.write_block_classed(block_nr, &buf, inode_holds_file_data(inode))?;
+            self.reader
+                .write_block_classed(block_nr, &buf, inode_holds_file_data(inode))?;
 
             offset = end;
         }
@@ -1803,8 +1779,7 @@ impl Ext4Driver {
         inode.i_size_high = (file_size >> 32) as u32;
 
         // Block count in 512-byte units (48-bit field).
-        let sectors = (blocks_needed as u64)
-            .saturating_mul(u64::from(self.sb.block_size / 512));
+        let sectors = (blocks_needed as u64).saturating_mul(u64::from(self.sb.block_size / 512));
         set_inode_blocks_48(inode, sectors);
 
         Ok(())
@@ -1879,9 +1854,8 @@ impl Ext4Driver {
         let combined = if tail_bytes_in_last_block > 0 {
             // Read the current tail block, patch in the new data.
             let last_logical_block = current_size.saturating_sub(1) / block_size_u64;
-            let phys = last_phys_start.saturating_add(
-                last_logical_block.saturating_sub(last_logical_start)
-            );
+            let phys = last_phys_start
+                .saturating_add(last_logical_block.saturating_sub(last_logical_start));
             let mut buf = vec![0u8; block_size];
             // Regular-file data bypasses the buffer cache (§38).
             self.reader
@@ -1915,10 +1889,8 @@ impl Ext4Driver {
         }
 
         // Calculate new blocks needed for the remaining data.
-        let new_blocks_needed = combined.len()
-            .saturating_add(block_size)
-            .saturating_sub(1)
-            / block_size;
+        let new_blocks_needed =
+            combined.len().saturating_add(block_size).saturating_sub(1) / block_size;
 
         if new_blocks_needed == 0 {
             return Ok(());
@@ -1926,7 +1898,9 @@ impl Ext4Driver {
 
         // Goal: allocate adjacent to the last extent's end for contiguity.
         let last_extent_end = last_phys_start.saturating_add(last_block_count);
-        let goal = if last_extent_end > 0 { last_extent_end } else {
+        let goal = if last_extent_end > 0 {
+            last_extent_end
+        } else {
             u64::from(self.sb.raw.s_first_data_block)
         };
 
@@ -1958,10 +1932,7 @@ impl Ext4Driver {
 
         // Update the extent tree — strategy depends on tree depth.
         let new_logical_start = if current_size > 0 {
-            
-            current_size
-                .saturating_add(block_size_u64.saturating_sub(1))
-                / block_size_u64
+            current_size.saturating_add(block_size_u64.saturating_sub(1)) / block_size_u64
         } else {
             0
         };
@@ -1977,8 +1948,7 @@ impl Ext4Driver {
 
             if is_adjacent {
                 // Extend the last extent's block count in-place.
-                let new_len = (last_block_count as u16)
-                    .saturating_add(new_blocks_needed as u16);
+                let new_len = (last_block_count as u16).saturating_add(new_blocks_needed as u16);
                 let idx = entries.saturating_sub(1);
                 let base = 3 + idx * 3; // each extent is 3 u32s, header is 3 u32s
                 if let Some(word) = inode.i_block.get(base + 1).copied() {
@@ -1988,8 +1958,7 @@ impl Ext4Driver {
             } else if entries < max_entries {
                 // Add a new extent entry.
                 let new_entries = (entries as u16).saturating_add(1);
-                inode.i_block[0] = u32::from(EXT4_EXTENT_MAGIC)
-                    | (u32::from(new_entries) << 16);
+                inode.i_block[0] = u32::from(EXT4_EXTENT_MAGIC) | (u32::from(new_entries) << 16);
 
                 let base = 3 + entries * 3;
                 if base + 2 < inode.i_block.len() {
@@ -2007,8 +1976,12 @@ impl Ext4Driver {
                 // to a single index entry.  After promotion, the tree can
                 // hold ~340 extents (4K blocks) before needing a second leaf.
                 if let Err(e) = self.promote_depth0_to_depth1(
-                    inode_nr, inode, entries,
-                    new_logical_start, new_blocks_needed, first_new_block,
+                    inode_nr,
+                    inode,
+                    entries,
+                    new_logical_start,
+                    new_blocks_needed,
+                    first_new_block,
                 ) {
                     self.free_contiguous_blocks(first_new_block, new_blocks_needed);
                     return Err(e);
@@ -2025,17 +1998,20 @@ impl Ext4Driver {
                 first_new_block,
             );
             match result {
-                Ok(()) => {},
+                Ok(()) => {}
                 Err(KernelError::NotSupported) => {
                     // Last leaf is full — try adding a new leaf block.
                     if let Err(e) = self.add_leaf_to_tree(
-                        inode_nr, inode,
-                        new_logical_start, new_blocks_needed, first_new_block,
+                        inode_nr,
+                        inode,
+                        new_logical_start,
+                        new_blocks_needed,
+                        first_new_block,
                     ) {
                         self.free_contiguous_blocks(first_new_block, new_blocks_needed);
                         return Err(e);
                     }
-                },
+                }
                 Err(e) => {
                     self.free_contiguous_blocks(first_new_block, new_blocks_needed);
                     return Err(e);
@@ -2049,11 +2025,9 @@ impl Ext4Driver {
         inode.i_size_high = (new_size >> 32) as u32;
 
         // Recalculate total block count in 512-byte sectors.
-        let total_blocks = new_size
-            .saturating_add(block_size_u64.saturating_sub(1))
-            / block_size_u64;
-        let sectors = total_blocks
-            .saturating_mul(u64::from(self.sb.block_size / 512));
+        let total_blocks =
+            new_size.saturating_add(block_size_u64.saturating_sub(1)) / block_size_u64;
+        let sectors = total_blocks.saturating_mul(u64::from(self.sb.block_size / 512));
         set_inode_blocks_48(inode, sectors);
 
         Ok(())
@@ -2065,7 +2039,10 @@ impl Ext4Driver {
         for i in 0..count {
             let block_nr = start.saturating_add(i as u64);
             let _ = super::balloc::free_block(
-                &self.reader, &mut self.sb, &mut self.group_descs, block_nr,
+                &self.reader,
+                &mut self.sb,
+                &mut self.group_descs,
+                block_nr,
             );
         }
     }
@@ -2097,9 +2074,7 @@ impl Ext4Driver {
         let root_header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
         let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
 
-        let leaf_block_nr = self.find_last_leaf_block(
-            block_bytes, &root_header,
-        )?;
+        let leaf_block_nr = self.find_last_leaf_block(block_bytes, &root_header)?;
 
         // Read the leaf block.
         let mut leaf_data = vec![0u8; block_size];
@@ -2130,15 +2105,23 @@ impl Ext4Driver {
             let new_len = (old_len & 0x8000) // preserve unwritten flag
                 | ((old_len & 0x7FFF).saturating_add(new_blocks_needed as u16));
             let new_len_bytes = new_len.to_le_bytes();
-            if let Some(b) = leaf_data.get_mut(ee_len_off) { *b = new_len_bytes[0]; }
-            if let Some(b) = leaf_data.get_mut(ee_len_off + 1) { *b = new_len_bytes[1]; }
+            if let Some(b) = leaf_data.get_mut(ee_len_off) {
+                *b = new_len_bytes[0];
+            }
+            if let Some(b) = leaf_data.get_mut(ee_len_off + 1) {
+                *b = new_len_bytes[1];
+            }
         } else if entries < max_entries {
             // Add a new extent entry in this leaf block.
             let new_entries = (entries as u16).saturating_add(1);
             // Update eh_entries in the leaf header.
             let eh_entries_bytes = new_entries.to_le_bytes();
-            if let Some(b) = leaf_data.get_mut(2) { *b = eh_entries_bytes[0]; }
-            if let Some(b) = leaf_data.get_mut(3) { *b = eh_entries_bytes[1]; }
+            if let Some(b) = leaf_data.get_mut(2) {
+                *b = eh_entries_bytes[0];
+            }
+            if let Some(b) = leaf_data.get_mut(3) {
+                *b = eh_entries_bytes[1];
+            }
 
             // Write the new extent at index `entries`.
             let off = header_size.saturating_add(entries.saturating_mul(extent_size));
@@ -2148,20 +2131,32 @@ impl Ext4Driver {
             // ee_block (4 bytes)
             let logical_bytes = (new_logical_start as u32).to_le_bytes();
             for (i, &b) in logical_bytes.iter().enumerate() {
-                if let Some(slot) = leaf_data.get_mut(off + i) { *slot = b; }
+                if let Some(slot) = leaf_data.get_mut(off + i) {
+                    *slot = b;
+                }
             }
             // ee_len (2 bytes)
             let len_bytes = (new_blocks_needed as u16).to_le_bytes();
-            if let Some(slot) = leaf_data.get_mut(off + 4) { *slot = len_bytes[0]; }
-            if let Some(slot) = leaf_data.get_mut(off + 5) { *slot = len_bytes[1]; }
+            if let Some(slot) = leaf_data.get_mut(off + 4) {
+                *slot = len_bytes[0];
+            }
+            if let Some(slot) = leaf_data.get_mut(off + 5) {
+                *slot = len_bytes[1];
+            }
             // ee_start_hi (2 bytes)
             let start_hi = ((first_new_block >> 32) as u16).to_le_bytes();
-            if let Some(slot) = leaf_data.get_mut(off + 6) { *slot = start_hi[0]; }
-            if let Some(slot) = leaf_data.get_mut(off + 7) { *slot = start_hi[1]; }
+            if let Some(slot) = leaf_data.get_mut(off + 6) {
+                *slot = start_hi[0];
+            }
+            if let Some(slot) = leaf_data.get_mut(off + 7) {
+                *slot = start_hi[1];
+            }
             // ee_start_lo (4 bytes)
             let start_lo = (first_new_block as u32).to_le_bytes();
             for (i, &b) in start_lo.iter().enumerate() {
-                if let Some(slot) = leaf_data.get_mut(off + 8 + i) { *slot = b; }
+                if let Some(slot) = leaf_data.get_mut(off + 8 + i) {
+                    *slot = b;
+                }
             }
         } else {
             // Leaf is full and blocks not adjacent — would need tree split.
@@ -2172,7 +2167,10 @@ impl Ext4Driver {
         // Re-read header after modifications.
         let updated_header = read_struct::<Ext4ExtentHeader>(&leaf_data)?;
         stamp_extent_block_checksum(
-            self.sb.has_metadata_csum, ino_seed, &mut leaf_data, &updated_header,
+            self.sb.has_metadata_csum,
+            ino_seed,
+            &mut leaf_data,
+            &updated_header,
         );
 
         // Write the modified leaf block back.
@@ -2229,9 +2227,8 @@ impl Ext4Driver {
 
         // Allocate one metadata block for the leaf node.
         let goal = u64::from(self.sb.raw.s_first_data_block);
-        let leaf_block_nr = super::balloc::alloc_block(
-            &self.reader, &mut self.sb, &mut self.group_descs, goal,
-        )?;
+        let leaf_block_nr =
+            super::balloc::alloc_block(&self.reader, &mut self.sb, &mut self.group_descs, goal)?;
 
         // Copy existing extent data from the inode's i_block BEFORE we
         // modify it.  Each extent is 12 bytes starting at offset 12
@@ -2275,24 +2272,32 @@ impl Ext4Driver {
         }
 
         // Append the new extent at the end.
-        let new_off = header_size
-            .saturating_add(existing_entries.saturating_mul(extent_size));
+        let new_off = header_size.saturating_add(existing_entries.saturating_mul(extent_size));
         write_extent_entry(
-            &mut leaf_data, new_off,
-            new_logical_start as u32, new_blocks_needed as u16, first_new_block,
+            &mut leaf_data,
+            new_off,
+            new_logical_start as u32,
+            new_blocks_needed as u16,
+            first_new_block,
         );
 
         // Stamp leaf block checksum.
         let leaf_hdr = read_struct::<Ext4ExtentHeader>(&leaf_data)?;
         stamp_extent_block_checksum(
-            self.sb.has_metadata_csum, ino_seed, &mut leaf_data, &leaf_hdr,
+            self.sb.has_metadata_csum,
+            ino_seed,
+            &mut leaf_data,
+            &leaf_hdr,
         );
 
         // Write the leaf block to disk.
         if let Err(e) = self.reader.write_block(leaf_block_nr, &leaf_data) {
             // Clean up allocated block on failure.
             let _ = super::balloc::free_block(
-                &self.reader, &mut self.sb, &mut self.group_descs, leaf_block_nr,
+                &self.reader,
+                &mut self.sb,
+                &mut self.group_descs,
+                leaf_block_nr,
             );
             return Err(e);
         }
@@ -2379,9 +2384,8 @@ impl Ext4Driver {
 
         // Allocate one metadata block for the new leaf.
         let goal = u64::from(self.sb.raw.s_first_data_block);
-        let leaf_block_nr = super::balloc::alloc_block(
-            &self.reader, &mut self.sb, &mut self.group_descs, goal,
-        )?;
+        let leaf_block_nr =
+            super::balloc::alloc_block(&self.reader, &mut self.sb, &mut self.group_descs, goal)?;
 
         // Build the new leaf block with a single extent.
         let mut leaf_data = vec![0u8; block_size];
@@ -2394,20 +2398,29 @@ impl Ext4Driver {
         );
 
         write_extent_entry(
-            &mut leaf_data, header_size,
-            new_logical_start as u32, new_blocks_needed as u16, first_new_block,
+            &mut leaf_data,
+            header_size,
+            new_logical_start as u32,
+            new_blocks_needed as u16,
+            first_new_block,
         );
 
         // Stamp checksum.
         let leaf_hdr = read_struct::<Ext4ExtentHeader>(&leaf_data)?;
         stamp_extent_block_checksum(
-            self.sb.has_metadata_csum, ino_seed, &mut leaf_data, &leaf_hdr,
+            self.sb.has_metadata_csum,
+            ino_seed,
+            &mut leaf_data,
+            &leaf_hdr,
         );
 
         // Write leaf to disk.
         if let Err(e) = self.reader.write_block(leaf_block_nr, &leaf_data) {
             let _ = super::balloc::free_block(
-                &self.reader, &mut self.sb, &mut self.group_descs, leaf_block_nr,
+                &self.reader,
+                &mut self.sb,
+                &mut self.group_descs,
+                leaf_block_nr,
             );
             return Err(e);
         }
@@ -2416,8 +2429,7 @@ impl Ext4Driver {
         let new_root_entries = (root_entries as u16).saturating_add(1);
 
         // Update root header: bump entries count.
-        inode.i_block[0] = u32::from(EXT4_EXTENT_MAGIC)
-            | (u32::from(new_root_entries) << 16);
+        inode.i_block[0] = u32::from(EXT4_EXTENT_MAGIC) | (u32::from(new_root_entries) << 16);
 
         // Write the new index entry.
         // Each Ext4ExtentIdx is 12 bytes = 3 u32s.
@@ -2426,7 +2438,10 @@ impl Ext4Driver {
         if idx_base.saturating_add(2) >= inode.i_block.len() {
             // Can't fit — shouldn't happen since we checked entries < max.
             let _ = super::balloc::free_block(
-                &self.reader, &mut self.sb, &mut self.group_descs, leaf_block_nr,
+                &self.reader,
+                &mut self.sb,
+                &mut self.group_descs,
+                leaf_block_nr,
             );
             return Err(KernelError::IoError);
         }
@@ -2467,8 +2482,7 @@ impl Ext4Driver {
         let idx = read_struct::<super::ondisk::Ext4ExtentIdx>(idx_bytes)?;
 
         // Reconstruct 48-bit physical block from lo+hi halves.
-        let child_block = u64::from(idx.ei_leaf_lo)
-            | (u64::from(idx.ei_leaf_hi) << 32);
+        let child_block = u64::from(idx.ei_leaf_lo) | (u64::from(idx.ei_leaf_hi) << 32);
 
         if header.eh_depth == 1 {
             // Child is a leaf block — return its address.
@@ -2647,7 +2661,12 @@ impl Ext4Driver {
         // Err(NotSupported).
         if dir_inode.i_flags & super::ondisk::inode_flags::INDEX != 0 {
             match super::htree::htree_add_entry(
-                self, dir_inode_nr, dir_inode, child_ino, name_bytes, file_type_byte,
+                self,
+                dir_inode_nr,
+                dir_inode,
+                child_ino,
+                name_bytes,
+                file_type_byte,
             ) {
                 Ok(true) => {
                     // Successfully inserted via htree.
@@ -2713,21 +2732,24 @@ impl Ext4Driver {
 
                     // Stamp directory block checksums before writing.
                     stamp_dir_data_checksums(
-                        &self.sb, dir_inode_nr, dir_inode.i_generation, &mut dir_data,
+                        &self.sb,
+                        dir_inode_nr,
+                        dir_inode.i_generation,
+                        &mut dir_data,
                     );
 
                     // Write modified data to existing blocks (no reallocation).
                     // For depth-0 extent trees this avoids the leak that
                     // write_file_data causes by always allocating new blocks.
                     match self.write_to_existing_blocks(dir_inode_nr, dir_inode, &dir_data) {
-                        Ok(()) => {},
+                        Ok(()) => {}
                         Err(KernelError::NotSupported) => {
                             // Deep extent tree — fall back to full rewrite.
                             let old_inode = *dir_inode;
                             self.invalidate_extent_cache(dir_inode_nr);
                             self.write_file_data(dir_inode, &dir_data)?;
                             self.free_inode_data(dir_inode_nr, &old_inode)?;
-                        },
+                        }
                         Err(e) => return Err(e),
                     }
                     self.write_inode(dir_inode_nr, dir_inode)?;
@@ -2777,7 +2799,10 @@ impl Ext4Driver {
         // Stamp checksums on all blocks (the existing ones may not need
         // re-stamping, but it's safe and simple).
         stamp_dir_data_checksums(
-            &self.sb, dir_inode_nr, dir_inode.i_generation, &mut dir_data,
+            &self.sb,
+            dir_inode_nr,
+            dir_inode.i_generation,
+            &mut dir_data,
         );
 
         // Save old inode for crash-safe block freeing.
@@ -2854,8 +2879,7 @@ impl Ext4Driver {
                     .ok_or(KernelError::IoError)?;
                 let extent = read_struct::<Ext4Extent>(ext_bytes)?;
 
-                let phys = u64::from(extent.ee_start_lo)
-                    | (u64::from(extent.ee_start_hi) << 32);
+                let phys = u64::from(extent.ee_start_lo) | (u64::from(extent.ee_start_hi) << 32);
                 // Mask off uninitialized-extent flag.
                 let len = u32::from(extent.ee_len & 0x7FFF);
 
@@ -2876,8 +2900,7 @@ impl Ext4Driver {
                     .ok_or(KernelError::IoError)?;
                 let idx = read_struct::<super::ondisk::Ext4ExtentIdx>(idx_bytes)?;
 
-                let child_block = u64::from(idx.ei_leaf_lo)
-                    | (u64::from(idx.ei_leaf_hi) << 32);
+                let child_block = u64::from(idx.ei_leaf_lo) | (u64::from(idx.ei_leaf_hi) << 32);
 
                 if child_block == 0 {
                     continue;
@@ -2949,35 +2972,20 @@ impl Ext4Driver {
         if block_nr == 0 {
             return Ok(());
         }
-        super::balloc::free_block(
-            &self.reader,
-            &mut self.sb,
-            &mut self.group_descs,
-            block_nr,
-        )
+        super::balloc::free_block(&self.reader, &mut self.sb, &mut self.group_descs, block_nr)
     }
 
     /// Free an inode number back to the inode bitmap.
     ///
     /// Also decrements the used_dirs count if the inode is a directory.
-    pub fn free_inode_number(
-        &mut self,
-        inode_nr: u32,
-        is_directory: bool,
-    ) -> KernelResult<()> {
-        super::balloc::free_inode(
-            &self.reader,
-            &mut self.sb,
-            &mut self.group_descs,
-            inode_nr,
-        )?;
+    pub fn free_inode_number(&mut self, inode_nr: u32, is_directory: bool) -> KernelResult<()> {
+        super::balloc::free_inode(&self.reader, &mut self.sb, &mut self.group_descs, inode_nr)?;
 
         // Decrement the used_dirs count in the group descriptor.
         if is_directory {
             let group = self.sb.inode_group(inode_nr) as usize;
             if let Some(gd) = self.group_descs.get_mut(group) {
-                gd.bg_used_dirs_count_lo =
-                    gd.bg_used_dirs_count_lo.saturating_sub(1);
+                gd.bg_used_dirs_count_lo = gd.bg_used_dirs_count_lo.saturating_sub(1);
             }
         }
 
@@ -3047,20 +3055,16 @@ impl Ext4Driver {
 
                 let ext_logical = u64::from(extent.ee_block);
                 let ext_len = u64::from(extent.ee_len & 0x7FFF);
-                let ext_phys = u64::from(extent.ee_start_lo)
-                    | (u64::from(extent.ee_start_hi) << 32);
+                let ext_phys =
+                    u64::from(extent.ee_start_lo) | (u64::from(extent.ee_start_hi) << 32);
 
                 if logical_block >= ext_logical
                     && logical_block < ext_logical.saturating_add(ext_len)
                 {
                     // Cache the full extent range for future lookups
                     // within the same contiguous run.
-                    self.extent_cache.insert(
-                        inode_nr,
-                        ext_logical,
-                        ext_phys,
-                        ext_len,
-                    );
+                    self.extent_cache
+                        .insert(inode_nr, ext_logical, ext_phys, ext_len);
 
                     let offset_in_ext = logical_block.saturating_sub(ext_logical);
                     return Ok(Some(ext_phys.saturating_add(offset_in_ext)));
@@ -3089,8 +3093,7 @@ impl Ext4Driver {
             }
 
             if let Some(idx) = best_idx {
-                let child_block = u64::from(idx.ei_leaf_lo)
-                    | (u64::from(idx.ei_leaf_hi) << 32);
+                let child_block = u64::from(idx.ei_leaf_lo) | (u64::from(idx.ei_leaf_hi) << 32);
                 if child_block == 0 {
                     return Ok(None);
                 }
@@ -3111,7 +3114,13 @@ impl Ext4Driver {
                     &child_header,
                 )?;
 
-                self.lookup_in_tree(inode_nr, ino_seed, &child_data, &child_header, logical_block)
+                self.lookup_in_tree(
+                    inode_nr,
+                    ino_seed,
+                    &child_data,
+                    &child_header,
+                    logical_block,
+                )
             } else {
                 Ok(None)
             }
@@ -3215,11 +3224,7 @@ impl Ext4Driver {
     /// `index` is the 0-based index into the array of `u32` pointers.
     ///
     /// Returns `Ok(None)` if the pointer is 0 (sparse hole).
-    fn read_indirect_ptr(
-        &self,
-        indirect_block: u64,
-        index: u64,
-    ) -> KernelResult<Option<u64>> {
+    fn read_indirect_ptr(&self, indirect_block: u64, index: u64) -> KernelResult<Option<u64>> {
         let byte_offset = index.saturating_mul(4);
         let block_size = u64::from(self.sb.block_size);
         if byte_offset.saturating_add(4) > block_size {
@@ -3234,9 +3239,7 @@ impl Ext4Driver {
         // Extract the u32 pointer at the given index.
         let off = byte_offset as usize;
         let ptr_bytes = buf.get(off..off + 4).ok_or(KernelError::IoError)?;
-        let ptr = u32::from_le_bytes([
-            ptr_bytes[0], ptr_bytes[1], ptr_bytes[2], ptr_bytes[3],
-        ]);
+        let ptr = u32::from_le_bytes([ptr_bytes[0], ptr_bytes[1], ptr_bytes[2], ptr_bytes[3]]);
 
         Ok(if ptr == 0 { None } else { Some(u64::from(ptr)) })
     }
@@ -3274,7 +3277,8 @@ impl Ext4Driver {
             let offset_in_block = (cur_offset % block_size) as usize;
 
             // Look up the physical block (extent cache accelerated).
-            let phys = self.lookup_physical_block(inode_nr, inode, logical_block)?
+            let phys = self
+                .lookup_physical_block(inode_nr, inode, logical_block)?
                 .ok_or(KernelError::IoError)?;
 
             // Read the existing block.
@@ -3340,8 +3344,8 @@ impl Ext4Driver {
                 let ext_logical = u64::from(extent.ee_block);
                 let ext_unwritten = (extent.ee_len & 0x8000) != 0;
                 let ext_len = u64::from(extent.ee_len & 0x7FFF);
-                let ext_phys = u64::from(extent.ee_start_lo)
-                    | (u64::from(extent.ee_start_hi) << 32);
+                let ext_phys =
+                    u64::from(extent.ee_start_lo) | (u64::from(extent.ee_start_hi) << 32);
                 let ext_end = ext_logical.saturating_add(ext_len);
 
                 // Skip extents that don't overlap our range.
@@ -3370,13 +3374,15 @@ impl Ext4Driver {
                     let mut buf = vec![0u8; block_size_usize];
                     let phys = ext_phys.saturating_add(b);
                     // Regular-file data bypasses the buffer cache (§38).
-                    self.reader.read_block_classed(phys, &mut buf, is_file_data)?;
+                    self.reader
+                        .read_block_classed(phys, &mut buf, is_file_data)?;
 
                     let dest_end = dest_start.saturating_add(n);
                     let src_end = src_start.saturating_add(n);
-                    if let (Some(dst), Some(src)) =
-                        (result.get_mut(dest_start..dest_end), buf.get(src_start..src_end))
-                    {
+                    if let (Some(dst), Some(src)) = (
+                        result.get_mut(dest_start..dest_end),
+                        buf.get(src_start..src_end),
+                    ) {
                         dst.copy_from_slice(src);
                     }
                 }
@@ -3391,8 +3397,7 @@ impl Ext4Driver {
                     .ok_or(KernelError::IoError)?;
                 let idx = read_struct::<super::ondisk::Ext4ExtentIdx>(idx_bytes)?;
 
-                let child_block = u64::from(idx.ei_leaf_lo)
-                    | (u64::from(idx.ei_leaf_hi) << 32);
+                let child_block = u64::from(idx.ei_leaf_lo) | (u64::from(idx.ei_leaf_hi) << 32);
                 if child_block == 0 {
                     continue;
                 }
@@ -3489,17 +3494,18 @@ impl Ext4Driver {
             if offset.saturating_add(entry_header_size) > block_size {
                 break;
             }
-            let entry_bytes = block_data.get(offset..offset.saturating_add(entry_header_size))
+            let entry_bytes = block_data
+                .get(offset..offset.saturating_add(entry_header_size))
                 .ok_or(KernelError::IoError)?;
             let entry = read_struct::<super::ondisk::Ext4XattrEntry>(entry_bytes)?;
 
             // Read the name.
             let name_start = offset.saturating_add(entry_header_size);
             let name_end = name_start.saturating_add(entry.e_name_len as usize);
-            let name_bytes = block_data.get(name_start..name_end)
+            let name_bytes = block_data
+                .get(name_start..name_end)
                 .ok_or(KernelError::IoError)?;
-            let name = core::str::from_utf8(name_bytes)
-                .map_err(|_| KernelError::IoError)?;
+            let name = core::str::from_utf8(name_bytes).map_err(|_| KernelError::IoError)?;
 
             // Build the full key with namespace prefix.
             let full_key = xattr_full_key(entry.e_name_index, name);
@@ -3508,9 +3514,7 @@ impl Ext4Driver {
             let val_start = entry.e_value_offs as usize;
             let val_end = val_start.saturating_add(entry.e_value_size as usize);
             let value = if entry.e_value_size > 0 && val_end <= block_size {
-                block_data.get(val_start..val_end)
-                    .unwrap_or(&[])
-                    .to_vec()
+                block_data.get(val_start..val_end).unwrap_or(&[]).to_vec()
             } else {
                 Vec::new()
             };
@@ -3550,8 +3554,12 @@ impl Ext4Driver {
                 )?;
                 inode.i_file_acl_lo = 0;
                 // Clear i_file_acl_high in i_osd2[2..4].
-                if let Some(b) = inode.i_osd2.get_mut(2) { *b = 0; }
-                if let Some(b) = inode.i_osd2.get_mut(3) { *b = 0; }
+                if let Some(b) = inode.i_osd2.get_mut(2) {
+                    *b = 0;
+                }
+                if let Some(b) = inode.i_osd2.get_mut(3) {
+                    *b = 0;
+                }
                 self.write_inode(inode_nr, inode)?;
             }
             return Ok(0);
@@ -3598,7 +3606,9 @@ impl Ext4Driver {
             }
 
             // Write the value.
-            if let Some(dest) = block_data.get_mut(value_start..value_start.saturating_add(value.len())) {
+            if let Some(dest) =
+                block_data.get_mut(value_start..value_start.saturating_add(value.len()))
+            {
                 dest.copy_from_slice(value);
             }
             value_end = value_start;
@@ -3613,13 +3623,17 @@ impl Ext4Driver {
                 e_hash: 0,
             };
             let entry_bytes = struct_as_bytes(&entry);
-            if let Some(dest) = block_data.get_mut(entry_offset..entry_offset.saturating_add(entry_bytes.len())) {
+            if let Some(dest) =
+                block_data.get_mut(entry_offset..entry_offset.saturating_add(entry_bytes.len()))
+            {
                 dest.copy_from_slice(entry_bytes);
             }
 
             // Write the name.
             let name_start = entry_offset.saturating_add(entry_header_size);
-            if let Some(dest) = block_data.get_mut(name_start..name_start.saturating_add(name_bytes.len())) {
+            if let Some(dest) =
+                block_data.get_mut(name_start..name_start.saturating_add(name_bytes.len()))
+            {
                 dest.copy_from_slice(name_bytes);
             }
 
@@ -3635,12 +3649,7 @@ impl Ext4Driver {
         } else {
             // Allocate a new block.
             let goal = u64::from(self.sb.raw.s_first_data_block);
-            super::balloc::alloc_block(
-                &self.reader,
-                &mut self.sb,
-                &mut self.group_descs,
-                goal,
-            )?
+            super::balloc::alloc_block(&self.reader, &mut self.sb, &mut self.group_descs, goal)?
         };
 
         // Stamp the checksum before writing.
@@ -3654,8 +3663,12 @@ impl Ext4Driver {
         // i_file_acl_high is at i_osd2[2..4].
         let hi = (block_nr >> 32) as u16;
         let hi_bytes = hi.to_le_bytes();
-        if let Some(b) = inode.i_osd2.get_mut(2) { *b = hi_bytes[0]; }
-        if let Some(b) = inode.i_osd2.get_mut(3) { *b = hi_bytes[1]; }
+        if let Some(b) = inode.i_osd2.get_mut(2) {
+            *b = hi_bytes[0];
+        }
+        if let Some(b) = inode.i_osd2.get_mut(3) {
+            *b = hi_bytes[1];
+        }
 
         self.write_inode(inode_nr, inode)?;
 
@@ -3667,11 +3680,7 @@ impl Ext4Driver {
     /// Allocates `block_count` contiguous blocks starting near `goal`.
     /// Returns the physical block number of the first allocated block.
     /// The caller is responsible for setting up the extent tree and inode.
-    pub fn fallocate_blocks(
-        &mut self,
-        goal: u64,
-        block_count: u32,
-    ) -> KernelResult<u64> {
+    pub fn fallocate_blocks(&mut self, goal: u64, block_count: u32) -> KernelResult<u64> {
         super::balloc::alloc_blocks(
             &self.reader,
             &mut self.sb,
@@ -3702,7 +3711,8 @@ impl Ext4Driver {
         }
 
         // Find the extent with the highest logical start.
-        let (_, phys, len) = extents.iter()
+        let (_, phys, len) = extents
+            .iter()
             .max_by_key(|&&(logical, _, _)| logical)
             .copied()
             .ok_or(KernelError::NotFound)?;
@@ -3749,16 +3759,12 @@ impl Ext4Driver {
     ///
     /// Wraps `balloc::alloc_block` with the driver's internal fields.
     pub(super) fn alloc_block(&mut self, goal: u64) -> KernelResult<u64> {
-        super::balloc::alloc_block(
-            &self.reader, &mut self.sb, &mut self.group_descs, goal,
-        )
+        super::balloc::alloc_block(&self.reader, &mut self.sb, &mut self.group_descs, goal)
     }
 
     /// Free a physical block (error cleanup for htree writes).
     pub(super) fn free_block_nr(&mut self, block_nr: u64) -> KernelResult<()> {
-        super::balloc::free_block(
-            &self.reader, &mut self.sb, &mut self.group_descs, block_nr,
-        )
+        super::balloc::free_block(&self.reader, &mut self.sb, &mut self.group_descs, block_nr)
     }
 
     /// Extend a directory's extent tree by mapping one new logical block
@@ -3822,8 +3828,7 @@ impl Ext4Driver {
                 let last_off = 12 + (entries - 1) * 12;
                 if let Some(ext_bytes) = block_bytes.get(last_off..last_off + 12) {
                     let ext: Ext4Extent = read_struct(ext_bytes)?;
-                    let ext_start = u64::from(ext.ee_start_lo)
-                        | (u64::from(ext.ee_start_hi) << 32);
+                    let ext_start = u64::from(ext.ee_start_lo) | (u64::from(ext.ee_start_hi) << 32);
                     let ext_end_logical = ext.ee_block + ext.ee_len as u32;
                     let ext_end_phys = ext_start + u64::from(ext.ee_len);
 
@@ -3892,8 +3897,7 @@ impl Ext4Driver {
     fn init_extent_header(&self, inode: &mut Ext4Inode, entries: u16) {
         // The extent header occupies the first 12 bytes of i_block.
         // eh_magic(2) + eh_entries(2) + eh_max(2) + eh_depth(2) + eh_generation(4)
-        inode.i_block[0] = u32::from(EXT4_EXTENT_MAGIC)
-            | (u32::from(entries) << 16);
+        inode.i_block[0] = u32::from(EXT4_EXTENT_MAGIC) | (u32::from(entries) << 16);
         // Max entries in i_block: (60 - 12) / 12 = 4 extents.
         let max_entries: u16 = 4;
         inode.i_block[1] = u32::from(max_entries); // eh_max + eh_depth(0)
@@ -3914,8 +3918,7 @@ impl Ext4Driver {
         //   ee_block(4) + ee_len(2) + ee_start_hi(2) + ee_start_lo(4)
         let base = 3; // offset in i_block for first extent
         inode.i_block[base] = logical_block;
-        inode.i_block[base + 1] = u32::from(block_count)
-            | ((physical_block >> 32) as u32) << 16;
+        inode.i_block[base + 1] = u32::from(block_count) | ((physical_block >> 32) as u32) << 16;
         inode.i_block[base + 2] = physical_block as u32;
     }
 
@@ -3937,8 +3940,7 @@ impl Ext4Driver {
         inode.i_block[base] = logical_block;
         // Set UNWRITTEN flag: bit 15 of ee_len (0x8000 | count).
         let ee_len_with_uninit = u32::from(block_count | 0x8000);
-        inode.i_block[base + 1] = ee_len_with_uninit
-            | ((physical_block >> 32) as u32) << 16;
+        inode.i_block[base + 1] = ee_len_with_uninit | ((physical_block >> 32) as u32) << 16;
         inode.i_block[base + 2] = physical_block as u32;
     }
 
@@ -3984,16 +3986,14 @@ impl Ext4Driver {
         // Add new UNWRITTEN extent at index `entries`.
         let new_entries = (entries as u16).saturating_add(1);
         // Update eh_entries in the header (i_block[0]).
-        inode.i_block[0] = u32::from(EXT4_EXTENT_MAGIC)
-            | (u32::from(new_entries) << 16);
+        inode.i_block[0] = u32::from(EXT4_EXTENT_MAGIC) | (u32::from(new_entries) << 16);
 
         let base = 3_usize.saturating_add(entries.saturating_mul(3));
         if base.saturating_add(2) < inode.i_block.len() {
             inode.i_block[base] = logical_start;
             // ee_len with UNWRITTEN flag (bit 15) | ee_start_hi in high 16 bits
             let ee_len_unwritten = u32::from(block_count | 0x8000);
-            inode.i_block[base + 1] =
-                ee_len_unwritten | (((first_block >> 32) as u32) << 16);
+            inode.i_block[base + 1] = ee_len_unwritten | (((first_block >> 32) as u32) << 16);
             inode.i_block[base + 2] = first_block as u32;
         } else {
             // Out of i_block space — free blocks and bail.
@@ -4033,7 +4033,12 @@ impl Ext4Driver {
     }
 
     /// Read file data using the extent tree.
-    fn read_extent_data(&self, inode_nr: u32, inode: &Ext4Inode, file_size: u64) -> KernelResult<Vec<u8>> {
+    fn read_extent_data(
+        &self,
+        inode_nr: u32,
+        inode: &Ext4Inode,
+        file_size: u64,
+    ) -> KernelResult<Vec<u8>> {
         // The extent tree root is in inode.i_block (60 bytes).
         // First 12 bytes = extent header, rest = extent entries.
         let block_bytes = inode_block_as_bytes(inode);
@@ -4051,8 +4056,12 @@ impl Ext4Driver {
         let mut result = alloc::vec![0u8; file_size as usize];
         let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
         self.read_extent_tree_recursive(
-            ino_seed, block_bytes, &header, file_size,
-            inode_holds_file_data(inode), &mut result,
+            ino_seed,
+            block_bytes,
+            &header,
+            file_size,
+            inode_holds_file_data(inode),
+            &mut result,
         )?;
         Ok(result)
     }
@@ -4079,13 +4088,14 @@ impl Ext4Driver {
             let extent_size = core::mem::size_of::<Ext4Extent>();
             for i in 0..header.eh_entries as usize {
                 let offset = header_size.saturating_add(i.saturating_mul(extent_size));
-                let ext_bytes = node_data.get(offset..offset.saturating_add(extent_size))
+                let ext_bytes = node_data
+                    .get(offset..offset.saturating_add(extent_size))
                     .ok_or(KernelError::IoError)?;
                 let extent = read_struct::<Ext4Extent>(ext_bytes)?;
 
                 let ext_logical = u64::from(extent.ee_block);
-                let phys_block = u64::from(extent.ee_start_lo)
-                    | (u64::from(extent.ee_start_hi) << 32);
+                let phys_block =
+                    u64::from(extent.ee_start_lo) | (u64::from(extent.ee_start_hi) << 32);
                 let unwritten = (extent.ee_len & 0x8000) != 0;
                 let block_count = u64::from(extent.ee_len & 0x7FFF);
 
@@ -4099,24 +4109,23 @@ impl Ext4Driver {
                     // Full-file read: the requested range is the whole file
                     // (`byte_offset = 0`, `byte_len = file_size`), so `src_start`
                     // is always 0 and `dest_start = logical * block_size`.
-                    let Some((dest_start, src_start, n)) = block_copy_placement(
-                        logical,
-                        block_size,
-                        0,
-                        file_size as usize,
-                    ) else {
+                    let Some((dest_start, src_start, n)) =
+                        block_copy_placement(logical, block_size, 0, file_size as usize)
+                    else {
                         continue;
                     };
                     let mut buf = vec![0u8; block_size_usize];
                     let block_nr = phys_block.saturating_add(b);
                     // Regular-file data bypasses the buffer cache (§38).
-                    self.reader.read_block_classed(block_nr, &mut buf, is_file_data)?;
+                    self.reader
+                        .read_block_classed(block_nr, &mut buf, is_file_data)?;
 
                     let dest_end = dest_start.saturating_add(n);
                     let src_end = src_start.saturating_add(n);
-                    if let (Some(dst), Some(src)) =
-                        (result.get_mut(dest_start..dest_end), buf.get(src_start..src_end))
-                    {
+                    if let (Some(dst), Some(src)) = (
+                        result.get_mut(dest_start..dest_end),
+                        buf.get(src_start..src_end),
+                    ) {
                         dst.copy_from_slice(src);
                     }
                 }
@@ -4126,12 +4135,12 @@ impl Ext4Driver {
             let idx_size = core::mem::size_of::<super::ondisk::Ext4ExtentIdx>();
             for i in 0..header.eh_entries as usize {
                 let offset = header_size.saturating_add(i.saturating_mul(idx_size));
-                let idx_bytes = node_data.get(offset..offset.saturating_add(idx_size))
+                let idx_bytes = node_data
+                    .get(offset..offset.saturating_add(idx_size))
                     .ok_or(KernelError::IoError)?;
                 let idx = read_struct::<super::ondisk::Ext4ExtentIdx>(idx_bytes)?;
 
-                let child_block = u64::from(idx.ei_leaf_lo)
-                    | (u64::from(idx.ei_leaf_hi) << 32);
+                let child_block = u64::from(idx.ei_leaf_lo) | (u64::from(idx.ei_leaf_hi) << 32);
                 if child_block == 0 {
                     continue;
                 }
@@ -4155,8 +4164,12 @@ impl Ext4Driver {
                 )?;
 
                 self.read_extent_tree_recursive(
-                    ino_seed, &child_data, &child_header, file_size,
-                    is_file_data, result,
+                    ino_seed,
+                    &child_data,
+                    &child_header,
+                    file_size,
+                    is_file_data,
+                    result,
                 )?;
             }
         }
@@ -4258,7 +4271,9 @@ fn read_group_descs(
             if stored != computed {
                 crate::serial_println!(
                     "[ext4] group {} descriptor checksum mismatch: stored={:#06X}, computed={:#06X}",
-                    i, stored, computed,
+                    i,
+                    stored,
+                    computed,
                 );
                 return Err(KernelError::CorruptedData);
             }
@@ -4293,7 +4308,9 @@ fn compute_gd_checksum(sb: &ParsedSuperblock, group: u32, raw: &[u8], desc_size:
 
     let before = raw.get(..CSUM_OFFSET).unwrap_or(&[]);
     let after_start = CSUM_OFFSET.saturating_add(CSUM_SIZE);
-    let after = raw.get(after_start..desc_size.min(raw.len())).unwrap_or(&[]);
+    let after = raw
+        .get(after_start..desc_size.min(raw.len()))
+        .unwrap_or(&[]);
 
     let crc = crate::crypto::crc32c_raw(crc, before);
     let crc = crate::crypto::crc32c_raw(crc, &[0u8; CSUM_SIZE]);
@@ -4302,7 +4319,9 @@ fn compute_gd_checksum(sb: &ParsedSuperblock, group: u32, raw: &[u8], desc_size:
 
     // Only the lower 16 bits are stored.
     #[allow(clippy::cast_possible_truncation)]
-    { final_crc as u16 }
+    {
+        final_crc as u16
+    }
 }
 
 /// Validate an inode's CRC32C checksum.
@@ -4380,7 +4399,9 @@ fn validate_inode_checksum(
         if stored != computed {
             crate::serial_println!(
                 "[ext4] inode {} checksum mismatch: stored={:#010X}, computed={:#010X}",
-                inode_nr, stored, computed,
+                inode_nr,
+                stored,
+                computed,
             );
             return Err(KernelError::CorruptedData);
         }
@@ -4394,7 +4415,9 @@ fn validate_inode_checksum(
         if stored_lo_only != computed_lo_only {
             crate::serial_println!(
                 "[ext4] inode {} checksum mismatch: stored={:#06X}, computed={:#06X}",
-                inode_nr, stored_lo_only, computed_lo_only,
+                inode_nr,
+                stored_lo_only,
+                computed_lo_only,
             );
             return Err(KernelError::CorruptedData);
         }
@@ -4408,12 +4431,7 @@ fn validate_inode_checksum(
 /// The inode buffer must be at least 128 bytes.  If the inode is 256+
 /// bytes, both `i_checksum_lo` (offset 0x7C) and `i_checksum_hi`
 /// (offset 0x82) are written.  Otherwise only `i_checksum_lo`.
-fn stamp_inode_checksum(
-    sb: &ParsedSuperblock,
-    inode_nr: u32,
-    inode: &Ext4Inode,
-    buf: &mut [u8],
-) {
+fn stamp_inode_checksum(sb: &ParsedSuperblock, inode_nr: u32, inode: &Ext4Inode, buf: &mut [u8]) {
     const CKSUM_LO_OFFSET: usize = 0x7C;
     const CKSUM_HI_OFFSET: usize = 0x82;
     let inode_sz = buf.len();
@@ -4555,11 +4573,10 @@ fn validate_extent_block_checksum(
     }
 
     // Read the stored checksum.
-    let tail_bytes = block_data.get(tail_offset..tail_end)
+    let tail_bytes = block_data
+        .get(tail_offset..tail_end)
         .ok_or(KernelError::IoError)?;
-    let stored = u32::from_le_bytes([
-        tail_bytes[0], tail_bytes[1], tail_bytes[2], tail_bytes[3],
-    ]);
+    let stored = u32::from_le_bytes([tail_bytes[0], tail_bytes[1], tail_bytes[2], tail_bytes[3]]);
 
     // Compute: CRC32C(inode_csum_seed, block_data[..tail_offset]).
     let data = block_data.get(..tail_offset).ok_or(KernelError::IoError)?;
@@ -4568,7 +4585,8 @@ fn validate_extent_block_checksum(
     if computed != stored {
         serial_println!(
             "[ext4] extent block checksum MISMATCH: stored={:#010x} computed={:#010x}",
-            stored, computed,
+            stored,
+            computed,
         );
         return Err(KernelError::CorruptedData);
     }
@@ -4594,14 +4612,30 @@ fn write_extent_header(buf: &mut [u8], entries: u16, max: u16, depth: u16) {
     let max_bytes = max.to_le_bytes();
     let depth_bytes = depth.to_le_bytes();
 
-    if let Some(b) = buf.get_mut(0) { *b = magic_bytes[0]; }
-    if let Some(b) = buf.get_mut(1) { *b = magic_bytes[1]; }
-    if let Some(b) = buf.get_mut(2) { *b = entries_bytes[0]; }
-    if let Some(b) = buf.get_mut(3) { *b = entries_bytes[1]; }
-    if let Some(b) = buf.get_mut(4) { *b = max_bytes[0]; }
-    if let Some(b) = buf.get_mut(5) { *b = max_bytes[1]; }
-    if let Some(b) = buf.get_mut(6) { *b = depth_bytes[0]; }
-    if let Some(b) = buf.get_mut(7) { *b = depth_bytes[1]; }
+    if let Some(b) = buf.get_mut(0) {
+        *b = magic_bytes[0];
+    }
+    if let Some(b) = buf.get_mut(1) {
+        *b = magic_bytes[1];
+    }
+    if let Some(b) = buf.get_mut(2) {
+        *b = entries_bytes[0];
+    }
+    if let Some(b) = buf.get_mut(3) {
+        *b = entries_bytes[1];
+    }
+    if let Some(b) = buf.get_mut(4) {
+        *b = max_bytes[0];
+    }
+    if let Some(b) = buf.get_mut(5) {
+        *b = max_bytes[1];
+    }
+    if let Some(b) = buf.get_mut(6) {
+        *b = depth_bytes[0];
+    }
+    if let Some(b) = buf.get_mut(7) {
+        *b = depth_bytes[1];
+    }
     // eh_generation = 0 (bytes 8..12 already zeroed in a fresh buffer)
 }
 
@@ -4621,17 +4655,29 @@ fn write_extent_entry(
 ) {
     let block_bytes = logical_block.to_le_bytes();
     for (i, &b) in block_bytes.iter().enumerate() {
-        if let Some(slot) = buf.get_mut(off.saturating_add(i)) { *slot = b; }
+        if let Some(slot) = buf.get_mut(off.saturating_add(i)) {
+            *slot = b;
+        }
     }
     let len_bytes = block_count.to_le_bytes();
-    if let Some(slot) = buf.get_mut(off.saturating_add(4)) { *slot = len_bytes[0]; }
-    if let Some(slot) = buf.get_mut(off.saturating_add(5)) { *slot = len_bytes[1]; }
+    if let Some(slot) = buf.get_mut(off.saturating_add(4)) {
+        *slot = len_bytes[0];
+    }
+    if let Some(slot) = buf.get_mut(off.saturating_add(5)) {
+        *slot = len_bytes[1];
+    }
     let start_hi = ((phys_start >> 32) as u16).to_le_bytes();
-    if let Some(slot) = buf.get_mut(off.saturating_add(6)) { *slot = start_hi[0]; }
-    if let Some(slot) = buf.get_mut(off.saturating_add(7)) { *slot = start_hi[1]; }
+    if let Some(slot) = buf.get_mut(off.saturating_add(6)) {
+        *slot = start_hi[0];
+    }
+    if let Some(slot) = buf.get_mut(off.saturating_add(7)) {
+        *slot = start_hi[1];
+    }
     let start_lo = (phys_start as u32).to_le_bytes();
     for (i, &b) in start_lo.iter().enumerate() {
-        if let Some(slot) = buf.get_mut(off.saturating_add(8).saturating_add(i)) { *slot = b; }
+        if let Some(slot) = buf.get_mut(off.saturating_add(8).saturating_add(i)) {
+            *slot = b;
+        }
     }
 }
 
@@ -4654,10 +4700,8 @@ fn stamp_extent_block_checksum(
         return;
     }
 
-    let computed = crate::crypto::crc32c_seed(
-        ino_seed,
-        block_data.get(..tail_offset).unwrap_or(&[]),
-    );
+    let computed =
+        crate::crypto::crc32c_seed(ino_seed, block_data.get(..tail_offset).unwrap_or(&[]));
     let csum_bytes = computed.to_le_bytes();
     if let Some(dest) = block_data.get_mut(tail_offset..tail_end) {
         dest.copy_from_slice(&csum_bytes);
@@ -4715,7 +4759,8 @@ pub(super) fn validate_dirent_checksum(
     let crc = crate::crypto::crc32c_raw(crc, &gen_le);
 
     // Feed the block data, zeroing the checksum field (last 4 bytes of the tail).
-    let data_before_csum = block_data.get(..tail_offset.saturating_add(8))
+    let data_before_csum = block_data
+        .get(..tail_offset.saturating_add(8))
         .ok_or(KernelError::IoError)?;
     let crc = crate::crypto::crc32c_raw(crc, data_before_csum);
     // Final segment with inversion (consistent with inode/GD checksum convention).
@@ -4724,7 +4769,9 @@ pub(super) fn validate_dirent_checksum(
     if computed != tail.det_checksum {
         serial_println!(
             "[ext4] directory block checksum MISMATCH for inode {}: stored={:#010x} computed={:#010x}",
-            dir_inode_nr, tail.det_checksum, computed,
+            dir_inode_nr,
+            tail.det_checksum,
+            computed,
         );
         return Err(KernelError::CorruptedData);
     }
@@ -4774,7 +4821,9 @@ fn stamp_dirent_checksum(
     let crc = crate::crypto::crc32c_raw(crc, &gen_le);
 
     // Feed block data with zeroed checksum field.
-    let data_before_csum = block_data.get(..tail_offset.saturating_add(8)).unwrap_or(&[]);
+    let data_before_csum = block_data
+        .get(..tail_offset.saturating_add(8))
+        .unwrap_or(&[]);
     let crc = crate::crypto::crc32c_raw(crc, data_before_csum);
     // Final segment with inversion (consistent with inode/GD checksum convention).
     let computed = crate::crypto::crc32c_seed(crc, &[0u8; 4]);
@@ -4843,23 +4892,27 @@ fn init_dirent_tail(block_data: &mut [u8]) {
         dest.copy_from_slice(&0u32.to_le_bytes());
     }
     // det_rec_len (2 bytes) = 12
-    if let Some(dest) = block_data.get_mut(
-        tail_offset.saturating_add(4)..tail_offset.saturating_add(6)
-    ) {
+    if let Some(dest) =
+        block_data.get_mut(tail_offset.saturating_add(4)..tail_offset.saturating_add(6))
+    {
         dest.copy_from_slice(&12u16.to_le_bytes());
     }
     // det_reserved_zero2 (1 byte) = 0
-    if let Some(dest) = block_data.get_mut(tail_offset.saturating_add(6)..tail_offset.saturating_add(7)) {
+    if let Some(dest) =
+        block_data.get_mut(tail_offset.saturating_add(6)..tail_offset.saturating_add(7))
+    {
         dest[0] = 0;
     }
     // det_reserved_ft (1 byte) = 0xDE
-    if let Some(dest) = block_data.get_mut(tail_offset.saturating_add(7)..tail_offset.saturating_add(8)) {
+    if let Some(dest) =
+        block_data.get_mut(tail_offset.saturating_add(7)..tail_offset.saturating_add(8))
+    {
         dest[0] = super::ondisk::EXT4_DIRENT_TAIL_MARKER;
     }
     // det_checksum (4 bytes) = 0 (will be stamped separately)
-    if let Some(dest) = block_data.get_mut(
-        tail_offset.saturating_add(8)..tail_offset.saturating_add(12)
-    ) {
+    if let Some(dest) =
+        block_data.get_mut(tail_offset.saturating_add(8)..tail_offset.saturating_add(12))
+    {
         dest.copy_from_slice(&0u32.to_le_bytes());
     }
 }
@@ -4906,7 +4959,9 @@ fn validate_xattr_block_checksum(
     if stored != computed {
         crate::serial_println!(
             "[ext4] xattr block {} checksum MISMATCH: stored={:#010x} computed={:#010x}",
-            block_nr, stored, computed,
+            block_nr,
+            stored,
+            computed,
         );
         return Err(KernelError::CorruptedData);
     }
@@ -4919,11 +4974,7 @@ fn validate_xattr_block_checksum(
 /// Writes the CRC32C into the `h_checksum` field at offset 16.
 ///
 /// Based on Linux `ext4_xattr_block_csum_set()` in `fs/ext4/xattr.c`.
-fn stamp_xattr_block_checksum(
-    sb: &ParsedSuperblock,
-    block_nr: u64,
-    block_data: &mut [u8],
-) {
+fn stamp_xattr_block_checksum(sb: &ParsedSuperblock, block_nr: u64, block_data: &mut [u8]) {
     if !sb.has_metadata_csum {
         return;
     }
@@ -4955,11 +5006,7 @@ fn stamp_xattr_block_checksum(
 ///
 /// Algorithm: `crc32c(csum_seed, block_nr_le64 || block_data)`
 /// with h_checksum (4 bytes at offset 16) replaced by zeros.
-fn compute_xattr_block_checksum(
-    sb: &ParsedSuperblock,
-    block_nr: u64,
-    block_data: &[u8],
-) -> u32 {
+fn compute_xattr_block_checksum(sb: &ParsedSuperblock, block_nr: u64, block_data: &[u8]) -> u32 {
     const CSUM_OFFSET: usize = 16;
     const CSUM_SIZE: usize = 4;
 
@@ -5000,7 +5047,11 @@ fn parse_dir_entries(data: &[u8], block_size: usize) -> KernelResult<Vec<(u32, u
     // `break`ed out of the whole directory here, which silently hid every
     // entry in all subsequent blocks (e.g. a freshly added hard-link name in
     // the last block of a multi-block directory).  See known-issues B-EXT4-DIR.
-    let bs = if block_size == 0 { data.len().max(1) } else { block_size };
+    let bs = if block_size == 0 {
+        data.len().max(1)
+    } else {
+        block_size
+    };
 
     let mut block_start = 0usize;
     while block_start < data.len() {
@@ -5077,11 +5128,7 @@ fn read_struct<T: Copy>(data: &[u8]) -> KernelResult<T> {
     // is a valid representation (all fields are integer types).
     unsafe {
         let mut val = core::mem::MaybeUninit::<T>::uninit();
-        core::ptr::copy_nonoverlapping(
-            data.as_ptr(),
-            val.as_mut_ptr().cast::<u8>(),
-            size,
-        );
+        core::ptr::copy_nonoverlapping(data.as_ptr(), val.as_mut_ptr().cast::<u8>(), size);
         Ok(val.assume_init())
     }
 }
@@ -5272,8 +5319,12 @@ fn inode_block_sectors(inode: &Ext4Inode, block_size: u32) -> u64 {
 fn set_inode_blocks_48(inode: &mut Ext4Inode, sectors: u64) {
     inode.i_blocks_lo = sectors as u32;
     let hi = ((sectors >> 32) as u16).to_le_bytes();
-    if let Some(slot) = inode.i_osd2.get_mut(0) { *slot = hi[0]; }
-    if let Some(slot) = inode.i_osd2.get_mut(1) { *slot = hi[1]; }
+    if let Some(slot) = inode.i_osd2.get_mut(0) {
+        *slot = hi[0];
+    }
+    if let Some(slot) = inode.i_osd2.get_mut(1) {
+        *slot = hi[1];
+    }
     // Always clear HUGE_FILE since we store sectors, not fs blocks.
     inode.i_flags &= !super::ondisk::inode_flags::HUGE_FILE;
 }
@@ -5442,9 +5493,9 @@ fn insert_dir_entry(
                     if next > offset || hdr.rec_len == 0 {
                         // This is the entry we need to shrink.
                         let new_rec_len = (offset.saturating_sub(pos)) as u16;
-                        if let Some(rl_bytes) = data.get_mut(
-                            pos.saturating_add(4)..pos.saturating_add(6)
-                        ) {
+                        if let Some(rl_bytes) =
+                            data.get_mut(pos.saturating_add(4)..pos.saturating_add(6))
+                        {
                             rl_bytes.copy_from_slice(&new_rec_len.to_le_bytes());
                         }
                         break;
@@ -5497,9 +5548,7 @@ fn write_dir_entry_raw(
         dest.copy_from_slice(&inode.to_le_bytes());
     }
     // rec_len (2 bytes, LE)
-    if let Some(dest) = buf.get_mut(
-        offset.saturating_add(4)..offset.saturating_add(6)
-    ) {
+    if let Some(dest) = buf.get_mut(offset.saturating_add(4)..offset.saturating_add(6)) {
         dest.copy_from_slice(&(rec_len as u16).to_le_bytes());
     }
     // name_len (1 byte)
@@ -5571,7 +5620,9 @@ fn test_block_copy_placement() -> KernelResult<()> {
         if got != want {
             crate::serial_println!(
                 "[ext4-driver]   FAIL: block_copy_placement {} = {:?}, want {:?}",
-                what, got, want
+                what,
+                got,
+                want
             );
             return Err(KernelError::InternalError);
         }
@@ -5579,24 +5630,52 @@ fn test_block_copy_placement() -> KernelResult<()> {
     };
 
     // Full-file read: each block lands at logical*block_size.
-    check(block_copy_placement(0, BS, 0, 8192), Some((0, 0, 4096)), "full b0")?;
-    check(block_copy_placement(1, BS, 0, 8192), Some((4096, 0, 4096)), "full b1")?;
+    check(
+        block_copy_placement(0, BS, 0, 8192),
+        Some((0, 0, 4096)),
+        "full b0",
+    )?;
+    check(
+        block_copy_placement(1, BS, 0, 8192),
+        Some((4096, 0, 4096)),
+        "full b1",
+    )?;
 
     // Sparse regression: with a hole at logical block 1, block 2 must stay at
     // byte 8192, NOT collapse to 4096.
-    check(block_copy_placement(2, BS, 0, 12288), Some((8192, 0, 4096)), "sparse b2")?;
+    check(
+        block_copy_placement(2, BS, 0, 12288),
+        Some((8192, 0, 4096)),
+        "sparse b2",
+    )?;
 
     // Tail block clamped to file size.
-    check(block_copy_placement(1, BS, 0, 4196), Some((4096, 0, 100)), "clamp tail")?;
+    check(
+        block_copy_placement(1, BS, 0, 4196),
+        Some((4096, 0, 100)),
+        "clamp tail",
+    )?;
 
     // Page-aligned partial read [8192,12288): covering block maps to page start.
-    check(block_copy_placement(2, BS, 8192, 4096), Some((0, 0, 4096)), "page b2")?;
+    check(
+        block_copy_placement(2, BS, 8192, 4096),
+        Some((0, 0, 4096)),
+        "page b2",
+    )?;
     check(block_copy_placement(3, BS, 8192, 4096), None, "page past")?;
     check(block_copy_placement(1, BS, 8192, 4096), None, "page before")?;
 
     // Unaligned range start sets the src offset within the first block.
-    check(block_copy_placement(1, BS, 4196, 4096), Some((0, 100, 3996)), "unaligned b1")?;
-    check(block_copy_placement(2, BS, 4196, 4096), Some((3996, 0, 100)), "unaligned b2")?;
+    check(
+        block_copy_placement(1, BS, 4196, 4096),
+        Some((0, 100, 3996)),
+        "unaligned b1",
+    )?;
+    check(
+        block_copy_placement(2, BS, 4196, 4096),
+        Some((3996, 0, 100)),
+        "unaligned b2",
+    )?;
 
     crate::serial_println!("[ext4-driver]   block_copy_placement (sparse holes): OK");
     Ok(())
@@ -5617,9 +5696,7 @@ fn test_dcache_basic() -> KernelResult<()> {
     match dcache.lookup(2, Path::new("hello.txt")) {
         Some((100, 1)) => {}
         other => {
-            crate::serial_println!(
-                "[ext4-driver]   FAIL: dcache lookup = {:?}", other
-            );
+            crate::serial_println!("[ext4-driver]   FAIL: dcache lookup = {:?}", other);
             return Err(KernelError::InternalError);
         }
     }
@@ -5644,7 +5721,8 @@ fn test_dcache_basic() -> KernelResult<()> {
     if hits != 1 || misses != 3 {
         crate::serial_println!(
             "[ext4-driver]   FAIL: dcache stats hits={}, misses={}",
-            hits, misses
+            hits,
+            misses
         );
         return Err(KernelError::InternalError);
     }
@@ -5687,9 +5765,7 @@ fn test_dcache_lru_eviction() -> KernelResult<()> {
     match dcache.lookup(2, Path::new("newfile")) {
         Some((999, 1)) => {}
         other => {
-            crate::serial_println!(
-                "[ext4-driver]   FAIL: newfile lookup = {:?}", other
-            );
+            crate::serial_println!("[ext4-driver]   FAIL: newfile lookup = {:?}", other);
             return Err(KernelError::InternalError);
         }
     }
@@ -5715,9 +5791,7 @@ fn test_extent_cache() -> KernelResult<()> {
     match cache.lookup(100, 0) {
         Some(1000) => {}
         other => {
-            crate::serial_println!(
-                "[ext4-driver]   FAIL: extent lookup(0) = {:?}", other
-            );
+            crate::serial_println!("[ext4-driver]   FAIL: extent lookup(0) = {:?}", other);
             return Err(KernelError::InternalError);
         }
     }
@@ -5726,9 +5800,7 @@ fn test_extent_cache() -> KernelResult<()> {
     match cache.lookup(100, 5) {
         Some(1005) => {}
         other => {
-            crate::serial_println!(
-                "[ext4-driver]   FAIL: extent lookup(5) = {:?}", other
-            );
+            crate::serial_println!("[ext4-driver]   FAIL: extent lookup(5) = {:?}", other);
             return Err(KernelError::InternalError);
         }
     }
@@ -5756,7 +5828,9 @@ fn test_extent_cache() -> KernelResult<()> {
     let (hits, _misses, valid) = cache.stats();
     if hits != 2 || valid != 0 {
         crate::serial_println!(
-            "[ext4-driver]   FAIL: extent stats hits={}, valid={}", hits, valid
+            "[ext4-driver]   FAIL: extent stats hits={}, valid={}",
+            hits,
+            valid
         );
         return Err(KernelError::InternalError);
     }
@@ -5826,7 +5900,8 @@ fn test_inode_blocks_48() -> KernelResult<()> {
     // Verify lo field.
     if inode.i_blocks_lo != 0x0000_1234 {
         crate::serial_println!(
-            "[ext4-driver]   FAIL: i_blocks_lo = {:#x}", inode.i_blocks_lo
+            "[ext4-driver]   FAIL: i_blocks_lo = {:#x}",
+            inode.i_blocks_lo
         );
         return Err(KernelError::InternalError);
     }
@@ -5844,23 +5919,23 @@ fn test_inode_blocks_48() -> KernelResult<()> {
     // Read back — should match (non-HUGE_FILE mode: raw value is sectors).
     let sectors = inode_block_sectors(&inode, 4096);
     if sectors != 0x0001_0000_1234 {
-        crate::serial_println!(
-            "[ext4-driver]   FAIL: read back sectors = {:#x}", sectors
-        );
+        crate::serial_println!("[ext4-driver]   FAIL: read back sectors = {:#x}", sectors);
         return Err(KernelError::InternalError);
     }
 
     // HUGE_FILE flag: raw is in fs blocks → multiply by block_size/512.
     inode.i_flags |= super::ondisk::inode_flags::HUGE_FILE;
     inode.i_blocks_lo = 100;
-    if let Some(b) = inode.i_osd2.get_mut(0) { *b = 0; }
-    if let Some(b) = inode.i_osd2.get_mut(1) { *b = 0; }
+    if let Some(b) = inode.i_osd2.get_mut(0) {
+        *b = 0;
+    }
+    if let Some(b) = inode.i_osd2.get_mut(1) {
+        *b = 0;
+    }
     // block_size=4096, sectors_per_block=8.
     let sectors = inode_block_sectors(&inode, 4096);
     if sectors != 800 {
-        crate::serial_println!(
-            "[ext4-driver]   FAIL: HUGE_FILE sectors = {}", sectors
-        );
+        crate::serial_println!("[ext4-driver]   FAIL: HUGE_FILE sectors = {}", sectors);
         return Err(KernelError::InternalError);
     }
 
@@ -5872,18 +5947,16 @@ fn test_inode_blocks_48() -> KernelResult<()> {
 fn test_find_in_leaf_extents() -> KernelResult<()> {
     // (logical_start, physical_start, length)
     let extents: &[(u64, u64, u64)] = &[
-        (0, 1000, 10),    // logical 0-9  → physical 1000-1009
-        (20, 2000, 5),    // logical 20-24 → physical 2000-2004
-        (100, 5000, 50),  // logical 100-149 → physical 5000-5049
+        (0, 1000, 10),   // logical 0-9  → physical 1000-1009
+        (20, 2000, 5),   // logical 20-24 → physical 2000-2004
+        (100, 5000, 50), // logical 100-149 → physical 5000-5049
     ];
 
     // Hit in first extent.
     match find_in_leaf_extents(extents, 0) {
         Some(1000) => {}
         other => {
-            crate::serial_println!(
-                "[ext4-driver]   FAIL: extent(0) = {:?}", other
-            );
+            crate::serial_println!("[ext4-driver]   FAIL: extent(0) = {:?}", other);
             return Err(KernelError::InternalError);
         }
     }
@@ -5891,9 +5964,7 @@ fn test_find_in_leaf_extents() -> KernelResult<()> {
     match find_in_leaf_extents(extents, 9) {
         Some(1009) => {}
         other => {
-            crate::serial_println!(
-                "[ext4-driver]   FAIL: extent(9) = {:?}", other
-            );
+            crate::serial_println!("[ext4-driver]   FAIL: extent(9) = {:?}", other);
             return Err(KernelError::InternalError);
         }
     }
@@ -5908,9 +5979,7 @@ fn test_find_in_leaf_extents() -> KernelResult<()> {
     match find_in_leaf_extents(extents, 22) {
         Some(2002) => {}
         other => {
-            crate::serial_println!(
-                "[ext4-driver]   FAIL: extent(22) = {:?}", other
-            );
+            crate::serial_println!("[ext4-driver]   FAIL: extent(22) = {:?}", other);
             return Err(KernelError::InternalError);
         }
     }
@@ -5956,7 +6025,10 @@ fn test_parse_dir_entries() -> KernelResult<()> {
     let (ino, ft, ref name) = entries[0];
     if ino != 2 || ft != 2 || name.as_path() != Path::new(".") {
         crate::serial_println!(
-            "[ext4-driver]   FAIL: entry 0 = ({}, {}, '{}')", ino, ft, name.display()
+            "[ext4-driver]   FAIL: entry 0 = ({}, {}, '{}')",
+            ino,
+            ft,
+            name.display()
         );
         return Err(KernelError::InternalError);
     }
@@ -5965,7 +6037,10 @@ fn test_parse_dir_entries() -> KernelResult<()> {
     let (ino, ft, ref name) = entries[1];
     if ino != 2 || ft != 2 || name.as_path() != Path::new("..") {
         crate::serial_println!(
-            "[ext4-driver]   FAIL: entry 1 = ({}, {}, '{}')", ino, ft, name.display()
+            "[ext4-driver]   FAIL: entry 1 = ({}, {}, '{}')",
+            ino,
+            ft,
+            name.display()
         );
         return Err(KernelError::InternalError);
     }
@@ -5974,7 +6049,10 @@ fn test_parse_dir_entries() -> KernelResult<()> {
     let (ino, ft, ref name) = entries[2];
     if ino != 100 || ft != 1 || name.as_path() != Path::new("hello.txt") {
         crate::serial_println!(
-            "[ext4-driver]   FAIL: entry 2 = ({}, {}, '{}')", ino, ft, name.display()
+            "[ext4-driver]   FAIL: entry 2 = ({}, {}, '{}')",
+            ino,
+            ft,
+            name.display()
         );
         return Err(KernelError::InternalError);
     }
@@ -6078,9 +6156,7 @@ fn test_blank_inode() -> KernelResult<()> {
     // inode_block_as_bytes should work on a blank inode.
     let bytes = inode_block_as_bytes(&inode);
     if bytes.len() != 60 {
-        crate::serial_println!(
-            "[ext4-driver]   FAIL: i_block bytes len = {}", bytes.len()
-        );
+        crate::serial_println!("[ext4-driver]   FAIL: i_block bytes len = {}", bytes.len());
         return Err(KernelError::InternalError);
     }
     if bytes.iter().any(|&b| b != 0) {
@@ -6150,9 +6226,15 @@ mod placement_tests {
     fn unaligned_range_start_sets_src_offset() {
         // Reading [4196, 8292) (starts 100 bytes into block 1).
         // Block 1: src_start=100, dest_start=0, n = 4096-100 = 3996.
-        assert_eq!(block_copy_placement(1, BS, 4196, 4096), Some((0, 100, 3996)));
+        assert_eq!(
+            block_copy_placement(1, BS, 4196, 4096),
+            Some((0, 100, 3996))
+        );
         // Block 2: dest_start = 8192-4196 = 3996, src_start=0, clamped to 100.
-        assert_eq!(block_copy_placement(2, BS, 4196, 4096), Some((3996, 0, 100)));
+        assert_eq!(
+            block_copy_placement(2, BS, 4196, 4096),
+            Some((3996, 0, 100))
+        );
     }
 
     /// Blocks entirely outside the range yield None.

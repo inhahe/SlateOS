@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -35,10 +35,10 @@ use crate::error::{KernelError, KernelResult};
 /// Name resolution source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveSource {
-    Files,    // /etc/hosts
-    Dns,      // DNS server
-    Mdns,     // mDNS (multicast)
-    Cache,    // Local cache
+    Files, // /etc/hosts
+    Dns,   // DNS server
+    Mdns,  // mDNS (multicast)
+    Cache, // Local cache
 }
 
 impl ResolveSource {
@@ -108,11 +108,17 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         hostname: String::from("localhost"),
         domain: String::from("localdomain"),
-        resolve_order: alloc::vec![ResolveSource::Cache, ResolveSource::Files, ResolveSource::Dns],
+        resolve_order: alloc::vec![
+            ResolveSource::Cache,
+            ResolveSource::Files,
+            ResolveSource::Dns
+        ],
         hosts: alloc::vec![
             HostEntry {
                 address: String::from("127.0.0.1"),
@@ -135,7 +141,10 @@ pub fn init_defaults() {
 
 /// Get system hostname.
 pub fn get_hostname() -> String {
-    STATE.lock().as_ref().map_or(String::from("unknown"), |s| s.hostname.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(String::from("unknown"), |s| s.hostname.clone())
 }
 
 /// Set system hostname.
@@ -160,7 +169,10 @@ pub fn set_hostname(name: &str) -> KernelResult<()> {
 
 /// Get domain.
 pub fn get_domain() -> String {
-    STATE.lock().as_ref().map_or(String::new(), |s| s.domain.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(String::new(), |s| s.domain.clone())
 }
 
 /// Set domain.
@@ -191,7 +203,9 @@ pub fn resolve(hostname: &str) -> KernelResult<ResolveResult> {
                     ttl_secs: 0,
                 };
                 // Add to cache.
-                if state.cache.len() >= MAX_CACHE { state.cache.remove(0); }
+                if state.cache.len() >= MAX_CACHE {
+                    state.cache.remove(0);
+                }
                 state.cache.push(result.clone());
                 return Ok(result);
             }
@@ -203,8 +217,14 @@ pub fn resolve(hostname: &str) -> KernelResult<ResolveResult> {
 /// Add a static host entry.
 pub fn add_host(address: &str, hostname: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.hosts.len() >= MAX_HOSTS { return Err(KernelError::ResourceExhausted); }
-        if state.hosts.iter().any(|h| h.hostname == hostname && h.address == address) {
+        if state.hosts.len() >= MAX_HOSTS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state
+            .hosts
+            .iter()
+            .any(|h| h.hostname == hostname && h.address == address)
+        {
             return Err(KernelError::AlreadyExists);
         }
         state.hosts.push(HostEntry {
@@ -221,7 +241,9 @@ pub fn remove_host(hostname: &str) -> KernelResult<()> {
     with_state(|state| {
         let before = state.hosts.len();
         state.hosts.retain(|h| h.hostname != hostname);
-        if state.hosts.len() == before { return Err(KernelError::NotFound); }
+        if state.hosts.len() == before {
+            return Err(KernelError::NotFound);
+        }
         // Also invalidate cache.
         state.cache.retain(|r| r.hostname != hostname);
         Ok(())
@@ -230,12 +252,18 @@ pub fn remove_host(hostname: &str) -> KernelResult<()> {
 
 /// List all host entries.
 pub fn list_hosts() -> Vec<HostEntry> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.hosts.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.hosts.clone())
 }
 
 /// Get resolution order.
 pub fn get_order() -> Vec<ResolveSource> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.resolve_order.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.resolve_order.clone())
 }
 
 /// Flush resolve cache.
@@ -251,7 +279,13 @@ pub fn flush_cache() -> KernelResult<u64> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.hosts.len(), s.total_lookups, s.cache_hits, s.cache_misses, s.ops),
+        Some(s) => (
+            s.hosts.len(),
+            s.total_lookups,
+            s.cache_hits,
+            s.cache_misses,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

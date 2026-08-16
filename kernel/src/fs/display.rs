@@ -29,11 +29,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -151,11 +151,8 @@ impl Monitor {
         if let Some(mode) = self.current_mode() {
             if self.physical_width_mm > 0 {
                 // DPI = pixels / inches. 1 inch = 25.4mm.
-                let dpi = (mode.width as u64)
-                    .saturating_mul(254)
-                    / (self.physical_width_mm as u64)
-                    .saturating_mul(10)
-                    .max(1);
+                let dpi = (mode.width as u64).saturating_mul(254)
+                    / (self.physical_width_mm as u64).saturating_mul(10).max(1);
                 dpi as u32
             } else {
                 96 // Default assumption.
@@ -168,10 +165,21 @@ impl Monitor {
     /// Recommended scale factor based on DPI.
     pub fn recommended_scale(&self) -> u32 {
         let dpi = self.effective_dpi();
-        if dpi >= 192 { 200 }       // 4K on ~24"
-        else if dpi >= 144 { 150 }  // QHD on ~24"
-        else if dpi >= 120 { 125 }  // FHD on ~15"
-        else { 100 }                // Normal
+        if dpi >= 192 {
+            200
+        }
+        // 4K on ~24"
+        else if dpi >= 144 {
+            150
+        }
+        // QHD on ~24"
+        else if dpi >= 120 {
+            125
+        }
+        // FHD on ~15"
+        else {
+            100
+        } // Normal
     }
 }
 
@@ -225,21 +233,24 @@ pub fn add_monitor(id: &str, name: &str, phys_w_mm: u32, phys_h_mm: u32) -> Kern
         return Err(KernelError::ResourceExhausted);
     }
     let is_first = state.monitors.is_empty();
-    state.monitors.insert(String::from(id), Monitor {
-        id: String::from(id),
-        name: String::from(name),
-        modes: Vec::new(),
-        active_mode: 0,
-        enabled: true,
-        primary: is_first,
-        pos_x: 0,
-        pos_y: 0,
-        orientation: Orientation::Landscape,
-        scale_percent: 100,
-        physical_width_mm: phys_w_mm,
-        physical_height_mm: phys_h_mm,
-        connected: true,
-    });
+    state.monitors.insert(
+        String::from(id),
+        Monitor {
+            id: String::from(id),
+            name: String::from(name),
+            modes: Vec::new(),
+            active_mode: 0,
+            enabled: true,
+            primary: is_first,
+            pos_x: 0,
+            pos_y: 0,
+            orientation: Orientation::Landscape,
+            scale_percent: 100,
+            physical_width_mm: phys_w_mm,
+            physical_height_mm: phys_h_mm,
+            connected: true,
+        },
+    );
     Ok(())
 }
 
@@ -251,14 +262,27 @@ pub fn remove_monitor(id: &str) -> KernelResult<()> {
 }
 
 /// Add a display mode to a monitor.
-pub fn add_mode(monitor_id: &str, width: u32, height: u32,
-                refresh: u32, preferred: bool) -> KernelResult<()> {
+pub fn add_mode(
+    monitor_id: &str,
+    width: u32,
+    height: u32,
+    refresh: u32,
+    preferred: bool,
+) -> KernelResult<()> {
     let mut state = DISPLAY.lock();
-    let mon = state.monitors.get_mut(monitor_id).ok_or(KernelError::NotFound)?;
+    let mon = state
+        .monitors
+        .get_mut(monitor_id)
+        .ok_or(KernelError::NotFound)?;
     if mon.modes.len() >= MAX_MODES {
         return Err(KernelError::ResourceExhausted);
     }
-    mon.modes.push(DisplayMode { width, height, refresh_hz: refresh, preferred });
+    mon.modes.push(DisplayMode {
+        width,
+        height,
+        refresh_hz: refresh,
+        preferred,
+    });
     // If this is preferred and we haven't selected one, use it.
     if preferred && mon.active_mode == 0 && mon.modes.len() > 1 {
         mon.active_mode = mon.modes.len().saturating_sub(1);
@@ -288,7 +312,10 @@ pub fn set_mode(monitor_id: &str, mode_index: usize) -> KernelResult<()> {
     MODE_CHANGE_COUNT.fetch_add(1, Ordering::Relaxed);
     let now = crate::timekeeping::clock_monotonic();
     let mut state = DISPLAY.lock();
-    let mon = state.monitors.get_mut(monitor_id).ok_or(KernelError::NotFound)?;
+    let mon = state
+        .monitors
+        .get_mut(monitor_id)
+        .ok_or(KernelError::NotFound)?;
     if mode_index >= mon.modes.len() {
         return Err(KernelError::InvalidArgument);
     }
@@ -308,12 +335,16 @@ pub fn set_mode(monitor_id: &str, mode_index: usize) -> KernelResult<()> {
 }
 
 /// Set resolution by width/height/refresh (finds matching mode).
-pub fn set_resolution(monitor_id: &str, width: u32, height: u32,
-                      refresh: u32) -> KernelResult<()> {
+pub fn set_resolution(monitor_id: &str, width: u32, height: u32, refresh: u32) -> KernelResult<()> {
     let state = DISPLAY.lock();
-    let mon = state.monitors.get(monitor_id).ok_or(KernelError::NotFound)?;
-    let idx = mon.modes.iter().position(|m|
-        m.width == width && m.height == height && m.refresh_hz == refresh);
+    let mon = state
+        .monitors
+        .get(monitor_id)
+        .ok_or(KernelError::NotFound)?;
+    let idx = mon
+        .modes
+        .iter()
+        .position(|m| m.width == width && m.height == height && m.refresh_hz == refresh);
     drop(state);
     match idx {
         Some(i) => set_mode(monitor_id, i),
@@ -370,7 +401,10 @@ pub fn set_scale(monitor_id: &str, percent: u32) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     let mut state = DISPLAY.lock();
-    let mon = state.monitors.get_mut(monitor_id).ok_or(KernelError::NotFound)?;
+    let mon = state
+        .monitors
+        .get_mut(monitor_id)
+        .ok_or(KernelError::NotFound)?;
     mon.scale_percent = percent;
     Ok(())
 }
@@ -378,7 +412,10 @@ pub fn set_scale(monitor_id: &str, percent: u32) -> KernelResult<()> {
 /// Auto-detect and set recommended scale for a monitor.
 pub fn auto_scale(monitor_id: &str) -> KernelResult<u32> {
     let mut state = DISPLAY.lock();
-    let mon = state.monitors.get_mut(monitor_id).ok_or(KernelError::NotFound)?;
+    let mon = state
+        .monitors
+        .get_mut(monitor_id)
+        .ok_or(KernelError::NotFound)?;
     let rec = mon.recommended_scale();
     mon.scale_percent = rec;
     Ok(rec)
@@ -391,7 +428,10 @@ pub fn auto_scale(monitor_id: &str) -> KernelResult<u32> {
 /// Set monitor position in the virtual desktop.
 pub fn set_position(monitor_id: &str, x: i32, y: i32) -> KernelResult<()> {
     let mut state = DISPLAY.lock();
-    let mon = state.monitors.get_mut(monitor_id).ok_or(KernelError::NotFound)?;
+    let mon = state
+        .monitors
+        .get_mut(monitor_id)
+        .ok_or(KernelError::NotFound)?;
     mon.pos_x = x;
     mon.pos_y = y;
     Ok(())
@@ -400,7 +440,10 @@ pub fn set_position(monitor_id: &str, x: i32, y: i32) -> KernelResult<()> {
 /// Set orientation.
 pub fn set_orientation(monitor_id: &str, orient: Orientation) -> KernelResult<()> {
     let mut state = DISPLAY.lock();
-    let mon = state.monitors.get_mut(monitor_id).ok_or(KernelError::NotFound)?;
+    let mon = state
+        .monitors
+        .get_mut(monitor_id)
+        .ok_or(KernelError::NotFound)?;
     mon.orientation = orient;
     Ok(())
 }
@@ -424,7 +467,10 @@ pub fn set_primary(monitor_id: &str) -> KernelResult<()> {
 /// Enable or disable a monitor.
 pub fn set_enabled(monitor_id: &str, enabled: bool) -> KernelResult<()> {
     let mut state = DISPLAY.lock();
-    let mon = state.monitors.get_mut(monitor_id).ok_or(KernelError::NotFound)?;
+    let mon = state
+        .monitors
+        .get_mut(monitor_id)
+        .ok_or(KernelError::NotFound)?;
     mon.enabled = enabled;
     Ok(())
 }
@@ -436,7 +482,10 @@ pub fn set_enabled(monitor_id: &str, enabled: bool) -> KernelResult<()> {
 /// Returns (monitor_count, mode_change_count).
 pub fn stats() -> (usize, u64) {
     let state = DISPLAY.lock();
-    (state.monitors.len(), MODE_CHANGE_COUNT.load(Ordering::Relaxed))
+    (
+        state.monitors.len(),
+        MODE_CHANGE_COUNT.load(Ordering::Relaxed),
+    )
 }
 
 /// Reset counters.
@@ -516,7 +565,10 @@ pub fn self_test() -> KernelResult<()> {
     // Test 6: Orientation and enable/disable.
     serial_println!("  display::test 6: orientation and enable");
     set_orientation("DP-1", Orientation::Portrait)?;
-    assert_eq!(get_monitor("DP-1").unwrap().orientation, Orientation::Portrait);
+    assert_eq!(
+        get_monitor("DP-1").unwrap().orientation,
+        Orientation::Portrait
+    );
     set_enabled("DP-1", false)?;
     assert!(!get_monitor("DP-1").unwrap().enabled);
     set_enabled("DP-1", true)?;

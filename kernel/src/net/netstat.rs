@@ -19,9 +19,9 @@
 //! netstat -6           — IPv6-specific information (addresses, NDP, SLAAC)
 //! ```
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
 use crate::error::KernelResult;
 
@@ -150,11 +150,19 @@ pub fn format_tcp_connections(entries: &[TcpEntry]) -> String {
     let has_ns = entries.iter().any(|e| e.ns_id != 0);
 
     if has_ns {
-        out.push_str("Proto  Local Address          Remote Address         State        Rx     Tx    NS\n");
-        out.push_str("─────  ─────────────────────  ─────────────────────  ───────────  ─────  ─────  ──\n");
+        out.push_str(
+            "Proto  Local Address          Remote Address         State        Rx     Tx    NS\n",
+        );
+        out.push_str(
+            "─────  ─────────────────────  ─────────────────────  ───────────  ─────  ─────  ──\n",
+        );
     } else {
-        out.push_str("Proto  Local Address          Remote Address         State        Rx     Tx\n");
-        out.push_str("─────  ─────────────────────  ─────────────────────  ───────────  ─────  ─────\n");
+        out.push_str(
+            "Proto  Local Address          Remote Address         State        Rx     Tx\n",
+        );
+        out.push_str(
+            "─────  ─────────────────────  ─────────────────────  ───────────  ─────  ─────\n",
+        );
     }
 
     for e in entries {
@@ -246,8 +254,14 @@ pub fn format_interface_stats() -> String {
         out.push_str(&format!("  DNS6:    {}\n", rdnss));
     }
 
-    out.push_str(&format!("  Status:  {}\n",
-        if super::interface::is_up() { "UP" } else { "DOWN" }));
+    out.push_str(&format!(
+        "  Status:  {}\n",
+        if super::interface::is_up() {
+            "UP"
+        } else {
+            "DOWN"
+        }
+    ));
     out.push('\n');
     out.push_str(&format!(
         "  RX packets: {:<10}  bytes: {}\n",
@@ -304,17 +318,12 @@ pub fn format_routing() -> String {
     out.push_str("───────────────────────────────────────  ─────────  ─────\n");
 
     let _link_local = Ipv6Addr::from_mac_link_local(&info.mac);
-    out.push_str(
-        "fe80::/10                                ::         eth0   (link-local)\n",
-    );
+    out.push_str("fe80::/10                                ::         eth0   (link-local)\n");
 
     if let Some(global) = super::icmpv6::slaac_global_addr() {
         // Show the /64 prefix route.
         let prefix = global.prefix_string(64);
-        out.push_str(&format!(
-            "{:<39}  ::         eth0   (SLAAC)\n",
-            prefix
-        ));
+        out.push_str(&format!("{:<39}  ::         eth0   (SLAAC)\n", prefix));
     }
 
     // Default IPv6 route via router (if we have a gateway from RA).
@@ -326,9 +335,7 @@ pub fn format_routing() -> String {
     }
 
     // Multicast.
-    out.push_str(
-        "ff00::/8                                 ::         eth0   (multicast)\n",
-    );
+    out.push_str("ff00::/8                                 ::         eth0   (multicast)\n");
 
     out
 }
@@ -344,7 +351,10 @@ pub fn format_protocol_stats() -> String {
     let mut out = String::with_capacity(768);
 
     out.push_str("TCP:\n");
-    out.push_str(&format!("  {} active connections\n", tcp_stats.active_connections));
+    out.push_str(&format!(
+        "  {} active connections\n",
+        tcp_stats.active_connections
+    ));
     out.push_str(&format!("    {} ESTABLISHED\n", tcp_stats.established));
     out.push_str(&format!("    {} TIME_WAIT\n", tcp_stats.time_wait));
     out.push_str(&format!("    {} CLOSE_WAIT\n", tcp_stats.close_wait));
@@ -359,9 +369,14 @@ pub fn format_protocol_stats() -> String {
     out.push('\n');
 
     out.push_str("DNS:\n");
-    out.push_str(&format!("  {}/{} cache entries\n", dns_stats.entries, dns_stats.capacity));
-    out.push_str(&format!("  {} hits, {} misses, {} evictions\n",
-        dns_stats.hits, dns_stats.misses, dns_stats.evictions));
+    out.push_str(&format!(
+        "  {}/{} cache entries\n",
+        dns_stats.entries, dns_stats.capacity
+    ));
+    out.push_str(&format!(
+        "  {} hits, {} misses, {} evictions\n",
+        dns_stats.hits, dns_stats.misses, dns_stats.evictions
+    ));
     out.push('\n');
 
     out.push_str("ARP:\n");
@@ -370,12 +385,30 @@ pub fn format_protocol_stats() -> String {
 
     out.push_str("NDP (IPv6):\n");
     out.push_str(&format!("  {} neighbor cache entries\n", ndp_count));
-    out.push_str(&format!("  SLAAC: {}\n",
-        if super::icmpv6::slaac_global_addr().is_some() { "configured" } else { "none" }));
-    out.push_str(&format!("  RDNSS: {}\n",
-        if super::icmpv6::slaac_rdnss().is_some() { "available" } else { "none" }));
-    out.push_str(&format!("  Default router: {}\n",
-        if super::icmpv6::default_router().is_some() { "available" } else { "none" }));
+    out.push_str(&format!(
+        "  SLAAC: {}\n",
+        if super::icmpv6::slaac_global_addr().is_some() {
+            "configured"
+        } else {
+            "none"
+        }
+    ));
+    out.push_str(&format!(
+        "  RDNSS: {}\n",
+        if super::icmpv6::slaac_rdnss().is_some() {
+            "available"
+        } else {
+            "none"
+        }
+    ));
+    out.push_str(&format!(
+        "  Default router: {}\n",
+        if super::icmpv6::default_router().is_some() {
+            "available"
+        } else {
+            "none"
+        }
+    ));
 
     out
 }
@@ -643,8 +676,14 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 13: Routing shows IPv6 ---
     {
         let formatted = format_routing();
-        assert!(formatted.contains("IPv4 Routing Table"), "v4 routing header");
-        assert!(formatted.contains("IPv6 Routing Table"), "v6 routing header");
+        assert!(
+            formatted.contains("IPv4 Routing Table"),
+            "v4 routing header"
+        );
+        assert!(
+            formatted.contains("IPv6 Routing Table"),
+            "v6 routing header"
+        );
         assert!(formatted.contains("fe80::/10"), "link-local route");
 
         passed = passed.saturating_add(1);

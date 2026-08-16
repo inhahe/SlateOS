@@ -438,9 +438,8 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
         let header_offset = archive.len() as u64;
 
         // Determine if ZIP64 extra field is needed for this entry.
-        let need_zip64 = uncomp_size > 0xFFFF_FFFE
-            || comp_size > 0xFFFF_FFFE
-            || header_offset > 0xFFFF_FFFE;
+        let need_zip64 =
+            uncomp_size > 0xFFFF_FFFE || comp_size > 0xFFFF_FFFE || header_offset > 0xFFFF_FFFE;
 
         let (comp32, uncomp32, extra_field) = if need_zip64 {
             // Use 0xFFFFFFFF sentinel + ZIP64 extra field.
@@ -458,10 +457,10 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
         // Local file header.
         write_u32(&mut archive, LOCAL_SIG);
         write_u16(&mut archive, if need_zip64 { 45 } else { 20 }); // version needed
-        write_u16(&mut archive, 0);             // general purpose bit flag
+        write_u16(&mut archive, 0); // general purpose bit flag
         write_u16(&mut archive, method);
-        write_u16(&mut archive, 0);             // mod time
-        write_u16(&mut archive, 0x0021);        // mod date (1980-01-01)
+        write_u16(&mut archive, 0); // mod time
+        write_u16(&mut archive, 0x0021); // mod date (1980-01-01)
         write_u32(&mut archive, crc32);
         write_u32(&mut archive, comp32);
         write_u32(&mut archive, uncomp32);
@@ -506,19 +505,19 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
         write_u32(&mut archive, CENTRAL_SIG);
         write_u16(&mut archive, if rec.need_zip64 { 45 } else { 20 }); // version made by
         write_u16(&mut archive, if rec.need_zip64 { 45 } else { 20 }); // version needed
-        write_u16(&mut archive, 0);             // bit flag
+        write_u16(&mut archive, 0); // bit flag
         write_u16(&mut archive, rec.method);
-        write_u16(&mut archive, 0);             // mod time
-        write_u16(&mut archive, 0x0021);        // mod date
+        write_u16(&mut archive, 0); // mod time
+        write_u16(&mut archive, 0x0021); // mod date
         write_u32(&mut archive, rec.crc32);
         write_u32(&mut archive, comp32);
         write_u32(&mut archive, uncomp32);
         write_u16(&mut archive, rec.name.len() as u16);
         write_u16(&mut archive, extra_field.len() as u16);
-        write_u16(&mut archive, 0);             // comment length
-        write_u16(&mut archive, 0);             // disk number start
-        write_u16(&mut archive, 0);             // internal attrs
-        write_u32(&mut archive, 0);             // external attrs
+        write_u16(&mut archive, 0); // comment length
+        write_u16(&mut archive, 0); // disk number start
+        write_u16(&mut archive, 0); // internal attrs
+        write_u32(&mut archive, 0); // external attrs
         write_u32(&mut archive, offset32);
         archive.extend_from_slice(rec.name.as_bytes());
         archive.extend_from_slice(&extra_field);
@@ -538,11 +537,11 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
         // ZIP64 end of central directory record (56 bytes).
         let zip64_eocd_off = archive.len() as u64;
         write_u32(&mut archive, ZIP64_EOCD_SIG);
-        write_u64(&mut archive, 44);            // size of remaining record
-        write_u16(&mut archive, 45);            // version made by
-        write_u16(&mut archive, 45);            // version needed
-        write_u32(&mut archive, 0);             // disk number
-        write_u32(&mut archive, 0);             // disk with CD start
+        write_u64(&mut archive, 44); // size of remaining record
+        write_u16(&mut archive, 45); // version made by
+        write_u16(&mut archive, 45); // version needed
+        write_u32(&mut archive, 0); // disk number
+        write_u32(&mut archive, 0); // disk with CD start
         write_u64(&mut archive, entry_count);
         write_u64(&mut archive, entry_count);
         write_u64(&mut archive, cd_size);
@@ -550,24 +549,36 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
 
         // ZIP64 end of central directory locator (20 bytes).
         write_u32(&mut archive, ZIP64_LOCATOR_SIG);
-        write_u32(&mut archive, 0);             // disk with ZIP64 EOCD
+        write_u32(&mut archive, 0); // disk with ZIP64 EOCD
         write_u64(&mut archive, zip64_eocd_off);
-        write_u32(&mut archive, 1);             // total disks
+        write_u32(&mut archive, 1); // total disks
     }
 
     // --- Standard End of Central Directory ---
-    let eocd_entries = if entry_count > 0xFFFF { 0xFFFFu16 } else { entry_count as u16 };
-    let eocd_cd_size = if cd_size > 0xFFFF_FFFF { 0xFFFF_FFFFu32 } else { cd_size as u32 };
-    let eocd_cd_off = if cd_start > 0xFFFF_FFFF { 0xFFFF_FFFFu32 } else { cd_start as u32 };
+    let eocd_entries = if entry_count > 0xFFFF {
+        0xFFFFu16
+    } else {
+        entry_count as u16
+    };
+    let eocd_cd_size = if cd_size > 0xFFFF_FFFF {
+        0xFFFF_FFFFu32
+    } else {
+        cd_size as u32
+    };
+    let eocd_cd_off = if cd_start > 0xFFFF_FFFF {
+        0xFFFF_FFFFu32
+    } else {
+        cd_start as u32
+    };
 
     write_u32(&mut archive, EOCD_SIG);
-    write_u16(&mut archive, 0);                 // disk number
-    write_u16(&mut archive, 0);                 // disk with CD
+    write_u16(&mut archive, 0); // disk number
+    write_u16(&mut archive, 0); // disk with CD
     write_u16(&mut archive, eocd_entries);
     write_u16(&mut archive, eocd_entries);
     write_u32(&mut archive, eocd_cd_size);
     write_u32(&mut archive, eocd_cd_off);
-    write_u16(&mut archive, 0);                 // comment length
+    write_u16(&mut archive, 0); // comment length
 
     archive
 }
@@ -611,7 +622,10 @@ pub fn self_test() -> KernelResult<()> {
         if parsed.len() != 1 {
             return Err(KernelError::CorruptedData);
         }
-        if parsed[0].name.as_path() != Path::new("hello.txt") || parsed[0].method != 0 || parsed[0].uncompressed_size != 13 {
+        if parsed[0].name.as_path() != Path::new("hello.txt")
+            || parsed[0].method != 0
+            || parsed[0].uncompressed_size != 13
+        {
             return Err(KernelError::CorruptedData);
         }
         let data = extract_entry(&archive, &parsed[0])?;
@@ -646,7 +660,10 @@ pub fn self_test() -> KernelResult<()> {
         if parsed[0].method != 8 {
             // If compression didn't help, method might be 0.  Only fail
             // if the data is clearly compressible but method is wrong.
-            serial_println!("[zip]   method={} (expected 8 for repetitive data)", parsed[0].method);
+            serial_println!(
+                "[zip]   method={} (expected 8 for repetitive data)",
+                parsed[0].method
+            );
         }
         let data = extract_entry(&archive, &parsed[0])?;
         if data != text {
@@ -715,7 +732,10 @@ pub fn self_test() -> KernelResult<()> {
         let off = parsed[0].local_header_offset as usize;
         let name_len = le_u16(&archive, off.wrapping_add(26)) as usize;
         let extra_len = le_u16(&archive, off.wrapping_add(28)) as usize;
-        let data_off = off.wrapping_add(30).wrapping_add(name_len).wrapping_add(extra_len);
+        let data_off = off
+            .wrapping_add(30)
+            .wrapping_add(name_len)
+            .wrapping_add(extra_len);
         if let Some(byte) = archive.get_mut(data_off) {
             *byte ^= 0xFF;
         }

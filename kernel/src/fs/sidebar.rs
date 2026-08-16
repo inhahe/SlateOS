@@ -275,7 +275,8 @@ pub fn section_count() -> usize {
 // ---------------------------------------------------------------------------
 
 fn is_expanded(expanded: &[(SectionKind, bool)], kind: SectionKind) -> bool {
-    expanded.iter()
+    expanded
+        .iter()
         .find(|(k, _)| *k == kind)
         .map(|(_, e)| *e)
         .unwrap_or(true) // Default expanded.
@@ -479,9 +480,11 @@ fn disk_usage_string<P: AsRef<Path>>(path: P) -> String {
             let free_mib = free_bytes / (1024 * 1024);
             let total_mib = total_bytes / (1024 * 1024);
             if total_mib >= 1024 {
-                alloc::format!("{:.1} GiB free of {:.1} GiB",
-                               free_mib as f64 / 1024.0,
-                               total_mib as f64 / 1024.0)
+                alloc::format!(
+                    "{:.1} GiB free of {:.1} GiB",
+                    free_mib as f64 / 1024.0,
+                    total_mib as f64 / 1024.0
+                )
             } else {
                 alloc::format!("{} MiB free of {} MiB", free_mib, total_mib)
             }
@@ -521,9 +524,22 @@ pub fn self_test() -> KernelResult<()> {
         let sidebar = build();
         assert!(!sidebar.sections.is_empty());
         // Should have Quick Access and This PC at minimum.
-        assert!(sidebar.sections.iter().any(|s| s.kind == SectionKind::QuickAccess));
-        assert!(sidebar.sections.iter().any(|s| s.kind == SectionKind::ThisPC));
-        serial_println!("[sidebar] test 1 passed: build ({} sections)", sidebar.sections.len());
+        assert!(
+            sidebar
+                .sections
+                .iter()
+                .any(|s| s.kind == SectionKind::QuickAccess)
+        );
+        assert!(
+            sidebar
+                .sections
+                .iter()
+                .any(|s| s.kind == SectionKind::ThisPC)
+        );
+        serial_println!(
+            "[sidebar] test 1 passed: build ({} sections)",
+            sidebar.sections.len()
+        );
     }
 
     // Test 2: section ordering.
@@ -540,11 +556,21 @@ pub fn self_test() -> KernelResult<()> {
     {
         hide_section(SectionKind::Network);
         let sidebar = build();
-        assert!(!sidebar.sections.iter().any(|s| s.kind == SectionKind::Network));
+        assert!(
+            !sidebar
+                .sections
+                .iter()
+                .any(|s| s.kind == SectionKind::Network)
+        );
 
         show_section(SectionKind::Network);
         let sidebar2 = build();
-        assert!(sidebar2.sections.iter().any(|s| s.kind == SectionKind::Network));
+        assert!(
+            sidebar2
+                .sections
+                .iter()
+                .any(|s| s.kind == SectionKind::Network)
+        );
         serial_println!("[sidebar] test 3 passed: hide/show section");
     }
 
@@ -562,7 +588,10 @@ pub fn self_test() -> KernelResult<()> {
     // Test 5: Quick Access defaults.
     {
         let sidebar = build();
-        let qa = sidebar.sections.iter().find(|s| s.kind == SectionKind::QuickAccess);
+        let qa = sidebar
+            .sections
+            .iter()
+            .find(|s| s.kind == SectionKind::QuickAccess);
         assert!(qa.is_some());
         // Should have default items (Desktop, Downloads, etc.) or bookmarks.
         assert!(!qa.map(|s| s.items.is_empty()).unwrap_or(true));
@@ -572,7 +601,10 @@ pub fn self_test() -> KernelResult<()> {
     // Test 6: This PC has root.
     {
         let sidebar = build();
-        let pc = sidebar.sections.iter().find(|s| s.kind == SectionKind::ThisPC);
+        let pc = sidebar
+            .sections
+            .iter()
+            .find(|s| s.kind == SectionKind::ThisPC);
         assert!(pc.is_some());
         let has_root = pc
             .map(|s| s.items.iter().any(|i| i.path.as_path() == Path::new("/")))

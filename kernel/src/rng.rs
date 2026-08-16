@@ -177,9 +177,7 @@ struct KernelRng {
 impl KernelRng {
     const fn new() -> Self {
         Self {
-            chacha: ChaCha20State {
-                state: [0u32; 16],
-            },
+            chacha: ChaCha20State { state: [0u32; 16] },
             buffer: [0u8; 64],
             buf_pos: 64, // Empty — will trigger refill on first use.
             bytes_generated: 0,
@@ -235,7 +233,8 @@ impl KernelRng {
 
             if let (Some(dst), Some(src)) = (
                 buf.get_mut(offset..offset.wrapping_add(copy_len)),
-                self.buffer.get(self.buf_pos..self.buf_pos.wrapping_add(copy_len)),
+                self.buffer
+                    .get(self.buf_pos..self.buf_pos.wrapping_add(copy_len)),
             ) {
                 dst.copy_from_slice(src);
             }
@@ -625,7 +624,10 @@ pub fn self_test() {
         "Expected ≥240 distinct byte values in 1024 samples, got {}",
         seen_count,
     );
-    serial_println!("[rng]   Uniformity: OK ({}/256 byte values in 1024 samples)", seen_count);
+    serial_println!(
+        "[rng]   Uniformity: OK ({}/256 byte values in 1024 samples)",
+        seen_count
+    );
 
     // --- 4. Bounded generation ---
     for _ in 0..100 {
@@ -639,13 +641,23 @@ pub fn self_test() {
     let rdseed_ok = try_rdseed().is_some();
     serial_println!(
         "[rng]   Hardware: RDRAND={}, RDSEED={}",
-        if rdrand_ok { "available" } else { "not available" },
-        if rdseed_ok { "available" } else { "not available" },
+        if rdrand_ok {
+            "available"
+        } else {
+            "not available"
+        },
+        if rdseed_ok {
+            "available"
+        } else {
+            "not available"
+        },
     );
 
     serial_println!(
         "[rng]   Stats: generated={} bytes, reseeds={}, entropy_count={}",
-        total_bytes_generated(), reseed_count(), entropy_contributions(),
+        total_bytes_generated(),
+        reseed_count(),
+        entropy_contributions(),
     );
 
     serial_println!("[rng] Self-test PASSED");

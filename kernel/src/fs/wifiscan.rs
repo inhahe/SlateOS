@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -113,8 +113,8 @@ pub struct WifiNetwork {
     pub security: SecurityType,
     pub band: Band,
     pub channel: u8,
-    pub signal_dbm: i32,       // Negative dBm (e.g., -50 is strong).
-    pub known: bool,           // Saved credentials.
+    pub signal_dbm: i32, // Negative dBm (e.g., -50 is strong).
+    pub known: bool,     // Saved credentials.
     pub last_seen_ns: u64,
 }
 
@@ -167,7 +167,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         networks: Vec::new(),
         saved: Vec::new(),
@@ -182,7 +184,14 @@ pub fn init_defaults() {
 }
 
 /// Simulate a scan (add discovered networks).
-pub fn discover(ssid: &str, bssid: &str, security: SecurityType, band: Band, channel: u8, signal_dbm: i32) -> KernelResult<u32> {
+pub fn discover(
+    ssid: &str,
+    bssid: &str,
+    security: SecurityType,
+    band: Band,
+    channel: u8,
+    signal_dbm: i32,
+) -> KernelResult<u32> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         // Update if already seen (by BSSID).
@@ -198,8 +207,15 @@ pub fn discover(ssid: &str, bssid: &str, security: SecurityType, band: Band, cha
         state.next_id += 1;
         let known = state.saved.iter().any(|s| s.ssid == ssid);
         state.networks.push(WifiNetwork {
-            id, ssid: String::from(ssid), bssid: String::from(bssid),
-            security, band, channel, signal_dbm, known, last_seen_ns: now,
+            id,
+            ssid: String::from(ssid),
+            bssid: String::from(bssid),
+            security,
+            band,
+            channel,
+            signal_dbm,
+            known,
+            last_seen_ns: now,
         });
         Ok(id)
     })
@@ -218,7 +234,10 @@ pub fn connect(ssid: &str) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         // Check network exists in scan results.
-        let net = state.networks.iter().find(|n| n.ssid == ssid)
+        let net = state
+            .networks
+            .iter()
+            .find(|n| n.ssid == ssid)
             .ok_or(KernelError::NotFound)?;
         // Simulate connection.
         state.connection_state = ConnectionState::Connected;
@@ -240,7 +259,9 @@ pub fn connect(ssid: &str) -> KernelResult<()> {
         }
         // Mark network as known.
         for n in &mut state.networks {
-            if n.ssid == ssid { n.known = true; }
+            if n.ssid == ssid {
+                n.known = true;
+            }
         }
         Ok(())
     })
@@ -260,9 +281,13 @@ pub fn forget(ssid: &str) -> KernelResult<()> {
     with_state(|state| {
         let before = state.saved.len();
         state.saved.retain(|s| s.ssid != ssid);
-        if state.saved.len() == before { return Err(KernelError::NotFound); }
+        if state.saved.len() == before {
+            return Err(KernelError::NotFound);
+        }
         for n in &mut state.networks {
-            if n.ssid == ssid { n.known = false; }
+            if n.ssid == ssid {
+                n.known = false;
+            }
         }
         Ok(())
     })
@@ -270,7 +295,10 @@ pub fn forget(ssid: &str) -> KernelResult<()> {
 
 /// Get current connection state.
 pub fn get_state() -> ConnectionState {
-    STATE.lock().as_ref().map_or(ConnectionState::Disconnected, |s| s.connection_state)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(ConnectionState::Disconnected, |s| s.connection_state)
 }
 
 /// Get connected SSID.
@@ -289,14 +317,24 @@ pub fn list_networks() -> Vec<WifiNetwork> {
 
 /// List saved networks.
 pub fn list_saved() -> Vec<SavedNetwork> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.saved.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.saved.clone())
 }
 
 /// Statistics: (network_count, saved_count, total_scans, total_connections, total_failures, ops).
 pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.networks.len(), s.saved.len(), s.total_scans, s.total_connections, s.total_failures, s.ops),
+        Some(s) => (
+            s.networks.len(),
+            s.saved.len(),
+            s.total_scans,
+            s.total_connections,
+            s.total_failures,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -320,9 +358,33 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] empty: OK");
 
     // 2: Discover networks.
-    discover("HomeNet", "AA:BB:CC:DD:EE:01", SecurityType::Wpa2Psk, Band::Band5Ghz, 36, -45).expect("d1");
-    discover("CoffeeShop", "AA:BB:CC:DD:EE:02", SecurityType::Open, Band::Band24Ghz, 6, -65).expect("d2");
-    discover("Office5G", "AA:BB:CC:DD:EE:03", SecurityType::Wpa3Psk, Band::Band5Ghz, 149, -50).expect("d3");
+    discover(
+        "HomeNet",
+        "AA:BB:CC:DD:EE:01",
+        SecurityType::Wpa2Psk,
+        Band::Band5Ghz,
+        36,
+        -45,
+    )
+    .expect("d1");
+    discover(
+        "CoffeeShop",
+        "AA:BB:CC:DD:EE:02",
+        SecurityType::Open,
+        Band::Band24Ghz,
+        6,
+        -65,
+    )
+    .expect("d2");
+    discover(
+        "Office5G",
+        "AA:BB:CC:DD:EE:03",
+        SecurityType::Wpa3Psk,
+        Band::Band5Ghz,
+        149,
+        -50,
+    )
+    .expect("d3");
     assert_eq!(list_networks().len(), 3);
     crate::serial_println!("  [2/8] discover: OK");
 

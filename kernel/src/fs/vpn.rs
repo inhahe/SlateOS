@@ -25,10 +25,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -262,8 +262,8 @@ pub fn remove_profile(profile_id: u64) -> KernelResult<()> {
         return Err(KernelError::NotFound);
     }
     // Cannot remove while connected.
-    if state.status.active_profile == Some(profile_id) &&
-       state.status.state == VpnState::Connected {
+    if state.status.active_profile == Some(profile_id) && state.status.state == VpnState::Connected
+    {
         return Err(KernelError::PermissionDenied);
     }
     state.profiles.retain(|p| p.id != profile_id);
@@ -274,7 +274,12 @@ pub fn remove_profile(profile_id: u64) -> KernelResult<()> {
 
 /// Get a profile.
 pub fn get_profile(profile_id: u64) -> KernelResult<VpnProfile> {
-    STATE.lock().profiles.iter().find(|p| p.id == profile_id).cloned()
+    STATE
+        .lock()
+        .profiles
+        .iter()
+        .find(|p| p.id == profile_id)
+        .cloned()
         .ok_or(KernelError::NotFound)
 }
 
@@ -290,7 +295,10 @@ pub fn list_profiles() -> Vec<VpnProfile> {
 /// Set authentication method.
 pub fn set_auth(profile_id: u64, auth: AuthMethod) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.auth = auth;
     state.changes += 1;
@@ -300,7 +308,10 @@ pub fn set_auth(profile_id: u64, auth: AuthMethod) -> KernelResult<()> {
 /// Set username.
 pub fn set_username(profile_id: u64, username: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.username = String::from(username);
     state.changes += 1;
@@ -310,7 +321,10 @@ pub fn set_username(profile_id: u64, username: &str) -> KernelResult<()> {
 /// Set certificate paths.
 pub fn set_certs(profile_id: u64, cert: &str, key: &str, ca: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.cert_path = String::from(cert);
     p.key_path = String::from(key);
@@ -322,7 +336,10 @@ pub fn set_certs(profile_id: u64, cert: &str, key: &str, ca: &str) -> KernelResu
 /// Set transport (UDP/TCP).
 pub fn set_transport(profile_id: u64, transport: Transport) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.transport = transport;
     state.changes += 1;
@@ -332,7 +349,10 @@ pub fn set_transport(profile_id: u64, transport: Transport) -> KernelResult<()> 
 /// Set route-all flag.
 pub fn set_route_all(profile_id: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.route_all = enabled;
     state.changes += 1;
@@ -342,7 +362,10 @@ pub fn set_route_all(profile_id: u64, enabled: bool) -> KernelResult<()> {
 /// Set kill switch.
 pub fn set_kill_switch(profile_id: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.kill_switch = enabled;
     state.changes += 1;
@@ -352,7 +375,10 @@ pub fn set_kill_switch(profile_id: u64, enabled: bool) -> KernelResult<()> {
 /// Set auto-connect.
 pub fn set_auto_connect(profile_id: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.auto_connect = enabled;
     state.changes += 1;
@@ -362,7 +388,10 @@ pub fn set_auto_connect(profile_id: u64, enabled: bool) -> KernelResult<()> {
 /// Set auto-reconnect.
 pub fn set_auto_reconnect(profile_id: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.auto_reconnect = enabled;
     state.changes += 1;
@@ -372,7 +401,10 @@ pub fn set_auto_reconnect(profile_id: u64, enabled: bool) -> KernelResult<()> {
 /// Add a DNS server to a profile.
 pub fn add_dns(profile_id: u64, server: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     if p.dns_servers.len() >= 8 {
         return Err(KernelError::ResourceExhausted);
@@ -389,7 +421,10 @@ pub fn add_dns(profile_id: u64, server: &str) -> KernelResult<()> {
 /// Initiate a VPN connection.
 pub fn connect(profile_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let server_name = state.profiles.iter().find(|p| p.id == profile_id)
+    let server_name = state
+        .profiles
+        .iter()
+        .find(|p| p.id == profile_id)
         .map(|p| p.server.clone())
         .ok_or(KernelError::NotFound)?;
     if state.status.state == VpnState::Connected {
@@ -411,8 +446,7 @@ pub fn connect(profile_id: u64) -> KernelResult<()> {
 /// Disconnect the active VPN.
 pub fn disconnect() -> KernelResult<()> {
     let mut state = STATE.lock();
-    if state.status.state != VpnState::Connected &&
-       state.status.state != VpnState::Connecting {
+    if state.status.state != VpnState::Connected && state.status.state != VpnState::Connecting {
         return Err(KernelError::NotFound);
     }
     state.status.state = VpnState::Disconnected;
@@ -435,8 +469,7 @@ pub fn status() -> VpnStatus {
 /// Whether any VPN (managed or third-party) is active.
 pub fn is_active() -> bool {
     let state = STATE.lock();
-    state.status.state == VpnState::Connected ||
-        state.third_party.iter().any(|t| t.connected)
+    state.status.state == VpnState::Connected || state.third_party.iter().any(|t| t.connected)
 }
 
 /// Register a detected third-party VPN.
@@ -459,7 +492,10 @@ pub fn register_third_party(app_name: &str, app_path: &str, interface: &str) -> 
 /// Update third-party VPN status.
 pub fn update_third_party(app_name: &str, connected: bool, pid: Option<u64>) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let tp = state.third_party.iter_mut().find(|t| t.app_name == app_name)
+    let tp = state
+        .third_party
+        .iter_mut()
+        .find(|t| t.app_name == app_name)
         .ok_or(KernelError::NotFound)?;
     tp.connected = connected;
     tp.pid = pid;

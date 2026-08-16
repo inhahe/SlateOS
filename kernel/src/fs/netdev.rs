@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -130,7 +130,9 @@ where
 /// when an interface comes up and the record functions on every packet event.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         ifaces: Vec::new(),
         total_rx_bytes: 0,
@@ -148,14 +150,34 @@ pub fn init_defaults() {
 /// counters at zero.  Duplicate interface names return
 /// [`KernelError::AlreadyExists`]; exceeding [`MAX_IFACES`] returns
 /// [`KernelError::ResourceExhausted`].
-pub fn register_iface(name: &str, nic_type: NicType, speed_mbps: u32, mtu: u32) -> KernelResult<()> {
+pub fn register_iface(
+    name: &str,
+    nic_type: NicType,
+    speed_mbps: u32,
+    mtu: u32,
+) -> KernelResult<()> {
     with_state(|state| {
-        if state.ifaces.len() >= MAX_IFACES { return Err(KernelError::ResourceExhausted); }
-        if state.ifaces.iter().any(|d| d.name == name) { return Err(KernelError::AlreadyExists); }
+        if state.ifaces.len() >= MAX_IFACES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.ifaces.iter().any(|d| d.name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.ifaces.push(IfaceStats {
-            name: String::from(name), nic_type, link_up: false, speed_mbps, mtu,
-            rx_bytes: 0, tx_bytes: 0, rx_packets: 0, tx_packets: 0,
-            rx_errors: 0, tx_errors: 0, rx_drops: 0, tx_drops: 0, collisions: 0,
+            name: String::from(name),
+            nic_type,
+            link_up: false,
+            speed_mbps,
+            mtu,
+            rx_bytes: 0,
+            tx_bytes: 0,
+            rx_packets: 0,
+            tx_packets: 0,
+            rx_errors: 0,
+            tx_errors: 0,
+            rx_drops: 0,
+            tx_drops: 0,
+            collisions: 0,
         });
         Ok(())
     })
@@ -164,7 +186,10 @@ pub fn register_iface(name: &str, nic_type: NicType, speed_mbps: u32, mtu: u32) 
 /// Record received traffic.
 pub fn record_rx(iface: &str, bytes: u64, packets: u64) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.ifaces.iter_mut().find(|d| d.name == iface)
+        let dev = state
+            .ifaces
+            .iter_mut()
+            .find(|d| d.name == iface)
             .ok_or(KernelError::NotFound)?;
         dev.rx_bytes += bytes;
         dev.rx_packets += packets;
@@ -176,7 +201,10 @@ pub fn record_rx(iface: &str, bytes: u64, packets: u64) -> KernelResult<()> {
 /// Record transmitted traffic.
 pub fn record_tx(iface: &str, bytes: u64, packets: u64) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.ifaces.iter_mut().find(|d| d.name == iface)
+        let dev = state
+            .ifaces
+            .iter_mut()
+            .find(|d| d.name == iface)
             .ok_or(KernelError::NotFound)?;
         dev.tx_bytes += bytes;
         dev.tx_packets += packets;
@@ -188,9 +216,16 @@ pub fn record_tx(iface: &str, bytes: u64, packets: u64) -> KernelResult<()> {
 /// Record an error.
 pub fn record_error(iface: &str, is_rx: bool) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.ifaces.iter_mut().find(|d| d.name == iface)
+        let dev = state
+            .ifaces
+            .iter_mut()
+            .find(|d| d.name == iface)
             .ok_or(KernelError::NotFound)?;
-        if is_rx { dev.rx_errors += 1; } else { dev.tx_errors += 1; }
+        if is_rx {
+            dev.rx_errors += 1;
+        } else {
+            dev.tx_errors += 1;
+        }
         state.total_errors += 1;
         Ok(())
     })
@@ -199,9 +234,16 @@ pub fn record_error(iface: &str, is_rx: bool) -> KernelResult<()> {
 /// Record a drop.
 pub fn record_drop(iface: &str, is_rx: bool) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.ifaces.iter_mut().find(|d| d.name == iface)
+        let dev = state
+            .ifaces
+            .iter_mut()
+            .find(|d| d.name == iface)
             .ok_or(KernelError::NotFound)?;
-        if is_rx { dev.rx_drops += 1; } else { dev.tx_drops += 1; }
+        if is_rx {
+            dev.rx_drops += 1;
+        } else {
+            dev.tx_drops += 1;
+        }
         state.total_drops += 1;
         Ok(())
     })
@@ -210,7 +252,10 @@ pub fn record_drop(iface: &str, is_rx: bool) -> KernelResult<()> {
 /// Set link state.
 pub fn set_link_state(iface: &str, up: bool) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.ifaces.iter_mut().find(|d| d.name == iface)
+        let dev = state
+            .ifaces
+            .iter_mut()
+            .find(|d| d.name == iface)
             .ok_or(KernelError::NotFound)?;
         dev.link_up = up;
         Ok(())
@@ -219,21 +264,32 @@ pub fn set_link_state(iface: &str, up: bool) -> KernelResult<()> {
 
 /// List all interfaces.
 pub fn list() -> Vec<IfaceStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.ifaces.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.ifaces.clone())
 }
 
 /// Get specific interface.
 pub fn get(iface: &str) -> Option<IfaceStats> {
-    STATE.lock().as_ref().and_then(|s| {
-        s.ifaces.iter().find(|d| d.name == iface).cloned()
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.ifaces.iter().find(|d| d.name == iface).cloned())
 }
 
 /// Statistics: (iface_count, total_rx_bytes, total_tx_bytes, total_errors, total_drops, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.ifaces.len(), s.total_rx_bytes, s.total_tx_bytes, s.total_errors, s.total_drops, s.ops),
+        Some(s) => (
+            s.ifaces.len(),
+            s.total_rx_bytes,
+            s.total_tx_bytes,
+            s.total_errors,
+            s.total_drops,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }

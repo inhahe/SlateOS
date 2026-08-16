@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -179,11 +179,7 @@ static OP_COUNT: AtomicU64 = AtomicU64::new(0);
 // ---------------------------------------------------------------------------
 
 /// Create a tuning profile.
-pub fn create_profile(
-    name: &str,
-    workload: WorkloadType,
-    model: SchedModel,
-) -> KernelResult<u64> {
+pub fn create_profile(name: &str, workload: WorkloadType, model: SchedModel) -> KernelResult<u64> {
     let mut state = STATE.lock();
     if state.profiles.len() >= 64 {
         return Err(KernelError::ResourceExhausted);
@@ -201,9 +197,27 @@ fn defaults_for(id: u64, name: &str, workload: WorkloadType, model: SchedModel) 
     let (timeslice, min_gran, target_lat, interactive, affinity, balance_ms, preempt, idle_ps) =
         match workload {
             WorkloadType::Desktop => (4000, 750, 6000, true, 30, 4, PreemptModel::Full, true),
-            WorkloadType::Server => (10000, 2000, 24000, false, 60, 8, PreemptModel::Voluntary, false),
+            WorkloadType::Server => (
+                10000,
+                2000,
+                24000,
+                false,
+                60,
+                8,
+                PreemptModel::Voluntary,
+                false,
+            ),
             WorkloadType::Gaming => (2000, 500, 3000, true, 80, 2, PreemptModel::Full, false),
-            WorkloadType::Development => (6000, 1000, 12000, true, 40, 6, PreemptModel::Voluntary, true),
+            WorkloadType::Development => (
+                6000,
+                1000,
+                12000,
+                true,
+                40,
+                6,
+                PreemptModel::Voluntary,
+                true,
+            ),
             WorkloadType::Realtime => (1000, 250, 1000, true, 90, 1, PreemptModel::RealTime, false),
             WorkloadType::LowPower => (15000, 3000, 30000, false, 50, 16, PreemptModel::None, true),
         };
@@ -244,7 +258,10 @@ fn defaults_for(id: u64, name: &str, workload: WorkloadType, model: SchedModel) 
 /// Remove a profile (built-in profiles cannot be removed).
 pub fn remove_profile(profile_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     if p.builtin {
         return Err(KernelError::PermissionDenied);
@@ -261,7 +278,12 @@ pub fn remove_profile(profile_id: u64) -> KernelResult<()> {
 
 /// Get a profile by ID.
 pub fn get_profile(profile_id: u64) -> KernelResult<SchedConfig> {
-    STATE.lock().profiles.iter().find(|p| p.id == profile_id).cloned()
+    STATE
+        .lock()
+        .profiles
+        .iter()
+        .find(|p| p.id == profile_id)
+        .cloned()
         .ok_or(KernelError::NotFound)
 }
 
@@ -272,7 +294,12 @@ pub fn list_profiles() -> Vec<SchedConfig> {
 
 /// Get the active profile.
 pub fn active_profile() -> KernelResult<SchedConfig> {
-    STATE.lock().profiles.iter().find(|p| p.active).cloned()
+    STATE
+        .lock()
+        .profiles
+        .iter()
+        .find(|p| p.active)
+        .cloned()
         .ok_or(KernelError::NotFound)
 }
 
@@ -297,7 +324,10 @@ pub fn apply_profile(profile_id: u64) -> KernelResult<()> {
 /// Set time slice.
 pub fn set_timeslice(profile_id: u64, us: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.timeslice_us = us.clamp(100, 100_000);
     state.changes += 1;
@@ -307,7 +337,10 @@ pub fn set_timeslice(profile_id: u64, us: u32) -> KernelResult<()> {
 /// Set preemption model.
 pub fn set_preempt(profile_id: u64, preempt: PreemptModel) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.preempt = preempt;
     p.requires_recompile = true;
@@ -318,7 +351,10 @@ pub fn set_preempt(profile_id: u64, preempt: PreemptModel) -> KernelResult<()> {
 /// Set target latency.
 pub fn set_target_latency(profile_id: u64, us: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.target_latency_us = us.clamp(100, 100_000);
     state.changes += 1;
@@ -328,7 +364,10 @@ pub fn set_target_latency(profile_id: u64, us: u32) -> KernelResult<()> {
 /// Set interactive boost.
 pub fn set_interactive_boost(profile_id: u64, enable: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.interactive_boost = enable;
     state.changes += 1;
@@ -338,7 +377,10 @@ pub fn set_interactive_boost(profile_id: u64, enable: bool) -> KernelResult<()> 
 /// Set affinity strictness (0-100).
 pub fn set_affinity(profile_id: u64, strictness: u8) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.affinity_strictness = strictness.min(100);
     state.changes += 1;
@@ -348,7 +390,10 @@ pub fn set_affinity(profile_id: u64, strictness: u8) -> KernelResult<()> {
 /// Set load balance strategy.
 pub fn set_balance_strategy(profile_id: u64, strategy: BalanceStrategy) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.balance_strategy = strategy;
     state.changes += 1;
@@ -358,7 +403,10 @@ pub fn set_balance_strategy(profile_id: u64, strategy: BalanceStrategy) -> Kerne
 /// Set balance interval.
 pub fn set_balance_interval(profile_id: u64, ms: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.balance_interval_ms = ms.clamp(1, 1000);
     state.changes += 1;
@@ -368,7 +416,10 @@ pub fn set_balance_interval(profile_id: u64, ms: u32) -> KernelResult<()> {
 /// Set priority inheritance.
 pub fn set_priority_inheritance(profile_id: u64, enable: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.priority_inheritance = enable;
     state.changes += 1;
@@ -378,7 +429,10 @@ pub fn set_priority_inheritance(profile_id: u64, enable: bool) -> KernelResult<(
 /// Set NUMA-aware scheduling.
 pub fn set_numa_aware(profile_id: u64, enable: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.numa_aware = enable;
     state.changes += 1;
@@ -388,7 +442,10 @@ pub fn set_numa_aware(profile_id: u64, enable: bool) -> KernelResult<()> {
 /// Set idle power-save.
 pub fn set_idle_powersave(profile_id: u64, enable: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.idle_powersave = enable;
     state.changes += 1;
@@ -405,7 +462,9 @@ pub fn tradeoffs(profile_id: u64) -> KernelResult<TradeoffInfo> {
     if !state.profiles.iter().any(|p| p.id == profile_id) {
         return Err(KernelError::NotFound);
     }
-    state.tradeoffs.iter()
+    state
+        .tradeoffs
+        .iter()
         .find(|(pid, _)| *pid == profile_id)
         .map(|(_, info)| info.clone())
         .ok_or(KernelError::NotFound)
@@ -420,9 +479,15 @@ pub fn list_tradeoffs() -> Vec<(u64, TradeoffInfo)> {
 // Init / stats
 // ---------------------------------------------------------------------------
 
-fn add_builtin(state: &mut State, name: &str, workload: WorkloadType, model: SchedModel,
-    active: bool, advantages: &[&str], disadvantages: &[&str])
-{
+fn add_builtin(
+    state: &mut State,
+    name: &str,
+    workload: WorkloadType,
+    model: SchedModel,
+    active: bool,
+    advantages: &[&str],
+    disadvantages: &[&str],
+) {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let mut cfg = defaults_for(id, name, workload, model);
     cfg.builtin = true;
@@ -444,64 +509,118 @@ pub fn init_defaults() {
         return;
     }
 
-    add_builtin(&mut state, "Desktop (Default)", WorkloadType::Desktop,
-        SchedModel::PriorityRoundRobin, true,
-        &["Good interactivity for GUI applications",
-          "Balanced CPU distribution across tasks",
-          "Low latency for user input response",
-          "Energy-efficient with idle power-save"],
-        &["Slightly lower throughput than Server profile",
-          "May not saturate all CPUs under batch workloads"]);
+    add_builtin(
+        &mut state,
+        "Desktop (Default)",
+        WorkloadType::Desktop,
+        SchedModel::PriorityRoundRobin,
+        true,
+        &[
+            "Good interactivity for GUI applications",
+            "Balanced CPU distribution across tasks",
+            "Low latency for user input response",
+            "Energy-efficient with idle power-save",
+        ],
+        &[
+            "Slightly lower throughput than Server profile",
+            "May not saturate all CPUs under batch workloads",
+        ],
+    );
 
-    add_builtin(&mut state, "Server", WorkloadType::Server,
-        SchedModel::Cfs, false,
-        &["Maximum throughput for parallel workloads",
-          "Fair CPU time distribution",
-          "Good for web servers, databases, VMs",
-          "Efficient load balancing across cores"],
-        &["Higher scheduling latency",
-          "Less responsive to interactive tasks",
-          "Not ideal for desktop use"]);
+    add_builtin(
+        &mut state,
+        "Server",
+        WorkloadType::Server,
+        SchedModel::Cfs,
+        false,
+        &[
+            "Maximum throughput for parallel workloads",
+            "Fair CPU time distribution",
+            "Good for web servers, databases, VMs",
+            "Efficient load balancing across cores",
+        ],
+        &[
+            "Higher scheduling latency",
+            "Less responsive to interactive tasks",
+            "Not ideal for desktop use",
+        ],
+    );
 
-    add_builtin(&mut state, "Gaming", WorkloadType::Gaming,
-        SchedModel::PriorityRoundRobin, false,
-        &["Minimal jitter for frame timing",
-          "Foreground process gets priority",
-          "Strict CPU affinity reduces cache thrashing",
-          "Short time slices for fast preemption"],
-        &["Background tasks may be starved",
-          "Higher CPU usage (no power-save)",
-          "Pinned balancing limits load distribution"]);
+    add_builtin(
+        &mut state,
+        "Gaming",
+        WorkloadType::Gaming,
+        SchedModel::PriorityRoundRobin,
+        false,
+        &[
+            "Minimal jitter for frame timing",
+            "Foreground process gets priority",
+            "Strict CPU affinity reduces cache thrashing",
+            "Short time slices for fast preemption",
+        ],
+        &[
+            "Background tasks may be starved",
+            "Higher CPU usage (no power-save)",
+            "Pinned balancing limits load distribution",
+        ],
+    );
 
-    add_builtin(&mut state, "Development", WorkloadType::Development,
-        SchedModel::PriorityRoundRobin, false,
-        &["Good parallel compilation throughput",
-          "Interactive IDE stays responsive",
-          "Moderate energy efficiency",
-          "Hybrid balancing works well with mixed workloads"],
-        &["Compile times not as fast as Server profile",
-          "Not optimised for single-threaded benchmarks"]);
+    add_builtin(
+        &mut state,
+        "Development",
+        WorkloadType::Development,
+        SchedModel::PriorityRoundRobin,
+        false,
+        &[
+            "Good parallel compilation throughput",
+            "Interactive IDE stays responsive",
+            "Moderate energy efficiency",
+            "Hybrid balancing works well with mixed workloads",
+        ],
+        &[
+            "Compile times not as fast as Server profile",
+            "Not optimised for single-threaded benchmarks",
+        ],
+    );
 
-    add_builtin(&mut state, "Realtime / Audio", WorkloadType::Realtime,
-        SchedModel::RtFifo, false,
-        &["Ultra-low latency (< 1ms scheduling)",
-          "Deterministic timing for audio/video",
-          "RT preemption model prevents priority inversion",
-          "Strict affinity prevents migration jitter"],
-        &["Requires RT preemption (recompile needed)",
-          "Badly-behaved RT tasks can lock out the system",
-          "No power saving",
-          "Not suitable for general desktop use"]);
+    add_builtin(
+        &mut state,
+        "Realtime / Audio",
+        WorkloadType::Realtime,
+        SchedModel::RtFifo,
+        false,
+        &[
+            "Ultra-low latency (< 1ms scheduling)",
+            "Deterministic timing for audio/video",
+            "RT preemption model prevents priority inversion",
+            "Strict affinity prevents migration jitter",
+        ],
+        &[
+            "Requires RT preemption (recompile needed)",
+            "Badly-behaved RT tasks can lock out the system",
+            "No power saving",
+            "Not suitable for general desktop use",
+        ],
+    );
 
-    add_builtin(&mut state, "Low Power", WorkloadType::LowPower,
-        SchedModel::PriorityRoundRobin, false,
-        &["Minimal context switches save energy",
-          "Longer time slices reduce overhead",
-          "Aggressive idle power-save",
-          "Good for laptops on battery"],
-        &["Higher latency for interactive tasks",
-          "Sluggish UI response under load",
-          "Poor for latency-sensitive workloads"]);
+    add_builtin(
+        &mut state,
+        "Low Power",
+        WorkloadType::LowPower,
+        SchedModel::PriorityRoundRobin,
+        false,
+        &[
+            "Minimal context switches save energy",
+            "Longer time slices reduce overhead",
+            "Aggressive idle power-save",
+            "Good for laptops on battery",
+        ],
+        &[
+            "Higher latency for interactive tasks",
+            "Sluggish UI response under load",
+            "Poor for latency-sensitive workloads",
+        ],
+    );
 
     state.changes += 1;
 }
@@ -551,7 +670,11 @@ pub fn self_test() -> KernelResult<()> {
     // Test 2: create custom profile.
     serial_println!("schedtune::self_test 2: create custom");
     clear_all();
-    let p1 = create_profile("Custom1", WorkloadType::Gaming, SchedModel::PriorityRoundRobin)?;
+    let p1 = create_profile(
+        "Custom1",
+        WorkloadType::Gaming,
+        SchedModel::PriorityRoundRobin,
+    )?;
     let p2 = create_profile("Custom2", WorkloadType::Server, SchedModel::Cfs)?;
     assert_eq!(list_profiles().len(), 2);
 

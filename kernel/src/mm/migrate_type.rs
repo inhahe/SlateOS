@@ -50,8 +50,8 @@
 // compaction wiring is in place, several helpers appear unused.
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Migration type enum
@@ -182,8 +182,11 @@ pub fn init() {
         // Already zero-initialized by static, so nothing to do.
         INITIALIZED = true;
     }
-    serial_println!("[migrate_type] Initialized: {} frames, {} pageblocks",
-        MAX_FRAMES, MAX_PAGEBLOCKS);
+    serial_println!(
+        "[migrate_type] Initialized: {} frames, {} pageblocks",
+        MAX_FRAMES,
+        MAX_PAGEBLOCKS
+    );
 }
 
 /// Set the migration type for a specific frame.
@@ -426,7 +429,10 @@ pub fn self_test() {
     set_frame_type(195, MigrateType::Reclaimable);
     let movable_count = count_in_pageblock(3, MigrateType::Movable);
     assert_eq!(movable_count, 3);
-    serial_println!("[migrate_type]   count_in_pageblock: OK ({})", movable_count);
+    serial_println!(
+        "[migrate_type]   count_in_pageblock: OK ({})",
+        movable_count
+    );
 
     // Test 8: Out-of-range access is safe.
     assert_eq!(get_frame_type(MAX_FRAMES + 100), MigrateType::Unmovable);
@@ -436,8 +442,13 @@ pub fn self_test() {
     // Test 9: Statistics.
     let s = stats();
     assert!(s.alloc_total[1] > 0, "should have movable allocations");
-    serial_println!("[migrate_type]   Stats: unmov={} mov={} recl={} hatm={}",
-        s.current[0], s.current[1], s.current[2], s.current[3]);
+    serial_println!(
+        "[migrate_type]   Stats: unmov={} mov={} recl={} hatm={}",
+        s.current[0],
+        s.current[1],
+        s.current[2],
+        s.current[3]
+    );
 
     // Cleanup: reset test frames back to Unmovable.
     for i in [10, 11, 12, 192, 193, 194, 195, 260, 261] {

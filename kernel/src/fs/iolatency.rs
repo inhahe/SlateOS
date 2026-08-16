@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -55,14 +55,14 @@ impl IoOp {
 
 /// Latency bucket boundaries (nanoseconds).
 const BUCKET_BOUNDS_NS: [u64; 8] = [
-    1_000,        // < 1us
-    10_000,       // < 10us
-    100_000,      // < 100us
-    1_000_000,    // < 1ms
-    10_000_000,   // < 10ms
-    100_000_000,  // < 100ms
-    1_000_000_000,// < 1s
-    u64::MAX,     // >= 1s
+    1_000,         // < 1us
+    10_000,        // < 10us
+    100_000,       // < 100us
+    1_000_000,     // < 1ms
+    10_000_000,    // < 10ms
+    100_000_000,   // < 100ms
+    1_000_000_000, // < 1s
+    u64::MAX,      // >= 1s
 ];
 
 /// Per-device I/O latency stats.
@@ -121,7 +121,9 @@ where
 
 fn bucket_index(ns: u64) -> usize {
     for (i, &bound) in BUCKET_BOUNDS_NS.iter().enumerate() {
-        if ns < bound { return i; }
+        if ns < bound {
+            return i;
+        }
     }
     7
 }
@@ -147,7 +149,9 @@ fn bucket_index(ns: u64) -> usize {
 /// and [`record`] on each completed I/O.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         slow_ios: Vec::new(),
@@ -174,10 +178,14 @@ pub fn register_device(device: &str) -> KernelResult<()> {
         }
         state.devices.push(DeviceLatency {
             device: String::from(device),
-            read_count: 0, write_count: 0,
-            read_avg_ns: 0, write_avg_ns: 0,
-            read_max_ns: 0, write_max_ns: 0,
-            histogram: [0; 8], slow_count: 0,
+            read_count: 0,
+            write_count: 0,
+            read_avg_ns: 0,
+            write_avg_ns: 0,
+            read_max_ns: 0,
+            write_max_ns: 0,
+            histogram: [0; 8],
+            slow_count: 0,
         });
         Ok(())
     })
@@ -187,7 +195,10 @@ pub fn register_device(device: &str) -> KernelResult<()> {
 pub fn record(device: &str, op: IoOp, latency_ns: u64) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let dev = state.devices.iter_mut().find(|d| d.device == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         let idx = bucket_index(latency_ns);
         dev.histogram[idx] += 1;
@@ -200,7 +211,9 @@ pub fn record(device: &str, op: IoOp, latency_ns: u64) -> KernelResult<()> {
                 } else {
                     (dev.read_avg_ns * 7 + latency_ns) / 8
                 };
-                if latency_ns > dev.read_max_ns { dev.read_max_ns = latency_ns; }
+                if latency_ns > dev.read_max_ns {
+                    dev.read_max_ns = latency_ns;
+                }
                 dev.read_count += 1;
             }
             IoOp::Write => {
@@ -209,7 +222,9 @@ pub fn record(device: &str, op: IoOp, latency_ns: u64) -> KernelResult<()> {
                 } else {
                     (dev.write_avg_ns * 7 + latency_ns) / 8
                 };
-                if latency_ns > dev.write_max_ns { dev.write_max_ns = latency_ns; }
+                if latency_ns > dev.write_max_ns {
+                    dev.write_max_ns = latency_ns;
+                }
                 dev.write_count += 1;
             }
             _ => {}
@@ -218,9 +233,14 @@ pub fn record(device: &str, op: IoOp, latency_ns: u64) -> KernelResult<()> {
         if latency_ns >= state.slow_threshold_ns {
             dev.slow_count += 1;
             state.total_slow += 1;
-            if state.slow_ios.len() >= MAX_SLOW { state.slow_ios.remove(0); }
+            if state.slow_ios.len() >= MAX_SLOW {
+                state.slow_ios.remove(0);
+            }
             state.slow_ios.push(SlowIo {
-                device: String::from(device), op, latency_ns, timestamp_ns: now,
+                device: String::from(device),
+                op,
+                latency_ns,
+                timestamp_ns: now,
             });
         }
         Ok(())
@@ -229,18 +249,26 @@ pub fn record(device: &str, op: IoOp, latency_ns: u64) -> KernelResult<()> {
 
 /// Set slow I/O threshold.
 pub fn set_threshold(ns: u64) -> KernelResult<()> {
-    with_state(|state| { state.slow_threshold_ns = ns; Ok(()) })
+    with_state(|state| {
+        state.slow_threshold_ns = ns;
+        Ok(())
+    })
 }
 
 /// Get per-device stats.
 pub fn per_device() -> Vec<DeviceLatency> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Get histogram for a device.
 pub fn histogram(device: &str) -> [u64; 8] {
     STATE.lock().as_ref().map_or([0; 8], |s| {
-        s.devices.iter().find(|d| d.device == device)
+        s.devices
+            .iter()
+            .find(|d| d.device == device)
             .map_or([0; 8], |d| d.histogram)
     })
 }
@@ -248,7 +276,11 @@ pub fn histogram(device: &str) -> [u64; 8] {
 /// Recent slow I/Os.
 pub fn slow_ios(n: usize) -> Vec<SlowIo> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let start = if n >= s.slow_ios.len() { 0 } else { s.slow_ios.len() - n };
+        let start = if n >= s.slow_ios.len() {
+            0
+        } else {
+            s.slow_ios.len() - n
+        };
         s.slow_ios[start..].to_vec()
     })
 }
@@ -257,7 +289,13 @@ pub fn slow_ios(n: usize) -> Vec<SlowIo> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.total_ios, s.total_slow, s.slow_threshold_ns, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.total_ios,
+            s.total_slow,
+            s.slow_threshold_ns,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -289,7 +327,11 @@ pub fn self_test() {
     register_device("nvme0n1").expect("register nvme0n1");
     assert!(register_device("sda").is_err()); // duplicate rejected
     record("sda", IoOp::Read, 500_000).expect("read");
-    let dev = per_device().iter().find(|d| d.device == "sda").cloned().expect("sda");
+    let dev = per_device()
+        .iter()
+        .find(|d| d.device == "sda")
+        .cloned()
+        .expect("sda");
     assert_eq!(dev.read_count, 1);
     assert_eq!(dev.read_avg_ns, 500_000); // first-sample seed, exact
     crate::serial_println!("  [2/8] register + fast read: OK");
@@ -317,7 +359,11 @@ pub fn self_test() {
 
     // 6: NVMe device accounts independently.
     record("nvme0n1", IoOp::Read, 25_000).expect("nvme_read");
-    let nvme = per_device().iter().find(|d| d.device == "nvme0n1").cloned().expect("nvme");
+    let nvme = per_device()
+        .iter()
+        .find(|d| d.device == "nvme0n1")
+        .cloned()
+        .expect("nvme");
     assert_eq!(nvme.read_count, 1);
     assert_eq!(nvme.read_avg_ns, 25_000);
     crate::serial_println!("  [6/8] nvme: OK");

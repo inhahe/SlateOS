@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::error::{KernelError, KernelResult};
-use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::pci;
 use crate::port;
 use crate::sync::Mutex;
@@ -264,7 +264,12 @@ pub fn init(hhdm_offset: u64) {
 
     crate::serial_println!(
         "[rtl8139] MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        mac[0],
+        mac[1],
+        mac[2],
+        mac[3],
+        mac[4],
+        mac[5]
     );
 
     // Allocate RX buffer (one 16 KiB frame gives us enough for the 8K+16+1500 buffer).
@@ -289,7 +294,9 @@ pub fn init(hhdm_offset: u64) {
         Ok(f) => f,
         Err(_) => {
             // SAFETY: We just allocated rx_frame and have not shared it.
-            unsafe { let _ = frame::free_frame(rx_frame); }
+            unsafe {
+                let _ = frame::free_frame(rx_frame);
+            }
             crate::serial_println!("[rtl8139] ERROR: cannot allocate TX buffer frame");
             return;
         }
@@ -363,8 +370,11 @@ pub fn init(hhdm_offset: u64) {
 
     *DEVICE.lock_irqsave() = Some(device);
 
-    crate::serial_println!("[rtl8139] RTL8139 initialized (io_base={:#06x}, IRQ {})",
-        io_base, pci_dev.irq_line);
+    crate::serial_println!(
+        "[rtl8139] RTL8139 initialized (io_base={:#06x}, IRQ {})",
+        io_base,
+        pci_dev.irq_line
+    );
 }
 
 /// Access the device through a closure (same pattern as e1000/virtio-net).
@@ -378,8 +388,7 @@ where
 
 /// Send a raw Ethernet frame.
 pub fn send(frame: &[u8]) -> KernelResult<()> {
-    with_device(|dev| dev.send(frame))
-        .unwrap_or(Err(KernelError::NotFound))
+    with_device(|dev| dev.send(frame)).unwrap_or(Err(KernelError::NotFound))
 }
 
 /// Receive a raw Ethernet frame (returns None if no packet available).
@@ -505,7 +514,11 @@ impl Rtl8139Device {
             // Bad packet — advance past it so we don't get stuck re-reading
             // the same bad header forever.  If the length field looks plausible,
             // use it; otherwise skip just the 4-byte header (minimum advance).
-            let skip = if length > 0 && length <= 1518 { length } else { 0 };
+            let skip = if length > 0 && length <= 1518 {
+                length
+            } else {
+                0
+            };
             self.rx_advance(skip);
             return None;
         }
@@ -623,6 +636,13 @@ pub fn self_test() {
         return;
     }
 
-    crate::serial_println!("[rtl8139] Self-test PASSED (MAC={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
-        dev.mac[0], dev.mac[1], dev.mac[2], dev.mac[3], dev.mac[4], dev.mac[5]);
+    crate::serial_println!(
+        "[rtl8139] Self-test PASSED (MAC={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+        dev.mac[0],
+        dev.mac[1],
+        dev.mac[2],
+        dev.mac[3],
+        dev.mac[4],
+        dev.mac[5]
+    );
 }

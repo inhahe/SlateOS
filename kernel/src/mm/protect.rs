@@ -83,9 +83,7 @@ impl MemProt {
                 PageFlags::PRESENT | PageFlags::NO_EXECUTE
             }
             Self::ReadOnly => {
-                PageFlags::PRESENT
-                    | PageFlags::USER_ACCESSIBLE
-                    | PageFlags::NO_EXECUTE
+                PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE
             }
             Self::ReadWrite => {
                 PageFlags::PRESENT
@@ -96,8 +94,7 @@ impl MemProt {
             Self::ReadExecute => {
                 // No NO_EXECUTE → page is executable.
                 // No WRITABLE → page is not writable.  W^X enforced.
-                PageFlags::PRESENT
-                    | PageFlags::USER_ACCESSIBLE
+                PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE
             }
         }
     }
@@ -268,7 +265,12 @@ impl WxAuditResult {
 pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
     let hhdm = match page_table::hhdm() {
         Some(h) => h,
-        None => return WxAuditResult { hhdm_violations: 0, kernel_violations: 0 },
+        None => {
+            return WxAuditResult {
+                hhdm_violations: 0,
+                kernel_violations: 0,
+            };
+        }
     };
 
     let mut hhdm_violations = 0usize;
@@ -361,7 +363,8 @@ pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
                         if is_hhdm {
                             hhdm_violations += 1;
                         } else {
-                            let virt = (pml4_idx * (1 << 39) + pdpt_idx * (1 << 30)
+                            let virt = (pml4_idx * (1 << 39)
+                                + pdpt_idx * (1 << 30)
                                 + pd_idx * (1 << 21)) as u64;
                             if kernel_violations < MAX_LOGGED {
                                 serial_println!(
@@ -392,8 +395,10 @@ pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
                         if is_hhdm {
                             hhdm_violations += 1;
                         } else {
-                            let virt = (pml4_idx * (1 << 39) + pdpt_idx * (1 << 30)
-                                + pd_idx * (1 << 21) + pt_idx * (1 << 12)) as u64;
+                            let virt = (pml4_idx * (1 << 39)
+                                + pdpt_idx * (1 << 30)
+                                + pd_idx * (1 << 21)
+                                + pt_idx * (1 << 12)) as u64;
                             if kernel_violations < MAX_LOGGED {
                                 serial_println!(
                                     "[wx-audit] VIOLATION: 4KiB page at {:#x} is W+X",
@@ -408,7 +413,10 @@ pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
         }
     }
 
-    WxAuditResult { hhdm_violations, kernel_violations }
+    WxAuditResult {
+        hhdm_violations,
+        kernel_violations,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -462,7 +470,9 @@ pub fn harden_hhdm_nx(pml4_phys: u64) -> usize {
 
         // SAFETY: We're only adding NX to an existing valid entry.
         // The physical address and other flags are preserved.
-        unsafe { page_table::write_entry(pml4_phys, pml4_idx, new_entry, hhdm); }
+        unsafe {
+            page_table::write_entry(pml4_phys, pml4_idx, new_entry, hhdm);
+        }
         hardened += 1;
     }
 
@@ -728,9 +738,7 @@ pub fn self_test() -> KernelResult<()> {
         let test_frame = frame::alloc_frame()?;
         let test_virt = VirtAddr::new(0xFFFF_C800_0000_0000); // Test VA
 
-        let initial_flags = PageFlags::PRESENT
-            | PageFlags::WRITABLE
-            | PageFlags::NO_EXECUTE;
+        let initial_flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
 
         // SAFETY: Test-only mapping in kernel space, will be cleaned up.
         unsafe {
@@ -748,8 +756,8 @@ pub fn self_test() -> KernelResult<()> {
         assert!(changed == 1, "expected 1 frame changed");
 
         // Verify flags changed.
-        let pte = page_table::read_leaf_pte(pml4_phys, test_virt)
-            .ok_or(KernelError::InternalError)?;
+        let pte =
+            page_table::read_leaf_pte(pml4_phys, test_virt).ok_or(KernelError::InternalError)?;
         let new_flags = pte.flags();
         if new_flags.contains(PageFlags::WRITABLE) {
             serial_println!("[protect]   FAIL: WRITABLE still set after mprotect(ReadOnly)");
@@ -783,15 +791,17 @@ pub fn self_test() -> KernelResult<()> {
         assert!(changed == 1);
 
         // Verify: executable (no NO_EXECUTE), not writable.
-        let pte2 = page_table::read_leaf_pte(pml4_phys, test_virt)
-            .ok_or(KernelError::InternalError)?;
+        let pte2 =
+            page_table::read_leaf_pte(pml4_phys, test_virt).ok_or(KernelError::InternalError)?;
         let exec_flags = pte2.flags();
         if exec_flags.contains(PageFlags::NO_EXECUTE) {
             serial_println!("[protect]   FAIL: NO_EXECUTE still set after mprotect(ReadExecute)");
             return Err(KernelError::InternalError);
         }
         if exec_flags.contains(PageFlags::WRITABLE) {
-            serial_println!("[protect]   FAIL: WRITABLE set after mprotect(ReadExecute) — W^X violation!");
+            serial_println!(
+                "[protect]   FAIL: WRITABLE set after mprotect(ReadExecute) — W^X violation!"
+            );
             return Err(KernelError::InternalError);
         }
 
@@ -806,15 +816,17 @@ pub fn self_test() -> KernelResult<()> {
         assert!(changed == 1);
 
         // Verify: writable, not executable.
-        let pte3 = page_table::read_leaf_pte(pml4_phys, test_virt)
-            .ok_or(KernelError::InternalError)?;
+        let pte3 =
+            page_table::read_leaf_pte(pml4_phys, test_virt).ok_or(KernelError::InternalError)?;
         let rw_flags = pte3.flags();
         if !rw_flags.contains(PageFlags::WRITABLE) {
             serial_println!("[protect]   FAIL: not WRITABLE after mprotect(ReadWrite)");
             return Err(KernelError::InternalError);
         }
         if !rw_flags.contains(PageFlags::NO_EXECUTE) {
-            serial_println!("[protect]   FAIL: NO_EXECUTE not set after mprotect(ReadWrite) — W^X violation!");
+            serial_println!(
+                "[protect]   FAIL: NO_EXECUTE not set after mprotect(ReadWrite) — W^X violation!"
+            );
             return Err(KernelError::InternalError);
         }
 

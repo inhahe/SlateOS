@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -170,7 +170,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         rules: alloc::vec![
             WindowRule {
@@ -178,9 +180,11 @@ pub fn init_defaults() {
                 name: String::from("Terminal always on top"),
                 match_type: MatchType::AppContains,
                 match_value: String::from("terminal"),
-                actions: alloc::vec![
-                    ActionEntry { action: RuleAction::AlwaysOnTop, param1: 1, param2: 0 },
-                ],
+                actions: alloc::vec![ActionEntry {
+                    action: RuleAction::AlwaysOnTop,
+                    param1: 1,
+                    param2: 0
+                },],
                 enabled: false,
                 hit_count: 0,
             },
@@ -189,9 +193,11 @@ pub fn init_defaults() {
                 name: String::from("Media player no decorations"),
                 match_type: MatchType::AppContains,
                 match_value: String::from("mediaplayer"),
-                actions: alloc::vec![
-                    ActionEntry { action: RuleAction::NoDecorations, param1: 1, param2: 0 },
-                ],
+                actions: alloc::vec![ActionEntry {
+                    action: RuleAction::NoDecorations,
+                    param1: 1,
+                    param2: 0
+                },],
                 enabled: false,
                 hit_count: 0,
             },
@@ -227,9 +233,16 @@ pub fn add_rule(name: &str, match_type: MatchType, match_value: &str) -> KernelR
 /// Add an action to a rule.
 pub fn add_action(rule_id: u32, action: RuleAction, param1: i32, param2: i32) -> KernelResult<()> {
     with_state(|state| {
-        let rule = state.rules.iter_mut().find(|r| r.id == rule_id)
+        let rule = state
+            .rules
+            .iter_mut()
+            .find(|r| r.id == rule_id)
             .ok_or(KernelError::NotFound)?;
-        rule.actions.push(ActionEntry { action, param1, param2 });
+        rule.actions.push(ActionEntry {
+            action,
+            param1,
+            param2,
+        });
         Ok(())
     })
 }
@@ -239,7 +252,9 @@ pub fn remove_rule(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.rules.len();
         state.rules.retain(|r| r.id != id);
-        if state.rules.len() == before { return Err(KernelError::NotFound); }
+        if state.rules.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -247,7 +262,10 @@ pub fn remove_rule(id: u32) -> KernelResult<()> {
 /// Enable/disable a rule.
 pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let rule = state.rules.iter_mut().find(|r| r.id == id)
+        let rule = state
+            .rules
+            .iter_mut()
+            .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         rule.enabled = enabled;
         Ok(())
@@ -265,7 +283,9 @@ pub fn match_rules(app_name: &str, title: &str, class: &str) -> Vec<(u32, Vec<Ac
     let title_lower = title.to_lowercase();
     let mut matches = Vec::new();
     for rule in &state.rules {
-        if !rule.enabled { continue; }
+        if !rule.enabled {
+            continue;
+        }
         let matched = match rule.match_type {
             MatchType::AppExact => app_name == rule.match_value,
             MatchType::AppContains => app_lower.contains(&rule.match_value.to_lowercase()),
@@ -283,7 +303,10 @@ pub fn match_rules(app_name: &str, title: &str, class: &str) -> Vec<(u32, Vec<Ac
 /// Record a rule match (update hit count and stats).
 pub fn record_match(rule_id: u32) -> KernelResult<usize> {
     with_state(|state| {
-        let rule = state.rules.iter_mut().find(|r| r.id == rule_id)
+        let rule = state
+            .rules
+            .iter_mut()
+            .find(|r| r.id == rule_id)
             .ok_or(KernelError::NotFound)?;
         rule.hit_count += 1;
         let action_count = rule.actions.len();
@@ -295,12 +318,18 @@ pub fn record_match(rule_id: u32) -> KernelResult<usize> {
 
 /// Get a rule by id.
 pub fn get_rule(id: u32) -> Option<WindowRule> {
-    STATE.lock().as_ref().and_then(|s| s.rules.iter().find(|r| r.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.rules.iter().find(|r| r.id == id).cloned())
 }
 
 /// List all rules.
 pub fn list_rules() -> Vec<WindowRule> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.rules.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.rules.clone())
 }
 
 /// Statistics: (rule_count, enabled_count, total_matches, total_applied, ops).
@@ -309,7 +338,13 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
     match guard.as_ref() {
         Some(s) => {
             let enabled = s.rules.iter().filter(|r| r.enabled).count();
-            (s.rules.len(), enabled, s.total_matches, s.total_applied, s.ops)
+            (
+                s.rules.len(),
+                enabled,
+                s.total_matches,
+                s.total_applied,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }

@@ -111,9 +111,13 @@ impl IconCategory {
             "video" => Self::Video,
             _ => match mime {
                 "application/pdf" | "application/rtf" => Self::Document,
-                "application/zip" | "application/gzip" | "application/x-tar"
-                | "application/x-bzip2" | "application/x-xz"
-                | "application/x-7z-compressed" | "application/x-rar-compressed"
+                "application/zip"
+                | "application/gzip"
+                | "application/x-tar"
+                | "application/x-bzip2"
+                | "application/x-xz"
+                | "application/x-7z-compressed"
+                | "application/x-rar-compressed"
                 | "application/zstd" => Self::Archive,
                 "application/x-executable" | "application/x-sharedlib" => Self::Executable,
                 "application/json" | "application/xml" | "application/yaml" => Self::Data,
@@ -209,21 +213,46 @@ pub fn init() {
     }
 
     let defaults: &[(&str, &str, &str, &[&str])] = &[
-        ("text/plain", "Text Document", "icon-text", &["txt", "text", "log"]),
+        (
+            "text/plain",
+            "Text Document",
+            "icon-text",
+            &["txt", "text", "log"],
+        ),
         ("text/html", "HTML Document", "icon-html", &["html", "htm"]),
         ("text/css", "CSS Stylesheet", "icon-css", &["css"]),
-        ("text/markdown", "Markdown Document", "icon-markdown", &["md", "markdown"]),
-        ("text/x-python", "Python Script", "icon-python", &["py", "pyw"]),
+        (
+            "text/markdown",
+            "Markdown Document",
+            "icon-markdown",
+            &["md", "markdown"],
+        ),
+        (
+            "text/x-python",
+            "Python Script",
+            "icon-python",
+            &["py", "pyw"],
+        ),
         ("text/x-rust", "Rust Source", "icon-rust", &["rs"]),
         ("text/x-c", "C Source", "icon-c", &["c", "h"]),
-        ("text/x-shellscript", "Shell Script", "icon-shell", &["sh", "bash"]),
+        (
+            "text/x-shellscript",
+            "Shell Script",
+            "icon-shell",
+            &["sh", "bash"],
+        ),
         ("text/csv", "CSV Spreadsheet", "icon-csv", &["csv"]),
         ("application/json", "JSON File", "icon-json", &["json"]),
         ("application/pdf", "PDF Document", "icon-pdf", &["pdf"]),
         ("application/zip", "ZIP Archive", "icon-zip", &["zip"]),
         ("application/gzip", "Gzip Archive", "icon-gzip", &["gz"]),
         ("application/x-tar", "Tar Archive", "icon-tar", &["tar"]),
-        ("application/rtf", "Rich Text Document", "icon-rtf", &["rtf"]),
+        (
+            "application/rtf",
+            "Rich Text Document",
+            "icon-rtf",
+            &["rtf"],
+        ),
         ("application/xml", "XML Document", "icon-xml", &["xml"]),
         ("image/png", "PNG Image", "icon-png", &["png"]),
         ("image/jpeg", "JPEG Image", "icon-jpeg", &["jpg", "jpeg"]),
@@ -297,7 +326,10 @@ pub fn icon_for_file_with_app(path: &str, app_path: Option<&str>) -> ResolvedIco
     // 1. Check app-specific override.
     if let Some(app) = app_path {
         let overrides = APP_ICONS.lock();
-        if let Some(ov) = overrides.iter().find(|o| o.app_path == app && o.mime == mime) {
+        if let Some(ov) = overrides
+            .iter()
+            .find(|o| o.app_path == app && o.mime == mime)
+        {
             let desc = type_description(mime);
             return ResolvedIcon {
                 icon: ov.icon.clone(),
@@ -378,7 +410,10 @@ pub fn register_app_icon(app_path: &str, mime: &str, icon: &str) -> KernelResult
     let mut overrides = APP_ICONS.lock();
 
     // Update existing.
-    if let Some(existing) = overrides.iter_mut().find(|o| o.app_path == app_path && o.mime == mime) {
+    if let Some(existing) = overrides
+        .iter_mut()
+        .find(|o| o.app_path == app_path && o.mime == mime)
+    {
         existing.icon = String::from(icon);
         return Ok(());
     }
@@ -399,7 +434,10 @@ pub fn register_app_icon(app_path: &str, mime: &str, icon: &str) -> KernelResult
 /// Unregister an app-specific icon override.
 pub fn unregister_app_icon(app_path: &str, mime: &str) -> KernelResult<()> {
     let mut overrides = APP_ICONS.lock();
-    if let Some(pos) = overrides.iter().position(|o| o.app_path == app_path && o.mime == mime) {
+    if let Some(pos) = overrides
+        .iter()
+        .position(|o| o.app_path == app_path && o.mime == mime)
+    {
         overrides.remove(pos);
         Ok(())
     } else {
@@ -410,8 +448,16 @@ pub fn unregister_app_icon(app_path: &str, mime: &str) -> KernelResult<()> {
 /// List all registered file types.
 pub fn list_types() -> Vec<(String, String, String, usize)> {
     let types = TYPES.lock();
-    types.iter()
-        .map(|t| (t.mime.clone(), t.description.clone(), t.icon.clone(), t.extensions.len()))
+    types
+        .iter()
+        .map(|t| {
+            (
+                t.mime.clone(),
+                t.description.clone(),
+                t.icon.clone(),
+                t.extensions.len(),
+            )
+        })
         .collect()
 }
 
@@ -437,9 +483,17 @@ pub fn mime_for_extension(ext: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 fn is_source_mime(mime: &str) -> bool {
-    matches!(mime, "text/x-python" | "text/x-rust" | "text/x-c"
-        | "text/x-shellscript" | "text/x-java" | "text/x-go"
-        | "text/x-javascript" | "text/x-typescript")
+    matches!(
+        mime,
+        "text/x-python"
+            | "text/x-rust"
+            | "text/x-c"
+            | "text/x-shellscript"
+            | "text/x-java"
+            | "text/x-go"
+            | "text/x-javascript"
+            | "text/x-typescript"
+    )
 }
 
 fn type_description(mime: &str) -> String {
@@ -499,9 +553,18 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(IconCategory::from_mime("image/png"), IconCategory::Image);
         assert_eq!(IconCategory::from_mime("audio/mpeg"), IconCategory::Audio);
         assert_eq!(IconCategory::from_mime("text/plain"), IconCategory::Text);
-        assert_eq!(IconCategory::from_mime("text/x-python"), IconCategory::SourceCode);
-        assert_eq!(IconCategory::from_mime("application/pdf"), IconCategory::Document);
-        assert_eq!(IconCategory::from_mime("application/zip"), IconCategory::Archive);
+        assert_eq!(
+            IconCategory::from_mime("text/x-python"),
+            IconCategory::SourceCode
+        );
+        assert_eq!(
+            IconCategory::from_mime("application/pdf"),
+            IconCategory::Document
+        );
+        assert_eq!(
+            IconCategory::from_mime("application/zip"),
+            IconCategory::Archive
+        );
         serial_println!("[filetype] test 2 passed: MIME category mapping");
     }
 
@@ -524,7 +587,10 @@ pub fn self_test() -> KernelResult<()> {
         )?;
         let ft = get_type("application/x-custom");
         assert!(ft.is_some());
-        assert_eq!(ft.as_ref().map(|f| f.description.as_str()), Some("Custom File"));
+        assert_eq!(
+            ft.as_ref().map(|f| f.description.as_str()),
+            Some("Custom File")
+        );
         serial_println!("[filetype] test 4 passed: register type");
     }
 

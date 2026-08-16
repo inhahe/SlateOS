@@ -36,9 +36,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -142,10 +142,13 @@ pub fn put(data: &[u8]) -> KernelResult<Hash256> {
     }
 
     // Store new blob.
-    cas.blobs.insert(hash, CasBlob {
-        data: data.to_vec(),
-        refcount: 1,
-    });
+    cas.blobs.insert(
+        hash,
+        CasBlob {
+            data: data.to_vec(),
+            refcount: 1,
+        },
+    );
     cas.total_bytes = new_total;
     cas.total_refs = cas.total_refs.saturating_add(1);
 
@@ -440,7 +443,11 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        serial_println!("[cas]   release/GC OK (removed {}, reclaimed {} bytes)", removed, reclaimed);
+        serial_println!(
+            "[cas]   release/GC OK (removed {}, reclaimed {} bytes)",
+            removed,
+            reclaimed
+        );
     }
 
     // --- Test 4: hash hex round-trip ---
@@ -449,7 +456,10 @@ pub fn self_test() -> KernelResult<()> {
         let hash = put(data)?;
         let hex = hash_to_hex(&hash);
         if hex.len() != 64 {
-            serial_println!("[cas]   ERROR: hex string should be 64 chars, got {}", hex.len());
+            serial_println!(
+                "[cas]   ERROR: hex string should be 64 chars, got {}",
+                hex.len()
+            );
             return Err(KernelError::InternalError);
         }
         let parsed = hex_to_hash(&hex);

@@ -342,13 +342,13 @@ fn test_demand_page() -> KernelResult<()> {
         start: DEMAND_PAGE_TEST_BASE,
         end: DEMAND_PAGE_TEST_BASE + DEMAND_PAGE_TEST_SIZE,
         kind: VmaKind::Anonymous,
-        flags: PageFlags::PRESENT
-            | PageFlags::WRITABLE
-            | PageFlags::GLOBAL
-            | PageFlags::NO_EXECUTE,
+        flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::GLOBAL | PageFlags::NO_EXECUTE,
     };
     add_kernel_vma(vma)?;
-    serial_println!("[fault]   Registered demand-page VMA at {:#x}", DEMAND_PAGE_TEST_BASE);
+    serial_println!(
+        "[fault]   Registered demand-page VMA at {:#x}",
+        DEMAND_PAGE_TEST_BASE
+    );
 
     // Touch the memory.  This will trigger a page fault because no
     // physical frame is mapped yet.  The fault handler will:
@@ -385,10 +385,7 @@ fn test_demand_page() -> KernelResult<()> {
         ptr.read_volatile()
     };
     if readback != 0xDD {
-        serial_println!(
-            "[fault]   FAIL: read back {:#x}, expected 0xDD",
-            readback
-        );
+        serial_println!("[fault]   FAIL: read back {:#x}, expected 0xDD", readback);
         remove_kernel_vma(DEMAND_PAGE_TEST_BASE);
         return Err(KernelError::InternalError);
     }
@@ -407,7 +404,8 @@ fn test_demand_page() -> KernelResult<()> {
             if val != 0xEE {
                 serial_println!(
                     "[fault]   FAIL: page at offset {} reads {:#x}, expected 0xEE",
-                    offset, val
+                    offset,
+                    val
                 );
                 remove_kernel_vma(DEMAND_PAGE_TEST_BASE);
                 return Err(KernelError::InternalError);
@@ -425,7 +423,9 @@ fn test_demand_page() -> KernelResult<()> {
         page_table::flush_frame(test_virt);
         f
     };
-    unsafe { frame::free_frame(frame)?; }
+    unsafe {
+        frame::free_frame(frame)?;
+    }
     remove_kernel_vma(DEMAND_PAGE_TEST_BASE);
     serial_println!("[fault]   Cleanup (unmap + free + remove VMA): OK");
 

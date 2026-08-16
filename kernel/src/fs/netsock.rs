@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -161,7 +161,9 @@ where
 /// `record_*` functions as traffic flows.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         sockets: Vec::new(),
         next_id: 1,
@@ -177,16 +179,27 @@ pub fn init_defaults() {
 /// Open a new socket.
 pub fn open(pid: u32, proto: SockProto, local_addr: &str, local_port: u16) -> KernelResult<u32> {
     with_state(|state| {
-        if state.sockets.len() >= MAX_SOCKETS { return Err(KernelError::ResourceExhausted); }
+        if state.sockets.len() >= MAX_SOCKETS {
+            return Err(KernelError::ResourceExhausted);
+        }
         let now = crate::hpet::elapsed_ns();
         let id = state.next_id;
         state.next_id += 1;
         state.total_opened += 1;
         state.sockets.push(Socket {
-            id, pid, proto, local_addr: String::from(local_addr), local_port,
-            remote_addr: String::from("0.0.0.0"), remote_port: 0,
-            state: TcpState::Closed, rx_bytes: 0, tx_bytes: 0,
-            retransmits: 0, backlog: 0, opened_ns: now,
+            id,
+            pid,
+            proto,
+            local_addr: String::from(local_addr),
+            local_port,
+            remote_addr: String::from("0.0.0.0"),
+            remote_port: 0,
+            state: TcpState::Closed,
+            rx_bytes: 0,
+            tx_bytes: 0,
+            retransmits: 0,
+            backlog: 0,
+            opened_ns: now,
         });
         Ok(id)
     })
@@ -195,7 +208,10 @@ pub fn open(pid: u32, proto: SockProto, local_addr: &str, local_port: u16) -> Ke
 /// Close a socket.
 pub fn close(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.sockets.iter().position(|s| s.id == id)
+        let idx = state
+            .sockets
+            .iter()
+            .position(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         state.sockets.remove(idx);
         state.total_closed += 1;
@@ -206,7 +222,10 @@ pub fn close(id: u32) -> KernelResult<()> {
 /// Set TCP state.
 pub fn set_state(id: u32, new_state: TcpState) -> KernelResult<()> {
     with_state(|state| {
-        let s = state.sockets.iter_mut().find(|s| s.id == id)
+        let s = state
+            .sockets
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         s.state = new_state;
         Ok(())
@@ -216,7 +235,10 @@ pub fn set_state(id: u32, new_state: TcpState) -> KernelResult<()> {
 /// Record traffic on a socket.
 pub fn record_traffic(id: u32, rx: u64, tx: u64) -> KernelResult<()> {
     with_state(|state| {
-        let s = state.sockets.iter_mut().find(|s| s.id == id)
+        let s = state
+            .sockets
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         s.rx_bytes += rx;
         s.tx_bytes += tx;
@@ -229,7 +251,10 @@ pub fn record_traffic(id: u32, rx: u64, tx: u64) -> KernelResult<()> {
 /// Record a retransmission.
 pub fn record_retransmit(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let s = state.sockets.iter_mut().find(|s| s.id == id)
+        let s = state
+            .sockets
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         s.retransmits += 1;
         state.total_retransmits += 1;
@@ -239,27 +264,42 @@ pub fn record_retransmit(id: u32) -> KernelResult<()> {
 
 /// List all sockets.
 pub fn list() -> Vec<Socket> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.sockets.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.sockets.clone())
 }
 
 /// Sockets by protocol.
 pub fn by_proto(proto: SockProto) -> Vec<Socket> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.sockets.iter().filter(|sk| sk.proto == proto).cloned().collect()
+        s.sockets
+            .iter()
+            .filter(|sk| sk.proto == proto)
+            .cloned()
+            .collect()
     })
 }
 
 /// Sockets by TCP state.
 pub fn by_state(state_filter: TcpState) -> Vec<Socket> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.sockets.iter().filter(|sk| sk.state == state_filter).cloned().collect()
+        s.sockets
+            .iter()
+            .filter(|sk| sk.state == state_filter)
+            .cloned()
+            .collect()
     })
 }
 
 /// Sockets for a given PID.
 pub fn by_pid(pid: u32) -> Vec<Socket> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.sockets.iter().filter(|sk| sk.pid == pid).cloned().collect()
+        s.sockets
+            .iter()
+            .filter(|sk| sk.pid == pid)
+            .cloned()
+            .collect()
     })
 }
 
@@ -267,7 +307,15 @@ pub fn by_pid(pid: u32) -> Vec<Socket> {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.sockets.len(), s.total_opened, s.total_closed, s.total_rx, s.total_tx, s.total_retransmits, s.ops),
+        Some(s) => (
+            s.sockets.len(),
+            s.total_opened,
+            s.total_closed,
+            s.total_rx,
+            s.total_tx,
+            s.total_retransmits,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0, 0),
     }
 }
@@ -289,7 +337,10 @@ pub fn self_test() {
     // 1: Empty after init — no fabricated rows.
     assert_eq!(list().len(), 0);
     let (socks0, opened0, closed0, rx0, tx0, retr0, _o0) = stats();
-    assert_eq!((socks0, opened0, closed0, rx0, tx0, retr0), (0, 0, 0, 0, 0, 0));
+    assert_eq!(
+        (socks0, opened0, closed0, rx0, tx0, retr0),
+        (0, 0, 0, 0, 0, 0)
+    );
     crate::serial_println!("  [1/8] empty init: OK");
 
     // 2: Open a socket (ids start at 1; total_opened increments).

@@ -19,10 +19,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -161,7 +161,9 @@ where
 /// subsystem is consolidated. Until then both registries are honestly empty.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         fonts: Vec::new(),
         next_id: 1,
@@ -173,7 +175,14 @@ pub fn init_defaults() {
 }
 
 /// Add a font.
-pub fn add_font(family: &str, style: FontStyle, category: FontCategory, path: &str, version: &str, glyphs: u32) -> KernelResult<u32> {
+pub fn add_font(
+    family: &str,
+    style: FontStyle,
+    category: FontCategory,
+    path: &str,
+    version: &str,
+    glyphs: u32,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.fonts.len() >= MAX_FONTS {
             return Err(KernelError::ResourceExhausted);
@@ -181,9 +190,14 @@ pub fn add_font(family: &str, style: FontStyle, category: FontCategory, path: &s
         let id = state.next_id;
         state.next_id += 1;
         state.fonts.push(FontEntry {
-            id, family: String::from(family), style, category,
-            file_path: String::from(path), version: String::from(version),
-            glyph_count: glyphs, preview_count: 0,
+            id,
+            family: String::from(family),
+            style,
+            category,
+            file_path: String::from(path),
+            version: String::from(version),
+            glyph_count: glyphs,
+            preview_count: 0,
         });
         Ok(id)
     })
@@ -194,7 +208,9 @@ pub fn remove_font(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.fonts.len();
         state.fonts.retain(|f| f.id != id);
-        if state.fonts.len() == before { return Err(KernelError::NotFound); }
+        if state.fonts.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -202,11 +218,16 @@ pub fn remove_font(id: u32) -> KernelResult<()> {
 /// Preview a font with sample text.
 pub fn preview(font_id: u32, sample: Option<&str>, size_pt: u32) -> KernelResult<PreviewResult> {
     with_state(|state| {
-        let font = state.fonts.iter_mut().find(|f| f.id == font_id)
+        let font = state
+            .fonts
+            .iter_mut()
+            .find(|f| f.id == font_id)
             .ok_or(KernelError::NotFound)?;
         font.preview_count += 1;
         state.total_previews += 1;
-        let text = sample.map(String::from).unwrap_or_else(|| state.default_sample.clone());
+        let text = sample
+            .map(String::from)
+            .unwrap_or_else(|| state.default_sample.clone());
         Ok(PreviewResult {
             font_id: font.id,
             family: font.family.clone(),
@@ -218,10 +239,16 @@ pub fn preview(font_id: u32, sample: Option<&str>, size_pt: u32) -> KernelResult
 }
 
 /// Compare multiple fonts.
-pub fn compare(font_ids: &[u32], sample: Option<&str>, size_pt: u32) -> KernelResult<Vec<PreviewResult>> {
+pub fn compare(
+    font_ids: &[u32],
+    sample: Option<&str>,
+    size_pt: u32,
+) -> KernelResult<Vec<PreviewResult>> {
     with_state(|state| {
         state.total_comparisons += 1;
-        let text = sample.map(String::from).unwrap_or_else(|| state.default_sample.clone());
+        let text = sample
+            .map(String::from)
+            .unwrap_or_else(|| state.default_sample.clone());
         let mut results = Vec::new();
         for &id in font_ids {
             if let Some(font) = state.fonts.iter_mut().find(|f| f.id == id) {
@@ -242,14 +269,18 @@ pub fn compare(font_ids: &[u32], sample: Option<&str>, size_pt: u32) -> KernelRe
 
 /// List all fonts.
 pub fn list_fonts() -> Vec<FontEntry> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.fonts.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.fonts.clone())
 }
 
 /// Search fonts by family name.
 pub fn search(query: &str) -> Vec<FontEntry> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let q = query.to_lowercase();
-        s.fonts.iter()
+        s.fonts
+            .iter()
             .filter(|f| f.family.to_lowercase().contains(&q))
             .cloned()
             .collect()
@@ -259,7 +290,11 @@ pub fn search(query: &str) -> Vec<FontEntry> {
 /// List fonts by category.
 pub fn by_category(category: FontCategory) -> Vec<FontEntry> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.fonts.iter().filter(|f| f.category == category).cloned().collect()
+        s.fonts
+            .iter()
+            .filter(|f| f.category == category)
+            .cloned()
+            .collect()
     })
 }
 
@@ -295,11 +330,51 @@ pub fn self_test() {
     // default sample text is configured. Build the test fixtures explicitly via
     // add_font(). add_font assigns ids from next_id (1), so these land on 1..=5.
     assert!(list_fonts().is_empty());
-    let _ = add_font("Inter", FontStyle::Regular, FontCategory::SansSerif, "/fonts/inter-regular.ttf", "0.0", 0).expect("fixture 1");
-    let _ = add_font("Inter", FontStyle::Bold, FontCategory::SansSerif, "/fonts/inter-bold.ttf", "0.0", 0).expect("fixture 2");
-    let _ = add_font("JetBrains Mono", FontStyle::Regular, FontCategory::Monospace, "/fonts/jetbrainsmono-regular.ttf", "0.0", 0).expect("fixture 3");
-    let _ = add_font("Noto Serif", FontStyle::Regular, FontCategory::Serif, "/fonts/notoserif-regular.ttf", "0.0", 0).expect("fixture 4");
-    let _ = add_font("Noto Serif", FontStyle::Italic, FontCategory::Serif, "/fonts/notoserif-italic.ttf", "0.0", 0).expect("fixture 5");
+    let _ = add_font(
+        "Inter",
+        FontStyle::Regular,
+        FontCategory::SansSerif,
+        "/fonts/inter-regular.ttf",
+        "0.0",
+        0,
+    )
+    .expect("fixture 1");
+    let _ = add_font(
+        "Inter",
+        FontStyle::Bold,
+        FontCategory::SansSerif,
+        "/fonts/inter-bold.ttf",
+        "0.0",
+        0,
+    )
+    .expect("fixture 2");
+    let _ = add_font(
+        "JetBrains Mono",
+        FontStyle::Regular,
+        FontCategory::Monospace,
+        "/fonts/jetbrainsmono-regular.ttf",
+        "0.0",
+        0,
+    )
+    .expect("fixture 3");
+    let _ = add_font(
+        "Noto Serif",
+        FontStyle::Regular,
+        FontCategory::Serif,
+        "/fonts/notoserif-regular.ttf",
+        "0.0",
+        0,
+    )
+    .expect("fixture 4");
+    let _ = add_font(
+        "Noto Serif",
+        FontStyle::Italic,
+        FontCategory::Serif,
+        "/fonts/notoserif-italic.ttf",
+        "0.0",
+        0,
+    )
+    .expect("fixture 5");
 
     // 1: Fixtures present.
     assert_eq!(list_fonts().len(), 5);
@@ -335,7 +410,15 @@ pub fn self_test() {
     crate::serial_println!("  [6/8] category: OK");
 
     // 7: Add font.
-    let _id = add_font("Roboto", FontStyle::Regular, FontCategory::SansSerif, "/fonts/roboto.ttf", "3.0", 1500).expect("add");
+    let _id = add_font(
+        "Roboto",
+        FontStyle::Regular,
+        FontCategory::SansSerif,
+        "/fonts/roboto.ttf",
+        "3.0",
+        1500,
+    )
+    .expect("add");
     assert_eq!(list_fonts().len(), 6);
     crate::serial_println!("  [7/8] add: OK");
 

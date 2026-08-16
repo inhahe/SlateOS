@@ -38,11 +38,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -252,7 +252,9 @@ pub fn get_icon(id: &str) -> Option<TrayIcon> {
 /// Get all visible tray icons in order.
 pub fn visible_icons() -> Vec<TraySnapshot> {
     let tray = TRAY.lock();
-    let mut icons: Vec<TraySnapshot> = tray.icons.values()
+    let mut icons: Vec<TraySnapshot> = tray
+        .icons
+        .values()
         .filter(|i| i.visibility == IconVisibility::Visible)
         .map(|i| TraySnapshot {
             id: i.id.clone(),
@@ -270,7 +272,9 @@ pub fn visible_icons() -> Vec<TraySnapshot> {
 /// Get overflow (hidden in collapsed area) tray icons.
 pub fn overflow_icons() -> Vec<TraySnapshot> {
     let tray = TRAY.lock();
-    let mut icons: Vec<TraySnapshot> = tray.icons.values()
+    let mut icons: Vec<TraySnapshot> = tray
+        .icons
+        .values()
         .filter(|i| i.visibility == IconVisibility::Overflow)
         .map(|i| TraySnapshot {
             id: i.id.clone(),
@@ -378,13 +382,17 @@ pub fn set_override(app_id: &str, ov: TrayOverride) -> KernelResult<()> {
 /// Get the override for an app (Default if none set).
 pub fn get_override(app_id: &str) -> TrayOverride {
     let tray = TRAY.lock();
-    tray.overrides.get(app_id).copied().unwrap_or(TrayOverride::Default)
+    tray.overrides
+        .get(app_id)
+        .copied()
+        .unwrap_or(TrayOverride::Default)
 }
 
 /// List all overrides.
 pub fn list_overrides() -> Vec<(String, TrayOverride)> {
     let tray = TRAY.lock();
-    tray.overrides.iter()
+    tray.overrides
+        .iter()
         .map(|(k, v)| (k.clone(), *v))
         .collect()
 }
@@ -400,8 +408,7 @@ pub fn should_start_in_tray(app_id: &str) -> bool {
         Some(TrayOverride::Default) | None => {
             // Check appregistry for start_hidden flag.
             drop(tray);
-            super::appregistry::get(app_id)
-                .is_some_and(|app| app.start_hidden)
+            super::appregistry::get(app_id).is_some_and(|app| app.start_hidden)
         }
     }
 }
@@ -417,8 +424,7 @@ pub fn should_have_tray_icon(app_id: &str) -> bool {
         Some(TrayOverride::Default) | None => {
             // Check appregistry for tray_icon flag.
             drop(tray);
-            super::appregistry::get(app_id)
-                .is_some_and(|app| app.tray_icon)
+            super::appregistry::get(app_id).is_some_and(|app| app.tray_icon)
         }
     }
 }

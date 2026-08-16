@@ -20,11 +20,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -147,7 +147,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         stages: Vec::new(),
         suggestions: Vec::new(),
@@ -185,7 +187,11 @@ pub fn begin_stage(name: &str, category: StageCategory) -> KernelResult<()> {
 /// End a boot stage.
 pub fn end_stage(name: &str) -> KernelResult<u64> {
     with_state(|state| {
-        let stage = state.stages.iter_mut().rev().find(|s| s.name == name && !s.completed)
+        let stage = state
+            .stages
+            .iter_mut()
+            .rev()
+            .find(|s| s.name == name && !s.completed)
             .ok_or(KernelError::NotFound)?;
         let now = crate::hpet::elapsed_ns();
         stage.end_ns = now;
@@ -198,7 +204,9 @@ pub fn end_stage(name: &str) -> KernelResult<u64> {
 /// Record a complete boot (call after all stages done).
 pub fn record_boot() -> KernelResult<u64> {
     with_state(|state| {
-        let total_ms: u64 = state.stages.iter()
+        let total_ms: u64 = state
+            .stages
+            .iter()
             .filter(|s| s.completed)
             .map(|s| s.duration_ms)
             .sum();
@@ -220,7 +228,9 @@ pub fn analyze() -> KernelResult<usize> {
 
         // Find slow stages (> 2000ms).
         for stage in &state.stages {
-            if !stage.completed { continue; }
+            if !stage.completed {
+                continue;
+            }
             if stage.duration_ms > 2000 {
                 let id = state.next_suggestion_id;
                 state.next_suggestion_id += 1;
@@ -231,8 +241,10 @@ pub fn analyze() -> KernelResult<usize> {
                     } else {
                         SuggestionPriority::High
                     },
-                    description: format!("Slow stage '{}' took {}ms — consider deferring or parallelizing",
-                        stage.name, stage.duration_ms),
+                    description: format!(
+                        "Slow stage '{}' took {}ms — consider deferring or parallelizing",
+                        stage.name, stage.duration_ms
+                    ),
                     estimated_savings_ms: stage.duration_ms / 2,
                     applied: false,
                 });
@@ -241,7 +253,9 @@ pub fn analyze() -> KernelResult<usize> {
         }
 
         // Check for too many autostart items.
-        let autostart_count = state.stages.iter()
+        let autostart_count = state
+            .stages
+            .iter()
             .filter(|s| matches!(s.category, StageCategory::AutoStart))
             .count();
         if autostart_count > 5 {
@@ -250,7 +264,10 @@ pub fn analyze() -> KernelResult<usize> {
             state.suggestions.push(Suggestion {
                 id,
                 priority: SuggestionPriority::Medium,
-                description: format!("Too many auto-start items ({}). Consider deferring some.", autostart_count),
+                description: format!(
+                    "Too many auto-start items ({}). Consider deferring some.",
+                    autostart_count
+                ),
                 estimated_savings_ms: (autostart_count as u64).saturating_sub(5) * 500,
                 applied: false,
             });
@@ -258,7 +275,9 @@ pub fn analyze() -> KernelResult<usize> {
         }
 
         // Check sequential stages that could be parallel.
-        let service_stages: Vec<&BootStage> = state.stages.iter()
+        let service_stages: Vec<&BootStage> = state
+            .stages
+            .iter()
             .filter(|s| matches!(s.category, StageCategory::Services) && s.completed)
             .collect();
         if service_stages.len() > 3 {
@@ -269,8 +288,11 @@ pub fn analyze() -> KernelResult<usize> {
                 state.suggestions.push(Suggestion {
                     id,
                     priority: SuggestionPriority::High,
-                    description: format!("Service startup took {}ms across {} services — enable parallel startup",
-                        total_service_ms, service_stages.len()),
+                    description: format!(
+                        "Service startup took {}ms across {} services — enable parallel startup",
+                        total_service_ms,
+                        service_stages.len()
+                    ),
                     estimated_savings_ms: total_service_ms / 3,
                     applied: false,
                 });
@@ -285,7 +307,10 @@ pub fn analyze() -> KernelResult<usize> {
 /// Mark a suggestion as applied.
 pub fn apply_suggestion(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let s = state.suggestions.iter_mut().find(|s| s.id == id)
+        let s = state
+            .suggestions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         s.applied = true;
         Ok(())
@@ -303,10 +328,7 @@ pub fn clear_stages() -> KernelResult<()> {
 /// Get stages sorted by duration (slowest first).
 pub fn get_stages_by_duration() -> Vec<BootStage> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let mut stages: Vec<BootStage> = s.stages.iter()
-            .filter(|s| s.completed)
-            .cloned()
-            .collect();
+        let mut stages: Vec<BootStage> = s.stages.iter().filter(|s| s.completed).cloned().collect();
         stages.sort_by_key(|e| core::cmp::Reverse(e.duration_ms));
         stages
     })
@@ -315,7 +337,8 @@ pub fn get_stages_by_duration() -> Vec<BootStage> {
 /// Get stages by category.
 pub fn get_stages_by_category(cat: StageCategory) -> Vec<BootStage> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.stages.iter()
+        s.stages
+            .iter()
             .filter(|s| s.category == cat && s.completed)
             .cloned()
             .collect()
@@ -324,7 +347,10 @@ pub fn get_stages_by_category(cat: StageCategory) -> Vec<BootStage> {
 
 /// Get current suggestions.
 pub fn get_suggestions() -> Vec<Suggestion> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.suggestions.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.suggestions.clone())
 }
 
 /// Statistics: (stage_count, boot_count, last_boot_ms, fastest_boot_ms, analyses, ops).
@@ -332,8 +358,19 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let fastest = if s.fastest_boot_ms == u64::MAX { 0 } else { s.fastest_boot_ms };
-            (s.stages.len(), s.boot_count, s.last_boot_ms, fastest, s.total_analyses, s.ops)
+            let fastest = if s.fastest_boot_ms == u64::MAX {
+                0
+            } else {
+                s.fastest_boot_ms
+            };
+            (
+                s.stages.len(),
+                s.boot_count,
+                s.last_boot_ms,
+                fastest,
+                s.total_analyses,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0, 0),
     }

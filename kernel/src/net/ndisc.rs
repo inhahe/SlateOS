@@ -26,15 +26,15 @@
 //! - Combines ARP/NDP and DNS for richer host identification
 //! - Host table with MAC, IP, optional hostname
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
-use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
 use super::ipv6::Ipv6Addr;
+use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -210,8 +210,7 @@ pub fn scan_range(net: Ipv4Addr, mask: Ipv4Addr) -> KernelResult<ScanResult> {
     let mut discovered = Vec::new();
     for entry in &arp_entries {
         // Try reverse DNS.
-        let hostname = super::dns::reverse_resolve(entry.ip)
-            .unwrap_or_default();
+        let hostname = super::dns::reverse_resolve(entry.ip).unwrap_or_default();
 
         discovered.push(Host {
             ip: entry.ip,
@@ -248,8 +247,7 @@ pub fn probe_host(ip: Ipv4Addr) -> KernelResult<Option<Host>> {
     let mac = super::arp::lookup(ip);
     match mac {
         Some(m) => {
-            let hostname = super::dns::reverse_resolve(ip)
-                .unwrap_or_default();
+            let hostname = super::dns::reverse_resolve(ip).unwrap_or_default();
             let now = crate::hrtimer::now_ns();
             TOTAL_DISCOVERED.fetch_add(1, Ordering::Relaxed);
 
@@ -322,8 +320,7 @@ pub fn scan_link_v6() -> KernelResult<ScanResultV6> {
         }
 
         // Try reverse DNS for IPv6.
-        let hostname = super::dns::reverse_resolve6(&entry.ip)
-            .unwrap_or_default();
+        let hostname = super::dns::reverse_resolve6(&entry.ip).unwrap_or_default();
 
         hosts.push(HostV6 {
             ip: entry.ip,
@@ -335,10 +332,7 @@ pub fn scan_link_v6() -> KernelResult<ScanResultV6> {
     let responding = hosts.len() as u32;
     TOTAL_DISCOVERED.fetch_add(responding as u64, Ordering::Relaxed);
 
-    Ok(ScanResultV6 {
-        hosts,
-        responding,
-    })
+    Ok(ScanResultV6 { hosts, responding })
 }
 
 /// Probe a single IPv6 address using NDP Neighbor Solicitation.
@@ -363,8 +357,7 @@ pub fn probe_host_v6(ip: Ipv6Addr) -> KernelResult<Option<HostV6>> {
         Some(mac) => {
             TOTAL_DISCOVERED.fetch_add(1, Ordering::Relaxed);
 
-            let hostname = super::dns::reverse_resolve6(&ip)
-                .unwrap_or_default();
+            let hostname = super::dns::reverse_resolve6(&ip).unwrap_or_default();
 
             Ok(Some(HostV6 {
                 ip,
@@ -389,8 +382,7 @@ pub fn hosts_v6() -> Vec<HostV6> {
         if entry.mac.0 == our_mac.0 {
             continue;
         }
-        let hostname = super::dns::reverse_resolve6(&entry.ip)
-            .unwrap_or_default();
+        let hostname = super::dns::reverse_resolve6(&entry.ip).unwrap_or_default();
         hosts.push(HostV6 {
             ip: entry.ip,
             mac: format!("{}", entry.mac),
@@ -430,7 +422,10 @@ pub fn procfs_content() -> String {
     let mut out = String::with_capacity(256);
     out.push_str("Network Discovery\n");
     out.push_str("=================\n\n");
-    out.push_str(&format!("Scanning:    {}\n", if s.scanning { "yes" } else { "no" }));
+    out.push_str(&format!(
+        "Scanning:    {}\n",
+        if s.scanning { "yes" } else { "no" }
+    ));
     out.push_str(&format!("Total scans: {}\n", s.total_scans));
     out.push_str(&format!("Probes sent: {}\n", s.total_probes));
     out.push_str(&format!("Discovered:  {}\n", s.total_discovered));

@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -128,7 +128,9 @@ where
 /// CPU and the begin_gp/end_gp/queue_callback/etc. functions as RCU runs.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         cpu_states: Vec::new(),
         gp_history: Vec::new(),
@@ -149,11 +151,18 @@ pub fn init_defaults() {
 /// `NotFound` for an unregistered CPU id.
 pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.cpu_states.iter().any(|c| c.cpu_id == cpu_id) { return Err(KernelError::AlreadyExists); }
-        if state.cpu_states.len() >= MAX_CPU { return Err(KernelError::ResourceExhausted); }
+        if state.cpu_states.iter().any(|c| c.cpu_id == cpu_id) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if state.cpu_states.len() >= MAX_CPU {
+            return Err(KernelError::ResourceExhausted);
+        }
         state.cpu_states.push(CpuRcuState {
-            cpu_id, callbacks_pending: 0, callbacks_invoked: 0,
-            quiescent_states: 0, in_critical_section: false,
+            cpu_id,
+            callbacks_pending: 0,
+            callbacks_invoked: 0,
+            quiescent_states: 0,
+            in_critical_section: false,
         });
         Ok(())
     })
@@ -175,10 +184,16 @@ pub fn end_gp(flavor: RcuFlavor, callbacks_processed: u64) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         let duration = now.saturating_sub(state.current_gp_start);
-        if state.gp_history.len() >= MAX_GP_HISTORY { state.gp_history.remove(0); }
+        if state.gp_history.len() >= MAX_GP_HISTORY {
+            state.gp_history.remove(0);
+        }
         state.gp_history.push(GracePeriod {
-            id: state.current_gp_id, flavor, start_ns: state.current_gp_start,
-            end_ns: now, duration_ns: duration, callbacks_processed,
+            id: state.current_gp_id,
+            flavor,
+            start_ns: state.current_gp_start,
+            end_ns: now,
+            duration_ns: duration,
+            callbacks_processed,
         });
         state.total_callbacks += callbacks_processed;
         Ok(())
@@ -188,7 +203,10 @@ pub fn end_gp(flavor: RcuFlavor, callbacks_processed: u64) -> KernelResult<()> {
 /// Queue a callback on a CPU.
 pub fn queue_callback(cpu: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cs = state.cpu_states.iter_mut().find(|c| c.cpu_id == cpu)
+        let cs = state
+            .cpu_states
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu)
             .ok_or(KernelError::NotFound)?;
         cs.callbacks_pending += 1;
         Ok(())
@@ -198,7 +216,10 @@ pub fn queue_callback(cpu: u32) -> KernelResult<()> {
 /// Process callbacks on a CPU.
 pub fn process_callbacks(cpu: u32, count: u64) -> KernelResult<()> {
     with_state(|state| {
-        let cs = state.cpu_states.iter_mut().find(|c| c.cpu_id == cpu)
+        let cs = state
+            .cpu_states
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu)
             .ok_or(KernelError::NotFound)?;
         let processed = count.min(cs.callbacks_pending);
         cs.callbacks_pending -= processed;
@@ -211,7 +232,10 @@ pub fn process_callbacks(cpu: u32, count: u64) -> KernelResult<()> {
 /// Record a quiescent state.
 pub fn quiescent(cpu: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cs = state.cpu_states.iter_mut().find(|c| c.cpu_id == cpu)
+        let cs = state
+            .cpu_states
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu)
             .ok_or(KernelError::NotFound)?;
         cs.quiescent_states += 1;
         Ok(())
@@ -228,13 +252,20 @@ pub fn report_stall(_cpu: u32) -> KernelResult<()> {
 
 /// Get per-CPU state.
 pub fn cpu_stats() -> Vec<CpuRcuState> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.cpu_states.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.cpu_states.clone())
 }
 
 /// Recent grace periods.
 pub fn gp_history(n: usize) -> Vec<GracePeriod> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let start = if n >= s.gp_history.len() { 0 } else { s.gp_history.len() - n };
+        let start = if n >= s.gp_history.len() {
+            0
+        } else {
+            s.gp_history.len() - n
+        };
         s.gp_history[start..].to_vec()
     })
 }
@@ -243,7 +274,14 @@ pub fn gp_history(n: usize) -> Vec<GracePeriod> {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.cpu_states.len(), s.current_gp_id, s.total_gp, s.total_callbacks, s.total_stalls, s.ops),
+        Some(s) => (
+            s.cpu_states.len(),
+            s.current_gp_id,
+            s.total_gp,
+            s.total_callbacks,
+            s.total_stalls,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -286,21 +324,33 @@ pub fn self_test() {
     // 4: Queue callbacks (exact, from zero); unknown CPU fails.
     queue_callback(0).expect("queue");
     queue_callback(0).expect("queue2");
-    let c = cpu_stats().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    let c = cpu_stats()
+        .iter()
+        .find(|c| c.cpu_id == 0)
+        .cloned()
+        .expect("cpu0");
     assert_eq!(c.callbacks_pending, 2);
     assert!(queue_callback(99).is_err());
     crate::serial_println!("  [4/8] queue callback: OK");
 
     // 5: Process callbacks moves pending → invoked.
     process_callbacks(0, 1).expect("process");
-    let c = cpu_stats().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    let c = cpu_stats()
+        .iter()
+        .find(|c| c.cpu_id == 0)
+        .cloned()
+        .expect("cpu0");
     assert_eq!(c.callbacks_pending, 1);
     assert_eq!(c.callbacks_invoked, 1);
     crate::serial_println!("  [5/8] process callbacks: OK");
 
     // 6: Quiescent state increments from exactly zero.
     quiescent(0).expect("qs");
-    let c = cpu_stats().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    let c = cpu_stats()
+        .iter()
+        .find(|c| c.cpu_id == 0)
+        .cloned()
+        .expect("cpu0");
     assert_eq!(c.quiescent_states, 1);
     crate::serial_println!("  [6/8] quiescent: OK");
 

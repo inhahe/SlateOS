@@ -23,9 +23,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -95,12 +95,22 @@ impl GestureType {
     /// All gesture types for iteration.
     pub fn all() -> &'static [GestureType] {
         &[
-            Self::Tap, Self::DoubleTap, Self::LongPress, Self::TwoFingerScroll,
-            Self::Pinch, Self::Rotate, Self::ThreeFingerSwipeUp, Self::ThreeFingerSwipeDown,
-            Self::ThreeFingerSwipeLeft, Self::ThreeFingerSwipeRight,
-            Self::FourFingerSwipeUp, Self::FourFingerSwipeDown,
-            Self::FourFingerSwipeLeft, Self::FourFingerSwipeRight,
-            Self::ThreeFingerTap, Self::FourFingerTap,
+            Self::Tap,
+            Self::DoubleTap,
+            Self::LongPress,
+            Self::TwoFingerScroll,
+            Self::Pinch,
+            Self::Rotate,
+            Self::ThreeFingerSwipeUp,
+            Self::ThreeFingerSwipeDown,
+            Self::ThreeFingerSwipeLeft,
+            Self::ThreeFingerSwipeRight,
+            Self::FourFingerSwipeUp,
+            Self::FourFingerSwipeDown,
+            Self::FourFingerSwipeLeft,
+            Self::FourFingerSwipeRight,
+            Self::ThreeFingerTap,
+            Self::FourFingerTap,
         ]
     }
 }
@@ -228,23 +238,77 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     // Default gesture mappings.
     let mappings = alloc::vec![
-        GestureMapping { gesture: GestureType::Tap, action: GestureAction::Click, enabled: true },
-        GestureMapping { gesture: GestureType::DoubleTap, action: GestureAction::Click, enabled: true },
-        GestureMapping { gesture: GestureType::LongPress, action: GestureAction::RightClick, enabled: true },
-        GestureMapping { gesture: GestureType::TwoFingerScroll, action: GestureAction::None, enabled: true },
-        GestureMapping { gesture: GestureType::Pinch, action: GestureAction::ZoomIn, enabled: true },
-        GestureMapping { gesture: GestureType::ThreeFingerSwipeUp, action: GestureAction::TaskView, enabled: true },
-        GestureMapping { gesture: GestureType::ThreeFingerSwipeDown, action: GestureAction::ShowDesktop, enabled: true },
-        GestureMapping { gesture: GestureType::ThreeFingerSwipeLeft, action: GestureAction::PrevDesktop, enabled: true },
-        GestureMapping { gesture: GestureType::ThreeFingerSwipeRight, action: GestureAction::NextDesktop, enabled: true },
-        GestureMapping { gesture: GestureType::FourFingerSwipeUp, action: GestureAction::Search, enabled: true },
-        GestureMapping { gesture: GestureType::FourFingerSwipeDown, action: GestureAction::Minimize, enabled: true },
-        GestureMapping { gesture: GestureType::ThreeFingerTap, action: GestureAction::NotificationCenter, enabled: true },
-        GestureMapping { gesture: GestureType::FourFingerTap, action: GestureAction::TaskView, enabled: true },
+        GestureMapping {
+            gesture: GestureType::Tap,
+            action: GestureAction::Click,
+            enabled: true
+        },
+        GestureMapping {
+            gesture: GestureType::DoubleTap,
+            action: GestureAction::Click,
+            enabled: true
+        },
+        GestureMapping {
+            gesture: GestureType::LongPress,
+            action: GestureAction::RightClick,
+            enabled: true
+        },
+        GestureMapping {
+            gesture: GestureType::TwoFingerScroll,
+            action: GestureAction::None,
+            enabled: true
+        },
+        GestureMapping {
+            gesture: GestureType::Pinch,
+            action: GestureAction::ZoomIn,
+            enabled: true
+        },
+        GestureMapping {
+            gesture: GestureType::ThreeFingerSwipeUp,
+            action: GestureAction::TaskView,
+            enabled: true
+        },
+        GestureMapping {
+            gesture: GestureType::ThreeFingerSwipeDown,
+            action: GestureAction::ShowDesktop,
+            enabled: true
+        },
+        GestureMapping {
+            gesture: GestureType::ThreeFingerSwipeLeft,
+            action: GestureAction::PrevDesktop,
+            enabled: true
+        },
+        GestureMapping {
+            gesture: GestureType::ThreeFingerSwipeRight,
+            action: GestureAction::NextDesktop,
+            enabled: true
+        },
+        GestureMapping {
+            gesture: GestureType::FourFingerSwipeUp,
+            action: GestureAction::Search,
+            enabled: true
+        },
+        GestureMapping {
+            gesture: GestureType::FourFingerSwipeDown,
+            action: GestureAction::Minimize,
+            enabled: true
+        },
+        GestureMapping {
+            gesture: GestureType::ThreeFingerTap,
+            action: GestureAction::NotificationCenter,
+            enabled: true
+        },
+        GestureMapping {
+            gesture: GestureType::FourFingerTap,
+            action: GestureAction::TaskView,
+            enabled: true
+        },
     ];
 
     *guard = Some(State {
@@ -257,7 +321,10 @@ pub fn init_defaults() {
 }
 
 pub fn set_enabled(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.enabled = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.enabled = enabled;
+        Ok(())
+    })
 }
 
 pub fn is_enabled() -> bool {
@@ -270,7 +337,11 @@ pub fn set_action(gesture: GestureType, action: GestureAction) -> KernelResult<(
         if let Some(m) = state.mappings.iter_mut().find(|m| m.gesture == gesture) {
             m.action = action;
         } else {
-            state.mappings.push(GestureMapping { gesture, action, enabled: true });
+            state.mappings.push(GestureMapping {
+                gesture,
+                action,
+                enabled: true,
+            });
         }
         Ok(())
     })
@@ -291,9 +362,15 @@ pub fn set_gesture_enabled(gesture: GestureType, enabled: bool) -> KernelResult<
 /// Get action for a gesture.
 pub fn get_action(gesture: GestureType) -> GestureAction {
     let guard = STATE.lock();
-    guard.as_ref().and_then(|s| {
-        s.mappings.iter().find(|m| m.gesture == gesture && m.enabled).map(|m| m.action)
-    }).unwrap_or(GestureAction::None)
+    guard
+        .as_ref()
+        .and_then(|s| {
+            s.mappings
+                .iter()
+                .find(|m| m.gesture == gesture && m.enabled)
+                .map(|m| m.action)
+        })
+        .unwrap_or(GestureAction::None)
 }
 
 /// Record a recognized gesture (for statistics).
@@ -313,23 +390,35 @@ pub fn record_gesture(gesture: GestureType) -> GestureAction {
         state.gesture_counts.push((gesture, 1));
     }
 
-    state.mappings.iter().find(|m| m.gesture == gesture && m.enabled)
+    state
+        .mappings
+        .iter()
+        .find(|m| m.gesture == gesture && m.enabled)
         .map_or(GestureAction::None, |m| m.action)
 }
 
 /// Set natural scrolling.
 pub fn set_natural_scroll(on: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.natural_scroll = on; Ok(()) })
+    with_state(|state| {
+        state.config.natural_scroll = on;
+        Ok(())
+    })
 }
 
 /// Set swipe threshold.
 pub fn set_swipe_threshold(pixels: u32) -> KernelResult<()> {
-    with_state(|state| { state.config.swipe_threshold = pixels; Ok(()) })
+    with_state(|state| {
+        state.config.swipe_threshold = pixels;
+        Ok(())
+    })
 }
 
 /// List gesture mappings.
 pub fn list_mappings() -> Vec<GestureMapping> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.mappings.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.mappings.clone())
 }
 
 /// Get configuration.
@@ -342,8 +431,11 @@ pub fn stats() -> (usize, u64, bool, bool, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => (
-            s.mappings.len(), s.total_gestures, s.config.enabled,
-            s.config.natural_scroll, s.ops,
+            s.mappings.len(),
+            s.total_gestures,
+            s.config.enabled,
+            s.config.natural_scroll,
+            s.ops,
         ),
         None => (0, 0, false, false, 0),
     }

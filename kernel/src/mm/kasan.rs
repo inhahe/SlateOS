@@ -78,7 +78,6 @@
 // (`sanitize` is nightly-only, so it is gated on the `kasan_instrumented` cfg
 // that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
 #![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
-
 // Diagnostic subsystem: much of the public API is tooling/shim surface that
 // may not have production call sites yet (the scheduler-path checked-store shim
 // lands in a follow-up). The shadow-index arithmetic is checked by the
@@ -623,7 +622,6 @@ struct ShadowRoots {
 /// running, since it edits the live PML4. `hhdm` must be the bootloader's
 /// direct-map offset.
 unsafe fn install_zero_shadow(hhdm: u64) -> Option<ShadowRoots> {
-
     // CR3's low 12 bits are flags (PCD/PWT/PCID), not part of the address.
     let cr3: u64;
     // SAFETY: reading CR3 is a plain register read, always valid in ring 0.
@@ -643,21 +641,16 @@ unsafe fn install_zero_shadow(hhdm: u64) -> Option<ShadowRoots> {
 
     // SAFETY: `pml4_phys` came from CR3 and `hhdm` is the bootloader's offset,
     // so the walk reads live, mapped paging structures.
-    let (
-        Some(zero_page_phys),
-        Some(pt_phys),
-        Some(pd_phys),
-        Some(pdpt_phys),
-        Some(pdpt0_phys),
-    ) = (unsafe {
-        (
-            early_translate(pml4_phys, hhdm, zero_page_va),
-            early_translate(pml4_phys, hhdm, pt_va),
-            early_translate(pml4_phys, hhdm, pd_va),
-            early_translate(pml4_phys, hhdm, pdpt_va),
-            early_translate(pml4_phys, hhdm, pdpt0_va),
-        )
-    })
+    let (Some(zero_page_phys), Some(pt_phys), Some(pd_phys), Some(pdpt_phys), Some(pdpt0_phys)) =
+        (unsafe {
+            (
+                early_translate(pml4_phys, hhdm, zero_page_va),
+                early_translate(pml4_phys, hhdm, pt_va),
+                early_translate(pml4_phys, hhdm, pd_va),
+                early_translate(pml4_phys, hhdm, pdpt_va),
+                early_translate(pml4_phys, hhdm, pdpt0_va),
+            )
+        })
     else {
         return None;
     };
@@ -876,10 +869,7 @@ unsafe fn install_shadow_frame(shadow_va: u64, phys: u64, hhdm: u64) -> bool {
         // all four entries live in this one page table.
         let base = idx(12);
         for k in 0..HW_PAGES_PER_FRAME {
-            let entry = phys.wrapping_add((k as u64) << 12)
-                | PTE_PRESENT
-                | PTE_WRITABLE
-                | PTE_NX;
+            let entry = phys.wrapping_add((k as u64) << 12) | PTE_PRESENT | PTE_WRITABLE | PTE_NX;
             pt_write(pt, base.wrapping_add(k), entry, hhdm);
         }
     }
@@ -992,7 +982,9 @@ fn ensure_shadow_mapped(shadow_va: u64) -> bool {
         let frame_virt = phys.to_virt(hhdm) as *mut u8;
         // SAFETY: to_virt yields the HHDM alias of a freshly-allocated frame,
         // valid and writable for FRAME_SIZE bytes.
-        unsafe { core::ptr::write_bytes(frame_virt, 0, FRAME_SIZE); }
+        unsafe {
+            core::ptr::write_bytes(frame_virt, 0, FRAME_SIZE);
+        }
 
         let frame_base = KASAN_SHADOW_BASE + (frame_idx as u64) * FRAME_SIZE as u64;
         // SAFETY: `frame_base` is frame-aligned and inside the backed window
@@ -1022,7 +1014,9 @@ fn set_shadow(addr: u64, val: u8) {
     }
     // SAFETY: ensure_shadow_mapped guarantees the shadow byte is mapped
     // writable; `sv` is within the reserved shadow range.
-    unsafe { core::ptr::write_volatile(sv as *mut u8, val); }
+    unsafe {
+        core::ptr::write_volatile(sv as *mut u8, val);
+    }
 }
 
 /// `log2(FRAME_SIZE)`. The shadow lookup divides by the frame size on the
@@ -1050,7 +1044,9 @@ const _: () = assert!(1usize << FRAME_SIZE_SHIFT == FRAME_SIZE);
 /// the load cannot be hoisted above the range checks that guard it.
 #[inline]
 fn get_shadow(addr: u64) -> u8 {
-    let Some(sv) = shadow_of(addr) else { return KASAN_ADDRESSABLE };
+    let Some(sv) = shadow_of(addr) else {
+        return KASAN_ADDRESSABLE;
+    };
     let frame_idx = raw_shr_u64(sv.wrapping_sub(KASAN_SHADOW_BASE), FRAME_SIZE_SHIFT) as usize;
     if frame_idx >= SHADOW_FRAMES {
         return KASAN_ADDRESSABLE;
@@ -1225,7 +1221,7 @@ pub fn shadow_allows(addr: u64, size: usize) -> bool {
 /// performance profile of everything measured afterwards.
 #[must_use]
 pub fn self_test_freed_address() -> Option<u64> {
-    use alloc::alloc::{alloc, dealloc, Layout};
+    use alloc::alloc::{Layout, alloc, dealloc};
 
     if !INITED.load(Ordering::Acquire) {
         return None;
@@ -1242,9 +1238,15 @@ pub fn self_test_freed_address() -> Option<u64> {
         let a = p as u64;
         // SAFETY: `p` came from `alloc(layout)` and is not used afterwards
         // except as an integer address for shadow lookups.
-        unsafe { dealloc(p, layout); }
+        unsafe {
+            dealloc(p, layout);
+        }
         // Only usable if the free actually poisoned a shadow byte we can read.
-        if get_shadow(a) == KASAN_FREE { Some(a) } else { None }
+        if get_shadow(a) == KASAN_FREE {
+            Some(a)
+        } else {
+            None
+        }
     };
 
     if !was_enabled {
@@ -1294,7 +1296,12 @@ pub fn check(addr: u64, size: usize, is_write: bool) -> Result<(), Violation> {
         let sb = byte_bad(a);
         if sb != KASAN_ADDRESSABLE {
             VIOLATIONS.fetch_add(1, Ordering::Relaxed);
-            return Err(Violation { addr: a, size, is_write, shadow: sb });
+            return Err(Violation {
+                addr: a,
+                size,
+                is_write,
+                shadow: sb,
+            });
         }
         // Advance to the next granule boundary (or stop at the last byte).
         let next = (a & !KASAN_GRANULE_MASK) + KASAN_GRANULE;
@@ -1307,7 +1314,12 @@ pub fn check(addr: u64, size: usize, is_write: bool) -> Result<(), Violation> {
     let sb = byte_bad(last);
     if sb != KASAN_ADDRESSABLE {
         VIOLATIONS.fetch_add(1, Ordering::Relaxed);
-        return Err(Violation { addr: last, size, is_write, shadow: sb });
+        return Err(Violation {
+            addr: last,
+            size,
+            is_write,
+            shadow: sb,
+        });
     }
     Ok(())
 }
@@ -1390,7 +1402,7 @@ pub fn stats() -> KasanStats {
 /// false-pass): a live object reads clean, its redzone and a partial granule
 /// are flagged out-of-bounds, and a freed object is flagged use-after-free.
 pub fn self_test() {
-    use alloc::alloc::{alloc, dealloc, Layout};
+    use alloc::alloc::{Layout, alloc, dealloc};
 
     if !INITED.load(Ordering::Acquire) {
         serial_println!("[kasan] self-test SKIPPED (not initialized)");
@@ -1425,7 +1437,9 @@ pub fn self_test() {
             a
         );
         // SAFETY: `p` was allocated with `layout40` and is otherwise unused.
-        unsafe { dealloc(p, layout40); }
+        unsafe {
+            dealloc(p, layout40);
+        }
         if !was_enabled {
             disable();
         }
@@ -1436,18 +1450,32 @@ pub fn self_test() {
     assert!(check(a, 40, false).is_ok(), "kasan: body flagged");
     assert!(check(a, 40, true).is_ok(), "kasan: body write flagged");
     // First redzone byte and last slot byte must be flagged.
-    assert!(check(a + 40, 1, false).is_err(), "kasan: redzone not caught");
-    assert!(check(a + 63, 1, true).is_err(), "kasan: slot end not caught");
+    assert!(
+        check(a + 40, 1, false).is_err(),
+        "kasan: redzone not caught"
+    );
+    assert!(
+        check(a + 63, 1, true).is_err(),
+        "kasan: slot end not caught"
+    );
     // A read straddling the object end into the redzone must be caught.
-    assert!(check(a + 39, 2, false).is_err(), "kasan: straddle not caught");
+    assert!(
+        check(a + 39, 2, false).is_err(),
+        "kasan: straddle not caught"
+    );
     serial_println!("[kasan]   redzone (40-in-64): OK");
 
     // -- Test 2: free → whole slot poisoned as use-after-free ----------------
     // SAFETY: `p` was allocated with `layout40`; not used after free except
     // via KASAN shadow checks (which do not dereference it).
-    unsafe { dealloc(p, layout40); }
+    unsafe {
+        dealloc(p, layout40);
+    }
     assert!(check(a, 8, false).is_err(), "kasan: UAF read not caught");
-    assert!(check(a + 32, 4, true).is_err(), "kasan: UAF write not caught");
+    assert!(
+        check(a + 32, 4, true).is_err(),
+        "kasan: UAF write not caught"
+    );
     let v = check(a, 8, false).unwrap_err();
     assert_eq!(v.shadow, KASAN_FREE, "kasan: freed shadow mismatch");
     serial_println!("[kasan]   use-after-free (freed 64B slot): OK");
@@ -1461,16 +1489,27 @@ pub fn self_test() {
     // Bytes 0..12 accessible; byte 12 (in the second granule, only 4 allowed)
     // must be flagged.
     assert!(check(a2, 12, false).is_ok(), "kasan: 12B body flagged");
-    assert!(check(a2 + 12, 1, false).is_err(), "kasan: partial granule not caught");
-    assert!(check(a2 + 11, 1, false).is_ok(), "kasan: byte 11 wrongly flagged");
+    assert!(
+        check(a2 + 12, 1, false).is_err(),
+        "kasan: partial granule not caught"
+    );
+    assert!(
+        check(a2 + 11, 1, false).is_ok(),
+        "kasan: byte 11 wrongly flagged"
+    );
     // SAFETY: `p2` was allocated with `layout12`.
-    unsafe { dealloc(p2, layout12); }
+    unsafe {
+        dealloc(p2, layout12);
+    }
     serial_println!("[kasan]   partial granule (12-in-16): OK");
 
     // -- Test 4: an address outside the covered range fails open -------------
     // A user address maps *below* the shadow base (the add wraps under it), so
     // this also pins the "negative" side of the window check.
-    assert!(check(0x1000, 8, false).is_ok(), "kasan: out-of-range not fail-open");
+    assert!(
+        check(0x1000, 8, false).is_ok(),
+        "kasan: out-of-range not fail-open"
+    );
     serial_println!("[kasan]   out-of-range fail-open: OK");
 
     // -- Test 5: the shadow mapping is exactly the one LLVM is told to emit ---
@@ -1485,13 +1524,19 @@ pub fn self_test() {
     assert!(!p3.is_null(), "kasan self-test: alloc(8) failed");
     let a3 = p3 as u64;
     let expected = (a3 >> KASAN_GRANULE_SHIFT).wrapping_add(KASAN_SHADOW_OFFSET);
-    assert_eq!(shadow_of(a3), Some(expected), "kasan: shadow_of != LLVM mapping");
+    assert_eq!(
+        shadow_of(a3),
+        Some(expected),
+        "kasan: shadow_of != LLVM mapping"
+    );
     assert!(
         expected >= KASAN_SHADOW_BASE && expected < KASAN_SHADOW_BASE + KASAN_SHADOW_SIZE,
         "kasan: heap shadow outside the backed window"
     );
     // SAFETY: `p3` was allocated with `layout8`.
-    unsafe { dealloc(p3, layout8); }
+    unsafe {
+        dealloc(p3, layout8);
+    }
     serial_println!("[kasan]   mapping matches -asan-mapping-offset: OK");
 
     let st = stats();

@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -143,7 +143,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         rules: Vec::new(),
         next_id: 1,
@@ -159,7 +161,12 @@ pub fn init_defaults() {
 }
 
 /// Add a bandwidth rule for an application.
-pub fn add_rule(app_name: &str, max_down_bps: u64, max_up_bps: u64, priority: QosPriority) -> KernelResult<u32> {
+pub fn add_rule(
+    app_name: &str,
+    max_down_bps: u64,
+    max_up_bps: u64,
+    priority: QosPriority,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.rules.len() >= MAX_RULES {
             return Err(KernelError::ResourceExhausted);
@@ -167,10 +174,15 @@ pub fn add_rule(app_name: &str, max_down_bps: u64, max_up_bps: u64, priority: Qo
         let id = state.next_id;
         state.next_id += 1;
         state.rules.push(BandwidthRule {
-            id, app_name: String::from(app_name),
-            max_down_bps, max_up_bps, priority,
+            id,
+            app_name: String::from(app_name),
+            max_down_bps,
+            max_up_bps,
+            priority,
             state: ThrottleState::Normal,
-            bytes_down: 0, bytes_up: 0, enabled: true,
+            bytes_down: 0,
+            bytes_up: 0,
+            enabled: true,
         });
         Ok(id)
     })
@@ -179,7 +191,10 @@ pub fn add_rule(app_name: &str, max_down_bps: u64, max_up_bps: u64, priority: Qo
 /// Remove a rule.
 pub fn remove_rule(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.rules.iter().position(|r| r.id == id)
+        let pos = state
+            .rules
+            .iter()
+            .position(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         state.rules.remove(pos);
         Ok(())
@@ -189,7 +204,10 @@ pub fn remove_rule(id: u32) -> KernelResult<()> {
 /// Set rule limits.
 pub fn set_limits(id: u32, max_down: u64, max_up: u64) -> KernelResult<()> {
     with_state(|state| {
-        let rule = state.rules.iter_mut().find(|r| r.id == id)
+        let rule = state
+            .rules
+            .iter_mut()
+            .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         rule.max_down_bps = max_down;
         rule.max_up_bps = max_up;
@@ -200,7 +218,10 @@ pub fn set_limits(id: u32, max_down: u64, max_up: u64) -> KernelResult<()> {
 /// Set rule priority.
 pub fn set_priority(id: u32, priority: QosPriority) -> KernelResult<()> {
     with_state(|state| {
-        let rule = state.rules.iter_mut().find(|r| r.id == id)
+        let rule = state
+            .rules
+            .iter_mut()
+            .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         rule.priority = priority;
         Ok(())
@@ -210,7 +231,10 @@ pub fn set_priority(id: u32, priority: QosPriority) -> KernelResult<()> {
 /// Enable/disable a rule.
 pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let rule = state.rules.iter_mut().find(|r| r.id == id)
+        let rule = state
+            .rules
+            .iter_mut()
+            .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         rule.enabled = enabled;
         Ok(())
@@ -218,12 +242,20 @@ pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
 }
 
 /// Record traffic and check throttle state.
-pub fn record_traffic(app_name: &str, bytes_down: u64, bytes_up: u64) -> KernelResult<ThrottleState> {
+pub fn record_traffic(
+    app_name: &str,
+    bytes_down: u64,
+    bytes_up: u64,
+) -> KernelResult<ThrottleState> {
     with_state(|state| {
         if !state.global.enabled {
             return Ok(ThrottleState::Normal);
         }
-        if let Some(rule) = state.rules.iter_mut().find(|r| r.app_name == app_name && r.enabled) {
+        if let Some(rule) = state
+            .rules
+            .iter_mut()
+            .find(|r| r.app_name == app_name && r.enabled)
+        {
             rule.bytes_down += bytes_down;
             rule.bytes_up += bytes_up;
 
@@ -260,26 +292,43 @@ pub fn set_global_limits(max_down: u64, max_up: u64) -> KernelResult<()> {
 
 /// Enable/disable global throttling.
 pub fn set_global_enabled(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.global.enabled = enabled; Ok(()) })
+    with_state(|state| {
+        state.global.enabled = enabled;
+        Ok(())
+    })
 }
 
 /// Get rule by ID.
 pub fn get_rule(id: u32) -> KernelResult<BandwidthRule> {
     with_state(|state| {
-        state.rules.iter().find(|r| r.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .rules
+            .iter()
+            .find(|r| r.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// List all rules.
 pub fn list_rules() -> Vec<BandwidthRule> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.rules.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.rules.clone())
 }
 
 /// Statistics: (rule_count, total_throttled, total_blocked, enabled, ops).
 pub fn stats() -> (usize, u64, u64, bool, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.rules.len(), s.total_throttled, s.total_blocked, s.global.enabled, s.ops),
+        Some(s) => (
+            s.rules.len(),
+            s.total_throttled,
+            s.total_blocked,
+            s.global.enabled,
+            s.ops,
+        ),
         None => (0, 0, 0, false, 0),
     }
 }

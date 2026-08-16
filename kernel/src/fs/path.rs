@@ -601,8 +601,12 @@ fn write_lossy(out: &mut dyn fmt::Write, bytes: &[u8]) -> fmt::Result {
                 // UTF-8 boundary, so the `get` cannot fail; the `?` on a
                 // `None` would be a bug, so fall back to stopping rather
                 // than indexing.
-                let Some(head) = rest.get(..good) else { return Ok(()) };
-                let Ok(head) = core::str::from_utf8(head) else { return Ok(()) };
+                let Some(head) = rest.get(..good) else {
+                    return Ok(());
+                };
+                let Ok(head) = core::str::from_utf8(head) else {
+                    return Ok(());
+                };
                 out.write_str(head)?;
                 out.write_str("\u{FFFD}")?;
                 // Skip the whole invalid subsequence, or the rest of the
@@ -637,7 +641,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // `\xfe` escape ends at two hex digits and it is easy to miscount the
     // literal by eye.
     assert_eq!(weird.as_bytes().len(), 12);
-    assert_eq!(weird.file_name().map(Path::as_bytes), Some(&b"\x80\xfename"[..]));
+    assert_eq!(
+        weird.file_name().map(Path::as_bytes),
+        Some(&b"\x80\xfename"[..])
+    );
     assert!(weird.is_valid());
     assert!(!Path::new(b"/a\0b").is_valid());
     assert!(Path::new("/a/b").is_absolute());
@@ -645,30 +652,60 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert!(Path::new("").is_empty());
 
     serial_println!("  path::self_test 2: components");
-    let comps: Vec<&[u8]> = Path::new("/a//b/c/").components().map(Path::as_bytes).collect();
+    let comps: Vec<&[u8]> = Path::new("/a//b/c/")
+        .components()
+        .map(Path::as_bytes)
+        .collect();
     assert_eq!(comps, alloc::vec![&b"a"[..], &b"b"[..], &b"c"[..]]);
     assert_eq!(Path::new("/").components().count(), 0);
     assert_eq!(Path::new("").components().count(), 0);
     // A non-UTF-8 component survives the split intact.
-    let c: Vec<&[u8]> = Path::new(b"/\x80/\xff").components().map(Path::as_bytes).collect();
+    let c: Vec<&[u8]> = Path::new(b"/\x80/\xff")
+        .components()
+        .map(Path::as_bytes)
+        .collect();
     assert_eq!(c, alloc::vec![&b"\x80"[..], &b"\xff"[..]]);
 
     serial_println!("  path::self_test 3: parent and file_name");
-    assert_eq!(Path::new("/a/b").parent().map(Path::as_bytes), Some(&b"/a"[..]));
-    assert_eq!(Path::new("/a/b/").parent().map(Path::as_bytes), Some(&b"/a"[..]));
-    assert_eq!(Path::new("/a").parent().map(Path::as_bytes), Some(&b"/"[..]));
+    assert_eq!(
+        Path::new("/a/b").parent().map(Path::as_bytes),
+        Some(&b"/a"[..])
+    );
+    assert_eq!(
+        Path::new("/a/b/").parent().map(Path::as_bytes),
+        Some(&b"/a"[..])
+    );
+    assert_eq!(
+        Path::new("/a").parent().map(Path::as_bytes),
+        Some(&b"/"[..])
+    );
     assert_eq!(Path::new("/").parent().map(Path::as_bytes), None);
     assert_eq!(Path::new("a").parent().map(Path::as_bytes), None);
-    assert_eq!(Path::new("/a/b").file_name().map(Path::as_bytes), Some(&b"b"[..]));
-    assert_eq!(Path::new("/a/b/").file_name().map(Path::as_bytes), Some(&b"b"[..]));
+    assert_eq!(
+        Path::new("/a/b").file_name().map(Path::as_bytes),
+        Some(&b"b"[..])
+    );
+    assert_eq!(
+        Path::new("/a/b/").file_name().map(Path::as_bytes),
+        Some(&b"b"[..])
+    );
     assert_eq!(Path::new("/").file_name().map(Path::as_bytes), None);
 
     serial_println!("  path::self_test 4: extension");
-    assert_eq!(Path::new("/a/b.txt").extension().map(Path::as_bytes), Some(&b"txt"[..]));
-    assert_eq!(Path::new("/a/.hidden").extension().map(Path::as_bytes), None);
+    assert_eq!(
+        Path::new("/a/b.txt").extension().map(Path::as_bytes),
+        Some(&b"txt"[..])
+    );
+    assert_eq!(
+        Path::new("/a/.hidden").extension().map(Path::as_bytes),
+        None
+    );
     assert_eq!(Path::new("/a/b.").extension().map(Path::as_bytes), None);
     assert_eq!(Path::new("/a/b").extension().map(Path::as_bytes), None);
-    assert_eq!(Path::new("/a/b.tar.gz").extension().map(Path::as_bytes), Some(&b"gz"[..]));
+    assert_eq!(
+        Path::new("/a/b.tar.gz").extension().map(Path::as_bytes),
+        Some(&b"gz"[..])
+    );
 
     serial_println!("  path::self_test 5: prefixes are component-aligned");
     assert!(Path::new("/a/b").starts_with("/a"));
@@ -681,7 +718,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert!(!Path::new("a/b").starts_with("/a"));
     assert!(!Path::new("/a/b").starts_with("a"));
     assert_eq!(
-        Path::new("/a/b/c").strip_prefix("/a").map(PathBuf::into_vec),
+        Path::new("/a/b/c")
+            .strip_prefix("/a")
+            .map(PathBuf::into_vec),
         Some(b"b/c".to_vec())
     );
     assert_eq!(Path::new("/ab/c").strip_prefix("/a"), None);
@@ -695,7 +734,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert!(!Path::new("/").starts_with("/a"));
     // Stripping a prefix equal to the whole path yields the empty relative
     // path, not `None` and not `/` — callers append to it.
-    assert_eq!(Path::new("/a/b").strip_prefix("/a/b").map(PathBuf::into_vec), Some(Vec::new()));
+    assert_eq!(
+        Path::new("/a/b")
+            .strip_prefix("/a/b")
+            .map(PathBuf::into_vec),
+        Some(Vec::new())
+    );
     // Repeated and trailing separators are noise, on either side. This is
     // exactly what the old `starts_with(prefix) && bytes[len] == b'/'` idiom
     // got wrong when `prefix` carried a trailing slash.
@@ -731,15 +775,27 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert!(!p.pop());
     // Joining a non-UTF-8 name onto a UTF-8 base is the ordinary case, not an
     // error.
-    assert_eq!(Path::new("/d").join(Path::new(b"\x80")).into_vec(), b"/d/\x80".to_vec());
+    assert_eq!(
+        Path::new("/d").join(Path::new(b"\x80")).into_vec(),
+        b"/d/\x80".to_vec()
+    );
 
     serial_println!("  path::self_test 7: display is lossy and only for humans");
     assert_eq!(format!("{}", Path::new("/a/b").display()), "/a/b");
-    assert_eq!(format!("{}", Path::new(b"/a/\x80b").display()), "/a/\u{FFFD}b");
+    assert_eq!(
+        format!("{}", Path::new(b"/a/\x80b").display()),
+        "/a/\u{FFFD}b"
+    );
     // A truncated multi-byte sequence at the very end must not loop forever
     // or panic.
-    assert_eq!(format!("{}", Path::new(b"/a/\xe2\x82").display()), "/a/\u{FFFD}");
-    assert_eq!(format!("{}", Path::new(b"\xff\xff").display()), "\u{FFFD}\u{FFFD}");
+    assert_eq!(
+        format!("{}", Path::new(b"/a/\xe2\x82").display()),
+        "/a/\u{FFFD}"
+    );
+    assert_eq!(
+        format!("{}", Path::new(b"\xff\xff").display()),
+        "\u{FFFD}\u{FFFD}"
+    );
     // Two different byte strings can render identically — which is exactly
     // why a rendered path must never be used to reopen a file.
     assert_eq!(
@@ -754,7 +810,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert_eq!(format!("[{:<6}]", Path::new("abc").display()), "[abc   ]");
     // Padding counts `char`s after the lossy decode, so a 2-byte invalid
     // sequence is one replacement char wide, not two.
-    assert_eq!(format!("[{:>4}]", Path::new(b"\xff\xff").display()), "[  \u{FFFD}\u{FFFD}]");
+    assert_eq!(
+        format!("[{:>4}]", Path::new(b"\xff\xff").display()),
+        "[  \u{FFFD}\u{FFFD}]"
+    );
 
     serial_println!("  path::self_test 8: dot components");
     assert!(Path::new("/a/b").has_no_dot_components());
@@ -767,9 +826,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("  path::self_test 9: from_utf16 is WTF-8, not lossy UTF-8");
     // ASCII, 2-byte, 3-byte.
     assert_eq!(PathBuf::from_utf16(&[]).as_path(), Path::new(""));
-    assert_eq!(PathBuf::from_utf16(&[0x0061, 0x002F, 0x0062]).as_path(), Path::new("a/b"));
-    assert_eq!(PathBuf::from_utf16(&[0x00E9]).into_vec(), b"\xc3\xa9".to_vec());
-    assert_eq!(PathBuf::from_utf16(&[0x20AC]).into_vec(), b"\xe2\x82\xac".to_vec());
+    assert_eq!(
+        PathBuf::from_utf16(&[0x0061, 0x002F, 0x0062]).as_path(),
+        Path::new("a/b")
+    );
+    assert_eq!(
+        PathBuf::from_utf16(&[0x00E9]).into_vec(),
+        b"\xc3\xa9".to_vec()
+    );
+    assert_eq!(
+        PathBuf::from_utf16(&[0x20AC]).into_vec(),
+        b"\xe2\x82\xac".to_vec()
+    );
     // A well-formed surrogate pair becomes the 4-byte encoding of one scalar
     // (U+10437), not two 3-byte surrogates.
     assert_eq!(
@@ -790,9 +858,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert_ne!(lone_high.as_path(), lone_low.as_path());
     // A high surrogate followed by a non-low unit is unpaired, and the unit
     // after it must still be encoded rather than swallowed.
-    assert_eq!(PathBuf::from_utf16(&[0xD800, 0x0061]).into_vec(), b"\xed\xa0\x80a".to_vec());
+    assert_eq!(
+        PathBuf::from_utf16(&[0xD800, 0x0061]).into_vec(),
+        b"\xed\xa0\x80a".to_vec()
+    );
     // A high surrogate at the very end must not read past the buffer.
-    assert_eq!(PathBuf::from_utf16(&[0xD800]).into_vec(), b"\xed\xa0\x80".to_vec());
+    assert_eq!(
+        PathBuf::from_utf16(&[0xD800]).into_vec(),
+        b"\xed\xa0\x80".to_vec()
+    );
 
     serial_println!("  path: all tests passed");
     Ok(())

@@ -120,9 +120,9 @@ pub struct CheckpointDiff {
 struct CheckpointStore(core::cell::UnsafeCell<[Checkpoint; MAX_CHECKPOINTS]>);
 unsafe impl Sync for CheckpointStore {}
 
-static STORE: CheckpointStore = CheckpointStore(
-    core::cell::UnsafeCell::new([Checkpoint::empty(); MAX_CHECKPOINTS])
-);
+static STORE: CheckpointStore = CheckpointStore(core::cell::UnsafeCell::new(
+    [Checkpoint::empty(); MAX_CHECKPOINTS],
+));
 
 /// Number of checkpoints currently stored.
 static STORED_COUNT: AtomicU8 = AtomicU8::new(0);
@@ -161,8 +161,8 @@ pub fn save(label: u8) -> usize {
 #[must_use]
 pub fn capture(label: u8) -> Checkpoint {
     let frame_stats = frame::stats();
-    let (free_frames, total_frames) = frame_stats
-        .map_or((0, 0), |s| (s.free_frames as u32, s.total_frames as u32));
+    let (free_frames, total_frames) =
+        frame_stats.map_or((0, 0), |s| (s.free_frames as u32, s.total_frames as u32));
 
     let owner_summary = frame_owner::summary();
     let mut owner_counts = [0u32; NUM_OWNERS];
@@ -308,8 +308,11 @@ pub fn self_test() {
     assert_eq!(cp.label, b'A');
     assert!(cp.total_frames > 0);
     assert!(cp.free_frames > 0);
-    serial_println!("[alloc_checkpoint]   Save/get: OK (free={}, total={})",
-        cp.free_frames, cp.total_frames);
+    serial_println!(
+        "[alloc_checkpoint]   Save/get: OK (free={}, total={})",
+        cp.free_frames,
+        cp.total_frames
+    );
 
     // Test 3: Save a second checkpoint and diff.
     // Allocate a frame to create a difference.
@@ -320,16 +323,24 @@ pub fn self_test() {
     // We allocated one frame between A and B, so free_delta should be negative.
     // (fewer free frames in B than in A).
     if test_frame.is_ok() {
-        assert!(d.free_delta <= 0, "should have fewer free frames: delta={}",
-            d.free_delta);
+        assert!(
+            d.free_delta <= 0,
+            "should have fewer free frames: delta={}",
+            d.free_delta
+        );
     }
-    serial_println!("[alloc_checkpoint]   Diff A→B: free_delta={}, slab_delta={}",
-        d.free_delta, d.heap_slab_delta);
+    serial_println!(
+        "[alloc_checkpoint]   Diff A→B: free_delta={}, slab_delta={}",
+        d.free_delta,
+        d.heap_slab_delta
+    );
 
     // Free the test frame.
     if let Ok(f) = test_frame {
         // SAFETY: f was returned by alloc_frame_zeroed and has not been freed.
-        unsafe { let _ = frame::free_frame(f); }
+        unsafe {
+            let _ = frame::free_frame(f);
+        }
     }
 
     // Test 4: Overwrite existing checkpoint.

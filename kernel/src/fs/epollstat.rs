@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -124,7 +124,9 @@ where
 /// epoll_wait.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         instances: Vec::new(),
         next_id: 1,
@@ -139,13 +141,21 @@ pub fn init_defaults() {
 /// Create an epoll instance.
 pub fn create_instance(pid: u32, max_events: u32) -> KernelResult<u32> {
     with_state(|state| {
-        if state.instances.len() >= MAX_INSTANCES { return Err(KernelError::ResourceExhausted); }
+        if state.instances.len() >= MAX_INSTANCES {
+            return Err(KernelError::ResourceExhausted);
+        }
         let now = crate::hpet::elapsed_ns();
         let id = state.next_id;
         state.next_id += 1;
         state.instances.push(EpollInstance {
-            id, owner_pid: pid, registered_fds: 0, max_events,
-            wait_calls: 0, events_delivered: 0, timeouts: 0, created_ns: now,
+            id,
+            owner_pid: pid,
+            registered_fds: 0,
+            max_events,
+            wait_calls: 0,
+            events_delivered: 0,
+            timeouts: 0,
+            created_ns: now,
         });
         state.total_creates += 1;
         Ok(id)
@@ -155,7 +165,10 @@ pub fn create_instance(pid: u32, max_events: u32) -> KernelResult<u32> {
 /// Destroy an epoll instance.
 pub fn destroy_instance(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.instances.iter().position(|i| i.id == id)
+        let idx = state
+            .instances
+            .iter()
+            .position(|i| i.id == id)
             .ok_or(KernelError::NotFound)?;
         state.instances.remove(idx);
         Ok(())
@@ -165,7 +178,10 @@ pub fn destroy_instance(id: u32) -> KernelResult<()> {
 /// Add a file descriptor to an epoll instance.
 pub fn add_fd(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let inst = state.instances.iter_mut().find(|i| i.id == id)
+        let inst = state
+            .instances
+            .iter_mut()
+            .find(|i| i.id == id)
             .ok_or(KernelError::NotFound)?;
         inst.registered_fds += 1;
         Ok(())
@@ -175,7 +191,10 @@ pub fn add_fd(id: u32) -> KernelResult<()> {
 /// Remove a file descriptor from an epoll instance.
 pub fn remove_fd(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let inst = state.instances.iter_mut().find(|i| i.id == id)
+        let inst = state
+            .instances
+            .iter_mut()
+            .find(|i| i.id == id)
             .ok_or(KernelError::NotFound)?;
         inst.registered_fds = inst.registered_fds.saturating_sub(1);
         Ok(())
@@ -185,7 +204,10 @@ pub fn remove_fd(id: u32) -> KernelResult<()> {
 /// Record an epoll_wait call.
 pub fn record_wait(id: u32, events_returned: u32, timed_out: bool) -> KernelResult<()> {
     with_state(|state| {
-        let inst = state.instances.iter_mut().find(|i| i.id == id)
+        let inst = state
+            .instances
+            .iter_mut()
+            .find(|i| i.id == id)
             .ok_or(KernelError::NotFound)?;
         inst.wait_calls += 1;
         inst.events_delivered += events_returned as u64;
@@ -201,13 +223,20 @@ pub fn record_wait(id: u32, events_returned: u32, timed_out: bool) -> KernelResu
 
 /// Get all instances.
 pub fn list_instances() -> Vec<EpollInstance> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.instances.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.instances.clone())
 }
 
 /// Get instances for a specific PID.
 pub fn instances_for_pid(pid: u32) -> Vec<EpollInstance> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.instances.iter().filter(|i| i.owner_pid == pid).cloned().collect()
+        s.instances
+            .iter()
+            .filter(|i| i.owner_pid == pid)
+            .cloned()
+            .collect()
     })
 }
 
@@ -215,7 +244,14 @@ pub fn instances_for_pid(pid: u32) -> Vec<EpollInstance> {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.instances.len(), s.total_creates, s.total_waits, s.total_events, s.total_timeouts, s.ops),
+        Some(s) => (
+            s.instances.len(),
+            s.total_creates,
+            s.total_waits,
+            s.total_events,
+            s.total_timeouts,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -249,27 +285,43 @@ pub fn self_test() {
     // 3: Add FDs (exact, from zero).
     add_fd(id).expect("add");
     add_fd(id).expect("add2");
-    let inst = list_instances().iter().find(|i| i.id == id).cloned().expect("inst");
+    let inst = list_instances()
+        .iter()
+        .find(|i| i.id == id)
+        .cloned()
+        .expect("inst");
     assert_eq!(inst.registered_fds, 2);
     assert!(add_fd(9999).is_err()); // NotFound on unknown instance
     crate::serial_println!("  [3/8] add fd: OK");
 
     // 4: Remove FD.
     remove_fd(id).expect("remove");
-    let inst = list_instances().iter().find(|i| i.id == id).cloned().expect("inst");
+    let inst = list_instances()
+        .iter()
+        .find(|i| i.id == id)
+        .cloned()
+        .expect("inst");
     assert_eq!(inst.registered_fds, 1);
     crate::serial_println!("  [4/8] remove fd: OK");
 
     // 5: Record wait (delivers 3 events).
     record_wait(id, 3, false).expect("wait");
-    let inst = list_instances().iter().find(|i| i.id == id).cloned().expect("inst");
+    let inst = list_instances()
+        .iter()
+        .find(|i| i.id == id)
+        .cloned()
+        .expect("inst");
     assert_eq!(inst.wait_calls, 1);
     assert_eq!(inst.events_delivered, 3);
     crate::serial_println!("  [5/8] wait: OK");
 
     // 6: A timed-out wait bumps the timeout counter exactly.
     record_wait(id, 0, true).expect("timeout");
-    let inst = list_instances().iter().find(|i| i.id == id).cloned().expect("inst");
+    let inst = list_instances()
+        .iter()
+        .find(|i| i.id == id)
+        .cloned()
+        .expect("inst");
     assert_eq!(inst.timeouts, 1);
     assert_eq!(inst.wait_calls, 2);
     crate::serial_println!("  [6/8] timeout: OK");

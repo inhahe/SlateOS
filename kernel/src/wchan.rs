@@ -35,8 +35,8 @@
 //! - FreeBSD `ki_wchan` — wait channel address
 //! - ps(1) WCHAN column
 
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -226,7 +226,9 @@ pub fn set(task_id: u64, channel: WaitChannel, arg: u64) {
 #[inline]
 pub fn clear(task_id: u64) {
     let idx = task_id as usize & TABLE_MASK;
-    TABLE[idx].channel.store(WaitChannel::None as u8, Ordering::Release);
+    TABLE[idx]
+        .channel
+        .store(WaitChannel::None as u8, Ordering::Release);
     TABLE[idx].arg.store(0, Ordering::Relaxed);
     if let Some(stats) = PER_CPU_STATS.get(crate::smp::fast_cpu_index()) {
         bump(&stats.clears);

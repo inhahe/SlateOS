@@ -23,13 +23,13 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 // Paths are byte strings, not UTF-8. See `super::path` for why.
@@ -416,7 +416,13 @@ pub trait FileSystem: Send {
         let total = all.len();
         let start = offset.min(total);
         let end = start.saturating_add(count).min(total);
-        Ok((all.into_iter().skip(start).take(end.saturating_sub(start)).collect(), total))
+        Ok((
+            all.into_iter()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .collect(),
+            total,
+        ))
     }
 
     /// Read the contents of a file.
@@ -914,7 +920,6 @@ impl MountOptions {
         }
         result
     }
-
 }
 
 /// Format options as a comma-separated string for /proc/mounts.
@@ -1007,9 +1012,7 @@ pub struct FileId {
 }
 
 /// The global VFS state.
-static VFS: Mutex<VfsInner> = Mutex::new(VfsInner {
-    mounts: Vec::new(),
-});
+static VFS: Mutex<VfsInner> = Mutex::new(VfsInner { mounts: Vec::new() });
 
 struct VfsInner {
     mounts: Vec<MountPoint>,
@@ -1251,7 +1254,9 @@ impl VfsDcache {
         self.entries[lru_idx].key.extend_bytes(key.as_bytes());
         self.entries[lru_idx].follow_last = follow_last;
         self.entries[lru_idx].resolved.clear();
-        self.entries[lru_idx].resolved.extend_bytes(resolved.as_bytes());
+        self.entries[lru_idx]
+            .resolved
+            .extend_bytes(resolved.as_bytes());
         self.entries[lru_idx].last_access = self.counter;
         self.entries[lru_idx].valid = true;
         self.entries[lru_idx].negative = false;
@@ -1469,7 +1474,10 @@ impl Vfs {
         let mount_path = mount_path.as_ref();
         let mut vfs = VFS.lock();
 
-        let idx = vfs.mounts.iter().position(|mp| mp.path.as_path() == mount_path)
+        let idx = vfs
+            .mounts
+            .iter()
+            .position(|mp| mp.path.as_path() == mount_path)
             .ok_or(KernelError::NotFound)?;
 
         // Refuse to unmount root.
@@ -1496,7 +1504,8 @@ impl Vfs {
         if let Err(e) = vfs.mounts[idx].fs.lock().sync() {
             crate::serial_println!(
                 "[vfs] WARNING: sync failed during unmount of '{}': {:?}",
-                mount_path.display(), e
+                mount_path.display(),
+                e
             );
             // Continue with unmount anyway — data loss is better than a
             // permanently stuck mount.
@@ -1858,7 +1867,11 @@ impl Vfs {
         let total = entries.len();
         let start = offset.min(total);
         let end = start.saturating_add(count).min(total);
-        let page: Vec<DirEntry> = entries.into_iter().skip(start).take(end.saturating_sub(start)).collect();
+        let page: Vec<DirEntry> = entries
+            .into_iter()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .collect();
         Ok((page, total))
     }
 
@@ -1881,9 +1894,7 @@ impl Vfs {
         // gate).  The read path is high-frequency, so without an ACCESS watch
         // this is a single relaxed atomic load and we never touch the notify
         // lock.  Emitted after releasing the VFS lock (notify is a leaf lock).
-        if result.is_ok()
-            && super::notify::interest_includes(super::notify::FsEventMask::ACCESS)
-        {
+        if result.is_ok() && super::notify::interest_includes(super::notify::FsEventMask::ACCESS) {
             super::notify::emit(super::notify::FsEventType::Accessed, path, None);
         }
         result
@@ -1906,7 +1917,13 @@ impl Vfs {
             if meta.entry_type != EntryType::File || meta.ino == 0 {
                 return guard.read_file(&relative);
             }
-            (FileId { fs_id, ino: meta.ino }, meta.size)
+            (
+                FileId {
+                    fs_id,
+                    ino: meta.ino,
+                },
+                meta.size,
+            )
         };
         if size == 0 {
             return Ok(Vec::new());
@@ -2043,7 +2060,11 @@ impl Vfs {
         Self::copy_recursive_inner(src, dst, 0)
     }
 
-    fn copy_recursive_inner(src: impl AsRef<Path>, dst: impl AsRef<Path>, depth: usize) -> KernelResult<u64> {
+    fn copy_recursive_inner(
+        src: impl AsRef<Path>,
+        dst: impl AsRef<Path>,
+        depth: usize,
+    ) -> KernelResult<u64> {
         let src = src.as_ref();
         let dst = dst.as_ref();
         const MAX_DEPTH: usize = 64;
@@ -2078,7 +2099,8 @@ impl Vfs {
         for child in &entries {
             let src_child = src.join(&child.name);
             let dst_child = dst.join(&child.name);
-            let bytes = Self::copy_recursive_inner(&src_child, &dst_child, depth.saturating_add(1))?;
+            let bytes =
+                Self::copy_recursive_inner(&src_child, &dst_child, depth.saturating_add(1))?;
             total_bytes = total_bytes.saturating_add(bytes);
         }
 
@@ -2333,16 +2355,18 @@ impl Vfs {
     /// Open file descriptors hold a resolved reference (Unix semantics — an fd
     /// is immune to later chroot/rename/symlink changes), so handle-backed I/O
     /// must use this entry point, never the path-based [`read_at`](Self::read_at).
-    pub fn read_at_resolved(path: impl AsRef<Path>, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    pub fn read_at_resolved(
+        path: impl AsRef<Path>,
+        offset: u64,
+        len: usize,
+    ) -> KernelResult<Vec<u8>> {
         let path = path.as_ref();
         check_file_tags(path)?;
         let result = Self::read_at_routed(path, offset, len);
         // inotify IN_ACCESS, gated on a live ACCESS watch (see `read_file`).
         // The gate keeps this off the read hot path when no watch wants it —
         // the reason ACCESS was historically not emitted here at all.
-        if result.is_ok()
-            && super::notify::interest_includes(super::notify::FsEventMask::ACCESS)
-        {
+        if result.is_ok() && super::notify::interest_includes(super::notify::FsEventMask::ACCESS) {
             super::notify::emit(super::notify::FsEventType::Accessed, path, None);
         }
         result
@@ -2384,7 +2408,13 @@ impl Vfs {
             if meta.entry_type != EntryType::File || meta.ino == 0 {
                 return guard.read_at(&relative, offset, len);
             }
-            (FileId { fs_id, ino: meta.ino }, meta.size)
+            (
+                FileId {
+                    fs_id,
+                    ino: meta.ino,
+                },
+                meta.size,
+            )
         };
 
         // Clamp the request to the bytes that actually exist (the page cache
@@ -2414,7 +2444,11 @@ impl Vfs {
     /// the caller's pre-zeroed page (demand-paging zero-fill semantics).  The
     /// mount is re-resolved under the VFS lock here; the page-cache lock is
     /// already dropped before this runs, so the cache and VFS locks never nest.
-    fn fill_file_page(path: impl AsRef<Path>, page_off: u64, page_buf: &mut [u8]) -> KernelResult<()> {
+    fn fill_file_page(
+        path: impl AsRef<Path>,
+        page_off: u64,
+        page_buf: &mut [u8],
+    ) -> KernelResult<()> {
         let path = path.as_ref();
         let data = {
             let (fs, _id, _opts, relative) = resolve_mount(path)?;
@@ -2443,7 +2477,11 @@ impl Vfs {
     /// are internal cache fills, not user-visible reads (the user-visible read
     /// that triggered the fill emits `ACCESS` at the [`read_at`](Self::read_at)
     /// layer).
-    pub fn read_at_uncached(path: impl AsRef<Path>, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    pub fn read_at_uncached(
+        path: impl AsRef<Path>,
+        offset: u64,
+        len: usize,
+    ) -> KernelResult<Vec<u8>> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         Self::read_at_uncached_resolved(&path, offset, len)
@@ -2452,7 +2490,11 @@ impl Vfs {
     /// Like [`read_at_uncached`](Self::read_at_uncached) but on an
     /// **already-resolved** host path (see
     /// [`read_at_resolved`](Self::read_at_resolved)).
-    pub fn read_at_uncached_resolved(path: impl AsRef<Path>, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    pub fn read_at_uncached_resolved(
+        path: impl AsRef<Path>,
+        offset: u64,
+        len: usize,
+    ) -> KernelResult<Vec<u8>> {
         let path = path.as_ref();
         check_file_tags(path)?;
         let (fs, _id, _opts, relative) = resolve_mount(path)?;
@@ -2579,7 +2621,11 @@ impl Vfs {
         Self::rename_inner(from, to, true)
     }
 
-    fn rename_inner(from: impl AsRef<Path>, to: impl AsRef<Path>, noreplace: bool) -> KernelResult<()> {
+    fn rename_inner(
+        from: impl AsRef<Path>,
+        to: impl AsRef<Path>,
+        noreplace: bool,
+    ) -> KernelResult<()> {
         let from = from.as_ref();
         let to = to.as_ref();
         crate::ipc::namespace::check_writable(from)?;
@@ -2754,7 +2800,13 @@ impl Vfs {
         let vfs = VFS.lock();
         vfs.mounts
             .iter()
-            .map(|mp| (mp.path.clone(), String::from(mp.fs.lock().fs_type()), mp.options))
+            .map(|mp| {
+                (
+                    mp.path.clone(),
+                    String::from(mp.fs.lock().fs_type()),
+                    mp.options,
+                )
+            })
             .collect()
     }
 
@@ -2980,7 +3032,8 @@ impl Vfs {
         check_writable(&path)?;
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-            fs.lock().set_permissions_no_follow(&relative, permissions)?;
+            fs.lock()
+                .set_permissions_no_follow(&relative, permissions)?;
         }
         super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
@@ -3017,7 +3070,8 @@ impl Vfs {
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-        fs.lock().set_times_no_follow(&relative, accessed_ns, modified_ns)
+        fs.lock()
+            .set_times_no_follow(&relative, accessed_ns, modified_ns)
         // No notify/journal — timestamp changes are metadata-only.
     }
 
@@ -3080,7 +3134,11 @@ impl Vfs {
     }
 
     /// Set an xattr WITHOUT following a trailing symlink (`lsetxattr`).
-    pub fn set_xattr_no_follow(path: impl AsRef<Path>, key: &str, value: &[u8]) -> KernelResult<()> {
+    pub fn set_xattr_no_follow(
+        path: impl AsRef<Path>,
+        key: &str,
+        value: &[u8],
+    ) -> KernelResult<()> {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
@@ -3130,11 +3188,7 @@ impl Vfs {
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
         // Intercept: let pre-operation handlers approve/deny symlink creation.
-        super::intercept::pre_check(
-            super::intercept::FsOp::Symlink,
-            &path,
-            Some(target),
-        )?;
+        super::intercept::pre_check(super::intercept::FsOp::Symlink, &path, Some(target))?;
         // Quota: creating a symlink consumes an inode.
         enforce_quota_create(&path)?;
         {
@@ -3177,7 +3231,10 @@ impl Vfs {
     /// If `existing` names a symlink, the new directory entry hard-links the
     /// symlink inode itself rather than its target.  Intermediate symlinks in
     /// `existing` are still resolved; only the final component is not.
-    pub fn link_no_follow(existing: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
+    pub fn link_no_follow(
+        existing: impl AsRef<Path>,
+        new_path: impl AsRef<Path>,
+    ) -> KernelResult<()> {
         let existing = existing.as_ref();
         let new_path = new_path.as_ref();
         Self::link_inner(existing, new_path, false)
@@ -3187,7 +3244,11 @@ impl Vfs {
     /// trailing symlink in `existing` is dereferenced before the hard link is
     /// created; everything else (namespace/write checks, same-mount rule,
     /// quota, notify/journal/audit) is identical.
-    fn link_inner(existing: impl AsRef<Path>, new_path: impl AsRef<Path>, follow: bool) -> KernelResult<()> {
+    fn link_inner(
+        existing: impl AsRef<Path>,
+        new_path: impl AsRef<Path>,
+        follow: bool,
+    ) -> KernelResult<()> {
         let existing = existing.as_ref();
         let new_path = new_path.as_ref();
         crate::ipc::namespace::check_writable(new_path)?;
@@ -3199,11 +3260,7 @@ impl Vfs {
         let new_path = Self::resolve_no_follow(new_path)?;
         check_writable(&new_path)?;
         // Intercept: let pre-operation handlers approve/deny link creation.
-        super::intercept::pre_check(
-            super::intercept::FsOp::Link,
-            &new_path,
-            Some(&existing),
-        )?;
+        super::intercept::pre_check(super::intercept::FsOp::Link, &new_path, Some(&existing))?;
         // Quota: creating a link is creating a new inode reference.
         enforce_quota_create(&new_path)?;
 
@@ -3374,7 +3431,9 @@ impl Vfs {
                 Err(e) => {
                     crate::serial_println!(
                         "[vfs] mount_info: statvfs failed for '{}' ({}): {:?}",
-                        path.display(), guard.fs_type(), e
+                        path.display(),
+                        guard.fs_type(),
+                        e
                     );
                     FsInfo {
                         fs_type: String::from(guard.fs_type()),
@@ -3738,7 +3797,11 @@ impl Vfs {
     /// `open`), so they must NOT re-run namespace translation — doing so would
     /// re-apply the chroot jail prefix a second time (double-jail) and key the
     /// lock on the wrong path. This worker operates directly on `path`.
-    pub fn flock_resolved(path: impl AsRef<Path>, owner: u64, lock_type: LockType) -> KernelResult<()> {
+    pub fn flock_resolved(
+        path: impl AsRef<Path>,
+        owner: u64,
+        lock_type: LockType,
+    ) -> KernelResult<()> {
         let path = path.as_ref();
         let mut table = LOCK_TABLE.lock();
 
@@ -3771,7 +3834,11 @@ impl Vfs {
             match lock_type {
                 LockType::Shared => {
                     // Compatible only if no exclusive lock exists.
-                    if entry.locks.iter().any(|l| l.lock_type == LockType::Exclusive) {
+                    if entry
+                        .locks
+                        .iter()
+                        .any(|l| l.lock_type == LockType::Exclusive)
+                    {
                         return Err(KernelError::WouldBlock);
                     }
                 }
@@ -3865,7 +3932,11 @@ impl Vfs {
                 return Ok(None);
             }
             // If any lock is exclusive, report exclusive.
-            if entry.locks.iter().any(|l| l.lock_type == LockType::Exclusive) {
+            if entry
+                .locks
+                .iter()
+                .any(|l| l.lock_type == LockType::Exclusive)
+            {
                 return Ok(Some((LockType::Exclusive, 1)));
             }
             // Otherwise all are shared.
@@ -4102,7 +4173,7 @@ fn glob_recurse(
 fn globstar_recurse(
     base: &Path,
     components: &[&Path],
-    star_depth: usize,  // Index of `**` in components.
+    star_depth: usize, // Index of `**` in components.
     results: &mut Vec<PathBuf>,
     max_results: usize,
     recurse_depth: usize,
@@ -4203,11 +4274,7 @@ fn mount_matches(mount_path: &Path, path: &Path) -> bool {
 /// without the per-mutation `metadata` lookup, so the write/truncate/remove
 /// hot paths pay almost nothing.  Returns `None` for `ino == 0` (no stable
 /// identity, never cacheable).
-fn cache_identity(
-    fs: &mut Box<dyn FileSystem>,
-    fs_id: u64,
-    relative: &Path,
-) -> Option<(u64, u64)> {
+fn cache_identity(fs: &mut Box<dyn FileSystem>, fs_id: u64, relative: &Path) -> Option<(u64, u64)> {
     if !crate::mm::page_cache::is_populated() {
         return None;
     }
@@ -4318,21 +4385,11 @@ fn enforce_quota_write(path: &Path, bytes: u64) -> KernelResult<()> {
         super::quota::QuotaCheckResult::Allowed => Ok(()),
         super::quota::QuotaCheckResult::SoftWarning => {
             // Over soft limit but within grace — warn and allow.
-            super::audit::log_err(
-                super::audit::AuditOp::Write,
-                0,
-                path,
-                KernelError::DiskFull,
-            );
+            super::audit::log_err(super::audit::AuditOp::Write, 0, path, KernelError::DiskFull);
             Ok(())
         }
         super::quota::QuotaCheckResult::Denied => {
-            super::audit::log_err(
-                super::audit::AuditOp::Write,
-                0,
-                path,
-                KernelError::DiskFull,
-            );
+            super::audit::log_err(super::audit::AuditOp::Write, 0, path, KernelError::DiskFull);
             Err(KernelError::DiskFull)
         }
     }
@@ -4346,21 +4403,11 @@ fn enforce_quota_create(path: &Path) -> KernelResult<()> {
     match super::quota::check_create(0, 0) {
         super::quota::QuotaCheckResult::Allowed => Ok(()),
         super::quota::QuotaCheckResult::SoftWarning => {
-            super::audit::log_err(
-                super::audit::AuditOp::Mkdir,
-                0,
-                path,
-                KernelError::DiskFull,
-            );
+            super::audit::log_err(super::audit::AuditOp::Mkdir, 0, path, KernelError::DiskFull);
             Ok(())
         }
         super::quota::QuotaCheckResult::Denied => {
-            super::audit::log_err(
-                super::audit::AuditOp::Mkdir,
-                0,
-                path,
-                KernelError::DiskFull,
-            );
+            super::audit::log_err(super::audit::AuditOp::Mkdir, 0, path, KernelError::DiskFull);
             Err(KernelError::DiskFull)
         }
     }
@@ -4398,12 +4445,7 @@ fn check_file_tags(path: &Path) -> KernelResult<()> {
         None => return Ok(()), // No credentials — process being torn down.
     };
 
-    crate::cap::file_tags::check_access(
-        creds.uid,
-        creds.gid,
-        &creds.groups,
-        path,
-    )
+    crate::cap::file_tags::check_access(creds.uid, creds.gid, &creds.groups, path)
 }
 
 // ---------------------------------------------------------------------------
@@ -4437,7 +4479,10 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[vfs]   validate_path rejects relative: OK");
         }
         other => {
-            serial_println!("[vfs]   FAIL: relative path should be InvalidArgument, got {:?}", other);
+            serial_println!(
+                "[vfs]   FAIL: relative path should be InvalidArgument, got {:?}",
+                other
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -4451,7 +4496,10 @@ pub fn self_test() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    serial_println!("[vfs]   normalize_path: /a/b/../c/./d → {} OK", norm.display());
+    serial_println!(
+        "[vfs]   normalize_path: /a/b/../c/./d → {} OK",
+        norm.display()
+    );
 
     // --- Intra-mount symlink resolution (on /tmp memfs) ---
     if has_tmp {
@@ -4464,7 +4512,10 @@ pub fn self_test() -> KernelResult<()> {
         // stat through the symlink should return File.
         let stat_via_link = Vfs::stat("/tmp/_vfs_test_link")?;
         if stat_via_link.entry_type != EntryType::File {
-            serial_println!("[vfs]   FAIL: stat through symlink should be File, got {:?}", stat_via_link.entry_type);
+            serial_println!(
+                "[vfs]   FAIL: stat through symlink should be File, got {:?}",
+                stat_via_link.entry_type
+            );
             let _ = Vfs::remove("/tmp/_vfs_test_link");
             let _ = Vfs::remove("/tmp/_vfs_test_target");
             return Err(KernelError::InternalError);
@@ -4474,7 +4525,10 @@ pub fn self_test() -> KernelResult<()> {
         // lstat on the symlink itself should return Symlink.
         let lstat_link = Vfs::lstat("/tmp/_vfs_test_link")?;
         if lstat_link.entry_type != EntryType::Symlink {
-            serial_println!("[vfs]   FAIL: lstat on symlink should be Symlink, got {:?}", lstat_link.entry_type);
+            serial_println!(
+                "[vfs]   FAIL: lstat on symlink should be Symlink, got {:?}",
+                lstat_link.entry_type
+            );
             let _ = Vfs::remove("/tmp/_vfs_test_link");
             let _ = Vfs::remove("/tmp/_vfs_test_target");
             return Err(KernelError::InternalError);
@@ -4519,7 +4573,10 @@ pub fn self_test() -> KernelResult<()> {
                 serial_println!("[vfs]     stat through cross-mount symlink: File OK");
             }
             Ok(entry) => {
-                serial_println!("[vfs]   FAIL: cross-mount stat type={:?}, expected File", entry.entry_type);
+                serial_println!(
+                    "[vfs]   FAIL: cross-mount stat type={:?}, expected File",
+                    entry.entry_type
+                );
                 let _ = Vfs::remove(cross_link);
                 let _ = Vfs::remove("/tmp/_vfs_test_link");
                 let _ = Vfs::remove("/tmp/_vfs_test_target");
@@ -4540,7 +4597,10 @@ pub fn self_test() -> KernelResult<()> {
                 serial_println!("[vfs]     read through cross-mount symlink: content OK");
             }
             Ok(data) => {
-                serial_println!("[vfs]   FAIL: cross-mount read returned {} bytes, wrong content", data.len());
+                serial_println!(
+                    "[vfs]   FAIL: cross-mount read returned {} bytes, wrong content",
+                    data.len()
+                );
                 let _ = Vfs::remove(cross_link);
                 let _ = Vfs::remove("/tmp/_vfs_test_link");
                 let _ = Vfs::remove("/tmp/_vfs_test_target");
@@ -4672,7 +4732,10 @@ pub fn self_test() -> KernelResult<()> {
         Vfs::funlock(test_path, 200)?;
         let state = Vfs::lock_query(test_path)?;
         if state.is_some() {
-            serial_println!("[vfs]   FAIL: expected no lock after unlock, got {:?}", state);
+            serial_println!(
+                "[vfs]   FAIL: expected no lock after unlock, got {:?}",
+                state
+            );
             let _ = Vfs::remove(test_path);
             return Err(KernelError::InternalError);
         }
@@ -4706,7 +4769,10 @@ pub fn self_test() -> KernelResult<()> {
         Vfs::flock(test_path, 300, LockType::Shared)?;
         let state = Vfs::lock_query(test_path)?;
         if !matches!(state, Some((LockType::Shared, 1))) {
-            serial_println!("[vfs]   FAIL: expected Shared after downgrade, got {:?}", state);
+            serial_println!(
+                "[vfs]   FAIL: expected Shared after downgrade, got {:?}",
+                state
+            );
             Vfs::funlock_all(300);
             let _ = Vfs::remove(test_path);
             return Err(KernelError::InternalError);
@@ -4745,12 +4811,14 @@ pub fn self_test() -> KernelResult<()> {
         if hits_after > hits_mid {
             serial_println!(
                 "[vfs]     dcache hit on repeated path: {} → {} hits OK",
-                hits_mid, hits_after,
+                hits_mid,
+                hits_after,
             );
         } else {
             serial_println!(
                 "[vfs]     dcache repeated access: hits {} → {} (no increase, may be OK if path was simple)",
-                hits_mid, hits_after,
+                hits_mid,
+                hits_after,
             );
         }
         serial_println!("[vfs]     dcache valid entries: {}", valid_entries);
@@ -4765,13 +4833,15 @@ pub fn self_test() -> KernelResult<()> {
         if valid_after_remove < valid_before_remove {
             serial_println!(
                 "[vfs]     dcache invalidation on remove: {} → {} valid OK",
-                valid_before_remove, valid_after_remove,
+                valid_before_remove,
+                valid_after_remove,
             );
         } else {
             // Might be the same if other entries were added between.
             serial_println!(
                 "[vfs]     dcache after remove: {} → {} valid (invalidation may have been masked by new inserts)",
-                valid_before_remove, valid_after_remove,
+                valid_before_remove,
+                valid_after_remove,
             );
         }
 
@@ -4819,14 +4889,16 @@ pub fn self_test() -> KernelResult<()> {
         if hits_post_neg > hits_mid_neg {
             serial_println!(
                 "[vfs]     negative cache hit: {} → {} hits OK",
-                hits_mid_neg, hits_post_neg,
+                hits_mid_neg,
+                hits_post_neg,
             );
         } else {
             // May happen if resolve_follow doesn't fail at the resolve level
             // for this particular path (parent exists but child doesn't).
             serial_println!(
                 "[vfs]     negative cache: {} → {} hits (path may not trigger resolve-level NotFound)",
-                hits_mid_neg, hits_post_neg,
+                hits_mid_neg,
+                hits_post_neg,
             );
         }
 
@@ -4851,8 +4923,13 @@ pub fn self_test() -> KernelResult<()> {
         let total = h.saturating_add(m);
         if total > 0 {
             let rate = h.saturating_mul(100) / total;
-            serial_println!("[vfs]     dcache stats: {} hits, {} misses ({}% hit rate), {} valid entries",
-                h, m, rate, v);
+            serial_println!(
+                "[vfs]     dcache stats: {} hits, {} misses ({}% hit rate), {} valid entries",
+                h,
+                m,
+                rate,
+                v
+            );
         } else {
             serial_println!("[vfs]     dcache stats: no accesses yet");
         }
@@ -4870,13 +4947,25 @@ pub fn self_test() -> KernelResult<()> {
 
         // Verify all intermediate directories exist.
         let stat_a = Vfs::stat("/tmp/_vfs_mkdirall")?;
-        assert!(stat_a.entry_type == EntryType::Directory, "mkdirall: root should be dir");
+        assert!(
+            stat_a.entry_type == EntryType::Directory,
+            "mkdirall: root should be dir"
+        );
         let stat_b = Vfs::stat("/tmp/_vfs_mkdirall/a")?;
-        assert!(stat_b.entry_type == EntryType::Directory, "mkdirall: a should be dir");
+        assert!(
+            stat_b.entry_type == EntryType::Directory,
+            "mkdirall: a should be dir"
+        );
         let stat_c = Vfs::stat("/tmp/_vfs_mkdirall/a/b")?;
-        assert!(stat_c.entry_type == EntryType::Directory, "mkdirall: a/b should be dir");
+        assert!(
+            stat_c.entry_type == EntryType::Directory,
+            "mkdirall: a/b should be dir"
+        );
         let stat_d = Vfs::stat(deep_path)?;
-        assert!(stat_d.entry_type == EntryType::Directory, "mkdirall: a/b/c should be dir");
+        assert!(
+            stat_d.entry_type == EntryType::Directory,
+            "mkdirall: a/b/c should be dir"
+        );
 
         // Calling again on existing path should succeed (idempotent).
         Vfs::mkdir_all(deep_path)?;
@@ -4952,7 +5041,11 @@ pub fn self_test() -> KernelResult<()> {
             .iter()
             .any(|e| e.name.as_path() == Path::new("top.txt") && e.entry_type == EntryType::File);
         if !has_a || !has_top {
-            serial_println!("[vfs]   FAIL: copy directory structure wrong (a={}, top.txt={})", has_a, has_top);
+            serial_println!(
+                "[vfs]   FAIL: copy directory structure wrong (a={}, top.txt={})",
+                has_a,
+                has_top
+            );
             let _ = Vfs::remove_recursive("/tmp/_vfs_rc");
             let _ = Vfs::remove_recursive("/tmp/_vfs_rc_copy");
             return Err(KernelError::InternalError);
@@ -4968,7 +5061,10 @@ pub fn self_test() -> KernelResult<()> {
                 removed_count
             );
         } else {
-            serial_println!("[vfs]     remove_recursive: {} items removed OK", removed_count);
+            serial_println!(
+                "[vfs]     remove_recursive: {} items removed OK",
+                removed_count
+            );
         }
 
         // Verify the copy is gone.
@@ -4977,7 +5073,9 @@ pub fn self_test() -> KernelResult<()> {
                 serial_println!("[vfs]     remove_recursive: directory confirmed gone OK");
             }
             Ok(_) => {
-                serial_println!("[vfs]   FAIL: /tmp/_vfs_rc_copy still exists after remove_recursive");
+                serial_println!(
+                    "[vfs]   FAIL: /tmp/_vfs_rc_copy still exists after remove_recursive"
+                );
                 let _ = Vfs::remove_recursive("/tmp/_vfs_rc_copy");
                 let _ = Vfs::remove_recursive("/tmp/_vfs_rc");
                 return Err(KernelError::InternalError);
@@ -5042,7 +5140,9 @@ pub fn self_test() -> KernelResult<()> {
                         serial_println!("[vfs]     cross-mount rename: source removed OK");
                     }
                     _ => {
-                        serial_println!("[vfs]   FAIL: source still exists after cross-mount rename");
+                        serial_println!(
+                            "[vfs]   FAIL: source still exists after cross-mount rename"
+                        );
                         let _ = Vfs::remove(src_path);
                         let _ = Vfs::remove(dst_path);
                         return Err(KernelError::InternalError);
@@ -5058,7 +5158,10 @@ pub fn self_test() -> KernelResult<()> {
                 let _ = Vfs::remove(src_path);
             }
             Err(e) => {
-                serial_println!("[vfs]     cross-mount rename failed: {:?} (may be expected)", e);
+                serial_println!(
+                    "[vfs]     cross-mount rename failed: {:?} (may be expected)",
+                    e
+                );
                 let _ = Vfs::remove(src_path);
             }
         }
@@ -5080,10 +5183,7 @@ pub fn self_test() -> KernelResult<()> {
         // Full listing should have 10 entries.
         let (all, total) = Vfs::readdir_at(pg_dir, 0, 100)?;
         if total != 10 {
-            serial_println!(
-                "[vfs]   FAIL: readdir_at total = {}, expected 10",
-                total
-            );
+            serial_println!("[vfs]   FAIL: readdir_at total = {}, expected 10", total);
             let _ = Vfs::remove_recursive(pg_dir);
             return Err(KernelError::InternalError);
         }
@@ -5095,14 +5195,19 @@ pub fn self_test() -> KernelResult<()> {
             let _ = Vfs::remove_recursive(pg_dir);
             return Err(KernelError::InternalError);
         }
-        serial_println!("[vfs]     readdir_at(0, 100): {} entries, total={} OK", all.len(), total);
+        serial_println!(
+            "[vfs]     readdir_at(0, 100): {} entries, total={} OK",
+            all.len(),
+            total
+        );
 
         // Read first page (3 entries).
         let (page1, total1) = Vfs::readdir_at(pg_dir, 0, 3)?;
         if page1.len() != 3 || total1 != 10 {
             serial_println!(
                 "[vfs]   FAIL: page1 len={}, total={} (expected 3, 10)",
-                page1.len(), total1,
+                page1.len(),
+                total1,
             );
             let _ = Vfs::remove_recursive(pg_dir);
             return Err(KernelError::InternalError);
@@ -5114,7 +5219,8 @@ pub fn self_test() -> KernelResult<()> {
         if page2.len() != 3 || total2 != 10 {
             serial_println!(
                 "[vfs]   FAIL: page2 len={}, total={} (expected 3, 10)",
-                page2.len(), total2,
+                page2.len(),
+                total2,
             );
             let _ = Vfs::remove_recursive(pg_dir);
             return Err(KernelError::InternalError);
@@ -5137,19 +5243,24 @@ pub fn self_test() -> KernelResult<()> {
         if tail.len() != 2 || total_tail != 10 {
             serial_println!(
                 "[vfs]   FAIL: tail len={}, total={} (expected 2, 10)",
-                tail.len(), total_tail,
+                tail.len(),
+                total_tail,
             );
             let _ = Vfs::remove_recursive(pg_dir);
             return Err(KernelError::InternalError);
         }
-        serial_println!("[vfs]     readdir_at(8, 5): {} entries (tail) OK", tail.len());
+        serial_println!(
+            "[vfs]     readdir_at(8, 5): {} entries (tail) OK",
+            tail.len()
+        );
 
         // Read completely past end: offset 20 → should return 0 entries.
         let (empty, total_empty) = Vfs::readdir_at(pg_dir, 20, 5)?;
         if !empty.is_empty() || total_empty != 10 {
             serial_println!(
                 "[vfs]   FAIL: past-end len={}, total={} (expected 0, 10)",
-                empty.len(), total_empty,
+                empty.len(),
+                total_empty,
             );
             let _ = Vfs::remove_recursive(pg_dir);
             return Err(KernelError::InternalError);
@@ -5245,7 +5356,10 @@ pub fn self_test() -> KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
             Err(e) => {
-                serial_println!("[vfs]     FAIL: write_file returned {:?} instead of ReadOnlyFilesystem", e);
+                serial_println!(
+                    "[vfs]     FAIL: write_file returned {:?} instead of ReadOnlyFilesystem",
+                    e
+                );
                 Vfs::remount("/tmp", orig_opts)?;
                 return Err(e);
             }
@@ -5257,7 +5371,10 @@ pub fn self_test() -> KernelResult<()> {
                 serial_println!("[vfs]     mkdir correctly rejected on ro mount");
             }
             other => {
-                serial_println!("[vfs]     FAIL: mkdir returned {:?} instead of ReadOnlyFilesystem", other);
+                serial_println!(
+                    "[vfs]     FAIL: mkdir returned {:?} instead of ReadOnlyFilesystem",
+                    other
+                );
                 let _ = Vfs::rmdir("/tmp/_ro_test_dir");
                 Vfs::remount("/tmp", orig_opts)?;
                 return Err(KernelError::InternalError);
@@ -5292,7 +5409,8 @@ pub fn self_test() -> KernelResult<()> {
 
         // Test 1: /**/*.txt should find all .txt files recursively.
         let txt_results = Vfs::glob("/tmp/_glob_test/**/*.txt")?;
-        let txt_count = txt_results.iter()
+        let txt_count = txt_results
+            .iter()
             .filter(|p| p.as_bytes().ends_with(b".txt"))
             .count();
         if txt_count < 3 {
@@ -5304,7 +5422,10 @@ pub fn self_test() -> KernelResult<()> {
             let _ = cleanup_glob_test();
             return Err(KernelError::InternalError);
         }
-        serial_println!("[vfs]     **/*.txt found {} .txt files (>= 3) OK", txt_count);
+        serial_println!(
+            "[vfs]     **/*.txt found {} .txt files (>= 3) OK",
+            txt_count
+        );
 
         // Test 2: /** should find everything under the dir.
         let all_results = Vfs::glob("/tmp/_glob_test/**")?;
@@ -5318,11 +5439,15 @@ pub fn self_test() -> KernelResult<()> {
             let _ = cleanup_glob_test();
             return Err(KernelError::InternalError);
         }
-        serial_println!("[vfs]     /** found {} entries (>= 7) OK", all_results.len());
+        serial_println!(
+            "[vfs]     /** found {} entries (>= 7) OK",
+            all_results.len()
+        );
 
         // Test 3: /**/*.rs should find .rs files at any depth.
         let rs_results = Vfs::glob("/tmp/_glob_test/**/*.rs")?;
-        let rs_count = rs_results.iter()
+        let rs_count = rs_results
+            .iter()
             .filter(|p| p.as_bytes().ends_with(b".rs"))
             .count();
         if rs_count < 2 {
@@ -5393,7 +5518,9 @@ pub fn self_test() -> KernelResult<()> {
 
         // Verify no temp files left behind.
         let tmp_entries = Vfs::readdir("/tmp")?;
-        let stale = tmp_entries.iter().any(|e| e.name.starts_with(".tmp_atomic_"));
+        let stale = tmp_entries
+            .iter()
+            .any(|e| e.name.starts_with(".tmp_atomic_"));
         if stale {
             serial_println!("[vfs]     WARN: stale temp file found after atomic write");
         }
@@ -5426,14 +5553,20 @@ pub fn mount_self_test() -> KernelResult<()> {
     let mp = "/_mount_selftest";
 
     // Refuse to clobber a stale mount from a previous run.
-    if Vfs::mounts().iter().any(|(p, _)| p.as_path() == Path::new(mp)) {
+    if Vfs::mounts()
+        .iter()
+        .any(|(p, _)| p.as_path() == Path::new(mp))
+    {
         serial_println!("[vfs]   {} already mounted — unmounting stale entry", mp);
         let _ = Vfs::unmount(mp);
     }
 
     // Mount a fresh in-memory filesystem (same call as fstype "tmpfs").
     crate::fs::memfs::mount(mp)?;
-    if !Vfs::mounts().iter().any(|(p, _)| p.as_path() == Path::new(mp)) {
+    if !Vfs::mounts()
+        .iter()
+        .any(|(p, _)| p.as_path() == Path::new(mp))
+    {
         serial_println!("[vfs]   FAIL: {} not present after mount", mp);
         let _ = Vfs::unmount(mp);
         return Err(KernelError::InternalError);
@@ -5465,7 +5598,10 @@ pub fn mount_self_test() -> KernelResult<()> {
 
     // Unmount the scratch mount and verify it is gone.
     Vfs::unmount(mp)?;
-    if Vfs::mounts().iter().any(|(p, _)| p.as_path() == Path::new(mp)) {
+    if Vfs::mounts()
+        .iter()
+        .any(|(p, _)| p.as_path() == Path::new(mp))
+    {
         serial_println!("[vfs]   FAIL: {} still present after unmount", mp);
         return Err(KernelError::InternalError);
     }
@@ -5496,7 +5632,10 @@ pub fn file_identity_self_test() -> KernelResult<()> {
 
     // Refuse to clobber stale mounts from a previous run.
     for mp in [mp_a, mp_b] {
-        if Vfs::mounts().iter().any(|(p, _)| p.as_path() == Path::new(mp)) {
+        if Vfs::mounts()
+            .iter()
+            .any(|(p, _)| p.as_path() == Path::new(mp))
+        {
             let _ = Vfs::unmount(mp);
         }
     }
@@ -5543,8 +5682,7 @@ pub fn file_identity_self_test() -> KernelResult<()> {
         serial_println!("[vfs]   identity stable across lookups: OK");
 
         // (3) Distinct files on the same mount ⇒ same fs_id, different ino.
-        let a2 = Vfs::file_identity("/_fileid_selftest_a/f2")?
-            .ok_or(KernelError::InternalError)?;
+        let a2 = Vfs::file_identity("/_fileid_selftest_a/f2")?.ok_or(KernelError::InternalError)?;
         if a2.fs_id != a1.fs_id {
             serial_println!("[vfs]   FAIL: same-mount files have different fs_id");
             return Err(KernelError::InternalError);
@@ -5556,8 +5694,7 @@ pub fn file_identity_self_test() -> KernelResult<()> {
         serial_println!("[vfs]   distinct files on one mount differ: OK");
 
         // (4) Different mounts never collide — distinct fs_id even if ino matches.
-        let b1 = Vfs::file_identity("/_fileid_selftest_b/f1")?
-            .ok_or(KernelError::InternalError)?;
+        let b1 = Vfs::file_identity("/_fileid_selftest_b/f1")?.ok_or(KernelError::InternalError)?;
         if b1.fs_id == a1.fs_id {
             serial_println!("[vfs]   FAIL: separate mounts share an fs_id");
             return Err(KernelError::InternalError);
@@ -5658,12 +5795,9 @@ fn glob_match_inner(name: &[u8], pattern: &[u8], ci: bool) -> bool {
                 }
                 Some(b'[') => {
                     // Character class.
-                    if let Some((matched, end_pi)) = match_char_class(
-                        name.get(ni).copied().unwrap_or(0),
-                        pattern,
-                        pi,
-                        ci,
-                    ) {
+                    if let Some((matched, end_pi)) =
+                        match_char_class(name.get(ni).copied().unwrap_or(0), pattern, pi, ci)
+                    {
                         if matched {
                             ni += 1;
                             pi = end_pi;
@@ -5782,7 +5916,11 @@ fn match_char_class(ch: u8, pattern: &[u8], start: usize, ci: bool) -> Option<(b
                 if end_c != b']' {
                     // It's a range.
                     let lo = if ci { c.to_ascii_lowercase() } else { c };
-                    let hi = if ci { end_c.to_ascii_lowercase() } else { end_c };
+                    let hi = if ci {
+                        end_c.to_ascii_lowercase()
+                    } else {
+                        end_c
+                    };
                     let test = if ci { ch.to_ascii_lowercase() } else { ch };
                     if test >= lo && test <= hi {
                         matched = true;

@@ -180,7 +180,11 @@ pub fn schedule(func: fn(u64), arg: u64, delay_ticks: u64) -> Option<TimerHandle
 /// - `arg`: Argument passed to `func`.
 /// - `interval_ticks`: Period in ticks.  Minimum 1.
 pub fn schedule_periodic(func: fn(u64), arg: u64, interval_ticks: u64) -> Option<TimerHandle> {
-    let interval = if interval_ticks == 0 { 1 } else { interval_ticks };
+    let interval = if interval_ticks == 0 {
+        1
+    } else {
+        interval_ticks
+    };
     schedule_internal(func, arg, interval, interval)
 }
 
@@ -289,7 +293,9 @@ fn schedule_internal(
                 // we use Release ordering on the deadline CAS above, so
                 // the stores below will be visible when the scanner reads
                 // the deadline with Acquire.
-                entry.func.store(func as *const () as u64, Ordering::Relaxed);
+                entry
+                    .func
+                    .store(func as *const () as u64, Ordering::Relaxed);
                 entry.arg.store(arg, Ordering::Relaxed);
                 entry.interval.store(interval, Ordering::Relaxed);
                 entry.handle.store(handle_val, Ordering::Release);
@@ -506,7 +512,9 @@ pub fn self_test() {
     assert!(stats_sched > 0);
     serial_println!(
         "[ktimer]   Stats: scheduled={}, fired={}, cancelled={}",
-        stats_sched, stats_fired, stats_cancel,
+        stats_sched,
+        stats_fired,
+        stats_cancel,
     );
 
     serial_println!("[ktimer] Self-test PASSED");

@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -138,7 +138,9 @@ where
 /// programs/maps are installed and the record_* functions as they execute.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         programs: Vec::new(),
         maps: Vec::new(),
@@ -155,14 +157,22 @@ pub fn init_defaults() {
 /// Load a BPF program.
 pub fn load_program(name: &str, prog_type: BpfProgType, insn_count: u32) -> KernelResult<u32> {
     with_state(|state| {
-        if state.programs.len() >= MAX_PROGRAMS { return Err(KernelError::ResourceExhausted); }
+        if state.programs.len() >= MAX_PROGRAMS {
+            return Err(KernelError::ResourceExhausted);
+        }
         let now = crate::hpet::elapsed_ns();
         let id = state.next_prog_id;
         state.next_prog_id += 1;
         state.total_loaded += 1;
         state.programs.push(BpfProgram {
-            id, name: String::from(name), prog_type, insn_count,
-            run_count: 0, run_time_ns: 0, map_count: 0, loaded_ns: now,
+            id,
+            name: String::from(name),
+            prog_type,
+            insn_count,
+            run_count: 0,
+            run_time_ns: 0,
+            map_count: 0,
+            loaded_ns: now,
         });
         Ok(id)
     })
@@ -171,7 +181,10 @@ pub fn load_program(name: &str, prog_type: BpfProgType, insn_count: u32) -> Kern
 /// Unload a BPF program.
 pub fn unload_program(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.programs.iter().position(|p| p.id == id)
+        let idx = state
+            .programs
+            .iter()
+            .position(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         state.programs.remove(idx);
         state.total_unloaded += 1;
@@ -182,7 +195,10 @@ pub fn unload_program(id: u32) -> KernelResult<()> {
 /// Record a program execution.
 pub fn record_run(id: u32, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.programs.iter_mut().find(|p| p.id == id)
+        let p = state
+            .programs
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         p.run_count += 1;
         p.run_time_ns += ns;
@@ -200,13 +216,25 @@ pub fn record_verifier_error() -> KernelResult<()> {
 }
 
 /// Create a BPF map.
-pub fn create_map(name: &str, max_entries: u32, key_size: u32, value_size: u32) -> KernelResult<u32> {
+pub fn create_map(
+    name: &str,
+    max_entries: u32,
+    key_size: u32,
+    value_size: u32,
+) -> KernelResult<u32> {
     with_state(|state| {
-        if state.maps.len() >= MAX_MAPS { return Err(KernelError::ResourceExhausted); }
+        if state.maps.len() >= MAX_MAPS {
+            return Err(KernelError::ResourceExhausted);
+        }
         let id = state.next_map_id;
         state.next_map_id += 1;
         state.maps.push(BpfMap {
-            id, name: String::from(name), max_entries, key_size, value_size, used_entries: 0,
+            id,
+            name: String::from(name),
+            max_entries,
+            key_size,
+            value_size,
+            used_entries: 0,
         });
         Ok(id)
     })
@@ -214,7 +242,10 @@ pub fn create_map(name: &str, max_entries: u32, key_size: u32, value_size: u32) 
 
 /// List loaded programs.
 pub fn list_programs() -> Vec<BpfProgram> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.programs.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.programs.clone())
 }
 
 /// List maps.
@@ -225,7 +256,11 @@ pub fn list_maps() -> Vec<BpfMap> {
 /// Programs by type.
 pub fn by_type(prog_type: BpfProgType) -> Vec<BpfProgram> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.programs.iter().filter(|p| p.prog_type == prog_type).cloned().collect()
+        s.programs
+            .iter()
+            .filter(|p| p.prog_type == prog_type)
+            .cloned()
+            .collect()
     })
 }
 
@@ -233,7 +268,14 @@ pub fn by_type(prog_type: BpfProgType) -> Vec<BpfProgram> {
 pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.programs.len(), s.maps.len(), s.total_loaded, s.total_runs, s.verifier_errors, s.ops),
+        Some(s) => (
+            s.programs.len(),
+            s.maps.len(),
+            s.total_loaded,
+            s.total_runs,
+            s.verifier_errors,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -269,7 +311,11 @@ pub fn self_test() {
 
     // 3: Record run increments count + time exactly from zero.
     record_run(id1, 500).expect("run");
-    let p = list_programs().iter().find(|p| p.id == id1).cloned().expect("prog");
+    let p = list_programs()
+        .iter()
+        .find(|p| p.id == id1)
+        .cloned()
+        .expect("prog");
     assert_eq!(p.run_count, 1);
     assert_eq!(p.run_time_ns, 500);
     assert!(record_run(9999, 1).is_err()); // unknown id
@@ -279,7 +325,11 @@ pub fn self_test() {
     let map_id = create_map("test_map", 1024, 4, 8).expect("create_map");
     assert_eq!(map_id, 1);
     assert_eq!(list_maps().len(), 1);
-    let m = list_maps().iter().find(|m| m.id == map_id).cloned().expect("map");
+    let m = list_maps()
+        .iter()
+        .find(|m| m.id == map_id)
+        .cloned()
+        .expect("map");
     assert_eq!(m.used_entries, 0);
     crate::serial_println!("  [4/8] create map: OK");
 
@@ -303,10 +353,10 @@ pub fn self_test() {
 
     // 8: Aggregate totals equal the exact sums of the operations above.
     let (progs, maps, loaded, runs, verr, ops) = stats();
-    assert_eq!(progs, 1);    // two loaded, one unloaded
+    assert_eq!(progs, 1); // two loaded, one unloaded
     assert_eq!(maps, 1);
-    assert_eq!(loaded, 2);   // two load_program calls
-    assert_eq!(runs, 1);     // one successful record_run
+    assert_eq!(loaded, 2); // two load_program calls
+    assert_eq!(runs, 1); // one successful record_run
     assert_eq!(verr, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");

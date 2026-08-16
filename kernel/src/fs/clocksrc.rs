@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -36,11 +36,11 @@ use crate::error::{KernelError, KernelResult};
 /// Clock source quality rating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ClockRating {
-    Unusable,   // 0
-    Low,        // 100
-    Medium,     // 200
-    Good,       // 300
-    Ideal,      // 400
+    Unusable, // 0
+    Low,      // 100
+    Medium,   // 200
+    Good,     // 300
+    Ideal,    // 400
 }
 
 impl ClockRating {
@@ -130,7 +130,9 @@ where
 /// totals of 1,000,510,000 reads and 350 skew corrections.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         sources: Vec::new(),
         next_id: 1,
@@ -143,12 +145,22 @@ pub fn init_defaults() {
 /// Register a clock source.
 pub fn register(name: &str, freq_hz: u64, rating: ClockRating) -> KernelResult<u32> {
     with_state(|state| {
-        if state.sources.len() >= MAX_SOURCES { return Err(KernelError::ResourceExhausted); }
+        if state.sources.len() >= MAX_SOURCES {
+            return Err(KernelError::ResourceExhausted);
+        }
         let id = state.next_id;
         state.next_id += 1;
         state.sources.push(ClockSource {
-            id, name: String::from(name), freq_hz, rating, is_current: false,
-            reads: 0, skew_corrections: 0, total_skew_ns: 0, max_skew_ns: 0, read_latency_ns: 0,
+            id,
+            name: String::from(name),
+            freq_hz,
+            rating,
+            is_current: false,
+            reads: 0,
+            skew_corrections: 0,
+            total_skew_ns: 0,
+            max_skew_ns: 0,
+            read_latency_ns: 0,
         });
         Ok(id)
     })
@@ -157,8 +169,12 @@ pub fn register(name: &str, freq_hz: u64, rating: ClockRating) -> KernelResult<u
 /// Set current clock source.
 pub fn set_current(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if !state.sources.iter().any(|s| s.id == id) { return Err(KernelError::NotFound); }
-        for s in &mut state.sources { s.is_current = s.id == id; }
+        if !state.sources.iter().any(|s| s.id == id) {
+            return Err(KernelError::NotFound);
+        }
+        for s in &mut state.sources {
+            s.is_current = s.id == id;
+        }
         Ok(())
     })
 }
@@ -166,7 +182,10 @@ pub fn set_current(id: u32) -> KernelResult<()> {
 /// Record a clock read.
 pub fn record_read(id: u32, latency_ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let s = state.sources.iter_mut().find(|s| s.id == id)
+        let s = state
+            .sources
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         s.reads += 1;
         s.read_latency_ns = latency_ns; // Latest latency
@@ -178,11 +197,16 @@ pub fn record_read(id: u32, latency_ns: u64) -> KernelResult<()> {
 /// Record a skew correction.
 pub fn record_skew(id: u32, skew_ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let s = state.sources.iter_mut().find(|s| s.id == id)
+        let s = state
+            .sources
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         s.skew_corrections += 1;
         s.total_skew_ns += skew_ns;
-        if skew_ns > s.max_skew_ns { s.max_skew_ns = skew_ns; }
+        if skew_ns > s.max_skew_ns {
+            s.max_skew_ns = skew_ns;
+        }
         state.total_skew_corrections += 1;
         Ok(())
     })
@@ -190,21 +214,30 @@ pub fn record_skew(id: u32, skew_ns: u64) -> KernelResult<()> {
 
 /// List all clock sources.
 pub fn list() -> Vec<ClockSource> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.sources.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.sources.clone())
 }
 
 /// Get the current clock source.
 pub fn current() -> Option<ClockSource> {
-    STATE.lock().as_ref().and_then(|s| {
-        s.sources.iter().find(|src| src.is_current).cloned()
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.sources.iter().find(|src| src.is_current).cloned())
 }
 
 /// Statistics: (source_count, total_reads, total_skew_corrections, ops).
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.sources.len(), s.total_reads, s.total_skew_corrections, s.ops),
+        Some(s) => (
+            s.sources.len(),
+            s.total_reads,
+            s.total_skew_corrections,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }
@@ -232,7 +265,10 @@ pub fn self_test() {
     assert_eq!(id, 1);
     assert_eq!(list().len(), 1);
     let s = list().into_iter().find(|s| s.id == id).expect("find");
-    assert_eq!((s.reads, s.skew_corrections, s.total_skew_ns, s.max_skew_ns), (0, 0, 0, 0));
+    assert_eq!(
+        (s.reads, s.skew_corrections, s.total_skew_ns, s.max_skew_ns),
+        (0, 0, 0, 0)
+    );
     assert!(!s.is_current);
     crate::serial_println!("  [2/8] register: OK");
 
@@ -253,7 +289,10 @@ pub fn self_test() {
     record_skew(id, 200).expect("skew");
     record_skew(id, 80).expect("skew2");
     let s = list().into_iter().find(|s| s.id == id).expect("p5");
-    assert_eq!((s.skew_corrections, s.total_skew_ns, s.max_skew_ns), (2, 280, 200));
+    assert_eq!(
+        (s.skew_corrections, s.total_skew_ns, s.max_skew_ns),
+        (2, 280, 200)
+    );
     assert_eq!(stats().2, 2); // total_skew_corrections
     crate::serial_println!("  [5/8] skew: OK");
 

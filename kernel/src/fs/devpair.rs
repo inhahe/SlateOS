@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -140,7 +140,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         next_id: 1,
@@ -168,7 +170,12 @@ pub fn stop_scan() -> KernelResult<()> {
 }
 
 /// Discover a device (simulate).
-pub fn discover(name: &str, address: &str, device_type: PairDeviceType, signal: i32) -> KernelResult<u32> {
+pub fn discover(
+    name: &str,
+    address: &str,
+    device_type: PairDeviceType,
+    signal: i32,
+) -> KernelResult<u32> {
     with_state(|state| {
         // Check for existing device by address.
         if let Some(d) = state.devices.iter_mut().find(|d| d.address == address) {
@@ -202,7 +209,10 @@ pub fn discover(name: &str, address: &str, device_type: PairDeviceType, signal: 
 /// Initiate pairing.
 pub fn pair(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         if dev.state != PairState::Discovered && dev.state != PairState::Disconnected {
             return Err(KernelError::NotSupported);
@@ -216,7 +226,10 @@ pub fn pair(id: u32) -> KernelResult<()> {
 pub fn confirm_pair(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let dev = state.devices.iter_mut().find(|d| d.id == id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         if dev.state != PairState::Pairing && dev.state != PairState::PinRequired {
             return Err(KernelError::NotSupported);
@@ -232,7 +245,10 @@ pub fn confirm_pair(id: u32) -> KernelResult<()> {
 /// Reject/fail pairing.
 pub fn fail_pair(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         dev.state = PairState::Failed;
         state.total_failed += 1;
@@ -243,7 +259,10 @@ pub fn fail_pair(id: u32) -> KernelResult<()> {
 /// Trust a device (auto-connect).
 pub fn trust(id: u32, trusted: bool) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         dev.trusted = trusted;
         dev.auto_connect = trusted;
@@ -257,7 +276,10 @@ pub fn trust(id: u32, trusted: bool) -> KernelResult<()> {
 /// Disconnect a device.
 pub fn disconnect(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         dev.state = PairState::Disconnected;
         Ok(())
@@ -269,20 +291,26 @@ pub fn forget(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.devices.len();
         state.devices.retain(|d| d.id != id);
-        if state.devices.len() == before { return Err(KernelError::NotFound); }
+        if state.devices.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
 
 /// List all devices.
 pub fn list_devices() -> Vec<PairDevice> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// List paired devices.
 pub fn list_paired() -> Vec<PairDevice> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.devices.iter()
+        s.devices
+            .iter()
             .filter(|d| matches!(d.state, PairState::Paired | PairState::Trusted))
             .cloned()
             .collect()
@@ -306,9 +334,20 @@ pub fn stats() -> (usize, usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let paired = s.devices.iter().filter(|d| matches!(d.state, PairState::Paired | PairState::Trusted)).count();
+            let paired = s
+                .devices
+                .iter()
+                .filter(|d| matches!(d.state, PairState::Paired | PairState::Trusted))
+                .count();
             let trusted = s.devices.iter().filter(|d| d.trusted).count();
-            (s.devices.len(), paired, trusted, s.total_paired, s.total_failed, s.ops)
+            (
+                s.devices.len(),
+                paired,
+                trusted,
+                s.total_paired,
+                s.total_failed,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0, 0),
     }
@@ -327,8 +366,20 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] empty: OK");
 
     // 2: Discover devices.
-    let d1 = discover("BT Headphones", "AA:BB:CC:DD:EE:01", PairDeviceType::Headphones, -40).expect("disc1");
-    let d2 = discover("BT Keyboard", "AA:BB:CC:DD:EE:02", PairDeviceType::Keyboard, -50).expect("disc2");
+    let d1 = discover(
+        "BT Headphones",
+        "AA:BB:CC:DD:EE:01",
+        PairDeviceType::Headphones,
+        -40,
+    )
+    .expect("disc1");
+    let d2 = discover(
+        "BT Keyboard",
+        "AA:BB:CC:DD:EE:02",
+        PairDeviceType::Keyboard,
+        -50,
+    )
+    .expect("disc2");
     assert_eq!(list_devices().len(), 2);
     crate::serial_println!("  [2/8] discover: OK");
 

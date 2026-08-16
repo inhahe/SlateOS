@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -131,15 +131,57 @@ where
 /// 1050 migrations.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         tasks: Vec::new(),
         class_stats: alloc::vec![
-            ClassStats { class: SchedClass::RealTime, task_count: 0, context_switches: 0, total_runtime_ns: 0, total_slices: 0, avg_slice_ns: 0, migrations: 0 },
-            ClassStats { class: SchedClass::Deadline, task_count: 0, context_switches: 0, total_runtime_ns: 0, total_slices: 0, avg_slice_ns: 0, migrations: 0 },
-            ClassStats { class: SchedClass::Normal, task_count: 0, context_switches: 0, total_runtime_ns: 0, total_slices: 0, avg_slice_ns: 0, migrations: 0 },
-            ClassStats { class: SchedClass::Batch, task_count: 0, context_switches: 0, total_runtime_ns: 0, total_slices: 0, avg_slice_ns: 0, migrations: 0 },
-            ClassStats { class: SchedClass::Idle, task_count: 0, context_switches: 0, total_runtime_ns: 0, total_slices: 0, avg_slice_ns: 0, migrations: 0 },
+            ClassStats {
+                class: SchedClass::RealTime,
+                task_count: 0,
+                context_switches: 0,
+                total_runtime_ns: 0,
+                total_slices: 0,
+                avg_slice_ns: 0,
+                migrations: 0
+            },
+            ClassStats {
+                class: SchedClass::Deadline,
+                task_count: 0,
+                context_switches: 0,
+                total_runtime_ns: 0,
+                total_slices: 0,
+                avg_slice_ns: 0,
+                migrations: 0
+            },
+            ClassStats {
+                class: SchedClass::Normal,
+                task_count: 0,
+                context_switches: 0,
+                total_runtime_ns: 0,
+                total_slices: 0,
+                avg_slice_ns: 0,
+                migrations: 0
+            },
+            ClassStats {
+                class: SchedClass::Batch,
+                task_count: 0,
+                context_switches: 0,
+                total_runtime_ns: 0,
+                total_slices: 0,
+                avg_slice_ns: 0,
+                migrations: 0
+            },
+            ClassStats {
+                class: SchedClass::Idle,
+                task_count: 0,
+                context_switches: 0,
+                total_runtime_ns: 0,
+                total_slices: 0,
+                avg_slice_ns: 0,
+                migrations: 0
+            },
         ],
         total_switches: 0,
         total_migrations: 0,
@@ -159,9 +201,17 @@ pub fn register_task(pid: u32, class: SchedClass, priority: i32, nice: i32) -> K
             t.priority = priority;
             t.nice = nice;
         } else {
-            if state.tasks.len() >= MAX_TASKS { return Err(KernelError::ResourceExhausted); }
+            if state.tasks.len() >= MAX_TASKS {
+                return Err(KernelError::ResourceExhausted);
+            }
             state.tasks.push(TaskSchedInfo {
-                pid, class, priority, nice, runtime_ns: 0, switches: 0, migrations: 0,
+                pid,
+                class,
+                priority,
+                nice,
+                runtime_ns: 0,
+                switches: 0,
+                migrations: 0,
             });
         }
         if let Some(cs) = state.class_stats.iter_mut().find(|c| c.class == class) {
@@ -188,7 +238,10 @@ pub fn record_switch(pid: u32) -> KernelResult<()> {
 /// Record time slice usage.
 pub fn record_slice(pid: u32, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let t = state.tasks.iter_mut().find(|t| t.pid == pid)
+        let t = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
         t.runtime_ns += ns;
         if let Some(cs) = state.class_stats.iter_mut().find(|c| c.class == t.class) {
@@ -218,24 +271,39 @@ pub fn record_migration(pid: u32) -> KernelResult<()> {
 
 /// Get per-class statistics.
 pub fn class_stats() -> Vec<ClassStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.class_stats.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.class_stats.clone())
 }
 
 /// Get task scheduling info.
 pub fn task_info(pid: u32) -> Option<TaskSchedInfo> {
-    STATE.lock().as_ref().and_then(|s| s.tasks.iter().find(|t| t.pid == pid).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.tasks.iter().find(|t| t.pid == pid).cloned())
 }
 
 /// List all tracked tasks.
 pub fn list_tasks() -> Vec<TaskSchedInfo> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.tasks.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.tasks.clone())
 }
 
 /// Statistics: (task_count, class_count, total_switches, total_migrations, ops).
 pub fn stats() -> (usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.tasks.len(), s.class_stats.len(), s.total_switches, s.total_migrations, s.ops),
+        Some(s) => (
+            s.tasks.len(),
+            s.class_stats.len(),
+            s.total_switches,
+            s.total_migrations,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -253,7 +321,10 @@ pub fn self_test() {
 
     // Helper: fetch a class row by class.
     fn class_of(class: SchedClass) -> ClassStats {
-        class_stats().into_iter().find(|c| c.class == class).expect("class row")
+        class_stats()
+            .into_iter()
+            .find(|c| c.class == class)
+            .expect("class row")
     }
 
     // 1: Empty defaults — no tasks, five zeroed class rows, zero totals.

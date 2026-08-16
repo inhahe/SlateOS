@@ -26,10 +26,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -245,7 +245,14 @@ pub fn capture_full(width: u32, height: u32) -> KernelResult<u64> {
 
 /// Capture a specific window.
 pub fn capture_window(window_id: u64, width: u32, height: u32) -> KernelResult<u64> {
-    record_capture(CaptureKind::Window, width, height, Some(window_id), None, None)
+    record_capture(
+        CaptureKind::Window,
+        width,
+        height,
+        Some(window_id),
+        None,
+        None,
+    )
 }
 
 /// Capture a rectangular region.
@@ -255,7 +262,14 @@ pub fn capture_region(x: u32, y: u32, w: u32, h: u32) -> KernelResult<u64> {
 
 /// Capture a specific monitor.
 pub fn capture_monitor(monitor_id: &str, width: u32, height: u32) -> KernelResult<u64> {
-    record_capture(CaptureKind::Monitor, width, height, None, Some(monitor_id), None)
+    record_capture(
+        CaptureKind::Monitor,
+        width,
+        height,
+        None,
+        Some(monitor_id),
+        None,
+    )
 }
 
 fn record_capture(
@@ -276,8 +290,12 @@ fn record_capture(
     let path = if state.config.save_dir.is_empty() {
         alloc::format!("/tmp/screenshot_{}.{}", id, state.config.format.label())
     } else {
-        alloc::format!("{}/screenshot_{}.{}",
-            state.config.save_dir, id, state.config.format.label())
+        alloc::format!(
+            "{}/screenshot_{}.{}",
+            state.config.save_dir,
+            id,
+            state.config.format.label()
+        )
     };
 
     let screenshot = Screenshot {

@@ -232,8 +232,7 @@ pub fn spawn_suspended_with_tls(
     gs_base: u64,
 ) -> KernelResult<TaskId> {
     // Verify the process exists before allocating resources.
-    let proc_state = pcb::state(pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    let proc_state = pcb::state(pid).ok_or(KernelError::NoSuchProcess)?;
 
     // Don't spawn threads into zombie processes.
     if proc_state == ProcessState::Zombie {
@@ -244,8 +243,7 @@ pub fn spawn_suspended_with_tls(
     // on context switch.  We verified the process exists above, so a
     // missing PML4 is an internal inconsistency — never silently default
     // to kernel address space (0) for a userspace process.
-    let pml4 = pcb::get_pml4(pid)
-        .ok_or(KernelError::InternalError)?;
+    let pml4 = pcb::get_pml4(pid).ok_or(KernelError::InternalError)?;
 
     // Create the scheduler task **suspended** (not yet runnable).
     //
@@ -270,7 +268,9 @@ pub fn spawn_suspended_with_tls(
         // Blocked/not-enqueued task by simply marking it Dead.)
         serial_println!(
             "[thread] Failed to register task {} with process {}: {:?}",
-            task_id, pid, e
+            task_id,
+            pid,
+            e
         );
         sched::kill_task(task_id);
         return Err(e);
@@ -291,7 +291,8 @@ pub fn spawn_suspended_with_tls(
 
     serial_println!(
         "[thread] Spawned thread (task {}) in process {}",
-        task_id, pid
+        task_id,
+        pid
     );
 
     // Seed the TLS bases while the task is still suspended.  This MUST happen
@@ -334,7 +335,8 @@ pub fn admit(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
         // after unwinding the registration we just did.
         serial_println!(
             "[thread] Failed to admit task {} in process {}",
-            task_id, pid
+            task_id,
+            pid
         );
         {
             let mut owners = THREAD_OWNERS.lock();
@@ -383,8 +385,8 @@ pub fn spawn_user(
     entry_rip: u64,
     user_rsp: u64,
 ) -> KernelResult<TaskId> {
-    use alloc::boxed::Box;
     use crate::proc::spawn::{UserEntryInfo, userspace_entry_trampoline};
+    use alloc::boxed::Box;
 
     // Validate that the entry point is in user space (below the
     // canonical hole at 0x0000_8000_0000_0000).
@@ -411,7 +413,10 @@ pub fn spawn_user(
         Ok(task_id) => {
             serial_println!(
                 "[thread] Spawned user thread (task {}) in process {}: rip={:#x}, rsp={:#x}",
-                task_id, pid, entry_rip, user_rsp
+                task_id,
+                pid,
+                entry_rip,
+                user_rsp
             );
             Ok(task_id)
         }
@@ -738,10 +743,7 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
     match pcb::remove_thread(pid, task_id, acct) {
         Ok((is_zombie, wake_task, any_waiter)) => {
             if is_zombie {
-                serial_println!(
-                    "[thread] Process {} has no threads left — now zombie",
-                    pid
-                );
+                serial_println!("[thread] Process {} has no threads left — now zombie", pid);
 
                 // Close all fd-bearing kernel resources NOW, at process
                 // exit — matching Linux's `exit_files()` in `do_exit`.
@@ -777,10 +779,8 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                 // it.  Without this the parent livelocks in sigsuspend.
                 if let Some(parent) = pcb::parent(pid) {
                     if parent != 0 {
-                        let info = crate::proc::signal::SigInfo::child(
-                            u32::try_from(pid).unwrap_or(0),
-                            0,
-                        );
+                        let info =
+                            crate::proc::signal::SigInfo::child(u32::try_from(pid).unwrap_or(0), 0);
                         // Linux-ABI parents deliver SIGCHLD via their
                         // per-signal rt_sigaction disposition
                         // (deliver_linux_signal consults linux_disposition),
@@ -788,21 +788,15 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                         // through classify_post so a registered trampoline
                         // handler runs and a no-handler parent correctly
                         // drops it (SIGCHLD default action = ignore).
-                        if pcb::get_abi_mode(parent)
-                            == Some(pcb::AbiMode::Linux)
-                        {
-                            crate::proc::signal::set_pending_info(
-                                parent, 17, info,
-                            );
+                        if pcb::get_abi_mode(parent) == Some(pcb::AbiMode::Linux) {
+                            crate::proc::signal::set_pending_info(parent, 17, info);
                         } else {
                             // Discarding the PostDecision is intentional:
                             // SIGCHLD's default is ignore, so a no-handler
                             // native parent yields Drop with no side effect;
                             // a handler yields Deliver (already marked
                             // pending). There is no Terminate case for 17.
-                            let _ = crate::proc::signal::classify_post_info(
-                                parent, 17, info,
-                            );
+                            let _ = crate::proc::signal::classify_post_info(parent, 17, info);
                         }
                     }
                 }
@@ -819,7 +813,9 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
         Err(e) => {
             serial_println!(
                 "[thread] Failed to remove task {} from process {}: {:?}",
-                task_id, pid, e
+                task_id,
+                pid,
+                e
             );
         }
     }
@@ -1066,9 +1062,7 @@ extern "C" fn test_thread_entry(arg: u64) {
     // Simple task: just increment the shared counter and exit.
     // The arg encodes a pointer to an AtomicU64 counter.
     // SAFETY: arg was set from a valid &AtomicU64 in the test.
-    let counter = unsafe {
-        &*(arg as *const core::sync::atomic::AtomicU64)
-    };
+    let counter = unsafe { &*(arg as *const core::sync::atomic::AtomicU64) };
     counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
@@ -1219,9 +1213,7 @@ fn test_killed_thread_does_not_join_normally() -> KernelResult<()> {
     // (The synthetic ID is not registered in `THREAD_OWNERS`, so `join`
     // takes its "target not registered" path and reports NoSuchProcess.)
     if join(killed) != Err(KernelError::NoSuchProcess) {
-        serial_println!(
-            "[thread]   FAIL: a killed thread's outcome should be consumed by join"
-        );
+        serial_println!("[thread]   FAIL: a killed thread's outcome should be consumed by join");
         return Err(KernelError::InternalError);
     }
 
@@ -1265,9 +1257,7 @@ fn test_detached_exit_not_retained() -> KernelResult<()> {
     {
         let mut ev = THREAD_OUTCOMES.lock();
         if ev.remove(&fake) != Some(ThreadOutcome::Exited(7)) {
-            serial_println!(
-                "[thread]   FAIL: joinable exit value should have been recorded"
-            );
+            serial_println!("[thread]   FAIL: joinable exit value should have been recorded");
             return Err(KernelError::InternalError);
         }
     }
@@ -1277,9 +1267,7 @@ fn test_detached_exit_not_retained() -> KernelResult<()> {
     {
         let mut ev = THREAD_OUTCOMES.lock();
         if ev.remove(&fake).is_some() {
-            serial_println!(
-                "[thread]   FAIL: detached exit value must not be retained"
-            );
+            serial_println!("[thread]   FAIL: detached exit value must not be retained");
             return Err(KernelError::InternalError);
         }
     }
@@ -1311,7 +1299,11 @@ fn test_spawn_thread() -> KernelResult<()> {
     // Verify registration.
     let owner = owner_process(task_id);
     if owner != Some(pid) {
-        serial_println!("[thread]   FAIL: thread owner should be {}, got {:?}", pid, owner);
+        serial_println!(
+            "[thread]   FAIL: thread owner should be {}, got {:?}",
+            pid,
+            owner
+        );
         pcb::destroy(pid);
         return Err(KernelError::InternalError);
     }
@@ -1354,8 +1346,20 @@ fn test_thread_exit_zombies_process() -> KernelResult<()> {
     let counter_ptr = &counter as *const AtomicU64 as u64;
 
     // Spawn two threads.
-    let t1 = spawn(pid, b"t2-a", sched::task::DEFAULT_PRIORITY, test_thread_entry, counter_ptr)?;
-    let t2 = spawn(pid, b"t2-b", sched::task::DEFAULT_PRIORITY, test_thread_entry, counter_ptr)?;
+    let t1 = spawn(
+        pid,
+        b"t2-a",
+        sched::task::DEFAULT_PRIORITY,
+        test_thread_entry,
+        counter_ptr,
+    )?;
+    let t2 = spawn(
+        pid,
+        b"t2-b",
+        sched::task::DEFAULT_PRIORITY,
+        test_thread_entry,
+        counter_ptr,
+    )?;
 
     // Let both run.
     sched::yield_now();
@@ -1373,7 +1377,10 @@ fn test_thread_exit_zombies_process() -> KernelResult<()> {
     on_thread_exit(t1);
     let s = pcb::state(pid);
     if s != Some(ProcessState::Running) {
-        serial_println!("[thread]   FAIL: should still be Running after first exit, got {:?}", s);
+        serial_println!(
+            "[thread]   FAIL: should still be Running after first exit, got {:?}",
+            s
+        );
         pcb::destroy(pid);
         return Err(KernelError::InternalError);
     }
@@ -1382,7 +1389,10 @@ fn test_thread_exit_zombies_process() -> KernelResult<()> {
     on_thread_exit(t2);
     let s = pcb::state(pid);
     if s != Some(ProcessState::Zombie) {
-        serial_println!("[thread]   FAIL: should be Zombie after last exit, got {:?}", s);
+        serial_println!(
+            "[thread]   FAIL: should be Zombie after last exit, got {:?}",
+            s
+        );
         pcb::destroy(pid);
         return Err(KernelError::InternalError);
     }
@@ -1401,7 +1411,13 @@ fn test_spawn_into_zombie_fails() -> KernelResult<()> {
     let counter_ptr = &counter as *const AtomicU64 as u64;
 
     // Spawn and run a thread.
-    let t1 = spawn(pid, b"t3", sched::task::DEFAULT_PRIORITY, test_thread_entry, counter_ptr)?;
+    let t1 = spawn(
+        pid,
+        b"t3",
+        sched::task::DEFAULT_PRIORITY,
+        test_thread_entry,
+        counter_ptr,
+    )?;
     sched::yield_now();
     sched::yield_now();
 
@@ -1409,10 +1425,19 @@ fn test_spawn_into_zombie_fails() -> KernelResult<()> {
     on_thread_exit(t1);
 
     // Try to spawn into the zombie.
-    match spawn(pid, b"t3-late", sched::task::DEFAULT_PRIORITY, test_thread_entry, counter_ptr) {
+    match spawn(
+        pid,
+        b"t3-late",
+        sched::task::DEFAULT_PRIORITY,
+        test_thread_entry,
+        counter_ptr,
+    ) {
         Err(KernelError::NoSuchProcess) => {} // Expected.
         other => {
-            serial_println!("[thread]   FAIL: spawn into zombie should fail, got {:?}", other);
+            serial_println!(
+                "[thread]   FAIL: spawn into zombie should fail, got {:?}",
+                other
+            );
             pcb::destroy(pid);
             return Err(KernelError::InternalError);
         }
@@ -1475,10 +1500,7 @@ fn test_thread_exit_with_value() -> KernelResult<()> {
         match outcomes.remove(&task_id) {
             Some(ThreadOutcome::Exited(42)) => {} // Expected.
             other => {
-                serial_println!(
-                    "[thread]   FAIL: exit value should be 42, got {:?}",
-                    other
-                );
+                serial_println!("[thread]   FAIL: exit value should be 42, got {:?}", other);
                 pcb::destroy(pid);
                 return Err(KernelError::InternalError);
             }
@@ -1718,7 +1740,8 @@ fn run_blocking_join_phase(record_value: bool, expected: KernelResult<i64>) -> K
         1 => {
             serial_println!(
                 "[thread]   FAIL: joiner {} never registered on target {}",
-                joiner, target
+                joiner,
+                target
             );
             return bj_fail(pid, target, joiner);
         }
@@ -1751,7 +1774,10 @@ fn run_blocking_join_phase(record_value: bool, expected: KernelResult<i64>) -> K
     if !matched {
         serial_println!(
             "[thread]   FAIL: join() returned (value {}, err {}), expected {:?} (record_value={})",
-            value, err, expected, record_value
+            value,
+            err,
+            expected,
+            record_value
         );
         return bj_fail(pid, target, joiner);
     }

@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -105,7 +105,9 @@ where
 /// when a device is discovered and the record_* functions as I/O completes.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         total_reads: 0,
@@ -119,12 +121,26 @@ pub fn init_defaults() {
 /// Register a block device.
 pub fn register(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.devices.len() >= MAX_DEVICES { return Err(KernelError::ResourceExhausted); }
-        if state.devices.iter().any(|d| d.name == name) { return Err(KernelError::AlreadyExists); }
+        if state.devices.len() >= MAX_DEVICES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.devices.iter().any(|d| d.name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.devices.push(DevDiskStats {
-            name: String::from(name), reads: 0, read_bytes: 0, read_ns: 0,
-            writes: 0, write_bytes: 0, write_ns: 0, discards: 0, flushes: 0,
-            merges_read: 0, merges_write: 0, queue_depth: 0, max_queue_depth: 0,
+            name: String::from(name),
+            reads: 0,
+            read_bytes: 0,
+            read_ns: 0,
+            writes: 0,
+            write_bytes: 0,
+            write_ns: 0,
+            discards: 0,
+            flushes: 0,
+            merges_read: 0,
+            merges_write: 0,
+            queue_depth: 0,
+            max_queue_depth: 0,
         });
         Ok(())
     })
@@ -133,7 +149,10 @@ pub fn register(name: &str) -> KernelResult<()> {
 /// Record a read I/O.
 pub fn record_read(name: &str, bytes: u64, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.devices.iter_mut().find(|d| d.name == name)
+        let d = state
+            .devices
+            .iter_mut()
+            .find(|d| d.name == name)
             .ok_or(KernelError::NotFound)?;
         d.reads += 1;
         d.read_bytes += bytes;
@@ -147,7 +166,10 @@ pub fn record_read(name: &str, bytes: u64, ns: u64) -> KernelResult<()> {
 /// Record a write I/O.
 pub fn record_write(name: &str, bytes: u64, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.devices.iter_mut().find(|d| d.name == name)
+        let d = state
+            .devices
+            .iter_mut()
+            .find(|d| d.name == name)
             .ok_or(KernelError::NotFound)?;
         d.writes += 1;
         d.write_bytes += bytes;
@@ -161,7 +183,10 @@ pub fn record_write(name: &str, bytes: u64, ns: u64) -> KernelResult<()> {
 /// Record a discard.
 pub fn record_discard(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.devices.iter_mut().find(|d| d.name == name)
+        let d = state
+            .devices
+            .iter_mut()
+            .find(|d| d.name == name)
             .ok_or(KernelError::NotFound)?;
         d.discards += 1;
         Ok(())
@@ -171,7 +196,10 @@ pub fn record_discard(name: &str) -> KernelResult<()> {
 /// Record a flush.
 pub fn record_flush(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.devices.iter_mut().find(|d| d.name == name)
+        let d = state
+            .devices
+            .iter_mut()
+            .find(|d| d.name == name)
             .ok_or(KernelError::NotFound)?;
         d.flushes += 1;
         Ok(())
@@ -181,23 +209,40 @@ pub fn record_flush(name: &str) -> KernelResult<()> {
 /// Record a merge.
 pub fn record_merge(name: &str, is_write: bool) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.devices.iter_mut().find(|d| d.name == name)
+        let d = state
+            .devices
+            .iter_mut()
+            .find(|d| d.name == name)
             .ok_or(KernelError::NotFound)?;
-        if is_write { d.merges_write += 1; } else { d.merges_read += 1; }
+        if is_write {
+            d.merges_write += 1;
+        } else {
+            d.merges_read += 1;
+        }
         Ok(())
     })
 }
 
 /// Per-device stats.
 pub fn per_device() -> Vec<DevDiskStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Statistics: (dev_count, total_reads, total_writes, total_read_bytes, total_write_bytes, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.total_reads, s.total_writes, s.total_read_bytes, s.total_write_bytes, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.total_reads,
+            s.total_writes,
+            s.total_read_bytes,
+            s.total_write_bytes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -226,14 +271,22 @@ pub fn self_test() {
     register("test_disk").expect("register");
     assert_eq!(per_device().len(), 1);
     assert!(register("test_disk").is_err());
-    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().expect("dev");
+    let d = per_device()
+        .iter()
+        .find(|d| d.name == "test_disk")
+        .cloned()
+        .expect("dev");
     assert_eq!(d.reads, 0);
     assert_eq!(d.read_bytes, 0);
     crate::serial_println!("  [2/8] register: OK");
 
     // 3: Read records count + bytes exactly from zero.
     record_read("test_disk", 4096, 1000).expect("read");
-    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().expect("dev");
+    let d = per_device()
+        .iter()
+        .find(|d| d.name == "test_disk")
+        .cloned()
+        .expect("dev");
     assert_eq!(d.reads, 1);
     assert_eq!(d.read_bytes, 4096);
     assert_eq!(d.read_ns, 1000);
@@ -241,7 +294,11 @@ pub fn self_test() {
 
     // 4: Write records count + bytes exactly from zero.
     record_write("test_disk", 8192, 2000).expect("write");
-    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().expect("dev");
+    let d = per_device()
+        .iter()
+        .find(|d| d.name == "test_disk")
+        .cloned()
+        .expect("dev");
     assert_eq!(d.writes, 1);
     assert_eq!(d.write_bytes, 8192);
     assert_eq!(d.write_ns, 2000);
@@ -250,7 +307,11 @@ pub fn self_test() {
     // 5: Discard + flush increment exactly from zero.
     record_discard("test_disk").expect("discard");
     record_flush("test_disk").expect("flush");
-    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().expect("dev");
+    let d = per_device()
+        .iter()
+        .find(|d| d.name == "test_disk")
+        .cloned()
+        .expect("dev");
     assert_eq!(d.discards, 1);
     assert_eq!(d.flushes, 1);
     crate::serial_println!("  [5/8] discard/flush: OK");
@@ -258,7 +319,11 @@ pub fn self_test() {
     // 6: Merge counters split read vs write exactly.
     record_merge("test_disk", false).expect("merge_r");
     record_merge("test_disk", true).expect("merge_w");
-    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().expect("dev");
+    let d = per_device()
+        .iter()
+        .find(|d| d.name == "test_disk")
+        .cloned()
+        .expect("dev");
     assert_eq!(d.merges_read, 1);
     assert_eq!(d.merges_write, 1);
     crate::serial_println!("  [6/8] merge: OK");

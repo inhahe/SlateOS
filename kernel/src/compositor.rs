@@ -38,8 +38,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-use crate::drm::{self, DrmObjectId};
 use crate::drm::mode::PixelFormat;
+use crate::drm::{self, DrmObjectId};
 use crate::fb;
 use crate::mm::frame::FRAME_SIZE;
 use crate::sync::Mutex;
@@ -147,7 +147,8 @@ impl ScanoutBuffer {
             let p = dev.gem_pitch(handle)?;
             let fid = dev.fb_create(handle, width, height, p, PixelFormat::Xrgb8888)?;
             let addrs = dev.gem_frame_addrs(handle)?;
-            let cid = dev.first_crtc_id()
+            let cid = dev
+                .first_crtc_id()
                 .ok_or(crate::error::KernelError::NotFound)?;
             Ok((handle, fid, cid, addrs, p))
         })?;
@@ -219,10 +220,7 @@ impl ScanoutBuffer {
                 // SAFETY: frame_addr + frame_off is within a valid GEM frame.
                 // frame_off is 4-aligned, so frame_off+4 <= FRAME_SIZE.
                 unsafe {
-                    core::ptr::write_volatile(
-                        (frame_addr + frame_off as u64) as *mut u32,
-                        color,
-                    );
+                    core::ptr::write_volatile((frame_addr + frame_off as u64) as *mut u32, color);
                 }
                 frame_off += 4;
                 if frame_off >= FRAME_SIZE {
@@ -303,9 +301,11 @@ impl ScanoutBuffer {
         let src_y0 = if dst_y < 0 { (-dst_y) as u32 } else { 0 };
         let dst_x0 = dst_x.max(0) as u32;
         let dst_y0 = dst_y.max(0) as u32;
-        let clip_w = w.saturating_sub(src_x0)
+        let clip_w = w
+            .saturating_sub(src_x0)
             .min(self.width.saturating_sub(dst_x0));
-        let clip_h = h.saturating_sub(src_y0)
+        let clip_h = h
+            .saturating_sub(src_y0)
             .min(self.height.saturating_sub(dst_y0));
         if clip_w == 0 || clip_h == 0 {
             return;
@@ -315,8 +315,7 @@ impl ScanoutBuffer {
             let src_row = src_y0 + row;
             let dst_row = dst_y0 + row;
 
-            let row_byte_start =
-                (dst_row as usize) * (self.pitch as usize) + (dst_x0 as usize) * 4;
+            let row_byte_start = (dst_row as usize) * (self.pitch as usize) + (dst_x0 as usize) * 4;
             let mut frame_idx = row_byte_start / FRAME_SIZE;
             let mut frame_off = row_byte_start % FRAME_SIZE;
             let mut frame_addr = match self.frame_addrs.get(frame_idx) {
@@ -369,9 +368,7 @@ impl ScanoutBuffer {
 
     /// Page-flip this buffer to the display via DRM.
     fn flip(&self) -> Result<(), crate::error::KernelError> {
-        drm::with_primary_mut(|dev| {
-            dev.page_flip(self.crtc_id, self.fb_id)
-        })
+        drm::with_primary_mut(|dev| dev.page_flip(self.crtc_id, self.fb_id))
     }
 
     /// Free the GEM object and DRM framebuffer.
@@ -550,7 +547,10 @@ static CURSOR_Y: AtomicI32 = AtomicI32::new(0);
 
 /// Get the current compositor cursor position.
 fn cursor_pos() -> (i32, i32) {
-    (CURSOR_X.load(Ordering::Relaxed), CURSOR_Y.load(Ordering::Relaxed))
+    (
+        CURSOR_X.load(Ordering::Relaxed),
+        CURSOR_Y.load(Ordering::Relaxed),
+    )
 }
 
 /// Update cursor position from mouse delta.
@@ -688,7 +688,11 @@ pub fn start() {
 
     crate::serial_println!(
         "[compositor] Started ({})",
-        if drm_ok { "DRM double-buffered" } else { "fb fallback" }
+        if drm_ok {
+            "DRM double-buffered"
+        } else {
+            "fb fallback"
+        }
     );
 }
 
@@ -795,7 +799,11 @@ fn compose_drm(state: &CompositorState) {
 
     let back = match scanout.buffers {
         Some(ref bufs) => {
-            if back_idx == 0 { &bufs.0 } else { &bufs.1 }
+            if back_idx == 0 {
+                &bufs.0
+            } else {
+                &bufs.1
+            }
         }
         None => return,
     };
@@ -864,8 +872,20 @@ fn draw_window_drm(buf: &ScanoutBuffer, window: &Window, focused: bool) {
     let close_y = y + BORDER_WIDTH as i32 + 4;
     buf.fill_rect(close_x, close_y, 14, 14, COLOR_CLOSE_BTN);
     // Draw X in the close button.
-    buf.draw_line(close_x + 3, close_y + 3, close_x + 11, close_y + 11, COLOR_TITLE_TEXT);
-    buf.draw_line(close_x + 11, close_y + 3, close_x + 3, close_y + 11, COLOR_TITLE_TEXT);
+    buf.draw_line(
+        close_x + 3,
+        close_y + 3,
+        close_x + 11,
+        close_y + 11,
+        COLOR_TITLE_TEXT,
+    );
+    buf.draw_line(
+        close_x + 11,
+        close_y + 3,
+        close_x + 3,
+        close_y + 11,
+        COLOR_TITLE_TEXT,
+    );
 
     // Client area: blit the window's pixel buffer.
     let client_x = window.client_x();
@@ -978,8 +998,20 @@ fn draw_window_fb(window: &Window, focused: bool) {
     let close_x = x + tw as i32 - BORDER_WIDTH as i32 - 18;
     let close_y = y + BORDER_WIDTH as i32 + 4;
     fb::fill_rect(close_x, close_y, 14, 14, COLOR_CLOSE_BTN);
-    fb::draw_line(close_x + 3, close_y + 3, close_x + 11, close_y + 11, COLOR_TITLE_TEXT);
-    fb::draw_line(close_x + 11, close_y + 3, close_x + 3, close_y + 11, COLOR_TITLE_TEXT);
+    fb::draw_line(
+        close_x + 3,
+        close_y + 3,
+        close_x + 11,
+        close_y + 11,
+        COLOR_TITLE_TEXT,
+    );
+    fb::draw_line(
+        close_x + 11,
+        close_y + 3,
+        close_x + 3,
+        close_y + 11,
+        COLOR_TITLE_TEXT,
+    );
 
     let client_x = window.client_x();
     let client_y = window.client_y();

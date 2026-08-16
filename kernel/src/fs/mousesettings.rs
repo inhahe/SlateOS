@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -330,7 +330,12 @@ pub fn set_scroll_lines(lines: u32) -> KernelResult<()> {
 /// Set button mapping for a physical button.
 pub fn set_button_map(physical: u8, action: ButtonAction) -> KernelResult<()> {
     with_state(|state| {
-        if let Some(entry) = state.config.button_map.iter_mut().find(|(b, _)| *b == physical) {
+        if let Some(entry) = state
+            .config
+            .button_map
+            .iter_mut()
+            .find(|(b, _)| *b == physical)
+        {
             entry.1 = action;
         } else {
             state.config.button_map.push((physical, action));
@@ -344,7 +349,13 @@ pub fn set_button_map(physical: u8, action: ButtonAction) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Register a mouse device.
-pub fn add_device(name: &str, buttons: u8, has_wheel: bool, dpi: u32, wireless: bool) -> KernelResult<u32> {
+pub fn add_device(
+    name: &str,
+    buttons: u8,
+    has_wheel: bool,
+    dpi: u32,
+    wireless: bool,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.devices.len() >= MAX_MICE {
             return Err(KernelError::ResourceExhausted);
@@ -381,7 +392,9 @@ pub fn remove_device(id: u32) -> KernelResult<()> {
 pub fn get_device(id: u32) -> KernelResult<MouseDevice> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.devices.iter()
+    state
+        .devices
+        .iter()
         .find(|d| d.id == id)
         .cloned()
         .ok_or(KernelError::NotFound)
@@ -399,7 +412,9 @@ pub fn set_device_dpi(id: u32, dpi: u32) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        let dev = state.devices.iter_mut()
+        let dev = state
+            .devices
+            .iter_mut()
             .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         dev.dpi = dpi;
@@ -413,7 +428,9 @@ pub fn update_battery(id: u32, pct: u8) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        let dev = state.devices.iter_mut()
+        let dev = state
+            .devices
+            .iter_mut()
             .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         dev.battery_pct = pct;
@@ -424,7 +441,9 @@ pub fn update_battery(id: u32, pct: u8) -> KernelResult<()> {
 /// Set device connected state.
 pub fn set_connected(id: u32, connected: bool) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut()
+        let dev = state
+            .devices
+            .iter_mut()
             .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         dev.connected = connected;

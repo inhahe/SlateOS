@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -99,7 +99,9 @@ where
 /// queues / 300 KB — plus global totals of 60 shm / 25 sem / 13 msg.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         namespaces: Vec::new(),
         next_id: 1,
@@ -113,14 +115,22 @@ pub fn init_defaults() {
 /// Create an IPC namespace.
 pub fn create_ns(name: &str) -> KernelResult<u32> {
     with_state(|state| {
-        if state.namespaces.len() >= MAX_NAMESPACES { return Err(KernelError::ResourceExhausted); }
+        if state.namespaces.len() >= MAX_NAMESPACES {
+            return Err(KernelError::ResourceExhausted);
+        }
         let now = crate::hpet::elapsed_ns();
         let id = state.next_id;
         state.next_id += 1;
         state.namespaces.push(IpcNamespace {
-            ns_id: id, name: String::from(name),
-            shm_segments: 0, shm_bytes: 0, sem_sets: 0, sem_total: 0,
-            msg_queues: 0, msg_bytes: 0, created_ns: now,
+            ns_id: id,
+            name: String::from(name),
+            shm_segments: 0,
+            shm_bytes: 0,
+            sem_sets: 0,
+            sem_total: 0,
+            msg_queues: 0,
+            msg_bytes: 0,
+            created_ns: now,
         });
         Ok(id)
     })
@@ -129,7 +139,10 @@ pub fn create_ns(name: &str) -> KernelResult<u32> {
 /// Destroy an IPC namespace.
 pub fn destroy_ns(ns_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.namespaces.iter().position(|n| n.ns_id == ns_id)
+        let idx = state
+            .namespaces
+            .iter()
+            .position(|n| n.ns_id == ns_id)
             .ok_or(KernelError::NotFound)?;
         state.namespaces.remove(idx);
         Ok(())
@@ -139,7 +152,10 @@ pub fn destroy_ns(ns_id: u32) -> KernelResult<()> {
 /// Record a shared memory segment.
 pub fn record_shm(ns_id: u32, bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let ns = state.namespaces.iter_mut().find(|n| n.ns_id == ns_id)
+        let ns = state
+            .namespaces
+            .iter_mut()
+            .find(|n| n.ns_id == ns_id)
             .ok_or(KernelError::NotFound)?;
         ns.shm_segments += 1;
         ns.shm_bytes += bytes;
@@ -151,7 +167,10 @@ pub fn record_shm(ns_id: u32, bytes: u64) -> KernelResult<()> {
 /// Record a semaphore set.
 pub fn record_sem(ns_id: u32, count: u32) -> KernelResult<()> {
     with_state(|state| {
-        let ns = state.namespaces.iter_mut().find(|n| n.ns_id == ns_id)
+        let ns = state
+            .namespaces
+            .iter_mut()
+            .find(|n| n.ns_id == ns_id)
             .ok_or(KernelError::NotFound)?;
         ns.sem_sets += 1;
         ns.sem_total += count as u64;
@@ -163,7 +182,10 @@ pub fn record_sem(ns_id: u32, count: u32) -> KernelResult<()> {
 /// Record a message queue.
 pub fn record_msg(ns_id: u32, bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let ns = state.namespaces.iter_mut().find(|n| n.ns_id == ns_id)
+        let ns = state
+            .namespaces
+            .iter_mut()
+            .find(|n| n.ns_id == ns_id)
             .ok_or(KernelError::NotFound)?;
         ns.msg_queues += 1;
         ns.msg_bytes += bytes;
@@ -174,21 +196,31 @@ pub fn record_msg(ns_id: u32, bytes: u64) -> KernelResult<()> {
 
 /// List namespaces.
 pub fn ns_list() -> Vec<IpcNamespace> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.namespaces.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.namespaces.clone())
 }
 
 /// Get a specific namespace.
 pub fn ns_info(ns_id: u32) -> Option<IpcNamespace> {
-    STATE.lock().as_ref().and_then(|s| {
-        s.namespaces.iter().find(|n| n.ns_id == ns_id).cloned()
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.namespaces.iter().find(|n| n.ns_id == ns_id).cloned())
 }
 
 /// Statistics: (ns_count, total_shm, total_sem, total_msg, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.namespaces.len(), s.total_shm, s.total_sem, s.total_msg, s.ops),
+        Some(s) => (
+            s.namespaces.len(),
+            s.total_shm,
+            s.total_sem,
+            s.total_msg,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -215,7 +247,17 @@ pub fn self_test() {
     assert_eq!(id, 1);
     assert_eq!(ns_list().len(), 1);
     let ns = ns_info(id).expect("info");
-    assert_eq!((ns.shm_segments, ns.shm_bytes, ns.sem_sets, ns.sem_total, ns.msg_queues, ns.msg_bytes), (0, 0, 0, 0, 0, 0));
+    assert_eq!(
+        (
+            ns.shm_segments,
+            ns.shm_bytes,
+            ns.sem_sets,
+            ns.sem_total,
+            ns.msg_queues,
+            ns.msg_bytes
+        ),
+        (0, 0, 0, 0, 0, 0)
+    );
     crate::serial_println!("  [2/8] create: OK");
 
     // 3: Shm — per-namespace and global SHM counters advance.

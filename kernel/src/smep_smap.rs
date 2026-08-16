@@ -189,7 +189,9 @@ fn smap_enable_blocker() -> Option<&'static str> {
     if !entry_paths_clear_ac_impl() {
         // Keep this string specific: it is what a future reader sees on the
         // serial log when they wonder why SMAP is off.
-        return Some("IDT entry stubs do not clear EFLAGS.AC — alternatives::apply() has not patched in `clac`");
+        return Some(
+            "IDT entry stubs do not clear EFLAGS.AC — alternatives::apply() has not patched in `clac`",
+        );
     }
     if !USER_ACCESSES_ANNOTATED {
         return Some("user-access paths not fully STAC/CLAC-annotated");
@@ -277,7 +279,9 @@ pub fn init() {
         // Adding SMEP/SMAP bits to CR4 is safe as long as the kernel doesn't
         // intentionally execute user pages (it shouldn't!) and uses STAC/CLAC
         // when accessing user memory.
-        unsafe { write_cr4(new_cr4); }
+        unsafe {
+            write_cr4(new_cr4);
+        }
         serial_println!("[smep_smap] CR4 updated: {:#x} → {:#x}", cr4, new_cr4);
     }
 }
@@ -286,7 +290,9 @@ pub fn init() {
 ///
 /// Each CPU has its own CR4, so each AP must independently enable these bits.
 pub fn init_ap() {
-    let Some(features) = crate::cpu::features() else { return };
+    let Some(features) = crate::cpu::features() else {
+        return;
+    };
 
     let cr4 = read_cr4();
     let mut new_cr4 = cr4;
@@ -306,7 +312,9 @@ pub fn init_ap() {
 
     if new_cr4 != cr4 {
         // SAFETY: Same as init() — CPU supports these features.
-        unsafe { write_cr4(new_cr4); }
+        unsafe {
+            write_cr4(new_cr4);
+        }
     }
 }
 
@@ -392,10 +400,14 @@ where
     F: FnOnce() -> R,
 {
     // SAFETY: Caller guarantees the closure only accesses validated user memory.
-    unsafe { stac(); }
+    unsafe {
+        stac();
+    }
     let result = f();
     // SAFETY: Paired with stac() above.
-    unsafe { clac(); }
+    unsafe {
+        clac();
+    }
     result
 }
 
@@ -492,19 +504,34 @@ pub fn self_test() {
 
     // Test 1: Status query works without panic.
     let s = status();
-    serial_println!("[smep_smap]   Status: SMEP hw={}, SMAP hw={}, UMIP hw={}",
-        s.hw_smep, s.hw_smap, s.hw_umip);
-    serial_println!("[smep_smap]   Active: SMEP={}, SMAP={}, UMIP={}",
-        s.smep_active, s.smap_active, s.umip_active);
+    serial_println!(
+        "[smep_smap]   Status: SMEP hw={}, SMAP hw={}, UMIP hw={}",
+        s.hw_smep,
+        s.hw_smap,
+        s.hw_umip
+    );
+    serial_println!(
+        "[smep_smap]   Active: SMEP={}, SMAP={}, UMIP={}",
+        s.smep_active,
+        s.smap_active,
+        s.umip_active
+    );
     serial_println!("[smep_smap]   CR4={:#x}", s.cr4);
 
     // Test 2: If SMEP is supported, verify CR4.SMEP is set.
     if s.hw_smep {
-        assert!(s.cr4 & CR4_SMEP != 0, "CR4.SMEP should be set when SMEP is supported");
+        assert!(
+            s.cr4 & CR4_SMEP != 0,
+            "CR4.SMEP should be set when SMEP is supported"
+        );
         assert!(s.smep_active, "SMEP should be marked active");
         serial_println!("[smep_smap]   SMEP enforcement: VERIFIED (CR4 bit set)");
     } else {
-        assert_eq!(s.cr4 & CR4_SMEP, 0, "CR4.SMEP should be clear without support");
+        assert_eq!(
+            s.cr4 & CR4_SMEP,
+            0,
+            "CR4.SMEP should be clear without support"
+        );
         serial_println!("[smep_smap]   SMEP: not available on this CPU");
     }
 
@@ -518,25 +545,45 @@ pub fn self_test() {
     if s.hw_smap {
         match smap_enable_blocker() {
             None => {
-                assert!(s.cr4 & CR4_SMAP != 0, "CR4.SMAP should be set once both prerequisites are met");
+                assert!(
+                    s.cr4 & CR4_SMAP != 0,
+                    "CR4.SMAP should be set once both prerequisites are met"
+                );
                 assert!(s.smap_active, "SMAP should be marked active");
                 serial_println!("[smep_smap]   SMAP enforcement: VERIFIED (CR4 bit set)");
             }
             Some(blocker) => {
-                assert_eq!(s.cr4 & CR4_SMAP, 0, "CR4.SMAP should be clear while a prerequisite is unmet");
-                assert!(!s.smap_active, "SMAP should not be marked active while a prerequisite is unmet");
+                assert_eq!(
+                    s.cr4 & CR4_SMAP,
+                    0,
+                    "CR4.SMAP should be clear while a prerequisite is unmet"
+                );
+                assert!(
+                    !s.smap_active,
+                    "SMAP should not be marked active while a prerequisite is unmet"
+                );
                 serial_println!("[smep_smap]   SMAP: supported but deferred — {blocker}");
             }
         }
     } else {
-        assert_eq!(s.cr4 & CR4_SMAP, 0, "CR4.SMAP should be clear without support");
-        assert!(!s.smap_active, "SMAP should not be marked active without support");
+        assert_eq!(
+            s.cr4 & CR4_SMAP,
+            0,
+            "CR4.SMAP should be clear without support"
+        );
+        assert!(
+            !s.smap_active,
+            "SMAP should not be marked active without support"
+        );
         serial_println!("[smep_smap]   SMAP: not available on this CPU");
     }
 
     // Test 3b: If UMIP is supported, verify CR4.UMIP is set.
     if s.hw_umip {
-        assert!(s.cr4 & CR4_UMIP != 0, "CR4.UMIP should be set when UMIP is supported");
+        assert!(
+            s.cr4 & CR4_UMIP != 0,
+            "CR4.UMIP should be set when UMIP is supported"
+        );
         assert!(s.umip_active, "UMIP should be marked active");
         serial_println!("[smep_smap]   UMIP enforcement: VERIFIED (CR4 bit set)");
     } else {
@@ -559,12 +606,17 @@ pub fn self_test() {
 
         // Test 6: Access count incremented correctly.
         let count_before = USER_ACCESS_COUNT.load(Ordering::Relaxed);
-        unsafe { stac(); clac(); }
+        unsafe {
+            stac();
+            clac();
+        }
         let count_after = USER_ACCESS_COUNT.load(Ordering::Relaxed);
         assert_eq!(count_after, count_before.wrapping_add(1));
         serial_println!("[smep_smap]   Access counter: OK");
     } else {
-        serial_println!("[smep_smap]   STAC/CLAC: skipped (SMAP not available — instructions would #UD)");
+        serial_println!(
+            "[smep_smap]   STAC/CLAC: skipped (SMAP not available — instructions would #UD)"
+        );
     }
 
     serial_println!("[smep_smap] Self-test PASSED");

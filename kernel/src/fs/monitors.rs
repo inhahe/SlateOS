@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -242,7 +242,11 @@ pub fn init_defaults() {
             scale_pct: 100,
             rotation: Rotation::Normal,
             // The only mode we know is the one the framebuffer is using now.
-            modes: alloc::vec![DisplayMode { width, height, refresh_hz: 0 }],
+            modes: alloc::vec![DisplayMode {
+                width,
+                height,
+                refresh_hz: 0
+            }],
             width_mm: 0, // Unknown — no EDID.
             height_mm: 0,
             manufacturer: String::new(),
@@ -280,7 +284,9 @@ pub fn add_monitor(
         state.next_id += 1;
 
         // Position to the right of existing monitors.
-        let max_x = state.monitors.iter()
+        let max_x = state
+            .monitors
+            .iter()
             .filter(|m| m.enabled)
             .map(|m| m.x.saturating_add(m.width as i32))
             .max()
@@ -300,9 +306,11 @@ pub fn add_monitor(
             y: 0,
             scale_pct: 100,
             rotation: Rotation::Normal,
-            modes: alloc::vec![
-                DisplayMode { width, height, refresh_hz },
-            ],
+            modes: alloc::vec![DisplayMode {
+                width,
+                height,
+                refresh_hz
+            },],
             width_mm: 0,
             height_mm: 0,
             manufacturer: String::new(),
@@ -335,7 +343,9 @@ pub fn remove_monitor(id: u32) -> KernelResult<()> {
 pub fn get_monitor(id: u32) -> KernelResult<Monitor> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.monitors.iter()
+    state
+        .monitors
+        .iter()
         .find(|m| m.id == id)
         .cloned()
         .ok_or(KernelError::NotFound)
@@ -351,7 +361,9 @@ pub fn list_monitors() -> Vec<Monitor> {
 pub fn primary_monitor() -> KernelResult<Monitor> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.monitors.iter()
+    state
+        .monitors
+        .iter()
         .find(|m| m.primary)
         .cloned()
         .ok_or(KernelError::NotFound)
@@ -377,7 +389,9 @@ pub fn set_primary(id: u32) -> KernelResult<()> {
 /// Enable or disable a monitor.
 pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.monitors.iter()
+        let pos = state
+            .monitors
+            .iter()
             .position(|m| m.id == id)
             .ok_or(KernelError::NotFound)?;
         // Cannot disable the only enabled monitor.
@@ -395,7 +409,9 @@ pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
 /// Set monitor resolution and refresh rate.
 pub fn set_mode(id: u32, width: u32, height: u32, refresh_hz: u32) -> KernelResult<()> {
     with_state(|state| {
-        let monitor = state.monitors.iter_mut()
+        let monitor = state
+            .monitors
+            .iter_mut()
             .find(|m| m.id == id)
             .ok_or(KernelError::NotFound)?;
         monitor.width = width;
@@ -408,7 +424,9 @@ pub fn set_mode(id: u32, width: u32, height: u32, refresh_hz: u32) -> KernelResu
 /// Set monitor position on virtual desktop.
 pub fn set_position(id: u32, x: i32, y: i32) -> KernelResult<()> {
     with_state(|state| {
-        let monitor = state.monitors.iter_mut()
+        let monitor = state
+            .monitors
+            .iter_mut()
             .find(|m| m.id == id)
             .ok_or(KernelError::NotFound)?;
         monitor.x = x;
@@ -423,7 +441,9 @@ pub fn set_scale(id: u32, scale_pct: u32) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        let monitor = state.monitors.iter_mut()
+        let monitor = state
+            .monitors
+            .iter_mut()
             .find(|m| m.id == id)
             .ok_or(KernelError::NotFound)?;
         monitor.scale_pct = scale_pct;
@@ -434,7 +454,9 @@ pub fn set_scale(id: u32, scale_pct: u32) -> KernelResult<()> {
 /// Set monitor rotation.
 pub fn set_rotation(id: u32, rotation: Rotation) -> KernelResult<()> {
     with_state(|state| {
-        let monitor = state.monitors.iter_mut()
+        let monitor = state
+            .monitors
+            .iter_mut()
             .find(|m| m.id == id)
             .ok_or(KernelError::NotFound)?;
         monitor.rotation = rotation;
@@ -475,8 +497,16 @@ pub fn desktop_bounds() -> (i32, i32, u32, u32) {
 
     let min_x = enabled.iter().map(|m| m.x).min().unwrap_or(0);
     let min_y = enabled.iter().map(|m| m.y).min().unwrap_or(0);
-    let max_x = enabled.iter().map(|m| m.x.saturating_add(m.width as i32)).max().unwrap_or(0);
-    let max_y = enabled.iter().map(|m| m.y.saturating_add(m.height as i32)).max().unwrap_or(0);
+    let max_x = enabled
+        .iter()
+        .map(|m| m.x.saturating_add(m.width as i32))
+        .max()
+        .unwrap_or(0);
+    let max_y = enabled
+        .iter()
+        .map(|m| m.y.saturating_add(m.height as i32))
+        .max()
+        .unwrap_or(0);
 
     let w = (max_x - min_x) as u32;
     let h = (max_y - min_y) as u32;
@@ -491,8 +521,10 @@ pub fn monitor_at_point(x: i32, y: i32) -> Option<u32> {
         if !m.enabled {
             continue;
         }
-        if x >= m.x && x < m.x.saturating_add(m.width as i32)
-            && y >= m.y && y < m.y.saturating_add(m.height as i32)
+        if x >= m.x
+            && x < m.x.saturating_add(m.width as i32)
+            && y >= m.y
+            && y < m.y.saturating_add(m.height as i32)
         {
             return Some(m.id);
         }
@@ -526,10 +558,14 @@ pub fn stats() -> (usize, usize, &'static str, u32, u64) {
     match guard.as_ref() {
         Some(s) => {
             let enabled = s.monitors.iter().filter(|m| m.enabled).count();
-            let primary_id = s.monitors.iter()
-                .find(|m| m.primary)
-                .map_or(0, |m| m.id);
-            (s.monitors.len(), enabled, s.layout_mode.label(), primary_id, s.ops)
+            let primary_id = s.monitors.iter().find(|m| m.primary).map_or(0, |m| m.id);
+            (
+                s.monitors.len(),
+                enabled,
+                s.layout_mode.label(),
+                primary_id,
+                s.ops,
+            )
         }
         None => (0, 0, "n/a", 0, 0),
     }
@@ -590,7 +626,11 @@ pub fn self_test() {
             y: 0,
             scale_pct: 100,
             rotation: Rotation::Normal,
-            modes: alloc::vec![DisplayMode { width: 1920, height: 1080, refresh_hz: 60 }],
+            modes: alloc::vec![DisplayMode {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60
+            }],
             width_mm: 0,
             height_mm: 0,
             manufacturer: String::new(),
@@ -604,7 +644,15 @@ pub fn self_test() {
 
     // Test 2: add monitor.
     {
-        let id = add_monitor("Dell U2723QE", ConnectorType::Hdmi, "HDMI-1", 3840, 2160, 60).unwrap();
+        let id = add_monitor(
+            "Dell U2723QE",
+            ConnectorType::Hdmi,
+            "HDMI-1",
+            3840,
+            2160,
+            60,
+        )
+        .unwrap();
         assert_eq!(list_monitors().len(), 2);
         let m = get_monitor(id).unwrap();
         assert_eq!(m.name, "Dell U2723QE");

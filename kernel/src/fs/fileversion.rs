@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -164,7 +164,9 @@ pub fn capture_version(path: &str, data: &[u8], uid: u32) -> KernelResult<u64> {
 
         // Check if path is covered by a watched path (canonical subtree
         // predicate; see fs::pathutil).
-        let policy = state.watched_paths.iter()
+        let policy = state
+            .watched_paths
+            .iter()
             .find(|w| crate::fs::pathutil::path_in_subtree(path, w.path.as_str()))
             .map(|w| w.policy)
             .unwrap_or(state.default_policy);
@@ -174,7 +176,9 @@ pub fn capture_version(path: &str, data: &[u8], uid: u32) -> KernelResult<u64> {
         }
 
         // Check for max version size.
-        if let Some(wp) = state.watched_paths.iter()
+        if let Some(wp) = state
+            .watched_paths
+            .iter()
             .find(|w| crate::fs::pathutil::path_in_subtree(path, w.path.as_str()))
         {
             if wp.max_version_size > 0 && data.len() as u64 > wp.max_version_size {
@@ -224,7 +228,9 @@ pub fn capture_version(path: &str, data: &[u8], uid: u32) -> KernelResult<u64> {
             }
             VersionPolicy::KeepAll => {
                 // Cap at MAX_VERSIONS_PER_FILE.
-                while state.versions.iter().filter(|v| v.path == path).count() > MAX_VERSIONS_PER_FILE as usize {
+                while state.versions.iter().filter(|v| v.path == path).count()
+                    > MAX_VERSIONS_PER_FILE as usize
+                {
                     if let Some(pos) = state.versions.iter().position(|v| v.path == path) {
                         state.versions.remove(pos);
                     }
@@ -247,7 +253,9 @@ pub fn list_versions(path: &str) -> Vec<FileVersion> {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let mut versions: Vec<FileVersion> = s.versions.iter()
+            let mut versions: Vec<FileVersion> = s
+                .versions
+                .iter()
                 .filter(|v| v.path == path)
                 .cloned()
                 .collect();
@@ -261,7 +269,10 @@ pub fn list_versions(path: &str) -> Vec<FileVersion> {
 /// Get a specific version by ID.
 pub fn get_version(id: u64) -> KernelResult<FileVersion> {
     with_state(|state| {
-        state.versions.iter().find(|v| v.id == id)
+        state
+            .versions
+            .iter()
+            .find(|v| v.id == id)
             .cloned()
             .ok_or(KernelError::NotFound)
     })
@@ -270,7 +281,10 @@ pub fn get_version(id: u64) -> KernelResult<FileVersion> {
 /// Mark a version as restored (increments counter, returns version info).
 pub fn restore_version(id: u64) -> KernelResult<FileVersion> {
     with_state(|state| {
-        let version = state.versions.iter().find(|v| v.id == id)
+        let version = state
+            .versions
+            .iter()
+            .find(|v| v.id == id)
             .cloned()
             .ok_or(KernelError::NotFound)?;
         state.total_restored += 1;
@@ -281,7 +295,10 @@ pub fn restore_version(id: u64) -> KernelResult<FileVersion> {
 /// Delete a specific version.
 pub fn delete_version(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.versions.iter().position(|v| v.id == id)
+        let pos = state
+            .versions
+            .iter()
+            .position(|v| v.id == id)
             .ok_or(KernelError::NotFound)?;
         state.versions.remove(pos);
         Ok(())
@@ -300,7 +317,10 @@ pub fn purge_file_versions(path: &str) -> KernelResult<usize> {
 /// Add a comment/description to a version.
 pub fn set_version_comment(id: u64, comment: &str) -> KernelResult<()> {
     with_state(|state| {
-        let version = state.versions.iter_mut().find(|v| v.id == id)
+        let version = state
+            .versions
+            .iter_mut()
+            .find(|v| v.id == id)
             .ok_or(KernelError::NotFound)?;
         version.comment = String::from(comment);
         Ok(())
@@ -326,7 +346,10 @@ pub fn add_watch(path: &str, policy: VersionPolicy) -> KernelResult<()> {
 /// Remove a watched path.
 pub fn remove_watch(path: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.watched_paths.iter().position(|w| w.path == path)
+        let pos = state
+            .watched_paths
+            .iter()
+            .position(|w| w.path == path)
             .ok_or(KernelError::NotFound)?;
         state.watched_paths.remove(pos);
         Ok(())
@@ -389,7 +412,14 @@ pub fn stats() -> (usize, usize, u64, u64, usize, u64) {
             let mut paths: Vec<&str> = s.versions.iter().map(|v| v.path.as_str()).collect();
             paths.sort_unstable();
             paths.dedup();
-            (s.versions.len(), paths.len(), s.total_captured, s.total_restored, s.watched_paths.len(), s.ops)
+            (
+                s.versions.len(),
+                paths.len(),
+                s.total_captured,
+                s.total_restored,
+                s.watched_paths.len(),
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0, 0),
     }

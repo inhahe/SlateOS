@@ -22,11 +22,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -106,33 +106,99 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let tiles = alloc::vec![
-        SettingsTile { id: 1, name: String::from("Wi-Fi"), icon: String::from("wifi"),
-            tile_type: TileType::Toggle, enabled: true, value: 1,
-            subtitle: String::from("Connected"), position: 1, visible: true },
-        SettingsTile { id: 2, name: String::from("Bluetooth"), icon: String::from("bluetooth"),
-            tile_type: TileType::Toggle, enabled: true, value: 1,
-            subtitle: String::from("On"), position: 2, visible: true },
-        SettingsTile { id: 3, name: String::from("Airplane Mode"), icon: String::from("airplane"),
-            tile_type: TileType::Toggle, enabled: false, value: 0,
-            subtitle: String::from("Off"), position: 3, visible: true },
-        SettingsTile { id: 4, name: String::from("Night Light"), icon: String::from("nightlight"),
-            tile_type: TileType::Toggle, enabled: false, value: 0,
-            subtitle: String::from("Off"), position: 4, visible: true },
-        SettingsTile { id: 5, name: String::from("Brightness"), icon: String::from("brightness"),
-            tile_type: TileType::Slider, enabled: true, value: 70,
-            subtitle: String::from("70%"), position: 5, visible: true },
-        SettingsTile { id: 6, name: String::from("Volume"), icon: String::from("volume"),
-            tile_type: TileType::Slider, enabled: true, value: 50,
-            subtitle: String::from("50%"), position: 6, visible: true },
-        SettingsTile { id: 7, name: String::from("Do Not Disturb"), icon: String::from("dnd"),
-            tile_type: TileType::Toggle, enabled: false, value: 0,
-            subtitle: String::from("Off"), position: 7, visible: true },
-        SettingsTile { id: 8, name: String::from("Battery Saver"), icon: String::from("battery"),
-            tile_type: TileType::Toggle, enabled: false, value: 0,
-            subtitle: String::from("Off"), position: 8, visible: true },
+        SettingsTile {
+            id: 1,
+            name: String::from("Wi-Fi"),
+            icon: String::from("wifi"),
+            tile_type: TileType::Toggle,
+            enabled: true,
+            value: 1,
+            subtitle: String::from("Connected"),
+            position: 1,
+            visible: true
+        },
+        SettingsTile {
+            id: 2,
+            name: String::from("Bluetooth"),
+            icon: String::from("bluetooth"),
+            tile_type: TileType::Toggle,
+            enabled: true,
+            value: 1,
+            subtitle: String::from("On"),
+            position: 2,
+            visible: true
+        },
+        SettingsTile {
+            id: 3,
+            name: String::from("Airplane Mode"),
+            icon: String::from("airplane"),
+            tile_type: TileType::Toggle,
+            enabled: false,
+            value: 0,
+            subtitle: String::from("Off"),
+            position: 3,
+            visible: true
+        },
+        SettingsTile {
+            id: 4,
+            name: String::from("Night Light"),
+            icon: String::from("nightlight"),
+            tile_type: TileType::Toggle,
+            enabled: false,
+            value: 0,
+            subtitle: String::from("Off"),
+            position: 4,
+            visible: true
+        },
+        SettingsTile {
+            id: 5,
+            name: String::from("Brightness"),
+            icon: String::from("brightness"),
+            tile_type: TileType::Slider,
+            enabled: true,
+            value: 70,
+            subtitle: String::from("70%"),
+            position: 5,
+            visible: true
+        },
+        SettingsTile {
+            id: 6,
+            name: String::from("Volume"),
+            icon: String::from("volume"),
+            tile_type: TileType::Slider,
+            enabled: true,
+            value: 50,
+            subtitle: String::from("50%"),
+            position: 6,
+            visible: true
+        },
+        SettingsTile {
+            id: 7,
+            name: String::from("Do Not Disturb"),
+            icon: String::from("dnd"),
+            tile_type: TileType::Toggle,
+            enabled: false,
+            value: 0,
+            subtitle: String::from("Off"),
+            position: 7,
+            visible: true
+        },
+        SettingsTile {
+            id: 8,
+            name: String::from("Battery Saver"),
+            icon: String::from("battery"),
+            tile_type: TileType::Toggle,
+            enabled: false,
+            value: 0,
+            subtitle: String::from("Off"),
+            position: 8,
+            visible: true
+        },
     ];
 
     *guard = Some(State {
@@ -148,7 +214,10 @@ pub fn init_defaults() {
 /// Toggle a setting on/off.
 pub fn toggle(tile_id: u32) -> KernelResult<bool> {
     with_state(|state| {
-        let tile = state.tiles.iter_mut().find(|t| t.id == tile_id)
+        let tile = state
+            .tiles
+            .iter_mut()
+            .find(|t| t.id == tile_id)
             .ok_or(KernelError::NotFound)?;
         if tile.tile_type != TileType::Toggle {
             return Err(KernelError::InvalidArgument);
@@ -164,7 +233,10 @@ pub fn toggle(tile_id: u32) -> KernelResult<bool> {
 /// Set slider value (0-100).
 pub fn set_value(tile_id: u32, value: u32) -> KernelResult<()> {
     with_state(|state| {
-        let tile = state.tiles.iter_mut().find(|t| t.id == tile_id)
+        let tile = state
+            .tiles
+            .iter_mut()
+            .find(|t| t.id == tile_id)
             .ok_or(KernelError::NotFound)?;
         if tile.tile_type != TileType::Slider {
             return Err(KernelError::InvalidArgument);
@@ -179,7 +251,10 @@ pub fn set_value(tile_id: u32, value: u32) -> KernelResult<()> {
 /// Set subtitle text for a tile.
 pub fn set_subtitle(tile_id: u32, subtitle: &str) -> KernelResult<()> {
     with_state(|state| {
-        let tile = state.tiles.iter_mut().find(|t| t.id == tile_id)
+        let tile = state
+            .tiles
+            .iter_mut()
+            .find(|t| t.id == tile_id)
             .ok_or(KernelError::NotFound)?;
         tile.subtitle = String::from(subtitle);
         Ok(())
@@ -196,9 +271,15 @@ pub fn add_tile(name: &str, icon: &str, tile_type: TileType) -> KernelResult<u32
         state.next_id += 1;
         let position = state.tiles.len() as u32 + 1;
         state.tiles.push(SettingsTile {
-            id, name: String::from(name), icon: String::from(icon),
-            tile_type, enabled: false, value: 0,
-            subtitle: String::from("Off"), position, visible: true,
+            id,
+            name: String::from(name),
+            icon: String::from(icon),
+            tile_type,
+            enabled: false,
+            value: 0,
+            subtitle: String::from("Off"),
+            position,
+            visible: true,
         });
         Ok(id)
     })
@@ -207,7 +288,10 @@ pub fn add_tile(name: &str, icon: &str, tile_type: TileType) -> KernelResult<u32
 /// Remove a tile.
 pub fn remove_tile(tile_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.tiles.iter().position(|t| t.id == tile_id)
+        let pos = state
+            .tiles
+            .iter()
+            .position(|t| t.id == tile_id)
             .ok_or(KernelError::NotFound)?;
         state.tiles.remove(pos);
         Ok(())
@@ -217,7 +301,10 @@ pub fn remove_tile(tile_id: u32) -> KernelResult<()> {
 /// Show/hide a tile.
 pub fn set_visible(tile_id: u32, visible: bool) -> KernelResult<()> {
     with_state(|state| {
-        let tile = state.tiles.iter_mut().find(|t| t.id == tile_id)
+        let tile = state
+            .tiles
+            .iter_mut()
+            .find(|t| t.id == tile_id)
             .ok_or(KernelError::NotFound)?;
         tile.visible = visible;
         Ok(())
@@ -227,7 +314,10 @@ pub fn set_visible(tile_id: u32, visible: bool) -> KernelResult<()> {
 /// Reorder a tile.
 pub fn set_position(tile_id: u32, position: u32) -> KernelResult<()> {
     with_state(|state| {
-        let tile = state.tiles.iter_mut().find(|t| t.id == tile_id)
+        let tile = state
+            .tiles
+            .iter_mut()
+            .find(|t| t.id == tile_id)
             .ok_or(KernelError::NotFound)?;
         tile.position = position;
         Ok(())
@@ -250,10 +340,7 @@ pub fn is_panel_open() -> bool {
 /// Get all visible tiles sorted by position.
 pub fn get_tiles() -> Vec<SettingsTile> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let mut tiles: Vec<SettingsTile> = s.tiles.iter()
-            .filter(|t| t.visible)
-            .cloned()
-            .collect();
+        let mut tiles: Vec<SettingsTile> = s.tiles.iter().filter(|t| t.visible).cloned().collect();
         tiles.sort_by_key(|t| t.position);
         tiles
     })
@@ -261,7 +348,10 @@ pub fn get_tiles() -> Vec<SettingsTile> {
 
 /// Get all tiles (including hidden).
 pub fn list_all() -> Vec<SettingsTile> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.tiles.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.tiles.clone())
 }
 
 /// Statistics: (tile_count, total_toggles, total_adjustments, ops).
@@ -312,7 +402,7 @@ pub fn self_test() {
     // 6: Hide tile.
     set_visible(custom, false).expect("hide");
     assert_eq!(get_tiles().len(), 8); // Hidden.
-    assert_eq!(list_all().len(), 9);   // Still exists.
+    assert_eq!(list_all().len(), 9); // Still exists.
     crate::serial_println!("  [6/10] hide tile: OK");
 
     // 7: Remove tile.

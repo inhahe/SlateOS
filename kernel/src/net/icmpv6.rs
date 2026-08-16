@@ -107,7 +107,11 @@ struct Ping6Slot {
 
 impl Ping6Slot {
     const fn empty() -> Self {
-        Self { active: false, seq: 0, sent_ns: 0 }
+        Self {
+            active: false,
+            seq: 0,
+            sent_ns: 0,
+        }
     }
 }
 
@@ -122,7 +126,11 @@ fn record_outstanding(seq: u16) {
 
     for slot in table.iter_mut() {
         if !slot.active {
-            *slot = Ping6Slot { active: true, seq, sent_ns: now };
+            *slot = Ping6Slot {
+                active: true,
+                seq,
+                sent_ns: now,
+            };
             return;
         }
     }
@@ -137,7 +145,11 @@ fn record_outstanding(seq: u16) {
         }
     }
     if let Some(slot) = table.get_mut(oldest_idx) {
-        *slot = Ping6Slot { active: true, seq, sent_ns: now };
+        *slot = Ping6Slot {
+            active: true,
+            seq,
+            sent_ns: now,
+        };
     }
 }
 
@@ -282,10 +294,10 @@ pub fn build_trace6_echo_request(src: &Ipv6Addr, dst: &Ipv6Addr, seq: u16) -> Ve
     let total = 8usize.saturating_add(payload.len());
     let mut msg = Vec::with_capacity(total);
     msg.push(ICMPV6_ECHO_REQUEST); // Type
-    msg.push(0);                    // Code
+    msg.push(0); // Code
     msg.extend_from_slice(&[0, 0]); // Checksum placeholder
     msg.extend_from_slice(&TRACEROUTE6_ID.to_be_bytes()); // ID
-    msg.extend_from_slice(&seq.to_be_bytes());             // Seq
+    msg.extend_from_slice(&seq.to_be_bytes()); // Seq
     msg.extend_from_slice(payload);
     finalize_checksum(src, dst, msg)
 }
@@ -432,7 +444,12 @@ fn neighbor_update(ip: Ipv6Addr, mac: MacAddress) {
     // Find an empty slot.
     for entry in cache.iter_mut() {
         if !entry.active {
-            *entry = NeighborEntry { active: true, ip, mac, last_update_ns: now };
+            *entry = NeighborEntry {
+                active: true,
+                ip,
+                mac,
+                last_update_ns: now,
+            };
             return;
         }
     }
@@ -447,7 +464,12 @@ fn neighbor_update(ip: Ipv6Addr, mac: MacAddress) {
         }
     }
     if let Some(entry) = cache.get_mut(oldest_idx) {
-        *entry = NeighborEntry { active: true, ip, mac, last_update_ns: now };
+        *entry = NeighborEntry {
+            active: true,
+            ip,
+            mac,
+            last_update_ns: now,
+        };
     }
 }
 
@@ -742,7 +764,8 @@ pub fn process_icmpv6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
         ICMPV6_DEST_UNREACHABLE => {
             crate::serial_println!(
                 "[icmpv6] Destination unreachable from {} (code {})",
-                ip_packet.src, _code
+                ip_packet.src,
+                _code
             );
         }
         ICMPV6_PACKET_TOO_BIG => {
@@ -750,14 +773,16 @@ pub fn process_icmpv6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
                 let mtu = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
                 crate::serial_println!(
                     "[icmpv6] Packet Too Big from {}: MTU={}",
-                    ip_packet.src, mtu
+                    ip_packet.src,
+                    mtu
                 );
             }
         }
         ICMPV6_TIME_EXCEEDED => {
             crate::serial_println!(
                 "[icmpv6] Time Exceeded from {} (code {})",
-                ip_packet.src, _code
+                ip_packet.src,
+                _code
             );
             // Correlate with outstanding traceroute6 probes.
             match_trace6_time_exceeded(ip_packet.src, data);
@@ -827,19 +852,20 @@ fn handle_echo_reply(ip_packet: &Ipv6Packet<'_>, data: &[u8]) {
             let rtt_ms = rtt_us / 1000;
             crate::serial_println!(
                 "[icmpv6] Echo reply from {} seq={} rtt={} ms",
-                ip_packet.src, seq, rtt_ms
+                ip_packet.src,
+                seq,
+                rtt_ms
             );
         } else {
             crate::serial_println!(
                 "[icmpv6] Echo reply from {} seq={} rtt={} us",
-                ip_packet.src, seq, rtt_us
+                ip_packet.src,
+                seq,
+                rtt_us
             );
         }
     } else {
-        crate::serial_println!(
-            "[icmpv6] Echo reply from {} seq={}",
-            ip_packet.src, seq
-        );
+        crate::serial_println!("[icmpv6] Echo reply from {} seq={}", ip_packet.src, seq);
     }
 
     LAST_REPLY_SEQ.store(seq, Ordering::Release);
@@ -886,7 +912,8 @@ fn handle_neighbor_solicitation(ip_packet: &Ipv6Packet<'_>, data: &[u8]) -> Kern
 
     crate::serial_println!(
         "[icmpv6] Neighbor Solicitation from {} for {}",
-        ip_packet.src, target_addr
+        ip_packet.src,
+        target_addr
     );
 
     // Send Neighbor Advertisement.
@@ -914,7 +941,8 @@ fn handle_neighbor_advertisement(data: &[u8]) {
         neighbor_update(target_addr, target_mac);
         crate::serial_println!(
             "[icmpv6] Neighbor Advertisement: {} is at {}",
-            target_addr, target_mac
+            target_addr,
+            target_mac
         );
     }
 }
@@ -979,10 +1007,10 @@ pub fn send_neighbor_solicitation(target: Ipv6Addr) -> KernelResult<()> {
     // Type (135) + Code (0) + Checksum (2) + Reserved (4) + Target (16) + SLLA option (8) = 32
     let mut msg = Vec::with_capacity(32);
     msg.push(ICMPV6_NEIGHBOR_SOLICITATION); // Type
-    msg.push(0);                             // Code
-    msg.extend_from_slice(&[0, 0]);          // Checksum placeholder
-    msg.extend_from_slice(&[0, 0, 0, 0]);    // Reserved
-    msg.extend_from_slice(&target.0);         // Target Address
+    msg.push(0); // Code
+    msg.extend_from_slice(&[0, 0]); // Checksum placeholder
+    msg.extend_from_slice(&[0, 0, 0, 0]); // Reserved
+    msg.extend_from_slice(&target.0); // Target Address
 
     // Source Link-Layer Address option (type 1, length 1 = 8 bytes).
     msg.push(1); // Option type: Source LLA
@@ -1006,8 +1034,8 @@ fn send_neighbor_advertisement(
     // Type (136) + Code (0) + Checksum (2) + Flags+Reserved (4) + Target (16) + TLLA option (8) = 32
     let mut msg = Vec::with_capacity(32);
     msg.push(ICMPV6_NEIGHBOR_ADVERTISEMENT); // Type
-    msg.push(0);                              // Code
-    msg.extend_from_slice(&[0, 0]);           // Checksum placeholder
+    msg.push(0); // Code
+    msg.extend_from_slice(&[0, 0]); // Checksum placeholder
 
     // Flags: R=0, S=1, O=1, rest reserved (0).
     // Byte layout: R(1) S(1) O(1) Reserved(29 bits).
@@ -1050,9 +1078,9 @@ pub fn send_router_solicitation() -> KernelResult<()> {
     // Type (133) + Code (0) + Checksum (2) + Reserved (4) + SLLA option (8) = 16
     let mut msg = Vec::with_capacity(16);
     msg.push(ICMPV6_ROUTER_SOLICITATION); // Type
-    msg.push(0);                           // Code
-    msg.extend_from_slice(&[0, 0]);        // Checksum placeholder
-    msg.extend_from_slice(&[0, 0, 0, 0]);  // Reserved
+    msg.push(0); // Code
+    msg.extend_from_slice(&[0, 0]); // Checksum placeholder
+    msg.extend_from_slice(&[0, 0, 0, 0]); // Reserved
 
     // Source Link-Layer Address option (type 1, length 1 = 8 bytes).
     msg.push(1); // Option type: Source LLA
@@ -1063,7 +1091,8 @@ pub fn send_router_solicitation() -> KernelResult<()> {
 
     crate::serial_println!(
         "[icmpv6] Sending Router Solicitation from {} to {}",
-        our_ip, dst
+        our_ip,
+        dst
     );
 
     ipv6::send_raw(our_ip, dst, NH_ICMPV6, 255, &msg)
@@ -1101,14 +1130,16 @@ fn handle_router_advertisement(ip_packet: &Ipv6Packet<'_>, data: &[u8]) {
     let _cur_hop_limit = data[4];
     let flags = data[5];
     let _managed = (flags & 0x80) != 0; // M flag — managed (DHCPv6).
-    let _other = (flags & 0x40) != 0;   // O flag — other config (DHCPv6 for options).
+    let _other = (flags & 0x40) != 0; // O flag — other config (DHCPv6 for options).
     let router_lifetime = u16::from_be_bytes([data[6], data[7]]);
     let _reachable_time = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
     let _retrans_timer = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
 
     crate::serial_println!(
         "[icmpv6] Router Advertisement from {}: hop={}, lifetime={}s, flags=M:{} O:{}",
-        ip_packet.src, _cur_hop_limit, router_lifetime,
+        ip_packet.src,
+        _cur_hop_limit,
+        router_lifetime,
         if _managed { "1" } else { "0" },
         if _other { "1" } else { "0" }
     );
@@ -1160,13 +1191,19 @@ fn handle_router_advertisement(ip_packet: &Ipv6Packet<'_>, data: &[u8]) {
 
             crate::serial_println!(
                 "[icmpv6] SLAAC: {} (prefix /{}, valid={}s, preferred={}s)",
-                global, pi.prefix_len, pi.valid_lifetime, pi.preferred_lifetime
+                global,
+                pi.prefix_len,
+                pi.valid_lifetime,
+                pi.preferred_lifetime
             );
 
             // Insert into SLAAC state (update if same prefix, else add new).
             slaac_insert(
-                &mut state, global, pi.prefix_len,
-                pi.valid_lifetime, pi.preferred_lifetime,
+                &mut state,
+                global,
+                pi.prefix_len,
+                pi.valid_lifetime,
+                pi.preferred_lifetime,
             );
         }
     }
@@ -1178,10 +1215,7 @@ fn handle_router_advertisement(ip_packet: &Ipv6Packet<'_>, data: &[u8]) {
             if rdnss_idx < MAX_RDNSS {
                 state.rdnss[rdnss_idx] = ri.addr;
                 rdnss_idx = rdnss_idx.wrapping_add(1);
-                crate::serial_println!(
-                    "[icmpv6] RDNSS: {}",
-                    ri.addr
-                );
+                crate::serial_println!("[icmpv6] RDNSS: {}", ri.addr);
             }
         }
     }
@@ -1247,10 +1281,7 @@ fn slaac_insert(
     }
 
     // All slots full — log and skip.
-    crate::serial_println!(
-        "[icmpv6] SLAAC table full, cannot add {}",
-        addr
-    );
+    crate::serial_println!("[icmpv6] SLAAC table full, cannot add {}", addr);
 }
 
 /// Parse Router Advertisement options.
@@ -1292,12 +1323,9 @@ fn parse_ra_options(
                     let flags = opts[3];
                     let on_link = (flags & 0x80) != 0;
                     let autonomous = (flags & 0x40) != 0;
-                    let valid_lifetime = u32::from_be_bytes([
-                        opts[4], opts[5], opts[6], opts[7],
-                    ]);
-                    let preferred_lifetime = u32::from_be_bytes([
-                        opts[8], opts[9], opts[10], opts[11],
-                    ]);
+                    let valid_lifetime = u32::from_be_bytes([opts[4], opts[5], opts[6], opts[7]]);
+                    let preferred_lifetime =
+                        u32::from_be_bytes([opts[8], opts[9], opts[10], opts[11]]);
                     let mut prefix_bytes = [0u8; 16];
                     prefix_bytes.copy_from_slice(&opts[16..32]);
 
@@ -1317,9 +1345,7 @@ fn parse_ra_options(
                 // Offset 2: Reserved (2 bytes)
                 // Offset 4: Lifetime (4 bytes)
                 // Offset 8: DNS server addresses (16 bytes each)
-                let lifetime = u32::from_be_bytes([
-                    opts[4], opts[5], opts[6], opts[7],
-                ]);
+                let lifetime = u32::from_be_bytes([opts[4], opts[5], opts[6], opts[7]]);
                 // Number of addresses = (total - 8) / 16.
                 let addr_bytes = total - 8;
                 let num_addrs = addr_bytes / 16;
@@ -1364,10 +1390,10 @@ pub fn ping6(dst: Ipv6Addr) -> KernelResult<u16> {
     let total = 8 + payload.len();
     let mut msg = Vec::with_capacity(total);
     msg.push(ICMPV6_ECHO_REQUEST); // Type
-    msg.push(0);                    // Code
+    msg.push(0); // Code
     msg.extend_from_slice(&[0, 0]); // Checksum placeholder
     msg.extend_from_slice(&PING6_ID.to_be_bytes()); // ID
-    msg.extend_from_slice(&seq.to_be_bytes());       // Seq
+    msg.extend_from_slice(&seq.to_be_bytes()); // Seq
     msg.extend_from_slice(payload);
 
     let msg = finalize_checksum(&our_ip, &dst, msg);
@@ -1581,7 +1607,9 @@ fn test_ndp_option_parsing() -> KernelResult<()> {
 
 /// Test neighbor cache insert, lookup, and update.
 fn test_neighbor_cache() -> KernelResult<()> {
-    let ip = Ipv6Addr([0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFE, 0xAA, 0xBB]);
+    let ip = Ipv6Addr([
+        0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFE, 0xAA, 0xBB,
+    ]);
     let mac1 = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
     let mac2 = MacAddress([0x52, 0x54, 0x00, 0xAB, 0xCD, 0xEF]);
 
@@ -1590,7 +1618,10 @@ fn test_neighbor_cache() -> KernelResult<()> {
     match neighbor_lookup(&ip) {
         Some(mac) if mac.0 == mac1.0 => {}
         other => {
-            crate::serial_println!("[icmpv6]   FAIL: lookup after insert = {:?}", other.map(|m| m.0));
+            crate::serial_println!(
+                "[icmpv6]   FAIL: lookup after insert = {:?}",
+                other.map(|m| m.0)
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -1600,7 +1631,10 @@ fn test_neighbor_cache() -> KernelResult<()> {
     match neighbor_lookup(&ip) {
         Some(mac) if mac.0 == mac2.0 => {}
         other => {
-            crate::serial_println!("[icmpv6]   FAIL: lookup after update = {:?}", other.map(|m| m.0));
+            crate::serial_println!(
+                "[icmpv6]   FAIL: lookup after update = {:?}",
+                other.map(|m| m.0)
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -1631,7 +1665,7 @@ fn test_neighbor_solicitation_build() -> KernelResult<()> {
     let mut msg = Vec::with_capacity(32);
     msg.push(ICMPV6_NEIGHBOR_SOLICITATION);
     msg.push(0);
-    msg.extend_from_slice(&[0, 0]);       // Checksum
+    msg.extend_from_slice(&[0, 0]); // Checksum
     msg.extend_from_slice(&[0, 0, 0, 0]); // Reserved
     msg.extend_from_slice(&target.0);
     msg.push(1); // SLLA option type
@@ -1679,12 +1713,12 @@ fn test_neighbor_advertisement_build() -> KernelResult<()> {
     let mut msg = Vec::with_capacity(32);
     msg.push(ICMPV6_NEIGHBOR_ADVERTISEMENT);
     msg.push(0);
-    msg.extend_from_slice(&[0, 0]);       // Checksum
-    msg.push(0x60);                        // S+O flags
-    msg.extend_from_slice(&[0, 0, 0]);     // Rest of flags
-    msg.extend_from_slice(&our_ip.0);      // Target
-    msg.push(2);                           // TLLA option type
-    msg.push(1);                           // Length
+    msg.extend_from_slice(&[0, 0]); // Checksum
+    msg.push(0x60); // S+O flags
+    msg.extend_from_slice(&[0, 0, 0]); // Rest of flags
+    msg.extend_from_slice(&our_ip.0); // Target
+    msg.push(2); // TLLA option type
+    msg.push(1); // Length
     msg.extend_from_slice(&our_mac.0);
 
     let msg = finalize_checksum(&our_ip, &dst, msg);
@@ -1771,24 +1805,24 @@ fn test_ra_option_parsing() -> KernelResult<()> {
         64,                  // Prefix length
         0xC0,                // Flags: L=1, A=1
     ];
-    opts.extend_from_slice(&7200u32.to_be_bytes());  // Valid lifetime
-    opts.extend_from_slice(&3600u32.to_be_bytes());  // Preferred lifetime
-    opts.extend_from_slice(&[0, 0, 0, 0]);           // Reserved2
+    opts.extend_from_slice(&7200u32.to_be_bytes()); // Valid lifetime
+    opts.extend_from_slice(&3600u32.to_be_bytes()); // Preferred lifetime
+    opts.extend_from_slice(&[0, 0, 0, 0]); // Reserved2
     // Prefix: 2001:db8:1::
     opts.extend_from_slice(&[
-        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00,
     ]);
 
     // RDNSS option: type=25, length=3 (24 bytes).
-    opts.push(NDP_OPT_RDNSS);       // Type
-    opts.push(3);                    // Length (3 * 8 = 24 bytes)
+    opts.push(NDP_OPT_RDNSS); // Type
+    opts.push(3); // Length (3 * 8 = 24 bytes)
     opts.extend_from_slice(&[0, 0]); // Reserved
     opts.extend_from_slice(&1800u32.to_be_bytes()); // Lifetime
     // DNS address: 2001:4860:4860::8888
     opts.extend_from_slice(&[
-        0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x88, 0x88,
+        0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x88,
+        0x88,
     ]);
 
     let mut prefixes: [Option<PrefixInfo>; 4] = [None; 4];
@@ -1823,12 +1857,15 @@ fn test_ra_option_parsing() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         if pi.preferred_lifetime != 3600 {
-            crate::serial_println!("[icmpv6]   FAIL: preferred_lifetime = {}", pi.preferred_lifetime);
+            crate::serial_println!(
+                "[icmpv6]   FAIL: preferred_lifetime = {}",
+                pi.preferred_lifetime
+            );
             return Err(KernelError::InternalError);
         }
         let expected_prefix = Ipv6Addr([
-            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
         ]);
         if pi.prefix != expected_prefix {
             crate::serial_println!("[icmpv6]   FAIL: prefix = {}", pi.prefix);
@@ -1846,8 +1883,8 @@ fn test_ra_option_parsing() -> KernelResult<()> {
     }
     if let Some(ri) = rdnss_addrs[0] {
         let expected_dns = Ipv6Addr([
-            0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x88, 0x88,
+            0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x88, 0x88,
         ]);
         if ri.addr != expected_dns {
             crate::serial_println!("[icmpv6]   FAIL: rdnss addr = {}", ri.addr);
@@ -1865,8 +1902,8 @@ fn test_ra_option_parsing() -> KernelResult<()> {
 /// Test SLAAC address construction from prefix + MAC.
 fn test_slaac_address_build() -> KernelResult<()> {
     let prefix = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00,
     ]);
     let mac = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
 
@@ -1876,8 +1913,8 @@ fn test_slaac_address_build() -> KernelResult<()> {
     // High 64 bits from prefix, low 64 bits from EUI-64:
     // 52:54:00 → 50:54:00 (flip U/L bit) → 5054:00ff:fe12:3456
     let expected = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00,
-        0x50, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34, 0x56,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00, 0x50, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34,
+        0x56,
     ]);
 
     if addr != expected {
@@ -1891,7 +1928,9 @@ fn test_slaac_address_build() -> KernelResult<()> {
         if addr.0[i] != prefix.0[i] {
             crate::serial_println!(
                 "[icmpv6]   FAIL: prefix byte {} mismatch: {} vs {}",
-                i, addr.0[i], prefix.0[i]
+                i,
+                addr.0[i],
+                prefix.0[i]
             );
             return Err(KernelError::InternalError);
         }
@@ -1905,8 +1944,8 @@ fn test_slaac_address_build() -> KernelResult<()> {
 fn test_slaac_state() -> KernelResult<()> {
     let mut state = SlaacState::new();
     let addr = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00,
-        0x50, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34, 0x56,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00, 0x50, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34,
+        0x56,
     ]);
 
     // Initially empty.
@@ -1922,7 +1961,10 @@ fn test_slaac_state() -> KernelResult<()> {
     // Insert an address.
     slaac_insert(&mut state, addr, 64, 7200, 3600);
     if state.addr_count != 1 {
-        crate::serial_println!("[icmpv6]   FAIL: addr_count after insert = {}", state.addr_count);
+        crate::serial_println!(
+            "[icmpv6]   FAIL: addr_count after insert = {}",
+            state.addr_count
+        );
         return Err(KernelError::InternalError);
     }
     if !state.addrs[0].active {
@@ -1934,14 +1976,20 @@ fn test_slaac_state() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if state.addrs[0].prefix_len != 64 {
-        crate::serial_println!("[icmpv6]   FAIL: prefix_len = {}", state.addrs[0].prefix_len);
+        crate::serial_println!(
+            "[icmpv6]   FAIL: prefix_len = {}",
+            state.addrs[0].prefix_len
+        );
         return Err(KernelError::InternalError);
     }
 
     // Update the same address (should not increase count).
     slaac_insert(&mut state, addr, 64, 14400, 7200);
     if state.addr_count != 1 {
-        crate::serial_println!("[icmpv6]   FAIL: addr_count after update = {}", state.addr_count);
+        crate::serial_println!(
+            "[icmpv6]   FAIL: addr_count after update = {}",
+            state.addr_count
+        );
         return Err(KernelError::InternalError);
     }
     if state.addrs[0].valid_lifetime != 14400 {
@@ -1951,12 +1999,15 @@ fn test_slaac_state() -> KernelResult<()> {
 
     // Insert a different address.
     let addr2 = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0x00, 0x00,
-        0x50, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34, 0x56,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0x00, 0x00, 0x50, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34,
+        0x56,
     ]);
     slaac_insert(&mut state, addr2, 64, 7200, 3600);
     if state.addr_count != 2 {
-        crate::serial_println!("[icmpv6]   FAIL: addr_count after 2nd insert = {}", state.addr_count);
+        crate::serial_println!(
+            "[icmpv6]   FAIL: addr_count after 2nd insert = {}",
+            state.addr_count
+        );
         return Err(KernelError::InternalError);
     }
 

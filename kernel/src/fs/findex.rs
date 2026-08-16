@@ -36,9 +36,9 @@
 
 #![allow(dead_code)]
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
@@ -155,7 +155,9 @@ pub fn index_file<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<usize> {
     for entry in index.iter_mut() {
         if entry.path.as_path() == path {
             entry.mime = info.mime.clone();
-            entry.fields = info.fields.iter()
+            entry.fields = info
+                .fields
+                .iter()
                 .map(|f| (f.name.clone(), f.value.clone()))
                 .collect();
             register_fields(&info);
@@ -173,7 +175,9 @@ pub fn index_file<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<usize> {
     index.push(IndexedFile {
         path: path.to_path_buf(),
         mime: info.mime.clone(),
-        fields: info.fields.iter()
+        fields: info
+            .fields
+            .iter()
             .map(|f| (f.name.clone(), f.value.clone()))
             .collect(),
     });
@@ -265,7 +269,8 @@ pub fn query_has_field(field: &str) -> Vec<PathBuf> {
     QUERY_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let index = INDEX.lock();
-    index.iter()
+    index
+        .iter()
         .filter(|e| e.fields.iter().any(|(n, _)| n == field))
         .take(MAX_QUERY_RESULTS)
         .map(|e| e.path.clone())
@@ -276,10 +281,12 @@ pub fn query_has_field(field: &str) -> Vec<PathBuf> {
 pub fn get_fields<P: AsRef<Path> + ?Sized>(path: &P) -> Vec<(String, String)> {
     let path = path.as_ref();
     let index = INDEX.lock();
-    index.iter()
+    index
+        .iter()
         .find(|e| e.path.as_path() == path)
         .map(|e| {
-            e.fields.iter()
+            e.fields
+                .iter()
                 .map(|(name, value)| (name.clone(), value.display()))
                 .collect()
         })
@@ -330,7 +337,8 @@ pub fn columns_for_dir<P: AsRef<Path> + ?Sized>(dir_path: &P) -> Vec<FieldStat> 
     // Sort by frequency (most common first).
     field_counts.sort_by_key(|e| core::cmp::Reverse(e.2));
 
-    field_counts.into_iter()
+    field_counts
+        .into_iter()
         .map(|(name, label, count)| FieldStat { name, label, count })
         .collect()
 }
@@ -444,7 +452,8 @@ fn register_fields(info: &FileInfo) {
 /// Look up a human-readable label for a field name.
 fn field_label(name: &str) -> String {
     let names = FIELD_NAMES.lock();
-    names.iter()
+    names
+        .iter()
         .find(|(n, _)| n == name)
         .map(|(_, l)| l.clone())
         .unwrap_or_else(|| String::from(name))
@@ -539,7 +548,9 @@ fn compare_float(a: f64, op: QueryOp, b: f64) -> bool {
 /// Minimal f64 parser (no std float parsing in no_std).
 fn parse_f64(s: &str) -> Result<f64, ()> {
     let s = s.trim();
-    if s.is_empty() { return Err(()); }
+    if s.is_empty() {
+        return Err(());
+    }
 
     let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
         (true, rest)
@@ -565,15 +576,21 @@ fn parse_f64(s: &str) -> Result<f64, ()> {
                 }
             }
             b'.' => {
-                if decimal { return Err(()); }
+                if decimal {
+                    return Err(());
+                }
                 decimal = true;
             }
             _ => return Err(()),
         }
     }
 
-    if !has_digits { return Err(()); }
-    if negative { result = -result; }
+    if !has_digits {
+        return Err(());
+    }
+    if negative {
+        result = -result;
+    }
     Ok(result)
 }
 
@@ -637,11 +654,23 @@ fn test_parse_query() {
 
 fn test_compare_value() {
     // Text equality.
-    assert!(compare_value(&FieldValue::Text(String::from("hello")), QueryOp::Eq, "hello"));
-    assert!(!compare_value(&FieldValue::Text(String::from("hello")), QueryOp::Eq, "world"));
+    assert!(compare_value(
+        &FieldValue::Text(String::from("hello")),
+        QueryOp::Eq,
+        "hello"
+    ));
+    assert!(!compare_value(
+        &FieldValue::Text(String::from("hello")),
+        QueryOp::Eq,
+        "world"
+    ));
 
     // Text contains.
-    assert!(compare_value(&FieldValue::Text(String::from("hello world")), QueryOp::Contains, "world"));
+    assert!(compare_value(
+        &FieldValue::Text(String::from("hello world")),
+        QueryOp::Contains,
+        "world"
+    ));
 
     // Uint comparison.
     assert!(compare_value(&FieldValue::Uint(320), QueryOp::Gt, "192"));
@@ -650,7 +679,11 @@ fn test_compare_value() {
 
     // Bool comparison.
     assert!(compare_value(&FieldValue::Bool(true), QueryOp::Eq, "yes"));
-    assert!(!compare_value(&FieldValue::Bool(false), QueryOp::Eq, "true"));
+    assert!(!compare_value(
+        &FieldValue::Bool(false),
+        QueryOp::Eq,
+        "true"
+    ));
 
     serial_println!("[findex]   compare_value: ok");
 }
@@ -738,7 +771,10 @@ fn test_columns_for_dir() {
     let cols = columns_for_dir("/music");
     assert_eq!(cols.len(), 1);
     assert_eq!(cols[0].name, "audio.artist");
-    assert_eq!(cols[0].count, 2, "direct children only, including the non-UTF-8 one");
+    assert_eq!(
+        cols[0].count, 2,
+        "direct children only, including the non-UTF-8 one"
+    );
 
     // A trailing separator names the same directory.
     let cols = columns_for_dir("/music/");

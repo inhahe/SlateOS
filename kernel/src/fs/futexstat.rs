@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -133,7 +133,9 @@ where
 /// [`record_wait`]/[`record_wake`] as userspace mutexes block and wake.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         addrs: Vec::new(),
         procs: Vec::new(),
@@ -152,10 +154,18 @@ pub fn record_wait(pid: u32, address: u64) -> KernelResult<()> {
         let addr = if let Some(a) = state.addrs.iter_mut().find(|a| a.address == address) {
             a
         } else {
-            if state.addrs.len() >= MAX_ADDRS { return Err(KernelError::ResourceExhausted); }
+            if state.addrs.len() >= MAX_ADDRS {
+                return Err(KernelError::ResourceExhausted);
+            }
             state.addrs.push(FutexAddr {
-                address, waits: 0, wakes: 0, timeouts: 0, requeues: 0,
-                current_waiters: 0, max_waiters: 0, total_wait_ns: 0,
+                address,
+                waits: 0,
+                wakes: 0,
+                timeouts: 0,
+                requeues: 0,
+                current_waiters: 0,
+                max_waiters: 0,
+                total_wait_ns: 0,
             });
             state.addrs.last_mut().ok_or(KernelError::InternalError)?
         };
@@ -169,7 +179,11 @@ pub fn record_wait(pid: u32, address: u64) -> KernelResult<()> {
             p.total_waits += 1;
         } else if state.procs.len() < MAX_PROCS {
             state.procs.push(ProcessFutexStats {
-                pid, total_waits: 1, total_wakes: 0, total_timeouts: 0, total_contention_ns: 0,
+                pid,
+                total_waits: 1,
+                total_wakes: 0,
+                total_timeouts: 0,
+                total_contention_ns: 0,
             });
         }
         state.total_waits += 1;
@@ -229,14 +243,24 @@ pub fn hotspots(n: usize) -> Vec<FutexAddr> {
 
 /// Per-process stats.
 pub fn process_stats() -> Vec<ProcessFutexStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.procs.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.procs.clone())
 }
 
 /// Statistics: (addr_count, proc_count, total_waits, total_wakes, total_timeouts, ops).
 pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.addrs.len(), s.procs.len(), s.total_waits, s.total_wakes, s.total_timeouts, s.ops),
+        Some(s) => (
+            s.addrs.len(),
+            s.procs.len(),
+            s.total_waits,
+            s.total_wakes,
+            s.total_timeouts,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }

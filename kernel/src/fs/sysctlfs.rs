@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -95,39 +95,91 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         params: alloc::vec![
-            SysParam { key: String::from("kernel.hostname"), value: String::from("localhost"),
-                param_type: ParamType::StringVal, description: String::from("System hostname"),
-                read_only: false, modified: false },
-            SysParam { key: String::from("kernel.ostype"), value: String::from("MintOS"),
-                param_type: ParamType::StringVal, description: String::from("OS type"),
-                read_only: true, modified: false },
-            SysParam { key: String::from("kernel.osrelease"), value: String::from("0.1.0"),
-                param_type: ParamType::StringVal, description: String::from("OS release version"),
-                read_only: true, modified: false },
-            SysParam { key: String::from("vm.swappiness"), value: String::from("60"),
-                param_type: ParamType::Percentage, description: String::from("Swap aggressiveness (0-100)"),
-                read_only: false, modified: false },
-            SysParam { key: String::from("vm.dirty_ratio"), value: String::from("20"),
-                param_type: ParamType::Percentage, description: String::from("Dirty page ratio threshold"),
-                read_only: false, modified: false },
-            SysParam { key: String::from("vm.overcommit"), value: String::from("0"),
-                param_type: ParamType::Boolean, description: String::from("Allow memory overcommit"),
-                read_only: false, modified: false },
-            SysParam { key: String::from("net.ipv4.ip_forward"), value: String::from("0"),
-                param_type: ParamType::Boolean, description: String::from("Enable IPv4 forwarding"),
-                read_only: false, modified: false },
-            SysParam { key: String::from("net.core.somaxconn"), value: String::from("128"),
-                param_type: ParamType::Integer, description: String::from("Max socket listen backlog"),
-                read_only: false, modified: false },
-            SysParam { key: String::from("fs.file-max"), value: String::from("65536"),
-                param_type: ParamType::Integer, description: String::from("Max open files system-wide"),
-                read_only: false, modified: false },
-            SysParam { key: String::from("fs.inotify.max_user_watches"), value: String::from("8192"),
-                param_type: ParamType::Integer, description: String::from("Max inotify watches per user"),
-                read_only: false, modified: false },
+            SysParam {
+                key: String::from("kernel.hostname"),
+                value: String::from("localhost"),
+                param_type: ParamType::StringVal,
+                description: String::from("System hostname"),
+                read_only: false,
+                modified: false
+            },
+            SysParam {
+                key: String::from("kernel.ostype"),
+                value: String::from("MintOS"),
+                param_type: ParamType::StringVal,
+                description: String::from("OS type"),
+                read_only: true,
+                modified: false
+            },
+            SysParam {
+                key: String::from("kernel.osrelease"),
+                value: String::from("0.1.0"),
+                param_type: ParamType::StringVal,
+                description: String::from("OS release version"),
+                read_only: true,
+                modified: false
+            },
+            SysParam {
+                key: String::from("vm.swappiness"),
+                value: String::from("60"),
+                param_type: ParamType::Percentage,
+                description: String::from("Swap aggressiveness (0-100)"),
+                read_only: false,
+                modified: false
+            },
+            SysParam {
+                key: String::from("vm.dirty_ratio"),
+                value: String::from("20"),
+                param_type: ParamType::Percentage,
+                description: String::from("Dirty page ratio threshold"),
+                read_only: false,
+                modified: false
+            },
+            SysParam {
+                key: String::from("vm.overcommit"),
+                value: String::from("0"),
+                param_type: ParamType::Boolean,
+                description: String::from("Allow memory overcommit"),
+                read_only: false,
+                modified: false
+            },
+            SysParam {
+                key: String::from("net.ipv4.ip_forward"),
+                value: String::from("0"),
+                param_type: ParamType::Boolean,
+                description: String::from("Enable IPv4 forwarding"),
+                read_only: false,
+                modified: false
+            },
+            SysParam {
+                key: String::from("net.core.somaxconn"),
+                value: String::from("128"),
+                param_type: ParamType::Integer,
+                description: String::from("Max socket listen backlog"),
+                read_only: false,
+                modified: false
+            },
+            SysParam {
+                key: String::from("fs.file-max"),
+                value: String::from("65536"),
+                param_type: ParamType::Integer,
+                description: String::from("Max open files system-wide"),
+                read_only: false,
+                modified: false
+            },
+            SysParam {
+                key: String::from("fs.inotify.max_user_watches"),
+                value: String::from("8192"),
+                param_type: ParamType::Integer,
+                description: String::from("Max inotify watches per user"),
+                read_only: false,
+                modified: false
+            },
         ],
         total_reads: 0,
         total_writes: 0,
@@ -138,7 +190,10 @@ pub fn init_defaults() {
 /// Get a parameter value.
 pub fn get(key: &str) -> KernelResult<String> {
     with_state(|state| {
-        let param = state.params.iter().find(|p| p.key == key)
+        let param = state
+            .params
+            .iter()
+            .find(|p| p.key == key)
             .ok_or(KernelError::NotFound)?;
         state.total_reads += 1;
         Ok(param.value.clone())
@@ -148,7 +203,10 @@ pub fn get(key: &str) -> KernelResult<String> {
 /// Set a parameter value.
 pub fn set(key: &str, value: &str) -> KernelResult<()> {
     with_state(|state| {
-        let param = state.params.iter_mut().find(|p| p.key == key)
+        let param = state
+            .params
+            .iter_mut()
+            .find(|p| p.key == key)
             .ok_or(KernelError::NotFound)?;
         if param.read_only {
             return Err(KernelError::PermissionDenied);
@@ -161,7 +219,13 @@ pub fn set(key: &str, value: &str) -> KernelResult<()> {
 }
 
 /// Add a new parameter.
-pub fn add_param(key: &str, value: &str, param_type: ParamType, description: &str, read_only: bool) -> KernelResult<()> {
+pub fn add_param(
+    key: &str,
+    value: &str,
+    param_type: ParamType,
+    description: &str,
+    read_only: bool,
+) -> KernelResult<()> {
     with_state(|state| {
         if state.params.len() >= MAX_PARAMS {
             return Err(KernelError::ResourceExhausted);
@@ -170,9 +234,12 @@ pub fn add_param(key: &str, value: &str, param_type: ParamType, description: &st
             return Err(KernelError::AlreadyExists);
         }
         state.params.push(SysParam {
-            key: String::from(key), value: String::from(value),
-            param_type, description: String::from(description),
-            read_only, modified: false,
+            key: String::from(key),
+            value: String::from(value),
+            param_type,
+            description: String::from(description),
+            read_only,
+            modified: false,
         });
         Ok(())
     })
@@ -183,20 +250,29 @@ pub fn remove_param(key: &str) -> KernelResult<()> {
     with_state(|state| {
         let before = state.params.len();
         state.params.retain(|p| p.key != key);
-        if state.params.len() == before { return Err(KernelError::NotFound); }
+        if state.params.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
 
 /// List all parameters.
 pub fn list_all() -> Vec<SysParam> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.params.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.params.clone())
 }
 
 /// List parameters matching a prefix.
 pub fn list_prefix(prefix: &str) -> Vec<SysParam> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.params.iter().filter(|p| p.key.starts_with(prefix)).cloned().collect()
+        s.params
+            .iter()
+            .filter(|p| p.key.starts_with(prefix))
+            .cloned()
+            .collect()
     })
 }
 
@@ -213,7 +289,13 @@ pub fn stats() -> (usize, u64, u64, usize, u64) {
     match guard.as_ref() {
         Some(s) => {
             let modified = s.params.iter().filter(|p| p.modified).count();
-            (s.params.len(), s.total_reads, s.total_writes, modified, s.ops)
+            (
+                s.params.len(),
+                s.total_reads,
+                s.total_writes,
+                modified,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }

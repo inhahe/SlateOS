@@ -50,17 +50,17 @@
 //! - Maximum 64 cached records and 8 registered services.
 //! - Single-question queries only (one question per packet).
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use alloc::format;
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
 use super::ipv6::Ipv6Addr;
+use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -70,10 +70,8 @@ use super::ipv6::Ipv6Addr;
 const MDNS_MULTICAST_IP: Ipv4Addr = Ipv4Addr([224, 0, 0, 251]);
 
 /// mDNS IPv6 multicast address: ff02::fb (RFC 6762 §11).
-const MDNS_MULTICAST_IP6: Ipv6Addr = Ipv6Addr([
-    0xFF, 0x02, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0xFB,
-]);
+const MDNS_MULTICAST_IP6: Ipv6Addr =
+    Ipv6Addr([0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFB]);
 
 /// mDNS port.
 const MDNS_PORT: u16 = 5353;
@@ -664,8 +662,10 @@ fn parse_record_data(rtype: RecordType, rdata: &[u8], full_packet: &[u8]) -> Opt
         RecordType::Ptr => {
             // PTR RDATA is a DNS name.
             // The name may contain pointers into the full packet.
-            let (name, _) = decode_dns_name(full_packet,
-                rdata.as_ptr() as usize - full_packet.as_ptr() as usize);
+            let (name, _) = decode_dns_name(
+                full_packet,
+                rdata.as_ptr() as usize - full_packet.as_ptr() as usize,
+            );
             if name.is_empty() {
                 return None;
             }
@@ -681,7 +681,12 @@ fn parse_record_data(rtype: RecordType, rdata: &[u8], full_packet: &[u8]) -> Opt
             // Target name follows.
             let target_offset = rdata.as_ptr() as usize - full_packet.as_ptr() as usize + 6;
             let (target, _) = decode_dns_name(full_packet, target_offset);
-            Some(RecordData::Srv { priority, weight, port, target })
+            Some(RecordData::Srv {
+                priority,
+                weight,
+                port,
+                target,
+            })
         }
         RecordType::Txt => {
             let mut entries = Vec::new();
@@ -743,7 +748,10 @@ pub fn init() {
             match super::udp::join_group_v6(handle, MDNS_MULTICAST_IP6) {
                 Ok(()) => {
                     state.v6_joined = true;
-                    crate::serial_println!("[mdns] Joined IPv6 multicast group {}", MDNS_MULTICAST_IP6);
+                    crate::serial_println!(
+                        "[mdns] Joined IPv6 multicast group {}",
+                        MDNS_MULTICAST_IP6
+                    );
                 }
                 Err(e) => {
                     crate::serial_println!("[mdns] Failed to join IPv6 multicast: {:?}", e);
@@ -762,7 +770,9 @@ pub fn init() {
     INITIALIZED.store(true, Ordering::Relaxed);
     crate::serial_println!(
         "[mdns] Initialized (v4={}, v6={}, port={})",
-        MDNS_MULTICAST_IP, MDNS_MULTICAST_IP6, MDNS_PORT,
+        MDNS_MULTICAST_IP,
+        MDNS_MULTICAST_IP6,
+        MDNS_PORT,
     );
 }
 
@@ -910,7 +920,9 @@ pub fn browse_services(service_type: &str) -> KernelResult<Vec<DiscoveredService
                         continue;
                     }
                     match &rec.data {
-                        RecordData::Srv { port: p, target, .. } => {
+                        RecordData::Srv {
+                            port: p, target, ..
+                        } => {
                             port = *p;
                             hostname = target.clone();
                         }
@@ -989,7 +1001,10 @@ pub fn register_service(
         }
     };
 
-    let svc = state.services.get_mut(idx).ok_or(KernelError::InternalError)?;
+    let svc = state
+        .services
+        .get_mut(idx)
+        .ok_or(KernelError::InternalError)?;
     svc.instance_name = String::from(instance_name);
     svc.service_type = String::from(service_type);
     svc.port = port;
@@ -998,7 +1013,9 @@ pub fn register_service(
 
     crate::serial_println!(
         "[mdns] Registered service: {}.{}.local (port {})",
-        instance_name, service_type, port
+        instance_name,
+        service_type,
+        port
     );
 
     Ok(idx)
@@ -1077,9 +1094,10 @@ fn ingest_mdns_packet(data: &[u8], from_v6: bool) {
 
             for record in records {
                 // Update or insert into cache.
-                let existing = state.cache.iter().position(|e| {
-                    e.name == record.name && e.record_type == record.record_type
-                });
+                let existing = state
+                    .cache
+                    .iter()
+                    .position(|e| e.name == record.name && e.record_type == record.record_type);
 
                 if let Some(idx) = existing {
                     if let Some(entry) = state.cache.get_mut(idx) {
@@ -1091,7 +1109,10 @@ fn ingest_mdns_packet(data: &[u8], from_v6: bool) {
                     state.cache.push(record);
                 } else {
                     // Evict oldest entry.
-                    let oldest = state.cache.iter().enumerate()
+                    let oldest = state
+                        .cache
+                        .iter()
+                        .enumerate()
                         .min_by_key(|(_, e)| e.cached_at_ns)
                         .map(|(i, _)| i);
                     if let Some(idx) = oldest {
@@ -1179,7 +1200,11 @@ fn respond_if_matching(qname: &str, qtype: u16, from_v6: bool) {
             }
             let svc_local = format!("{}.local", svc.service_type);
             if qname.eq_ignore_ascii_case(&svc_local) {
-                let ip6_for_svc = if our_ip6.is_unspecified() { None } else { Some(our_ip6) };
+                let ip6_for_svc = if our_ip6.is_unspecified() {
+                    None
+                } else {
+                    Some(our_ip6)
+                };
                 let pkt = build_service_response(svc, our_ip, ip6_for_svc, &hostname);
                 drop(state);
                 send_response(&pkt, from_v6);
@@ -1281,9 +1306,22 @@ pub fn procfs_content() -> String {
     out.push_str("=====================\n\n");
 
     out.push_str(&format!("Hostname:      {}.local\n", s.hostname));
-    out.push_str(&format!("IPv6:          {}\n", if s.ipv6_enabled { "enabled (ff02::fb)" } else { "disabled" }));
-    out.push_str(&format!("Cache entries: {}/{}\n", s.cache_entries, MAX_CACHE_ENTRIES));
-    out.push_str(&format!("Services:      {}/{}\n", s.services_registered, MAX_SERVICES));
+    out.push_str(&format!(
+        "IPv6:          {}\n",
+        if s.ipv6_enabled {
+            "enabled (ff02::fb)"
+        } else {
+            "disabled"
+        }
+    ));
+    out.push_str(&format!(
+        "Cache entries: {}/{}\n",
+        s.cache_entries, MAX_CACHE_ENTRIES
+    ));
+    out.push_str(&format!(
+        "Services:      {}/{}\n",
+        s.services_registered, MAX_SERVICES
+    ));
     out.push_str(&format!("Queries sent:  {}\n", s.queries_sent));
     out.push_str(&format!("Responses:     {}\n", s.responses_sent));
     out.push_str(&format!("Records recv:  {}\n", s.records_received));
@@ -1308,7 +1346,10 @@ pub fn procfs_content() -> String {
             };
             out.push_str(&format!(
                 "  {} {} {} (TTL={}s)\n",
-                entry.name, entry.record_type.label(), data_str, entry.ttl
+                entry.name,
+                entry.record_type.label(),
+                data_str,
+                entry.ttl
             ));
         }
     }
@@ -1357,7 +1398,9 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 2: DNS name decode (no pointers) ---
     {
-        let data = [6u8, b'm', b'y', b'h', b'o', b's', b't', 5, b'l', b'o', b'c', b'a', b'l', 0];
+        let data = [
+            6u8, b'm', b'y', b'h', b'o', b's', b't', 5, b'l', b'o', b'c', b'a', b'l', 0,
+        ];
         let (name, end) = decode_dns_name(&data, 0);
         assert!(name == "myhost.local", "decoded name");
         assert!(end == 14, "end offset");
@@ -1500,11 +1543,13 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 12: AAAA response construction ---
     {
         let ip6 = Ipv6Addr([
-            0xFE, 0x80, 0, 0, 0, 0, 0, 0,
-            0x52, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34, 0x56,
+            0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0x52, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34, 0x56,
         ]);
         let pkt = build_response_aaaa("myhost.local", ip6, 120);
-        assert!(pkt.len() >= DNS_HEADER_SIZE + 14 + 16, "AAAA response large enough");
+        assert!(
+            pkt.len() >= DNS_HEADER_SIZE + 14 + 16,
+            "AAAA response large enough"
+        );
         // Check header: ANCOUNT = 1.
         assert!(read_u16(&pkt, 6) == 1, "1 answer");
         // Check flags.
@@ -1517,8 +1562,7 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 13: Parse AAAA record from response ---
     {
         let ip6 = Ipv6Addr([
-            0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0x42,
+            0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x42,
         ]);
         let pkt = build_response_aaaa("test6.local", ip6, 90);
         let records = parse_mdns_packet(&pkt)?;
@@ -1528,7 +1572,10 @@ pub fn self_test() -> KernelResult<()> {
         assert!(rec.record_type == RecordType::Aaaa, "AAAA record type");
         assert!(rec.ttl == 90, "AAAA record TTL");
         if let RecordData::Address6(addr6) = rec.data {
-            assert!(addr6.0[0] == 0x20 && addr6.0[1] == 0x01, "parsed IPv6 prefix");
+            assert!(
+                addr6.0[0] == 0x20 && addr6.0[1] == 0x01,
+                "parsed IPv6 prefix"
+            );
             assert!(addr6.0[15] == 0x42, "parsed IPv6 suffix");
         } else {
             panic!("expected AAAA record data");
@@ -1541,7 +1588,10 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 14: RecordType AAAA round-trip ---
     {
         assert!(RecordType::Aaaa.to_u16() == TYPE_AAAA, "AAAA to u16");
-        assert!(RecordType::from_u16(TYPE_AAAA) == Some(RecordType::Aaaa), "u16 to AAAA");
+        assert!(
+            RecordType::from_u16(TYPE_AAAA) == Some(RecordType::Aaaa),
+            "u16 to AAAA"
+        );
         assert!(RecordType::Aaaa.label() == "AAAA", "AAAA label");
 
         passed = passed.saturating_add(1);
@@ -1558,10 +1608,7 @@ pub fn self_test() -> KernelResult<()> {
             active: true,
         };
         let ip = Ipv4Addr([10, 0, 0, 1]);
-        let ip6 = Ipv6Addr([
-            0xFE, 0x80, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 1,
-        ]);
+        let ip6 = Ipv6Addr([0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
         // With IPv6: ARCOUNT should be 2.
         let pkt_v6 = build_service_response(&svc, ip, Some(ip6), "test");

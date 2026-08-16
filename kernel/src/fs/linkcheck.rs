@@ -144,10 +144,12 @@ pub fn check<R: AsRef<Path> + ?Sized>(root: &R, opts: &CheckOptions) -> KernelRe
         for (key, paths) in &hardlink_candidates {
             if paths.len() > 1 {
                 // Multiple paths with same (size, mtime, nlinks>1) — likely hardlinks.
-                let size = paths.first()
+                let size = paths
+                    .first()
                     .and_then(|p| Vfs::metadata(p).ok())
                     .map_or(0, |m| m.size);
-                let nlinks = paths.first()
+                let nlinks = paths
+                    .first()
                     .and_then(|p| Vfs::metadata(p).ok())
                     .map_or(0, |m| m.nlinks);
                 report.hardlink_groups.push(HardlinkGroup {
@@ -211,7 +213,8 @@ pub fn fix_broken<R: AsRef<Path> + ?Sized>(
 
     serial_println!(
         "[linkcheck] Fix: {} removed, {} errors{}",
-        removed, errors.len(),
+        removed,
+        errors.len(),
         if dry_run { " (dry run)" } else { "" },
     );
 
@@ -352,9 +355,15 @@ fn test_broken_symlink() {
     let _ = Vfs::symlink("/tmp/lc_broken/bad", "/nonexistent/target");
 
     let report = check("/tmp/lc_broken", &CheckOptions::default()).expect("check");
-    assert!(!report.broken_symlinks.is_empty(), "should find broken symlink");
+    assert!(
+        !report.broken_symlinks.is_empty(),
+        "should find broken symlink"
+    );
     assert_eq!(
-        report.broken_symlinks.first().map(|b| b.link_path.as_path()),
+        report
+            .broken_symlinks
+            .first()
+            .map(|b| b.link_path.as_path()),
         Some(Path::new("/tmp/lc_broken/bad"))
     );
 
@@ -385,7 +394,10 @@ fn test_non_utf8_symlink() {
         broken.target.as_deref(),
         Some(Path::new(b"/no/such/tar\xfeget".as_slice()))
     );
-    assert!(broken.error.is_empty(), "readlink succeeded, so no error text");
+    assert!(
+        broken.error.is_empty(),
+        "readlink succeeded, so no error text"
+    );
 
     // A relative target resolves against the link's own directory, not the
     // process cwd.
@@ -409,8 +421,10 @@ fn test_valid_symlink() {
     let _ = Vfs::symlink("/tmp/lc_valid/link", "/tmp/lc_valid/target.txt");
 
     let report = check("/tmp/lc_valid", &CheckOptions::default()).expect("check");
-    assert!(report.valid_symlinks >= 1 || report.broken_symlinks.is_empty(),
-        "should have valid symlink or no broken ones");
+    assert!(
+        report.valid_symlinks >= 1 || report.broken_symlinks.is_empty(),
+        "should have valid symlink or no broken ones"
+    );
 
     let _ = Vfs::remove("/tmp/lc_valid/link");
     let _ = Vfs::remove("/tmp/lc_valid/target.txt");

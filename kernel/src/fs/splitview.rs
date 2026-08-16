@@ -20,9 +20,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -51,7 +51,7 @@ impl Orientation {
 pub struct Pane {
     pub id: u32,
     pub window_id: Option<u32>,
-    pub ratio: u32,     // 1-100, relative size within split.
+    pub ratio: u32, // 1-100, relative size within split.
     pub focused: bool,
 }
 
@@ -102,7 +102,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         splits: Vec::new(),
         next_split_id: 1,
@@ -126,7 +128,10 @@ pub fn create_split(orientation: Orientation) -> KernelResult<u32> {
         state.next_split_id += 1;
         state.total_splits_created += 1;
         state.splits.push(SplitContainer {
-            id, orientation, panes: Vec::new(), created_ns: now,
+            id,
+            orientation,
+            panes: Vec::new(),
+            created_ns: now,
         });
         if state.active_split.is_none() {
             state.active_split = Some(id);
@@ -140,7 +145,9 @@ pub fn remove_split(split_id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.splits.len();
         state.splits.retain(|s| s.id != split_id);
-        if state.splits.len() == before { return Err(KernelError::NotFound); }
+        if state.splits.len() == before {
+            return Err(KernelError::NotFound);
+        }
         if state.active_split == Some(split_id) {
             state.active_split = state.splits.first().map(|s| s.id);
         }
@@ -151,7 +158,10 @@ pub fn remove_split(split_id: u32) -> KernelResult<()> {
 /// Add a pane to a split container.
 pub fn add_pane(split_id: u32, window_id: Option<u32>) -> KernelResult<u32> {
     with_state(|state| {
-        let split = state.splits.iter_mut().find(|s| s.id == split_id)
+        let split = state
+            .splits
+            .iter_mut()
+            .find(|s| s.id == split_id)
             .ok_or(KernelError::NotFound)?;
         if split.panes.len() >= MAX_PANES_PER_SPLIT {
             return Err(KernelError::ResourceExhausted);
@@ -167,7 +177,10 @@ pub fn add_pane(split_id: u32, window_id: Option<u32>) -> KernelResult<u32> {
             p.focused = false;
         }
         split.panes.push(Pane {
-            id: pane_id, window_id, ratio: each, focused: true,
+            id: pane_id,
+            window_id,
+            ratio: each,
+            focused: true,
         });
         Ok(pane_id)
     })
@@ -176,11 +189,16 @@ pub fn add_pane(split_id: u32, window_id: Option<u32>) -> KernelResult<u32> {
 /// Remove a pane from a split.
 pub fn remove_pane(split_id: u32, pane_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let split = state.splits.iter_mut().find(|s| s.id == split_id)
+        let split = state
+            .splits
+            .iter_mut()
+            .find(|s| s.id == split_id)
             .ok_or(KernelError::NotFound)?;
         let before = split.panes.len();
         split.panes.retain(|p| p.id != pane_id);
-        if split.panes.len() == before { return Err(KernelError::NotFound); }
+        if split.panes.len() == before {
+            return Err(KernelError::NotFound);
+        }
         // Redistribute ratios.
         if !split.panes.is_empty() {
             let each = 100 / split.panes.len() as u32;
@@ -198,9 +216,15 @@ pub fn resize_pane(split_id: u32, pane_id: u32, ratio: u32) -> KernelResult<()> 
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        let split = state.splits.iter_mut().find(|s| s.id == split_id)
+        let split = state
+            .splits
+            .iter_mut()
+            .find(|s| s.id == split_id)
             .ok_or(KernelError::NotFound)?;
-        let pane = split.panes.iter_mut().find(|p| p.id == pane_id)
+        let pane = split
+            .panes
+            .iter_mut()
+            .find(|p| p.id == pane_id)
             .ok_or(KernelError::NotFound)?;
         pane.ratio = ratio;
         state.total_resizes += 1;
@@ -211,7 +235,10 @@ pub fn resize_pane(split_id: u32, pane_id: u32, ratio: u32) -> KernelResult<()> 
 /// Focus a pane.
 pub fn focus_pane(split_id: u32, pane_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let split = state.splits.iter_mut().find(|s| s.id == split_id)
+        let split = state
+            .splits
+            .iter_mut()
+            .find(|s| s.id == split_id)
             .ok_or(KernelError::NotFound)?;
         for p in &mut split.panes {
             p.focused = p.id == pane_id;
@@ -224,9 +251,15 @@ pub fn focus_pane(split_id: u32, pane_id: u32) -> KernelResult<()> {
 /// Assign a window to a pane.
 pub fn set_window(split_id: u32, pane_id: u32, window_id: Option<u32>) -> KernelResult<()> {
     with_state(|state| {
-        let split = state.splits.iter_mut().find(|s| s.id == split_id)
+        let split = state
+            .splits
+            .iter_mut()
+            .find(|s| s.id == split_id)
             .ok_or(KernelError::NotFound)?;
-        let pane = split.panes.iter_mut().find(|p| p.id == pane_id)
+        let pane = split
+            .panes
+            .iter_mut()
+            .find(|p| p.id == pane_id)
             .ok_or(KernelError::NotFound)?;
         pane.window_id = window_id;
         Ok(())
@@ -236,7 +269,10 @@ pub fn set_window(split_id: u32, pane_id: u32, window_id: Option<u32>) -> Kernel
 /// Change split orientation.
 pub fn set_orientation(split_id: u32, orientation: Orientation) -> KernelResult<()> {
     with_state(|state| {
-        let split = state.splits.iter_mut().find(|s| s.id == split_id)
+        let split = state
+            .splits
+            .iter_mut()
+            .find(|s| s.id == split_id)
             .ok_or(KernelError::NotFound)?;
         split.orientation = orientation;
         Ok(())
@@ -245,7 +281,10 @@ pub fn set_orientation(split_id: u32, orientation: Orientation) -> KernelResult<
 
 /// List all splits.
 pub fn list_splits() -> Vec<SplitContainer> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.splits.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.splits.clone())
 }
 
 /// Get active split.
@@ -257,7 +296,13 @@ pub fn active_split() -> Option<u32> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.splits.len(), s.total_splits_created, s.total_panes_added, s.total_resizes, s.ops),
+        Some(s) => (
+            s.splits.len(),
+            s.total_splits_created,
+            s.total_panes_added,
+            s.total_resizes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

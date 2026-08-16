@@ -10,8 +10,7 @@ use alloc::string::String;
 use crate::error::{KernelError, KernelResult};
 
 use super::ondisk::{
-    self, Ext4Superblock, EXT4_MAGIC, SUPERBLOCK_OFFSET,
-    SUPPORTED_INCOMPAT, SUPPORTED_RO_COMPAT,
+    self, EXT4_MAGIC, Ext4Superblock, SUPERBLOCK_OFFSET, SUPPORTED_INCOMPAT, SUPPORTED_RO_COMPAT,
 };
 
 // ---------------------------------------------------------------------------
@@ -125,8 +124,7 @@ pub fn parse(data: &[u8]) -> KernelResult<ParsedSuperblock> {
     let is_64bit = (raw.s_feature_incompat & ondisk::incompat::BIT64) != 0;
     let has_extents = (raw.s_feature_incompat & ondisk::incompat::EXTENTS) != 0;
     let has_journal = (raw.s_feature_compat & ondisk::compat::HAS_JOURNAL) != 0;
-    let has_huge_file =
-        (raw.s_feature_ro_compat & ondisk::ro_compat::HUGE_FILE) != 0;
+    let has_huge_file = (raw.s_feature_ro_compat & ondisk::ro_compat::HUGE_FILE) != 0;
 
     // Check incompatible features — refuse to mount if we don't understand.
     let unsupported_incompat = raw.s_feature_incompat & !SUPPORTED_INCOMPAT;
@@ -140,16 +138,14 @@ pub fn parse(data: &[u8]) -> KernelResult<ParsedSuperblock> {
 
     // Total block count (combine hi+lo for 64-bit).
     let block_count = if is_64bit {
-        u64::from(raw.s_blocks_count_lo)
-            | (u64::from(raw.s_blocks_count_hi) << 32)
+        u64::from(raw.s_blocks_count_lo) | (u64::from(raw.s_blocks_count_hi) << 32)
     } else {
         u64::from(raw.s_blocks_count_lo)
     };
 
     // Free block count.
     let free_block_count = if is_64bit {
-        u64::from(raw.s_free_blocks_count_lo)
-            | (u64::from(raw.s_free_blocks_count_hi) << 32)
+        u64::from(raw.s_free_blocks_count_lo) | (u64::from(raw.s_free_blocks_count_hi) << 32)
     } else {
         u64::from(raw.s_free_blocks_count_lo)
     };
@@ -165,8 +161,7 @@ pub fn parse(data: &[u8]) -> KernelResult<ParsedSuperblock> {
         .saturating_sub(1)
         / blocks_per_group;
     // Block group count must fit in u32.
-    let group_count = u32::try_from(group_count)
-        .map_err(|_| KernelError::InvalidArgument)?;
+    let group_count = u32::try_from(group_count).map_err(|_| KernelError::InvalidArgument)?;
 
     // Group descriptor size.
     let desc_size = if is_64bit && raw.s_desc_size >= 64 {
@@ -179,8 +174,7 @@ pub fn parse(data: &[u8]) -> KernelResult<ParsedSuperblock> {
     let volume_name = extract_name(&raw.s_volume_name);
 
     // Metadata checksums.
-    let has_metadata_csum =
-        (raw.s_feature_ro_compat & ondisk::ro_compat::METADATA_CSUM) != 0;
+    let has_metadata_csum = (raw.s_feature_ro_compat & ondisk::ro_compat::METADATA_CSUM) != 0;
 
     // Compute the checksum seed.  ext4 uses this as the initial CRC
     // accumulator for all per-object checksums (group descriptors, inodes,
@@ -208,7 +202,13 @@ pub fn parse(data: &[u8]) -> KernelResult<ParsedSuperblock> {
     let want_extra_isize = if inode_size > 128 {
         let want = raw.s_want_extra_isize;
         let min = raw.s_min_extra_isize;
-        if want > 0 { want } else if min > 0 { min } else { 32 }
+        if want > 0 {
+            want
+        } else if min > 0 {
+            min
+        } else {
+            32
+        }
     } else {
         0
     };
@@ -260,7 +260,9 @@ fn validate_superblock_checksum(data: &[u8]) -> KernelResult<()> {
     // then over everything after it (there's nothing after in a standard
     // 1024-byte superblock, but be correct anyway).
     let before = data.get(..CSUM_OFFSET).unwrap_or(&[]);
-    let after = data.get(CSUM_OFFSET.saturating_add(4)..SB_SIZE).unwrap_or(&[]);
+    let after = data
+        .get(CSUM_OFFSET.saturating_add(4)..SB_SIZE)
+        .unwrap_or(&[]);
 
     let mut crc = crate::crypto::crc32c_raw(!0u32, before);
     // Zero-fill the checksum field position (4 bytes of 0x00).
@@ -297,11 +299,7 @@ fn read_superblock(data: &[u8]) -> KernelResult<Ext4Superblock> {
     // The struct is #[repr(C)] and all fields are integer types
     // (no padding holes that need specific values).
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            data.as_ptr(),
-            sb.as_mut_ptr().cast::<u8>(),
-            sb_size,
-        );
+        core::ptr::copy_nonoverlapping(data.as_ptr(), sb.as_mut_ptr().cast::<u8>(), sb_size);
         Ok(sb.assume_init())
     }
 }
@@ -368,9 +366,8 @@ impl ParsedSuperblock {
         // (s_first_data_block + 1).
         let gdt_block = u64::from(self.raw.s_first_data_block) + 1;
         let gdt_byte_offset = gdt_block.saturating_mul(u64::from(self.block_size));
-        gdt_byte_offset.saturating_add(
-            u64::from(group_nr).saturating_mul(u64::from(self.desc_size))
-        )
+        gdt_byte_offset
+            .saturating_add(u64::from(group_nr).saturating_mul(u64::from(self.desc_size)))
     }
 
     /// Total filesystem size in bytes.
@@ -382,7 +379,8 @@ impl ParsedSuperblock {
     /// Free space in bytes.
     #[must_use]
     pub fn free_bytes(&self) -> u64 {
-        self.free_block_count.saturating_mul(u64::from(self.block_size))
+        self.free_block_count
+            .saturating_mul(u64::from(self.block_size))
     }
 
     /// Human-readable summary for diagnostics.
@@ -533,40 +531,34 @@ fn test_parse_valid_4k() -> KernelResult<()> {
     let sb = parse(&buf)?;
 
     if sb.block_size != 4096 {
-        crate::serial_println!(
-            "[ext4-superblock]   FAIL: block_size = {}", sb.block_size
-        );
+        crate::serial_println!("[ext4-superblock]   FAIL: block_size = {}", sb.block_size);
         return Err(KernelError::InternalError);
     }
     if sb.block_count != 32768 {
-        crate::serial_println!(
-            "[ext4-superblock]   FAIL: block_count = {}", sb.block_count
-        );
+        crate::serial_println!("[ext4-superblock]   FAIL: block_count = {}", sb.block_count);
         return Err(KernelError::InternalError);
     }
     if sb.free_block_count != 16384 {
         crate::serial_println!(
-            "[ext4-superblock]   FAIL: free_block_count = {}", sb.free_block_count
+            "[ext4-superblock]   FAIL: free_block_count = {}",
+            sb.free_block_count
         );
         return Err(KernelError::InternalError);
     }
     if sb.inode_size != 256 {
-        crate::serial_println!(
-            "[ext4-superblock]   FAIL: inode_size = {}", sb.inode_size
-        );
+        crate::serial_println!("[ext4-superblock]   FAIL: inode_size = {}", sb.inode_size);
         return Err(KernelError::InternalError);
     }
     if sb.group_count != 1 {
-        crate::serial_println!(
-            "[ext4-superblock]   FAIL: group_count = {}", sb.group_count
-        );
+        crate::serial_println!("[ext4-superblock]   FAIL: group_count = {}", sb.group_count);
         return Err(KernelError::InternalError);
     }
     // 32-bit mode: desc_size should be 32.
     if sb.desc_size != 32 || sb.is_64bit {
         crate::serial_println!(
             "[ext4-superblock]   FAIL: desc_size={}, is_64bit={}",
-            sb.desc_size, sb.is_64bit
+            sb.desc_size,
+            sb.is_64bit
         );
         return Err(KernelError::InternalError);
     }
@@ -599,9 +591,7 @@ fn test_parse_64bit_mode() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if sb.desc_size != 64 {
-        crate::serial_println!(
-            "[ext4-superblock]   FAIL: desc_size = {}", sb.desc_size
-        );
+        crate::serial_println!("[ext4-superblock]   FAIL: desc_size = {}", sb.desc_size);
         return Err(KernelError::InternalError);
     }
 
@@ -610,7 +600,8 @@ fn test_parse_64bit_mode() -> KernelResult<()> {
     if sb.block_count != expected {
         crate::serial_println!(
             "[ext4-superblock]   FAIL: block_count = {:#x}, expected {:#x}",
-            sb.block_count, expected
+            sb.block_count,
+            expected
         );
         return Err(KernelError::InternalError);
     }
@@ -663,25 +654,19 @@ fn test_group_desc_offset() -> KernelResult<()> {
 
     let off0 = sb.group_desc_offset(0);
     if off0 != 4096 {
-        crate::serial_println!(
-            "[ext4-superblock]   FAIL: gd_offset(0) = {}", off0
-        );
+        crate::serial_println!("[ext4-superblock]   FAIL: gd_offset(0) = {}", off0);
         return Err(KernelError::InternalError);
     }
 
     let off1 = sb.group_desc_offset(1);
     if off1 != 4096 + 32 {
-        crate::serial_println!(
-            "[ext4-superblock]   FAIL: gd_offset(1) = {}", off1
-        );
+        crate::serial_println!("[ext4-superblock]   FAIL: gd_offset(1) = {}", off1);
         return Err(KernelError::InternalError);
     }
 
     let off10 = sb.group_desc_offset(10);
     if off10 != 4096 + 320 {
-        crate::serial_println!(
-            "[ext4-superblock]   FAIL: gd_offset(10) = {}", off10
-        );
+        crate::serial_println!("[ext4-superblock]   FAIL: gd_offset(10) = {}", off10);
         return Err(KernelError::InternalError);
     }
 
@@ -698,9 +683,7 @@ fn test_size_accessors() -> KernelResult<()> {
     // total = 32768 * 4096 = 128 MiB = 134217728.
     let total = sb.total_bytes();
     if total != 134_217_728 {
-        crate::serial_println!(
-            "[ext4-superblock]   FAIL: total_bytes = {}", total
-        );
+        crate::serial_println!("[ext4-superblock]   FAIL: total_bytes = {}", total);
         return Err(KernelError::InternalError);
     }
 
@@ -708,9 +691,7 @@ fn test_size_accessors() -> KernelResult<()> {
     // free = 16384 * 4096 = 64 MiB = 67108864.
     let free = sb.free_bytes();
     if free != 67_108_864 {
-        crate::serial_println!(
-            "[ext4-superblock]   FAIL: free_bytes = {}", free
-        );
+        crate::serial_println!("[ext4-superblock]   FAIL: free_bytes = {}", free);
         return Err(KernelError::InternalError);
     }
 

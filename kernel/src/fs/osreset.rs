@@ -30,10 +30,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -258,7 +258,11 @@ pub fn create_checkpoint(name: &str, scope: ResetScope) -> KernelResult<u64> {
 pub fn delete_checkpoint(checkpoint_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
     // Cannot delete if a plan references it and hasn't been executed.
-    if state.plans.iter().any(|p| p.checkpoint_id == checkpoint_id && !p.executed) {
+    if state
+        .plans
+        .iter()
+        .any(|p| p.checkpoint_id == checkpoint_id && !p.executed)
+    {
         return Err(KernelError::NotEmpty);
     }
     let before = state.checkpoints.len();
@@ -359,23 +363,85 @@ pub fn plan_reset(scope: ResetScope) -> KernelResult<u64> {
     let settings = if scope == ResetScope::Full {
         Vec::new()
     } else {
-        use SettingsCategory::{Display, Network, Audio, Input, Privacy, Power, Accounts, Locale, Appearance, FileAssociations, Accessibility};
+        use SettingsCategory::{
+            Accessibility, Accounts, Appearance, Audio, Display, FileAssociations, Input, Locale,
+            Network, Power, Privacy,
+        };
         alloc::vec![
-            SettingsImportInfo { category: Display, description: String::from("Display and resolution"), include: true, entry_count: 12 },
-            SettingsImportInfo { category: Network, description: String::from("WiFi and network"), include: true, entry_count: 8 },
-            SettingsImportInfo { category: Audio, description: String::from("Sound settings"), include: true, entry_count: 6 },
-            SettingsImportInfo { category: Input, description: String::from("Keyboard and mouse"), include: true, entry_count: 15 },
-            SettingsImportInfo { category: Privacy, description: String::from("Privacy and security"), include: false, entry_count: 10 },
-            SettingsImportInfo { category: Power, description: String::from("Power management"), include: true, entry_count: 5 },
-            SettingsImportInfo { category: Accounts, description: String::from("User accounts"), include: true, entry_count: 4 },
-            SettingsImportInfo { category: Locale, description: String::from("Language and region"), include: true, entry_count: 7 },
-            SettingsImportInfo { category: Appearance, description: String::from("Desktop appearance"), include: true, entry_count: 9 },
-            SettingsImportInfo { category: FileAssociations, description: String::from("File type associations"), include: true, entry_count: 20 },
-            SettingsImportInfo { category: Accessibility, description: String::from("Accessibility"), include: true, entry_count: 11 },
+            SettingsImportInfo {
+                category: Display,
+                description: String::from("Display and resolution"),
+                include: true,
+                entry_count: 12
+            },
+            SettingsImportInfo {
+                category: Network,
+                description: String::from("WiFi and network"),
+                include: true,
+                entry_count: 8
+            },
+            SettingsImportInfo {
+                category: Audio,
+                description: String::from("Sound settings"),
+                include: true,
+                entry_count: 6
+            },
+            SettingsImportInfo {
+                category: Input,
+                description: String::from("Keyboard and mouse"),
+                include: true,
+                entry_count: 15
+            },
+            SettingsImportInfo {
+                category: Privacy,
+                description: String::from("Privacy and security"),
+                include: false,
+                entry_count: 10
+            },
+            SettingsImportInfo {
+                category: Power,
+                description: String::from("Power management"),
+                include: true,
+                entry_count: 5
+            },
+            SettingsImportInfo {
+                category: Accounts,
+                description: String::from("User accounts"),
+                include: true,
+                entry_count: 4
+            },
+            SettingsImportInfo {
+                category: Locale,
+                description: String::from("Language and region"),
+                include: true,
+                entry_count: 7
+            },
+            SettingsImportInfo {
+                category: Appearance,
+                description: String::from("Desktop appearance"),
+                include: true,
+                entry_count: 9
+            },
+            SettingsImportInfo {
+                category: FileAssociations,
+                description: String::from("File type associations"),
+                include: true,
+                entry_count: 20
+            },
+            SettingsImportInfo {
+                category: Accessibility,
+                description: String::from("Accessibility"),
+                include: true,
+                entry_count: 11
+            },
         ]
     };
 
-    let preserve: u64 = apps.iter().filter(|a| a.include).map(|a| a.size_bytes).sum();
+    let preserve: u64 = apps
+        .iter()
+        .filter(|a| a.include)
+        .map(|a| a.size_bytes)
+        .sum();
 
     let plan_id = NEXT_PLAN_ID.fetch_add(1, Ordering::Relaxed);
     state.plans.push(ResetPlan {
@@ -424,7 +490,12 @@ pub fn set_app_include(plan_id: u64, app_id: &str, include: bool) -> KernelResul
         .ok_or(KernelError::NotFound)?;
     app.include = include;
     // Recompute preserve total.
-    plan.preserve_bytes = plan.apps.iter().filter(|a| a.include).map(|a| a.size_bytes).sum();
+    plan.preserve_bytes = plan
+        .apps
+        .iter()
+        .filter(|a| a.include)
+        .map(|a| a.size_bytes)
+        .sum();
     state.changes += 1;
     Ok(())
 }
@@ -615,11 +686,19 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("osreset::self_test 3: modify plan");
     set_app_include(plan_id, "system.terminal", false)?;
     let plan = get_plan(plan_id)?;
-    let term = plan.apps.iter().find(|a| a.app_id == "system.terminal").expect("terminal");
+    let term = plan
+        .apps
+        .iter()
+        .find(|a| a.app_id == "system.terminal")
+        .expect("terminal");
     assert!(!term.include);
     set_settings_include(plan_id, SettingsCategory::Privacy, true)?;
     let plan = get_plan(plan_id)?;
-    let priv_cat = plan.settings.iter().find(|s| s.category == SettingsCategory::Privacy).expect("privacy");
+    let priv_cat = plan
+        .settings
+        .iter()
+        .find(|s| s.category == SettingsCategory::Privacy)
+        .expect("privacy");
     assert!(priv_cat.include);
 
     // Test 4: execute plan.

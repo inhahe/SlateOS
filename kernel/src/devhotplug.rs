@@ -44,10 +44,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::udriver::{DeviceAddr, DeviceId};
@@ -395,8 +395,12 @@ pub fn device_arrived_pci(addr: DeviceAddr, id: DeviceId) {
         "devhotplug",
         Info,
         "PCI device arrived: {:02x}:{:02x}.{} vendor={:04x} device={:04x} → {}",
-        addr.bus, addr.device, addr.function,
-        id.vendor_id, id.device_id, match_str
+        addr.bus,
+        addr.device,
+        addr.function,
+        id.vendor_id,
+        id.device_id,
+        match_str
     );
 }
 
@@ -427,7 +431,9 @@ pub fn device_removed_pci(addr: DeviceAddr) {
         "devhotplug",
         Info,
         "PCI device removed: {:02x}:{:02x}.{}",
-        addr.bus, addr.device, addr.function
+        addr.bus,
+        addr.device,
+        addr.function
     );
 }
 
@@ -538,7 +544,9 @@ pub fn device_error(addr: DeviceAddr, device_id: Option<DeviceId>) {
         "devhotplug",
         Error,
         "device error: {:02x}:{:02x}.{}",
-        addr.bus, addr.device, addr.function
+        addr.bus,
+        addr.device,
+        addr.function
     );
 }
 
@@ -569,7 +577,10 @@ pub fn drain_events() -> Vec<HotplugEvent> {
 /// Peek at pending events without consuming them.
 #[must_use]
 pub fn pending_events() -> Vec<HotplugEvent> {
-    STATE.lock().event_queue.iter()
+    STATE
+        .lock()
+        .event_queue
+        .iter()
         .filter(|e| !e.consumed)
         .cloned()
         .collect()
@@ -578,7 +589,10 @@ pub fn pending_events() -> Vec<HotplugEvent> {
 /// Get the number of pending (unconsumed) events.
 #[must_use]
 pub fn pending_count() -> usize {
-    STATE.lock().event_queue.iter()
+    STATE
+        .lock()
+        .event_queue
+        .iter()
         .filter(|e| !e.consumed)
         .count()
 }
@@ -624,7 +638,10 @@ pub fn add_driver_entry(
 /// Remove a driver database entry by ID.
 pub fn remove_driver_entry(id: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let idx = state.driver_db.iter().position(|e| e.id == id)
+    let idx = state
+        .driver_db
+        .iter()
+        .position(|e| e.id == id)
         .ok_or(KernelError::NotFound)?;
     state.driver_db.swap_remove(idx);
     Ok(())
@@ -633,7 +650,10 @@ pub fn remove_driver_entry(id: u32) -> KernelResult<()> {
 /// Enable/disable a driver database entry.
 pub fn set_driver_entry_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let entry = state.driver_db.iter_mut().find(|e| e.id == id)
+    let entry = state
+        .driver_db
+        .iter_mut()
+        .find(|e| e.id == id)
         .ok_or(KernelError::NotFound)?;
     entry.enabled = enabled;
     Ok(())
@@ -751,7 +771,10 @@ pub fn procfs_content() -> String {
     out.push_str(&format!("Total bindings:     {}\n", state.total_bindings));
     out.push_str(&format!("Events dropped:     {}\n", state.events_dropped));
     out.push_str(&format!("Driver DB entries:  {}\n", state.driver_db.len()));
-    out.push_str(&format!("History entries:    {}\n\n", state.event_history.len()));
+    out.push_str(&format!(
+        "History entries:    {}\n\n",
+        state.event_history.len()
+    ));
 
     // Pending events.
     if pending > 0 {
@@ -803,9 +826,14 @@ pub fn procfs_content() -> String {
             let enabled = if entry.enabled { "" } else { " [disabled]" };
             out.push_str(&format!(
                 "  #{:<3} {}:{} class={}:{} → '{}' (pri={}){}",
-                entry.id, vendor_str, device_str,
-                class_str, sub_str,
-                entry.driver_name, entry.priority, enabled,
+                entry.id,
+                vendor_str,
+                device_str,
+                class_str,
+                sub_str,
+                entry.driver_name,
+                entry.priority,
+                enabled,
             ));
             out.push('\n');
         }
@@ -819,19 +847,33 @@ fn format_event(out: &mut String, event: &HotplugEvent, indent: &str) {
 
     out.push_str(&format!(
         "{}[{}] #{} {} {}",
-        indent, ts_ms, event.id, event.bus.label(), event.kind.label()
+        indent,
+        ts_ms,
+        event.id,
+        event.bus.label(),
+        event.kind.label()
     ));
 
     if let Some(addr) = &event.device_addr {
-        out.push_str(&format!(" {:02x}:{:02x}.{}", addr.bus, addr.device, addr.function));
+        out.push_str(&format!(
+            " {:02x}:{:02x}.{}",
+            addr.bus, addr.device, addr.function
+        ));
     }
 
     if let Some(id) = &event.device_id {
-        out.push_str(&format!(" (vendor={:04x} device={:04x})", id.vendor_id, id.device_id));
+        out.push_str(&format!(
+            " (vendor={:04x} device={:04x})",
+            id.vendor_id, id.device_id
+        ));
     }
 
     if let Some(usb) = &event.usb_info {
-        out.push_str(&format!(" USB {} port={}", usb.speed.label(), usb.port_path));
+        out.push_str(&format!(
+            " USB {} port={}",
+            usb.speed.label(),
+            usb.port_path
+        ));
     }
 
     if let Some(drv) = &event.matched_driver {

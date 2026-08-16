@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -100,7 +100,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         badges: Vec::new(),
         global_enabled: true,
@@ -125,7 +127,8 @@ pub fn set_count(app_name: &str, count: u32) -> KernelResult<()> {
             state.badges.push(Badge {
                 app_name: String::from(app_name),
                 style: BadgeStyle::Count,
-                count, progress: 0,
+                count,
+                progress: 0,
                 visible: count > 0,
                 last_updated_ns: now,
             });
@@ -152,7 +155,8 @@ pub fn increment(app_name: &str) -> KernelResult<u32> {
             state.badges.push(Badge {
                 app_name: String::from(app_name),
                 style: BadgeStyle::Count,
-                count: 1, progress: 0,
+                count: 1,
+                progress: 0,
                 visible: true,
                 last_updated_ns: now,
             });
@@ -177,7 +181,8 @@ pub fn set_dot(app_name: &str, visible: bool) -> KernelResult<()> {
             state.badges.push(Badge {
                 app_name: String::from(app_name),
                 style: BadgeStyle::Dot,
-                count: 0, progress: 0,
+                count: 0,
+                progress: 0,
                 visible,
                 last_updated_ns: now,
             });
@@ -204,7 +209,8 @@ pub fn set_progress(app_name: &str, progress: u32) -> KernelResult<()> {
             state.badges.push(Badge {
                 app_name: String::from(app_name),
                 style: BadgeStyle::Progress,
-                count: 0, progress: pct,
+                count: 0,
+                progress: pct,
                 visible: true,
                 last_updated_ns: now,
             });
@@ -234,15 +240,20 @@ pub fn clear_all() -> KernelResult<()> {
 
 /// Get badge for an app.
 pub fn get_badge(app_name: &str) -> Option<Badge> {
-    STATE.lock().as_ref().and_then(|s| {
-        s.badges.iter().find(|b| b.app_name == app_name).cloned()
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.badges.iter().find(|b| b.app_name == app_name).cloned())
 }
 
 /// List all visible badges.
 pub fn list_visible() -> Vec<Badge> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.badges.iter().filter(|b| b.visible && s.global_enabled).cloned().collect()
+        s.badges
+            .iter()
+            .filter(|b| b.visible && s.global_enabled)
+            .cloned()
+            .collect()
     })
 }
 

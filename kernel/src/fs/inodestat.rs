@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -136,10 +136,19 @@ where
 /// filesystem is mounted and the record functions as inodes flow through it.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         filesystems: Vec::new(),
-        dcache: DcacheStats { entries: 0, lookups: 0, hits: 0, misses: 0, evictions: 0, negative_entries: 0 },
+        dcache: DcacheStats {
+            entries: 0,
+            lookups: 0,
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            negative_entries: 0,
+        },
         total_allocs: 0,
         total_frees: 0,
         total_evictions: 0,
@@ -176,7 +185,10 @@ pub fn register_fs(fs_type: FsType, mount_point: &str) -> KernelResult<()> {
 /// Allocate an inode.
 pub fn alloc_inode(fs_type: FsType) -> KernelResult<()> {
     with_state(|state| {
-        let fs = state.filesystems.iter_mut().find(|f| f.fs_type == fs_type)
+        let fs = state
+            .filesystems
+            .iter_mut()
+            .find(|f| f.fs_type == fs_type)
             .ok_or(KernelError::NotFound)?;
         fs.allocated += 1;
         fs.active += 1;
@@ -188,7 +200,10 @@ pub fn alloc_inode(fs_type: FsType) -> KernelResult<()> {
 /// Free an inode.
 pub fn free_inode(fs_type: FsType) -> KernelResult<()> {
     with_state(|state| {
-        let fs = state.filesystems.iter_mut().find(|f| f.fs_type == fs_type)
+        let fs = state
+            .filesystems
+            .iter_mut()
+            .find(|f| f.fs_type == fs_type)
             .ok_or(KernelError::NotFound)?;
         fs.freed += 1;
         fs.active = fs.active.saturating_sub(1);
@@ -213,7 +228,10 @@ pub fn dcache_lookup(hit: bool) -> KernelResult<()> {
 /// Evict inodes from a filesystem.
 pub fn evict(fs_type: FsType, count: u64) -> KernelResult<()> {
     with_state(|state| {
-        let fs = state.filesystems.iter_mut().find(|f| f.fs_type == fs_type)
+        let fs = state
+            .filesystems
+            .iter_mut()
+            .find(|f| f.fs_type == fs_type)
             .ok_or(KernelError::NotFound)?;
         fs.evicted += count;
         fs.active = fs.active.saturating_sub(count);
@@ -225,7 +243,10 @@ pub fn evict(fs_type: FsType, count: u64) -> KernelResult<()> {
 /// Mark inodes dirty.
 pub fn mark_dirty(fs_type: FsType, count: u64) -> KernelResult<()> {
     with_state(|state| {
-        let fs = state.filesystems.iter_mut().find(|f| f.fs_type == fs_type)
+        let fs = state
+            .filesystems
+            .iter_mut()
+            .find(|f| f.fs_type == fs_type)
             .ok_or(KernelError::NotFound)?;
         fs.dirty += count;
         Ok(())
@@ -234,13 +255,23 @@ pub fn mark_dirty(fs_type: FsType, count: u64) -> KernelResult<()> {
 
 /// Get per-filesystem inode stats.
 pub fn fs_stats() -> Vec<FsInodeStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.filesystems.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.filesystems.clone())
 }
 
 /// Get dcache stats.
 pub fn dcache_stats() -> DcacheStats {
     STATE.lock().as_ref().map_or(
-        DcacheStats { entries: 0, lookups: 0, hits: 0, misses: 0, evictions: 0, negative_entries: 0 },
+        DcacheStats {
+            entries: 0,
+            lookups: 0,
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            negative_entries: 0,
+        },
         |s| s.dcache.clone(),
     )
 }
@@ -248,7 +279,9 @@ pub fn dcache_stats() -> DcacheStats {
 /// Dcache hit rate as percentage * 100 (integer math).
 pub fn dcache_hit_rate() -> u64 {
     let d = dcache_stats();
-    if d.lookups == 0 { return 0; }
+    if d.lookups == 0 {
+        return 0;
+    }
     d.hits * 10000 / d.lookups
 }
 
@@ -256,7 +289,14 @@ pub fn dcache_hit_rate() -> u64 {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.filesystems.len(), s.total_allocs, s.total_frees, s.total_evictions, s.dcache.lookups, s.ops),
+        Some(s) => (
+            s.filesystems.len(),
+            s.total_allocs,
+            s.total_frees,
+            s.total_evictions,
+            s.dcache.lookups,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -288,20 +328,32 @@ pub fn self_test() {
     register_fs(FsType::Tmpfs, "/tmp").expect("reg tmpfs");
     assert!(register_fs(FsType::Ext4, "/").is_err()); // AlreadyExists
     assert_eq!(fs_stats().len(), 2);
-    let ext4 = fs_stats().iter().find(|f| f.fs_type == FsType::Ext4).cloned().expect("ext4");
+    let ext4 = fs_stats()
+        .iter()
+        .find(|f| f.fs_type == FsType::Ext4)
+        .cloned()
+        .expect("ext4");
     assert_eq!((ext4.allocated, ext4.active, ext4.evicted), (0, 0, 0));
     crate::serial_println!("  [2/8] register: OK");
 
     // 3: Alloc inode increments allocated + active exactly from zero.
     alloc_inode(FsType::Ext4).expect("alloc");
-    let ext4 = fs_stats().iter().find(|f| f.fs_type == FsType::Ext4).cloned().expect("ext4");
+    let ext4 = fs_stats()
+        .iter()
+        .find(|f| f.fs_type == FsType::Ext4)
+        .cloned()
+        .expect("ext4");
     assert_eq!(ext4.allocated, 1);
     assert_eq!(ext4.active, 1);
     crate::serial_println!("  [3/8] alloc: OK");
 
     // 4: Free inode increments freed, decrements active back to zero.
     free_inode(FsType::Ext4).expect("free");
-    let ext4 = fs_stats().iter().find(|f| f.fs_type == FsType::Ext4).cloned().expect("ext4");
+    let ext4 = fs_stats()
+        .iter()
+        .find(|f| f.fs_type == FsType::Ext4)
+        .cloned()
+        .expect("ext4");
     assert_eq!(ext4.freed, 1);
     assert_eq!(ext4.active, 0);
     crate::serial_println!("  [4/8] free: OK");
@@ -320,7 +372,11 @@ pub fn self_test() {
     alloc_inode(FsType::Tmpfs).expect("a1");
     alloc_inode(FsType::Tmpfs).expect("a2");
     evict(FsType::Tmpfs, 2).expect("evict");
-    let tmpfs = fs_stats().iter().find(|f| f.fs_type == FsType::Tmpfs).cloned().expect("tmpfs");
+    let tmpfs = fs_stats()
+        .iter()
+        .find(|f| f.fs_type == FsType::Tmpfs)
+        .cloned()
+        .expect("tmpfs");
     assert_eq!(tmpfs.evicted, 2);
     assert_eq!(tmpfs.active, 0);
     crate::serial_println!("  [6/8] evict: OK");
@@ -333,10 +389,10 @@ pub fn self_test() {
     // 8: Aggregate totals equal the exact sums of the operations above.
     let (fss, allocs, frees, evictions, lookups, ops) = stats();
     assert_eq!(fss, 2);
-    assert_eq!(allocs, 3);     // 1 ext4 + 2 tmpfs
-    assert_eq!(frees, 1);      // 1 ext4
-    assert_eq!(evictions, 2);  // 2 tmpfs
-    assert_eq!(lookups, 4);    // 3 hits + 1 miss
+    assert_eq!(allocs, 3); // 1 ext4 + 2 tmpfs
+    assert_eq!(frees, 1); // 1 ext4
+    assert_eq!(evictions, 2); // 2 tmpfs
+    assert_eq!(lookups, 4); // 3 hits + 1 miss
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

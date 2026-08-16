@@ -289,7 +289,8 @@ pub fn parse(data: &[u8]) -> KernelResult<Vec<RarEntry>> {
                     return Err(KernelError::CorruptedData);
                 }
                 let name = PathBuf::from(
-                    data.get(pos..pos + name_len).ok_or(KernelError::CorruptedData)?,
+                    data.get(pos..pos + name_len)
+                        .ok_or(KernelError::CorruptedData)?,
                 );
 
                 // Data area starts right after the header.
@@ -505,7 +506,10 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::CorruptedData);
         }
         if entries[0].name.as_path() != Path::new("hello.txt") {
-            serial_println!("[rar]   ERROR: name mismatch: '{}'", entries[0].name.display());
+            serial_println!(
+                "[rar]   ERROR: name mismatch: '{}'",
+                entries[0].name.display()
+            );
             return Err(KernelError::CorruptedData);
         }
         if entries[0].unpacked_size != 12 {
@@ -520,7 +524,10 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[rar]   ERROR: incorrectly marked as directory");
             return Err(KernelError::CorruptedData);
         }
-        serial_println!("[rar]   parse OK (1 entry: '{}')", entries[0].name.display());
+        serial_println!(
+            "[rar]   parse OK (1 entry: '{}')",
+            entries[0].name.display()
+        );
     }
 
     // --- Test 2: extract stored entry ---

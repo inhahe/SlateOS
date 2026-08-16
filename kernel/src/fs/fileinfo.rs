@@ -33,10 +33,10 @@
 
 #![allow(dead_code)]
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelResult;
@@ -86,7 +86,13 @@ impl FieldValue {
             Self::Int(n) => format!("{}", n),
             Self::Uint(n) => format!("{}", n),
             Self::Float(f) => format!("{:.2}", f),
-            Self::Bool(b) => if *b { String::from("yes") } else { String::from("no") },
+            Self::Bool(b) => {
+                if *b {
+                    String::from("yes")
+                } else {
+                    String::from("no")
+                }
+            }
         }
     }
 }
@@ -155,7 +161,10 @@ impl FileInfo {
 
     /// Get a field by name.
     pub fn get(&self, name: &str) -> Option<&FieldValue> {
-        self.fields.iter().find(|f| f.name == name).map(|f| &f.value)
+        self.fields
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| &f.value)
     }
 
     /// Get a text field value.
@@ -214,8 +223,7 @@ pub fn extract(path: impl AsRef<Path>) -> KernelResult<FileInfo> {
     let mut info = FileInfo::new(path, mime);
 
     // Read header.
-    let header = crate::fs::Vfs::read_at(path, 0, MAX_HEADER_READ)
-        .unwrap_or_default();
+    let header = crate::fs::Vfs::read_at(path, 0, MAX_HEADER_READ).unwrap_or_default();
 
     // Dispatch to format-specific parser.
     match mime {
@@ -275,7 +283,8 @@ pub fn extract(path: impl AsRef<Path>) -> KernelResult<FileInfo> {
                 serial_println!(
                     "[fileinfo] CRITICAL: refusing to run corrupt extractor func={:#x} \
                      (mime_prefix={:?}) — table corruption; skipping (see B-KNULLJUMP-SIGNAL)",
-                    func_addr, ext.mime_prefix
+                    func_addr,
+                    ext.mime_prefix
                 );
             }
         }
@@ -492,9 +501,9 @@ fn parse_id3v2(data: &[u8], info: &mut FileInfo) {
     let mut pos = start;
     while pos + 10 <= end {
         let frame_id = &data[pos..pos + 4];
-        let frame_size = u32::from_be_bytes([
-            data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7],
-        ]) as usize;
+        let frame_size =
+            u32::from_be_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+                as usize;
         let _frame_flags = u16::from_be_bytes([data[pos + 8], data[pos + 9]]);
 
         if frame_size == 0 || pos + 10 + frame_size > end {
@@ -537,7 +546,9 @@ fn parse_id3v2(data: &[u8], info: &mut FileInfo) {
 /// Searches for a valid frame sync (0xFF 0xE0 mask) in the header data.
 fn parse_mpeg_frame(data: &[u8], info: &mut FileInfo) {
     // Find frame sync: 11 set bits (0xFF followed by 0xE0 mask).
-    let sync_pos = data.windows(2).position(|w| w[0] == 0xFF && (w[1] & 0xE0) == 0xE0);
+    let sync_pos = data
+        .windows(2)
+        .position(|w| w[0] == 0xFF && (w[1] & 0xE0) == 0xE0);
     let pos = match sync_pos {
         Some(p) if p + 4 <= data.len() => p,
         _ => return,
@@ -547,8 +558,8 @@ fn parse_mpeg_frame(data: &[u8], info: &mut FileInfo) {
     let b2 = data[pos + 2];
     let b3 = data[pos + 3];
 
-    let version = (b1 >> 3) & 0x03;   // 0=2.5, 1=reserved, 2=2, 3=1
-    let layer = (b1 >> 1) & 0x03;     // 0=reserved, 1=III, 2=II, 3=I
+    let version = (b1 >> 3) & 0x03; // 0=2.5, 1=reserved, 2=2, 3=1
+    let layer = (b1 >> 1) & 0x03; // 0=reserved, 1=III, 2=II, 3=I
     let br_idx = (b2 >> 4) & 0x0F;
     let sr_idx = (b2 >> 2) & 0x03;
     let channel_mode = (b3 >> 6) & 0x03;
@@ -559,7 +570,11 @@ fn parse_mpeg_frame(data: &[u8], info: &mut FileInfo) {
             0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
         ];
         if (br_idx as usize) < bitrates.len() && bitrates[br_idx as usize] > 0 {
-            info.push_uint("audio.bitrate_kbps", "Bitrate (kbps)", bitrates[br_idx as usize] as u64);
+            info.push_uint(
+                "audio.bitrate_kbps",
+                "Bitrate (kbps)",
+                bitrates[br_idx as usize] as u64,
+            );
         }
     }
 
@@ -567,16 +582,32 @@ fn parse_mpeg_frame(data: &[u8], info: &mut FileInfo) {
     if version == 3 {
         let sample_rates: [u32; 3] = [44100, 48000, 32000];
         if (sr_idx as usize) < sample_rates.len() {
-            info.push_uint("audio.sample_rate_hz", "Sample Rate", sample_rates[sr_idx as usize] as u64);
+            info.push_uint(
+                "audio.sample_rate_hz",
+                "Sample Rate",
+                sample_rates[sr_idx as usize] as u64,
+            );
         }
     }
 
     // Channel mode.
     let channels = match channel_mode {
-        0 => { info.push_text("audio.channel_mode", "Channel Mode", "Stereo"); 2u64 }
-        1 => { info.push_text("audio.channel_mode", "Channel Mode", "Joint Stereo"); 2 }
-        2 => { info.push_text("audio.channel_mode", "Channel Mode", "Dual Channel"); 2 }
-        3 => { info.push_text("audio.channel_mode", "Channel Mode", "Mono"); 1 }
+        0 => {
+            info.push_text("audio.channel_mode", "Channel Mode", "Stereo");
+            2u64
+        }
+        1 => {
+            info.push_text("audio.channel_mode", "Channel Mode", "Joint Stereo");
+            2
+        }
+        2 => {
+            info.push_text("audio.channel_mode", "Channel Mode", "Dual Channel");
+            2
+        }
+        3 => {
+            info.push_text("audio.channel_mode", "Channel Mode", "Mono");
+            1
+        }
         _ => 0,
     };
     if channels > 0 {
@@ -603,9 +634,9 @@ fn parse_wav(data: &[u8], info: &mut FileInfo) {
     let mut pos = 12;
     while pos + 8 <= data.len() {
         let chunk_id = &data[pos..pos + 4];
-        let chunk_size = u32::from_le_bytes([
-            data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7],
-        ]) as usize;
+        let chunk_size =
+            u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+                as usize;
 
         if chunk_id == b"fmt " && pos + 8 + chunk_size <= data.len() && chunk_size >= 16 {
             let fmt = &data[pos + 8..];
@@ -631,9 +662,9 @@ fn parse_wav(data: &[u8], info: &mut FileInfo) {
         }
 
         if chunk_id == b"data" {
-            let data_size = u32::from_le_bytes([
-                data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7],
-            ]) as u64;
+            let data_size =
+                u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+                    as u64;
             info.push_uint("audio.data_size", "Data Size", data_size);
 
             // Calculate duration if we have sample rate and bit info.
@@ -693,7 +724,11 @@ fn parse_jpeg(data: &[u8], info: &mut FileInfo) {
                     let width = u16::from_be_bytes([data[pos + 7], data[pos + 8]]) as u64;
                     info.push_uint("image.width", "Width", width);
                     info.push_uint("image.height", "Height", height);
-                    let comp_type = if marker == 0xC0 { "Baseline" } else { "Progressive" };
+                    let comp_type = if marker == 0xC0 {
+                        "Baseline"
+                    } else {
+                        "Progressive"
+                    };
                     info.push_text("image.compression", "Compression", comp_type);
                 }
             }
@@ -733,7 +768,9 @@ fn parse_exif(data: &[u8], info: &mut FileInfo) {
     };
 
     let read_u16 = |offset: usize| -> Option<u16> {
-        if offset + 2 > tiff.len() { return None; }
+        if offset + 2 > tiff.len() {
+            return None;
+        }
         Some(if big_endian {
             u16::from_be_bytes([tiff[offset], tiff[offset + 1]])
         } else {
@@ -742,11 +779,23 @@ fn parse_exif(data: &[u8], info: &mut FileInfo) {
     };
 
     let read_u32 = |offset: usize| -> Option<u32> {
-        if offset + 4 > tiff.len() { return None; }
+        if offset + 4 > tiff.len() {
+            return None;
+        }
         Some(if big_endian {
-            u32::from_be_bytes([tiff[offset], tiff[offset + 1], tiff[offset + 2], tiff[offset + 3]])
+            u32::from_be_bytes([
+                tiff[offset],
+                tiff[offset + 1],
+                tiff[offset + 2],
+                tiff[offset + 3],
+            ])
         } else {
-            u32::from_le_bytes([tiff[offset], tiff[offset + 1], tiff[offset + 2], tiff[offset + 3]])
+            u32::from_le_bytes([
+                tiff[offset],
+                tiff[offset + 1],
+                tiff[offset + 2],
+                tiff[offset + 3],
+            ])
         })
     };
 
@@ -776,11 +825,26 @@ fn parse_exif(data: &[u8], info: &mut FileInfo) {
             break;
         }
 
-        let tag = match read_u16(entry_offset) { Some(t) => t, None => continue };
-        let _dtype = match read_u16(entry_offset + 2) { Some(t) => t, None => continue };
-        let _count = match read_u32(entry_offset + 4) { Some(c) => c, None => continue };
-        let value_u32 = match read_u32(entry_offset + 8) { Some(v) => v, None => continue };
-        let value_u16 = match read_u16(entry_offset + 8) { Some(v) => v, None => continue };
+        let tag = match read_u16(entry_offset) {
+            Some(t) => t,
+            None => continue,
+        };
+        let _dtype = match read_u16(entry_offset + 2) {
+            Some(t) => t,
+            None => continue,
+        };
+        let _count = match read_u32(entry_offset + 4) {
+            Some(c) => c,
+            None => continue,
+        };
+        let value_u32 = match read_u32(entry_offset + 8) {
+            Some(v) => v,
+            None => continue,
+        };
+        let value_u16 = match read_u16(entry_offset + 8) {
+            Some(v) => v,
+            None => continue,
+        };
 
         match tag {
             // ImageWidth (short or long).
@@ -861,9 +925,8 @@ fn parse_png(data: &[u8], info: &mut FileInfo) {
 
     let mut pos = 8;
     while pos + 12 <= data.len() {
-        let chunk_len = u32::from_be_bytes([
-            data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-        ]) as usize;
+        let chunk_len =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         let chunk_type = &data[pos + 4..pos + 8];
         let chunk_data_start = pos + 8;
         let chunk_data_end = (chunk_data_start + chunk_len).min(data.len());
@@ -942,7 +1005,11 @@ fn parse_gif(data: &[u8], info: &mut FileInfo) {
         info.push_uint("image.color_depth", "Color Depth", color_depth as u64);
     }
 
-    let version = if data.starts_with(b"GIF89a") { "89a" } else { "87a" };
+    let version = if data.starts_with(b"GIF89a") {
+        "89a"
+    } else {
+        "87a"
+    };
     info.push_text("image.gif_version", "GIF Version", version);
 }
 
@@ -1002,7 +1069,9 @@ fn parse_pdf(data: &[u8], info: &mut FileInfo) {
     }
 
     // Extract version string.
-    let version_end = data[5..].iter().position(|&b| b == b'\n' || b == b'\r')
+    let version_end = data[5..]
+        .iter()
+        .position(|&b| b == b'\n' || b == b'\r')
         .map(|p| p + 5)
         .unwrap_or(8.min(data.len()));
     let version = core::str::from_utf8(&data[5..version_end]).unwrap_or("?");
@@ -1076,7 +1145,9 @@ fn parse_elf(data: &[u8], info: &mut FileInfo) {
 
 /// Trim trailing nulls and spaces from an ID3v1 fixed-width field.
 fn trim_id3_str(data: &[u8]) -> &str {
-    let end = data.iter().rposition(|&b| b != 0 && b != b' ')
+    let end = data
+        .iter()
+        .rposition(|&b| b != 0 && b != b' ')
         .map(|p| p + 1)
         .unwrap_or(0);
     core::str::from_utf8(&data[..end]).unwrap_or("")
@@ -1086,11 +1157,10 @@ fn trim_id3_str(data: &[u8]) -> &str {
 ///
 /// Each byte uses only 7 bits; bit 7 is always 0.
 fn synchsafe_u32(data: &[u8]) -> u32 {
-    if data.len() < 4 { return 0; }
-    ((data[0] as u32) << 21)
-        | ((data[1] as u32) << 14)
-        | ((data[2] as u32) << 7)
-        | (data[3] as u32)
+    if data.len() < 4 {
+        return 0;
+    }
+    ((data[0] as u32) << 21) | ((data[1] as u32) << 14) | ((data[2] as u32) << 7) | (data[3] as u32)
 }
 
 /// Decode ID3v2 text frame.
@@ -1106,7 +1176,10 @@ fn id3v2_text(data: &[u8]) -> String {
     match encoding {
         0 | 3 => {
             // ISO-8859-1 or UTF-8: treat as UTF-8 (works for ASCII subset).
-            let end = text_data.iter().position(|&b| b == 0).unwrap_or(text_data.len());
+            let end = text_data
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(text_data.len());
             core::str::from_utf8(&text_data[..end]).unwrap_or("").into()
         }
         1 | 2 => {
@@ -1121,7 +1194,9 @@ fn id3v2_text(data: &[u8]) -> String {
             while i + 1 < text_data.len() {
                 let lo = text_data[i];
                 let hi = text_data[i + 1];
-                if lo == 0 && hi == 0 { break; }
+                if lo == 0 && hi == 0 {
+                    break;
+                }
                 // Simple: only keep ASCII-range characters.
                 if encoding == 1 {
                     // UTF-16LE (common with BOM 0xFF 0xFE).
@@ -1169,28 +1244,99 @@ fn read_ascii_string(data: &[u8], offset: usize, count: usize) -> Option<String>
     }
     let end = (offset + count).min(data.len());
     let bytes = &data[offset..end];
-    let trimmed = bytes.iter().take_while(|&&b| b != 0).copied().collect::<Vec<u8>>();
-    core::str::from_utf8(&trimmed).ok().map(|s| String::from(s.trim()))
+    let trimmed = bytes
+        .iter()
+        .take_while(|&&b| b != 0)
+        .copied()
+        .collect::<Vec<u8>>();
+    core::str::from_utf8(&trimmed)
+        .ok()
+        .map(|s| String::from(s.trim()))
 }
 
 /// Map ID3v1 genre index to name.
 fn id3v1_genre_name(idx: u8) -> &'static str {
     const GENRES: &[&str] = &[
-        "Blues", "Classic Rock", "Country", "Dance", "Disco", "Funk",
-        "Grunge", "Hip-Hop", "Jazz", "Metal", "New Age", "Oldies",
-        "Other", "Pop", "R&B", "Rap", "Reggae", "Rock", "Techno",
-        "Industrial", "Alternative", "Ska", "Death Metal", "Pranks",
-        "Soundtrack", "Euro-Techno", "Ambient", "Trip-Hop", "Vocal",
-        "Jazz+Funk", "Fusion", "Trance", "Classical", "Instrumental",
-        "Acid", "House", "Game", "Sound Clip", "Gospel", "Noise",
-        "Alt. Rock", "Bass", "Soul", "Punk", "Space", "Meditative",
-        "Instrum. Pop", "Instrum. Rock", "Ethnic", "Gothic", "Darkwave",
-        "Techno-Indust.", "Electronic", "Pop-Folk", "Eurodance",
-        "Dream", "Southern Rock", "Comedy", "Cult", "Gangsta",
-        "Top 40", "Christian Rap", "Pop/Funk", "Jungle", "Native Amer.",
-        "Cabaret", "New Wave", "Psychedelic", "Rave", "Showtunes",
-        "Trailer", "Lo-Fi", "Tribal", "Acid Punk", "Acid Jazz",
-        "Polka", "Retro", "Musical", "Rock & Roll", "Hard Rock",
+        "Blues",
+        "Classic Rock",
+        "Country",
+        "Dance",
+        "Disco",
+        "Funk",
+        "Grunge",
+        "Hip-Hop",
+        "Jazz",
+        "Metal",
+        "New Age",
+        "Oldies",
+        "Other",
+        "Pop",
+        "R&B",
+        "Rap",
+        "Reggae",
+        "Rock",
+        "Techno",
+        "Industrial",
+        "Alternative",
+        "Ska",
+        "Death Metal",
+        "Pranks",
+        "Soundtrack",
+        "Euro-Techno",
+        "Ambient",
+        "Trip-Hop",
+        "Vocal",
+        "Jazz+Funk",
+        "Fusion",
+        "Trance",
+        "Classical",
+        "Instrumental",
+        "Acid",
+        "House",
+        "Game",
+        "Sound Clip",
+        "Gospel",
+        "Noise",
+        "Alt. Rock",
+        "Bass",
+        "Soul",
+        "Punk",
+        "Space",
+        "Meditative",
+        "Instrum. Pop",
+        "Instrum. Rock",
+        "Ethnic",
+        "Gothic",
+        "Darkwave",
+        "Techno-Indust.",
+        "Electronic",
+        "Pop-Folk",
+        "Eurodance",
+        "Dream",
+        "Southern Rock",
+        "Comedy",
+        "Cult",
+        "Gangsta",
+        "Top 40",
+        "Christian Rap",
+        "Pop/Funk",
+        "Jungle",
+        "Native Amer.",
+        "Cabaret",
+        "New Wave",
+        "Psychedelic",
+        "Rave",
+        "Showtunes",
+        "Trailer",
+        "Lo-Fi",
+        "Tribal",
+        "Acid Punk",
+        "Acid Jazz",
+        "Polka",
+        "Retro",
+        "Musical",
+        "Rock & Roll",
+        "Hard Rock",
     ];
     GENRES.get(idx as usize).copied().unwrap_or("Unknown")
 }
@@ -1221,7 +1367,9 @@ fn test_id3v1_parse() {
 
     // Construct a minimal ID3v1 tag.
     let mut tag = [0u8; 128];
-    tag[0] = b'T'; tag[1] = b'A'; tag[2] = b'G';
+    tag[0] = b'T';
+    tag[1] = b'A';
+    tag[2] = b'G';
     // Title: "Test Song" padded to 30 bytes.
     let title = b"Test Song";
     tag[3..3 + title.len()].copy_from_slice(title);
@@ -1294,11 +1442,11 @@ fn test_png_parse() {
     data.extend_from_slice(&640u32.to_be_bytes());
     // Height: 480.
     data.extend_from_slice(&480u32.to_be_bytes());
-    data.push(8);  // bit depth
-    data.push(6);  // color type: RGBA
-    data.push(0);  // compression
-    data.push(0);  // filter
-    data.push(0);  // interlace: none
+    data.push(8); // bit depth
+    data.push(6); // color type: RGBA
+    data.push(0); // compression
+    data.push(0); // filter
+    data.push(0); // interlace: none
     // CRC (dummy — our parser doesn't verify).
     data.extend_from_slice(&[0, 0, 0, 0]);
 
@@ -1320,8 +1468,8 @@ fn test_gif_parse() {
     data.extend_from_slice(&320u16.to_le_bytes()); // width
     data.extend_from_slice(&240u16.to_le_bytes()); // height
     data.push(0x87); // flags: global color table, 8-bit depth
-    data.push(0);    // background
-    data.push(0);    // aspect ratio
+    data.push(0); // background
+    data.push(0); // aspect ratio
 
     parse_gif(&data, &mut info);
 
@@ -1336,7 +1484,8 @@ fn test_bmp_parse() {
     let mut info = FileInfo::new(Path::new("/test.bmp"), "image/bmp");
 
     let mut data = vec![0u8; 40];
-    data[0] = b'B'; data[1] = b'M';
+    data[0] = b'B';
+    data[1] = b'M';
     // DIB header size: 40 (BITMAPINFOHEADER).
     data[14..18].copy_from_slice(&40u32.to_le_bytes());
     // Width: 800.

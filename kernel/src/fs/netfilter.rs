@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -179,7 +179,9 @@ where
 /// (9.15M packets, 9.05M accepted, 100k dropped).)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         rules: Vec::new(),
         conntrack: Vec::new(),
@@ -195,12 +197,19 @@ pub fn init_defaults() {
 /// Add a filter rule.
 pub fn add_rule(chain: Chain, action: Action, description: &str) -> KernelResult<u32> {
     with_state(|state| {
-        if state.rules.len() >= MAX_RULES { return Err(KernelError::ResourceExhausted); }
+        if state.rules.len() >= MAX_RULES {
+            return Err(KernelError::ResourceExhausted);
+        }
         let id = state.next_rule_id;
         state.next_rule_id += 1;
         state.rules.push(FilterRule {
-            id, chain, action, description: String::from(description),
-            matches: 0, bytes_matched: 0, enabled: true,
+            id,
+            chain,
+            action,
+            description: String::from(description),
+            matches: 0,
+            bytes_matched: 0,
+            enabled: true,
         });
         Ok(id)
     })
@@ -209,7 +218,10 @@ pub fn add_rule(chain: Chain, action: Action, description: &str) -> KernelResult
 /// Remove a rule.
 pub fn remove_rule(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.rules.iter().position(|r| r.id == id)
+        let idx = state
+            .rules
+            .iter()
+            .position(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         state.rules.remove(idx);
         Ok(())
@@ -227,8 +239,11 @@ pub fn record_match(chain: Chain, action: Action, bytes: u64) -> KernelResult<()
             Action::Log => {}
         }
         // Update first matching enabled rule in that chain with that action.
-        if let Some(rule) = state.rules.iter_mut()
-            .find(|r| r.chain == chain && r.action == action && r.enabled) {
+        if let Some(rule) = state
+            .rules
+            .iter_mut()
+            .find(|r| r.chain == chain && r.action == action && r.enabled)
+        {
             rule.matches += 1;
             rule.bytes_matched += bytes;
         }
@@ -239,7 +254,10 @@ pub fn record_match(chain: Chain, action: Action, bytes: u64) -> KernelResult<()
 /// Toggle a rule's enabled state.
 pub fn toggle_rule(id: u32) -> KernelResult<bool> {
     with_state(|state| {
-        let rule = state.rules.iter_mut().find(|r| r.id == id)
+        let rule = state
+            .rules
+            .iter_mut()
+            .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         rule.enabled = !rule.enabled;
         Ok(rule.enabled)
@@ -248,19 +266,29 @@ pub fn toggle_rule(id: u32) -> KernelResult<bool> {
 
 /// List all rules.
 pub fn list_rules() -> Vec<FilterRule> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.rules.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.rules.clone())
 }
 
 /// List rules for a specific chain.
 pub fn rules_for_chain(chain: Chain) -> Vec<FilterRule> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.rules.iter().filter(|r| r.chain == chain).cloned().collect()
+        s.rules
+            .iter()
+            .filter(|r| r.chain == chain)
+            .cloned()
+            .collect()
     })
 }
 
 /// Connection tracking entries.
 pub fn conntrack() -> Vec<ConnTrackEntry> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.conntrack.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.conntrack.clone())
 }
 
 /// Begin tracking a connection.
@@ -280,8 +308,10 @@ pub fn track_connection(
 ) -> KernelResult<()> {
     with_state(|state| {
         if state.conntrack.iter().any(|c| {
-            c.src_ip == src_ip && c.dst_ip == dst_ip
-                && c.src_port == src_port && c.dst_port == dst_port
+            c.src_ip == src_ip
+                && c.dst_ip == dst_ip
+                && c.src_port == src_port
+                && c.dst_port == dst_port
                 && c.protocol == protocol
         }) {
             return Ok(());
@@ -290,8 +320,14 @@ pub fn track_connection(
             return Err(KernelError::ResourceExhausted);
         }
         state.conntrack.push(ConnTrackEntry {
-            src_ip, dst_ip, src_port, dst_port, protocol,
-            packets: 0, bytes: 0, state: ConnState::New,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            protocol,
+            packets: 0,
+            bytes: 0,
+            state: ConnState::New,
         });
         Ok(())
     })
@@ -311,11 +347,17 @@ pub fn update_connection(
     bytes: u64,
 ) -> KernelResult<()> {
     with_state(|state| {
-        let entry = state.conntrack.iter_mut().find(|c| {
-            c.src_ip == src_ip && c.dst_ip == dst_ip
-                && c.src_port == src_port && c.dst_port == dst_port
-                && c.protocol == protocol
-        }).ok_or(KernelError::NotFound)?;
+        let entry = state
+            .conntrack
+            .iter_mut()
+            .find(|c| {
+                c.src_ip == src_ip
+                    && c.dst_ip == dst_ip
+                    && c.src_port == src_port
+                    && c.dst_port == dst_port
+                    && c.protocol == protocol
+            })
+            .ok_or(KernelError::NotFound)?;
         entry.packets = entry.packets.saturating_add(packets);
         entry.bytes = entry.bytes.saturating_add(bytes);
         Ok(())
@@ -334,11 +376,17 @@ pub fn set_conn_state(
     new_state: ConnState,
 ) -> KernelResult<()> {
     with_state(|state| {
-        let entry = state.conntrack.iter_mut().find(|c| {
-            c.src_ip == src_ip && c.dst_ip == dst_ip
-                && c.src_port == src_port && c.dst_port == dst_port
-                && c.protocol == protocol
-        }).ok_or(KernelError::NotFound)?;
+        let entry = state
+            .conntrack
+            .iter_mut()
+            .find(|c| {
+                c.src_ip == src_ip
+                    && c.dst_ip == dst_ip
+                    && c.src_port == src_port
+                    && c.dst_port == dst_port
+                    && c.protocol == protocol
+            })
+            .ok_or(KernelError::NotFound)?;
         entry.state = new_state;
         Ok(())
     })
@@ -355,11 +403,17 @@ pub fn untrack_connection(
     protocol: u8,
 ) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.conntrack.iter().position(|c| {
-            c.src_ip == src_ip && c.dst_ip == dst_ip
-                && c.src_port == src_port && c.dst_port == dst_port
-                && c.protocol == protocol
-        }).ok_or(KernelError::NotFound)?;
+        let idx = state
+            .conntrack
+            .iter()
+            .position(|c| {
+                c.src_ip == src_ip
+                    && c.dst_ip == dst_ip
+                    && c.src_port == src_port
+                    && c.dst_port == dst_port
+                    && c.protocol == protocol
+            })
+            .ok_or(KernelError::NotFound)?;
         state.conntrack.remove(idx);
         Ok(())
     })
@@ -369,7 +423,14 @@ pub fn untrack_connection(
 pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.rules.len(), s.conntrack.len(), s.total_packets, s.total_accepted, s.total_dropped, s.ops),
+        Some(s) => (
+            s.rules.len(),
+            s.conntrack.len(),
+            s.total_packets,
+            s.total_accepted,
+            s.total_dropped,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -389,7 +450,10 @@ pub fn self_test() {
     assert_eq!(list_rules().len(), 0);
     assert_eq!(conntrack().len(), 0);
     let (rules0, ct0, packets0, accepted0, dropped0, _) = stats();
-    assert_eq!((rules0, ct0, packets0, accepted0, dropped0), (0, 0, 0, 0, 0));
+    assert_eq!(
+        (rules0, ct0, packets0, accepted0, dropped0),
+        (0, 0, 0, 0, 0)
+    );
     crate::serial_println!("  [1/8] empty defaults: OK");
 
     // 2: Add rules — ids are monotonic starting at 1.
@@ -409,7 +473,10 @@ pub fn self_test() {
     // 4: Record match routes to the matching enabled rule and the totals.
     record_match(Chain::Input, Action::Accept, 1500).expect("match accept");
     record_match(Chain::Input, Action::Drop, 64).expect("match drop");
-    let accept_rule = list_rules().into_iter().find(|r| r.id == r_in).expect("rule");
+    let accept_rule = list_rules()
+        .into_iter()
+        .find(|r| r.id == r_in)
+        .expect("rule");
     assert_eq!(accept_rule.matches, 1);
     assert_eq!(accept_rule.bytes_matched, 1500);
     let (_, _, packets, accepted, dropped, _) = stats();
@@ -420,7 +487,10 @@ pub fn self_test() {
     let enabled = toggle_rule(r_in).expect("toggle");
     assert!(!enabled);
     record_match(Chain::Input, Action::Accept, 999).expect("match disabled");
-    let still = list_rules().into_iter().find(|r| r.id == r_in).expect("rule");
+    let still = list_rules()
+        .into_iter()
+        .find(|r| r.id == r_in)
+        .expect("rule");
     assert_eq!(still.matches, 1); // unchanged — rule disabled
     assert!(toggle_rule(r_in).expect("toggle back"));
     crate::serial_println!("  [5/8] toggle: OK");

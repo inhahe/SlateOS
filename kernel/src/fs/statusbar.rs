@@ -134,7 +134,11 @@ pub fn generate(input: &StatusInput) -> StatusContent {
     let center = generate_center(input);
     let right = generate_right(input);
 
-    StatusContent { left, center, right }
+    StatusContent {
+        left,
+        center,
+        right,
+    }
 }
 
 /// Generate status bar content for a directory with automatic info gathering.
@@ -182,13 +186,13 @@ pub fn generate_for_dir(path: &str, selected_count: u64, selected_size: u64) -> 
 
 /// Get disk information for the status bar.
 pub fn disk_info(path: &str) -> Option<DiskInfo> {
-    crate::fs::vfs::Vfs::statvfs(path).ok().map(|info| {
-        DiskInfo {
+    crate::fs::vfs::Vfs::statvfs(path)
+        .ok()
+        .map(|info| DiskInfo {
             free_bytes: info.free_blocks.saturating_mul(info.block_size),
             total_bytes: info.total_blocks.saturating_mul(info.block_size),
             fs_type: info.fs_type,
-        }
-    })
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -197,18 +201,18 @@ pub fn disk_info(path: &str) -> Option<DiskInfo> {
 
 fn generate_left(input: &StatusInput) -> String {
     match input.state {
-        ExplorerState::Loading => {
-            String::from("Loading...")
-        }
+        ExplorerState::Loading => String::from("Loading..."),
         ExplorerState::SearchResults => {
             if input.search_results == 0 {
                 alloc::format!("No results for \"{}\"", input.search_query)
             } else {
-                alloc::format!("{} result{} for \"{}\" ({} ms)",
-                               input.search_results,
-                               if input.search_results == 1 { "" } else { "s" },
-                               input.search_query,
-                               input.search_duration_ms)
+                alloc::format!(
+                    "{} result{} for \"{}\" ({} ms)",
+                    input.search_results,
+                    if input.search_results == 1 { "" } else { "s" },
+                    input.search_query,
+                    input.search_duration_ms
+                )
             }
         }
         ExplorerState::OperationInProgress => {
@@ -224,22 +228,28 @@ fn generate_left(input: &StatusInput) -> String {
                 if input.selected_count == 1 {
                     alloc::format!("1 item selected ({})", format_size(input.selected_size))
                 } else {
-                    alloc::format!("{} items selected ({})",
-                                   input.selected_count,
-                                   format_size(input.selected_size))
+                    alloc::format!(
+                        "{} items selected ({})",
+                        input.selected_count,
+                        format_size(input.selected_size)
+                    )
                 }
             } else {
                 // No selection — show item count.
                 let mut parts = Vec::new();
                 if input.file_count > 0 {
-                    parts.push(alloc::format!("{} file{}",
-                                             input.file_count,
-                                             if input.file_count == 1 { "" } else { "s" }));
+                    parts.push(alloc::format!(
+                        "{} file{}",
+                        input.file_count,
+                        if input.file_count == 1 { "" } else { "s" }
+                    ));
                 }
                 if input.dir_count > 0 {
-                    parts.push(alloc::format!("{} folder{}",
-                                             input.dir_count,
-                                             if input.dir_count == 1 { "" } else { "s" }));
+                    parts.push(alloc::format!(
+                        "{} folder{}",
+                        input.dir_count,
+                        if input.dir_count == 1 { "" } else { "s" }
+                    ));
                 }
                 if parts.is_empty() {
                     String::from("Empty folder")

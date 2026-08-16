@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -102,22 +102,34 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: alloc::vec![
             DeviceCacheConfig {
                 device_name: String::from("sda"),
-                policy: CachePolicy::WriteBack, readahead_pages: 128,
-                dirty_ratio_pct: 20, dirty_bg_ratio_pct: 10,
-                flush_interval_ms: 5000, cached_pages: 1024,
-                dirty_pages: 50, total_flushes: 0, total_readaheads: 0,
+                policy: CachePolicy::WriteBack,
+                readahead_pages: 128,
+                dirty_ratio_pct: 20,
+                dirty_bg_ratio_pct: 10,
+                flush_interval_ms: 5000,
+                cached_pages: 1024,
+                dirty_pages: 50,
+                total_flushes: 0,
+                total_readaheads: 0,
             },
             DeviceCacheConfig {
                 device_name: String::from("nvme0n1"),
-                policy: CachePolicy::WriteThrough, readahead_pages: 256,
-                dirty_ratio_pct: 40, dirty_bg_ratio_pct: 20,
-                flush_interval_ms: 3000, cached_pages: 4096,
-                dirty_pages: 0, total_flushes: 0, total_readaheads: 0,
+                policy: CachePolicy::WriteThrough,
+                readahead_pages: 256,
+                dirty_ratio_pct: 40,
+                dirty_bg_ratio_pct: 20,
+                flush_interval_ms: 3000,
+                cached_pages: 4096,
+                dirty_pages: 0,
+                total_flushes: 0,
+                total_readaheads: 0,
             },
         ],
         total_flushes: 0,
@@ -129,18 +141,27 @@ pub fn init_defaults() {
 
 /// List device cache configs.
 pub fn list_devices() -> Vec<DeviceCacheConfig> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Get config for a device.
 pub fn get_device(name: &str) -> Option<DeviceCacheConfig> {
-    STATE.lock().as_ref().and_then(|s| s.devices.iter().find(|d| d.device_name == name).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.devices.iter().find(|d| d.device_name == name).cloned())
 }
 
 /// Set cache policy for a device.
 pub fn set_policy(device: &str, policy: CachePolicy) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device_name == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device_name == device)
             .ok_or(KernelError::NotFound)?;
         dev.policy = policy;
         Ok(())
@@ -150,8 +171,13 @@ pub fn set_policy(device: &str, policy: CachePolicy) -> KernelResult<()> {
 /// Set read-ahead size.
 pub fn set_readahead(device: &str, pages: u32) -> KernelResult<()> {
     with_state(|state| {
-        if pages > 8192 { return Err(KernelError::InvalidArgument); }
-        let dev = state.devices.iter_mut().find(|d| d.device_name == device)
+        if pages > 8192 {
+            return Err(KernelError::InvalidArgument);
+        }
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device_name == device)
             .ok_or(KernelError::NotFound)?;
         dev.readahead_pages = pages;
         Ok(())
@@ -164,7 +190,10 @@ pub fn set_dirty_ratio(device: &str, ratio_pct: u32, bg_ratio_pct: u32) -> Kerne
         if ratio_pct > 100 || bg_ratio_pct > 100 || bg_ratio_pct > ratio_pct {
             return Err(KernelError::InvalidArgument);
         }
-        let dev = state.devices.iter_mut().find(|d| d.device_name == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device_name == device)
             .ok_or(KernelError::NotFound)?;
         dev.dirty_ratio_pct = ratio_pct;
         dev.dirty_bg_ratio_pct = bg_ratio_pct;
@@ -175,7 +204,10 @@ pub fn set_dirty_ratio(device: &str, ratio_pct: u32, bg_ratio_pct: u32) -> Kerne
 /// Flush cache for a device (simulated).
 pub fn flush(device: &str) -> KernelResult<u64> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device_name == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device_name == device)
             .ok_or(KernelError::NotFound)?;
         let flushed = dev.dirty_pages;
         dev.dirty_pages = 0;
@@ -188,13 +220,23 @@ pub fn flush(device: &str) -> KernelResult<u64> {
 /// Add a device.
 pub fn add_device(name: &str, policy: CachePolicy) -> KernelResult<()> {
     with_state(|state| {
-        if state.devices.len() >= MAX_DEVICES { return Err(KernelError::ResourceExhausted); }
-        if state.devices.iter().any(|d| d.device_name == name) { return Err(KernelError::AlreadyExists); }
+        if state.devices.len() >= MAX_DEVICES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.devices.iter().any(|d| d.device_name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.devices.push(DeviceCacheConfig {
-            device_name: String::from(name), policy, readahead_pages: 128,
-            dirty_ratio_pct: 20, dirty_bg_ratio_pct: 10,
-            flush_interval_ms: 5000, cached_pages: 0,
-            dirty_pages: 0, total_flushes: 0, total_readaheads: 0,
+            device_name: String::from(name),
+            policy,
+            readahead_pages: 128,
+            dirty_ratio_pct: 20,
+            dirty_bg_ratio_pct: 10,
+            flush_interval_ms: 5000,
+            cached_pages: 0,
+            dirty_pages: 0,
+            total_flushes: 0,
+            total_readaheads: 0,
         });
         Ok(())
     })
@@ -204,7 +246,13 @@ pub fn add_device(name: &str, policy: CachePolicy) -> KernelResult<()> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.total_flushes, s.total_readaheads, s.total_evictions, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.total_flushes,
+            s.total_readaheads,
+            s.total_evictions,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

@@ -27,15 +27,15 @@
 //! - No SNMP SET operations (read-only).
 //! - No trap receiver.
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use alloc::format;
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
 use super::ipv6::Ipv6Addr;
+use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -276,10 +276,15 @@ impl SnmpValue {
                 let mins = (total_secs % 3600) / 60;
                 let secs = total_secs % 60;
                 let hundredths = v % 100;
-                format!("Timeticks: ({}) {}d {}h {}m {}s.{:02}", v, days, hours, mins, secs, hundredths)
+                format!(
+                    "Timeticks: ({}) {}d {}h {}m {}s.{:02}",
+                    v, days, hours, mins, secs, hundredths
+                )
             }
             SnmpValue::Counter64(v) => format!("Counter64: {}", v),
-            SnmpValue::Unknown(tag, data) => format!("Unknown(0x{:02x}, {} bytes)", tag, data.len()),
+            SnmpValue::Unknown(tag, data) => {
+                format!("Unknown(0x{:02x}, {} bytes)", tag, data.len())
+            }
         }
     }
 }
@@ -632,26 +637,26 @@ fn parse_response(data: &[u8]) -> Option<SnmpResponse> {
         let val_data = vb_data.get(vbpos + vls2..vbpos + vls2 + val_len)?;
 
         let value = match val_tag {
-            TAG_INTEGER => {
-                decode_integer(val_data).map(SnmpValue::Integer).unwrap_or(SnmpValue::Null)
-            }
+            TAG_INTEGER => decode_integer(val_data)
+                .map(SnmpValue::Integer)
+                .unwrap_or(SnmpValue::Null),
             TAG_OCTET_STRING => SnmpValue::OctetString(val_data.to_vec()),
-            TAG_OID => {
-                Oid::decode(val_data).map(SnmpValue::ObjectId).unwrap_or(SnmpValue::Null)
-            }
+            TAG_OID => Oid::decode(val_data)
+                .map(SnmpValue::ObjectId)
+                .unwrap_or(SnmpValue::Null),
             TAG_NULL => SnmpValue::Null,
-            TAG_COUNTER32 => {
-                decode_unsigned(val_data).map(SnmpValue::Counter32).unwrap_or(SnmpValue::Null)
-            }
-            TAG_GAUGE32 => {
-                decode_unsigned(val_data).map(SnmpValue::Gauge32).unwrap_or(SnmpValue::Null)
-            }
-            TAG_TIMETICKS => {
-                decode_unsigned(val_data).map(SnmpValue::TimeTicks).unwrap_or(SnmpValue::Null)
-            }
-            TAG_COUNTER64 => {
-                decode_unsigned64(val_data).map(SnmpValue::Counter64).unwrap_or(SnmpValue::Null)
-            }
+            TAG_COUNTER32 => decode_unsigned(val_data)
+                .map(SnmpValue::Counter32)
+                .unwrap_or(SnmpValue::Null),
+            TAG_GAUGE32 => decode_unsigned(val_data)
+                .map(SnmpValue::Gauge32)
+                .unwrap_or(SnmpValue::Null),
+            TAG_TIMETICKS => decode_unsigned(val_data)
+                .map(SnmpValue::TimeTicks)
+                .unwrap_or(SnmpValue::Null),
+            TAG_COUNTER64 => decode_unsigned64(val_data)
+                .map(SnmpValue::Counter64)
+                .unwrap_or(SnmpValue::Null),
             _ => SnmpValue::Unknown(val_tag, val_data.to_vec()),
         };
 
@@ -676,7 +681,11 @@ pub fn get(host: Ipv4Addr, oid: &Oid, community: &str) -> KernelResult<VarBind> 
     GETS_SENT.fetch_add(1, Ordering::Relaxed);
 
     let req_id = REQUEST_ID.fetch_add(1, Ordering::Relaxed) as i32;
-    let comm = if community.is_empty() { DEFAULT_COMMUNITY } else { community };
+    let comm = if community.is_empty() {
+        DEFAULT_COMMUNITY
+    } else {
+        community
+    };
     let message = build_get_request(comm, req_id, oid);
 
     // Send via UDP.
@@ -702,7 +711,11 @@ pub fn get_next(host: Ipv4Addr, oid: &Oid, community: &str) -> KernelResult<VarB
     GET_NEXTS_SENT.fetch_add(1, Ordering::Relaxed);
 
     let req_id = REQUEST_ID.fetch_add(1, Ordering::Relaxed) as i32;
-    let comm = if community.is_empty() { DEFAULT_COMMUNITY } else { community };
+    let comm = if community.is_empty() {
+        DEFAULT_COMMUNITY
+    } else {
+        community
+    };
     let message = build_get_next_request(comm, req_id, oid);
 
     let src_port = 49152u16.saturating_add((crate::hrtimer::now_ns() % 16384) as u16);
@@ -737,7 +750,11 @@ pub fn get_v6(host: Ipv6Addr, oid: &Oid, community: &str) -> KernelResult<VarBin
     GETS_SENT.fetch_add(1, Ordering::Relaxed);
 
     let req_id = REQUEST_ID.fetch_add(1, Ordering::Relaxed) as i32;
-    let comm = if community.is_empty() { DEFAULT_COMMUNITY } else { community };
+    let comm = if community.is_empty() {
+        DEFAULT_COMMUNITY
+    } else {
+        community
+    };
     let message = build_get_request(comm, req_id, oid);
 
     let src_port = 49152u16.saturating_add((crate::hrtimer::now_ns() % 16384) as u16);
@@ -757,7 +774,11 @@ pub fn get_next_v6(host: Ipv6Addr, oid: &Oid, community: &str) -> KernelResult<V
     GET_NEXTS_SENT.fetch_add(1, Ordering::Relaxed);
 
     let req_id = REQUEST_ID.fetch_add(1, Ordering::Relaxed) as i32;
-    let comm = if community.is_empty() { DEFAULT_COMMUNITY } else { community };
+    let comm = if community.is_empty() {
+        DEFAULT_COMMUNITY
+    } else {
+        community
+    };
     let message = build_get_next_request(comm, req_id, oid);
 
     let src_port = 49152u16.saturating_add((crate::hrtimer::now_ns() % 16384) as u16);

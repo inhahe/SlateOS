@@ -53,10 +53,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
@@ -244,7 +244,8 @@ pub fn init() {
             journal.initialized = true;
             crate::serial_println!(
                 "[journal] Loaded {} entries from disk (next seq: {})",
-                count, journal.next_seq
+                count,
+                journal.next_seq
             );
         }
         Err(KernelError::NotFound) => {
@@ -255,7 +256,10 @@ pub fn init() {
         Err(e) => {
             // I/O error reading journal — start fresh but log the issue.
             journal.initialized = true;
-            crate::serial_println!("[journal] Error reading journal file: {:?}, starting fresh", e);
+            crate::serial_println!(
+                "[journal] Error reading journal file: {:?}, starting fresh",
+                e
+            );
         }
     }
 }
@@ -269,7 +273,11 @@ pub fn record(event_type: JournalEventType, path: impl AsRef<Path>) {
 
 /// Record a rename event with the old path.
 pub fn record_rename(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) {
-    record_with_old_path(JournalEventType::Renamed, new_path.as_ref(), Some(old_path.as_ref()));
+    record_with_old_path(
+        JournalEventType::Renamed,
+        new_path.as_ref(),
+        Some(old_path.as_ref()),
+    );
 }
 
 /// Internal: record an event with an optional old path.
@@ -572,19 +580,17 @@ fn json_extract_str(json: &str, prefix: &str) -> Option<String> {
     loop {
         match chars.next()? {
             '"' => return Some(result),
-            '\\' => {
-                match chars.next()? {
-                    '"' => result.push('"'),
-                    '\\' => result.push('\\'),
-                    'n' => result.push('\n'),
-                    'r' => result.push('\r'),
-                    't' => result.push('\t'),
-                    other => {
-                        result.push('\\');
-                        result.push(other);
-                    }
+            '\\' => match chars.next()? {
+                '"' => result.push('"'),
+                '\\' => result.push('\\'),
+                'n' => result.push('\n'),
+                'r' => result.push('\r'),
+                't' => result.push('\t'),
+                other => {
+                    result.push('\\');
+                    result.push(other);
                 }
-            }
+            },
             c => result.push(c),
         }
     }
@@ -666,17 +672,13 @@ pub fn self_test() -> KernelResult<()> {
     let json = entry.to_json_line();
     let parsed = JournalEntry::from_json_line(&json);
     match parsed {
-        Some(p) if p.seq == entry.seq
-            && p.event_type == entry.event_type
-            && p.path == entry.path =>
+        Some(p)
+            if p.seq == entry.seq && p.event_type == entry.event_type && p.path == entry.path =>
         {
             crate::serial_println!("[journal]   JSON round-trip: OK");
         }
         _ => {
-            crate::serial_println!(
-                "[journal]   FAILED: JSON round-trip. JSON: {}",
-                json
-            );
+            crate::serial_println!("[journal]   FAILED: JSON round-trip. JSON: {}", json);
             return Err(KernelError::IoError);
         }
     }
@@ -697,7 +699,10 @@ pub fn self_test() -> KernelResult<()> {
         // The readable field is lossy; the hex field is not.  Both must be
         // present, and the line must still be valid UTF-8 (it is a `String`).
         if !json.contains("\"path_hex\":\"") || !json.contains("\"from_hex\":\"") {
-            crate::serial_println!("[journal]   FAILED: no _hex field for non-UTF-8 path: {}", json);
+            crate::serial_println!(
+                "[journal]   FAILED: no _hex field for non-UTF-8 path: {}",
+                json
+            );
             return Err(KernelError::IoError);
         }
         match JournalEntry::from_json_line(&json) {
@@ -724,11 +729,13 @@ pub fn self_test() -> KernelResult<()> {
         };
         let plain_json = plain.to_json_line();
         if plain_json.contains("_hex") {
-            crate::serial_println!("[journal]   FAILED: UTF-8 path grew a _hex field: {}", plain_json);
+            crate::serial_println!(
+                "[journal]   FAILED: UTF-8 path grew a _hex field: {}",
+                plain_json
+            );
             return Err(KernelError::IoError);
         }
-        if plain_json.as_str()
-            != "{\"seq\":1,\"ts\":2,\"type\":\"create\",\"path\":\"/plain.txt\"}"
+        if plain_json.as_str() != "{\"seq\":1,\"ts\":2,\"type\":\"create\",\"path\":\"/plain.txt\"}"
         {
             crate::serial_println!("[journal]   FAILED: unexpected JSON layout: {}", plain_json);
             return Err(KernelError::IoError);
@@ -739,13 +746,13 @@ pub fn self_test() -> KernelResult<()> {
     flush()?;
     match crate::fs::Vfs::stat(JOURNAL_FILE) {
         Ok(stat) => {
-            crate::serial_println!(
-                "[journal]   Flushed to disk: {} bytes",
-                stat.size
-            );
+            crate::serial_println!("[journal]   Flushed to disk: {} bytes", stat.size);
         }
         Err(e) => {
-            crate::serial_println!("[journal]   FAILED: journal file not found after flush: {:?}", e);
+            crate::serial_println!(
+                "[journal]   FAILED: journal file not found after flush: {:?}",
+                e
+            );
             return Err(e);
         }
     }

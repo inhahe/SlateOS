@@ -29,10 +29,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -88,12 +88,18 @@ pub const RLIM_INFINITY: u64 = u64::MAX;
 impl Rlimit {
     /// Create a limit with both soft and hard set to the same value.
     pub const fn both(val: u64) -> Self {
-        Self { soft: val, hard: val }
+        Self {
+            soft: val,
+            hard: val,
+        }
     }
 
     /// Create an unlimited limit.
     pub const fn unlimited() -> Self {
-        Self { soft: RLIM_INFINITY, hard: RLIM_INFINITY }
+        Self {
+            soft: RLIM_INFINITY,
+            hard: RLIM_INFINITY,
+        }
     }
 
     /// Check if a value exceeds the soft limit.
@@ -162,9 +168,18 @@ struct RlimitInner {
 
 static RLIMITS: Mutex<RlimitInner> = Mutex::new(RlimitInner {
     defaults: RlimitSet {
-        nofile: Rlimit { soft: 1024, hard: 4096 },
-        fsize: Rlimit { soft: RLIM_INFINITY, hard: RLIM_INFINITY },
-        locks: Rlimit { soft: 256, hard: 1024 },
+        nofile: Rlimit {
+            soft: 1024,
+            hard: 4096,
+        },
+        fsize: Rlimit {
+            soft: RLIM_INFINITY,
+            hard: RLIM_INFINITY,
+        },
+        locks: Rlimit {
+            soft: 256,
+            hard: 1024,
+        },
     },
     overrides: BTreeMap::new(),
 });
@@ -206,7 +221,10 @@ pub fn set_soft(uid: u32, resource: Resource, soft: u64, requester_uid: u32) -> 
         return Err(KernelError::PermissionDenied);
     }
 
-    let new_limit = Rlimit { soft, hard: current.hard };
+    let new_limit = Rlimit {
+        soft,
+        hard: current.hard,
+    };
     set.set(resource, new_limit);
     Ok(())
 }
@@ -227,14 +245,26 @@ pub fn set_hard(uid: u32, resource: Resource, hard: u64, requester_uid: u32) -> 
     }
 
     // If the new hard limit is below the soft limit, adjust soft too.
-    let new_soft = if current.soft > hard { hard } else { current.soft };
-    let new_limit = Rlimit { soft: new_soft, hard };
+    let new_soft = if current.soft > hard {
+        hard
+    } else {
+        current.soft
+    };
+    let new_limit = Rlimit {
+        soft: new_soft,
+        hard,
+    };
     set.set(resource, new_limit);
     Ok(())
 }
 
 /// Set both soft and hard limits.
-pub fn set_both(uid: u32, resource: Resource, limit: Rlimit, requester_uid: u32) -> KernelResult<()> {
+pub fn set_both(
+    uid: u32,
+    resource: Resource,
+    limit: Rlimit,
+    requester_uid: u32,
+) -> KernelResult<()> {
     let mut inner = RLIMITS.lock();
     let defaults = inner.defaults;
     let set = inner.overrides.entry(uid).or_insert(defaults);
@@ -276,7 +306,11 @@ pub fn remove_override(uid: u32) -> bool {
 /// List all per-UID overrides.
 pub fn list_overrides() -> Vec<(u32, RlimitSet)> {
     let inner = RLIMITS.lock();
-    inner.overrides.iter().map(|(&uid, &set)| (uid, set)).collect()
+    inner
+        .overrides
+        .iter()
+        .map(|(&uid, &set)| (uid, set))
+        .collect()
 }
 
 /// Check whether opening a new file descriptor would exceed the limit.
@@ -326,8 +360,11 @@ pub fn self_test() -> KernelResult<()> {
     {
         let limits = get_limits(test_uid);
         if limits.nofile.soft != 1024 || limits.nofile.hard != 4096 {
-            serial_println!("[rlimit]   ERROR: wrong default nofile ({}/{})",
-                limits.nofile.soft, limits.nofile.hard);
+            serial_println!(
+                "[rlimit]   ERROR: wrong default nofile ({}/{})",
+                limits.nofile.soft,
+                limits.nofile.hard
+            );
             return Err(KernelError::InternalError);
         }
         serial_println!("[rlimit]   global defaults OK");
@@ -453,7 +490,15 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 10: lowering hard is irreversible ---
     {
-        set_both(test_uid, Resource::NoFile, Rlimit { soft: 100, hard: 200 }, 0)?;
+        set_both(
+            test_uid,
+            Resource::NoFile,
+            Rlimit {
+                soft: 100,
+                hard: 200,
+            },
+            0,
+        )?;
 
         // Non-root lowers hard to 150.
         set_hard(test_uid, Resource::NoFile, 150, test_uid)?;

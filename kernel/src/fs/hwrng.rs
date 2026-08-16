@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -138,7 +138,9 @@ const POOL_SIZE_BITS: u32 = 4096;
 /// pool reporting ready, and 100,000 reseeds.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         source_bytes: [0; NUM_SOURCES],
         source_failures: [0; NUM_SOURCES],
@@ -194,21 +196,37 @@ pub fn record_reseed() -> KernelResult<()> {
 /// Get pool status.
 pub fn pool_status() -> PoolStatus {
     let guard = STATE.lock();
-    guard.as_ref().map_or(PoolStatus { entropy_bits: 0, pool_size_bits: 0, ready: false }, |s| {
+    guard.as_ref().map_or(
         PoolStatus {
+            entropy_bits: 0,
+            pool_size_bits: 0,
+            ready: false,
+        },
+        |s| PoolStatus {
             entropy_bits: s.entropy_bits,
             pool_size_bits: s.pool_size_bits,
             ready: s.entropy_bits >= 256,
-        }
-    })
+        },
+    )
 }
 
 /// Per-source breakdown: Vec of (source, bytes, failures).
 pub fn source_breakdown() -> Vec<(EntropySource, u64, u64)> {
     let guard = STATE.lock();
     guard.as_ref().map_or(Vec::new(), |s| {
-        let sources = [EntropySource::Rdrand, EntropySource::Rdseed, EntropySource::Interrupt, EntropySource::Disk, EntropySource::Input, EntropySource::Jitter];
-        sources.iter().enumerate().map(|(i, &src)| (src, s.source_bytes[i], s.source_failures[i])).collect()
+        let sources = [
+            EntropySource::Rdrand,
+            EntropySource::Rdseed,
+            EntropySource::Interrupt,
+            EntropySource::Disk,
+            EntropySource::Input,
+            EntropySource::Jitter,
+        ];
+        sources
+            .iter()
+            .enumerate()
+            .map(|(i, &src)| (src, s.source_bytes[i], s.source_failures[i]))
+            .collect()
     })
 }
 
@@ -216,7 +234,13 @@ pub fn source_breakdown() -> Vec<(EntropySource, u64, u64)> {
 pub fn stats() -> (u64, u64, u64, u32, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.total_generated, s.total_requested, s.reseed_count, s.entropy_bits, s.ops),
+        Some(s) => (
+            s.total_generated,
+            s.total_requested,
+            s.reseed_count,
+            s.entropy_bits,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -289,7 +313,10 @@ pub fn self_test() {
     // 8: Final stats reflect only the real activity above: 32 bytes generated,
     //    16 requested, 1 reseed, pool at capacity.
     let (generated, requested, reseeds, bits, ops) = stats();
-    assert_eq!((generated, requested, reseeds, bits), (32, 16, 1, POOL_SIZE_BITS));
+    assert_eq!(
+        (generated, requested, reseeds, bits),
+        (32, 16, 1, POOL_SIZE_BITS)
+    );
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

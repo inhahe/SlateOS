@@ -23,8 +23,8 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -192,7 +192,8 @@ where
 fn recalculate_viewport(state: &mut State) {
     if state.config.zoom_pct <= 100 {
         state.viewport = Viewport {
-            x: 0, y: 0,
+            x: 0,
+            y: 0,
             width: state.screen_width,
             height: state.screen_height,
         };
@@ -208,8 +209,12 @@ fn recalculate_viewport(state: &mut State) {
     let mut vy = state.cursor_y - (vh as i32 / 2);
 
     // Clamp to screen bounds.
-    if vx < 0 { vx = 0; }
-    if vy < 0 { vy = 0; }
+    if vx < 0 {
+        vx = 0;
+    }
+    if vy < 0 {
+        vy = 0;
+    }
     if vx + vw as i32 > state.screen_width as i32 {
         vx = state.screen_width as i32 - vw as i32;
     }
@@ -217,7 +222,12 @@ fn recalculate_viewport(state: &mut State) {
         vy = state.screen_height as i32 - vh as i32;
     }
 
-    state.viewport = Viewport { x: vx, y: vy, width: vw, height: vh };
+    state.viewport = Viewport {
+        x: vx,
+        y: vy,
+        width: vw,
+        height: vh,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -226,10 +236,17 @@ fn recalculate_viewport(state: &mut State) {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         config: MagConfig::default(),
-        viewport: Viewport { x: 0, y: 0, width: 1920, height: 1080 },
+        viewport: Viewport {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        },
         screen_width: 1920,
         screen_height: 1080,
         cursor_x: 960,
@@ -256,7 +273,9 @@ pub fn is_enabled() -> bool {
 /// Set zoom level in percent.
 pub fn set_zoom(pct: u32) -> KernelResult<()> {
     with_state(|state| {
-        let clamped = pct.max(state.config.min_zoom_pct).min(state.config.max_zoom_pct);
+        let clamped = pct
+            .max(state.config.min_zoom_pct)
+            .min(state.config.max_zoom_pct);
         state.config.zoom_pct = clamped;
         state.total_zoom_changes += 1;
         recalculate_viewport(state);
@@ -267,7 +286,8 @@ pub fn set_zoom(pct: u32) -> KernelResult<()> {
 /// Zoom in by the configured step.
 pub fn zoom_in() -> KernelResult<u32> {
     with_state(|state| {
-        let new = (state.config.zoom_pct + state.config.zoom_step_pct).min(state.config.max_zoom_pct);
+        let new =
+            (state.config.zoom_pct + state.config.zoom_step_pct).min(state.config.max_zoom_pct);
         state.config.zoom_pct = new;
         state.total_zoom_changes += 1;
         recalculate_viewport(state);
@@ -278,7 +298,11 @@ pub fn zoom_in() -> KernelResult<u32> {
 /// Zoom out by the configured step.
 pub fn zoom_out() -> KernelResult<u32> {
     with_state(|state| {
-        let new = state.config.zoom_pct.saturating_sub(state.config.zoom_step_pct).max(state.config.min_zoom_pct);
+        let new = state
+            .config
+            .zoom_pct
+            .saturating_sub(state.config.zoom_step_pct)
+            .max(state.config.min_zoom_pct);
         state.config.zoom_pct = new;
         state.total_zoom_changes += 1;
         recalculate_viewport(state);
@@ -293,17 +317,26 @@ pub fn zoom_level() -> u32 {
 
 /// Set magnification mode.
 pub fn set_mode(mode: MagMode) -> KernelResult<()> {
-    with_state(|state| { state.config.mode = mode; Ok(()) })
+    with_state(|state| {
+        state.config.mode = mode;
+        Ok(())
+    })
 }
 
 /// Set color filter.
 pub fn set_color_filter(filter: ColorFilter) -> KernelResult<()> {
-    with_state(|state| { state.config.color_filter = filter; Ok(()) })
+    with_state(|state| {
+        state.config.color_filter = filter;
+        Ok(())
+    })
 }
 
 /// Set tracking mode.
 pub fn set_tracking(tracking: TrackingMode) -> KernelResult<()> {
-    with_state(|state| { state.config.tracking = tracking; Ok(()) })
+    with_state(|state| {
+        state.config.tracking = tracking;
+        Ok(())
+    })
 }
 
 /// Update cursor position (called by input subsystem).
@@ -321,7 +354,12 @@ pub fn update_cursor(x: i32, y: i32) -> KernelResult<()> {
 /// Get current viewport for compositor.
 pub fn get_viewport() -> Viewport {
     STATE.lock().as_ref().map_or(
-        Viewport { x: 0, y: 0, width: 1920, height: 1080 },
+        Viewport {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        },
         |s| s.viewport,
     )
 }
@@ -346,8 +384,12 @@ pub fn stats() -> (bool, u32, &'static str, &'static str, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => (
-            s.config.enabled, s.config.zoom_pct, s.config.mode.label(),
-            s.config.color_filter.label(), s.total_zoom_changes, s.ops,
+            s.config.enabled,
+            s.config.zoom_pct,
+            s.config.mode.label(),
+            s.config.color_filter.label(),
+            s.total_zoom_changes,
+            s.ops,
         ),
         None => (false, 100, "N/A", "N/A", 0, 0),
     }

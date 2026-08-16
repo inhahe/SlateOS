@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -126,16 +126,66 @@ where
 
 fn default_assignments() -> Vec<SoundAssignment> {
     alloc::vec![
-        SoundAssignment { event: SoundEvent::Startup, sound_path: String::from("/sys/sounds/startup.wav"), enabled: true, play_count: 0 },
-        SoundAssignment { event: SoundEvent::Shutdown, sound_path: String::from("/sys/sounds/shutdown.wav"), enabled: true, play_count: 0 },
-        SoundAssignment { event: SoundEvent::Notification, sound_path: String::from("/sys/sounds/notification.wav"), enabled: true, play_count: 0 },
-        SoundAssignment { event: SoundEvent::Error, sound_path: String::from("/sys/sounds/error.wav"), enabled: true, play_count: 0 },
-        SoundAssignment { event: SoundEvent::Warning, sound_path: String::from("/sys/sounds/warning.wav"), enabled: true, play_count: 0 },
-        SoundAssignment { event: SoundEvent::Information, sound_path: String::from("/sys/sounds/info.wav"), enabled: true, play_count: 0 },
-        SoundAssignment { event: SoundEvent::DeviceConnect, sound_path: String::from("/sys/sounds/device_connect.wav"), enabled: true, play_count: 0 },
-        SoundAssignment { event: SoundEvent::DeviceDisconnect, sound_path: String::from("/sys/sounds/device_disconnect.wav"), enabled: true, play_count: 0 },
-        SoundAssignment { event: SoundEvent::Screenshot, sound_path: String::from("/sys/sounds/screenshot.wav"), enabled: true, play_count: 0 },
-        SoundAssignment { event: SoundEvent::LowBattery, sound_path: String::from("/sys/sounds/low_battery.wav"), enabled: true, play_count: 0 },
+        SoundAssignment {
+            event: SoundEvent::Startup,
+            sound_path: String::from("/sys/sounds/startup.wav"),
+            enabled: true,
+            play_count: 0
+        },
+        SoundAssignment {
+            event: SoundEvent::Shutdown,
+            sound_path: String::from("/sys/sounds/shutdown.wav"),
+            enabled: true,
+            play_count: 0
+        },
+        SoundAssignment {
+            event: SoundEvent::Notification,
+            sound_path: String::from("/sys/sounds/notification.wav"),
+            enabled: true,
+            play_count: 0
+        },
+        SoundAssignment {
+            event: SoundEvent::Error,
+            sound_path: String::from("/sys/sounds/error.wav"),
+            enabled: true,
+            play_count: 0
+        },
+        SoundAssignment {
+            event: SoundEvent::Warning,
+            sound_path: String::from("/sys/sounds/warning.wav"),
+            enabled: true,
+            play_count: 0
+        },
+        SoundAssignment {
+            event: SoundEvent::Information,
+            sound_path: String::from("/sys/sounds/info.wav"),
+            enabled: true,
+            play_count: 0
+        },
+        SoundAssignment {
+            event: SoundEvent::DeviceConnect,
+            sound_path: String::from("/sys/sounds/device_connect.wav"),
+            enabled: true,
+            play_count: 0
+        },
+        SoundAssignment {
+            event: SoundEvent::DeviceDisconnect,
+            sound_path: String::from("/sys/sounds/device_disconnect.wav"),
+            enabled: true,
+            play_count: 0
+        },
+        SoundAssignment {
+            event: SoundEvent::Screenshot,
+            sound_path: String::from("/sys/sounds/screenshot.wav"),
+            enabled: true,
+            play_count: 0
+        },
+        SoundAssignment {
+            event: SoundEvent::LowBattery,
+            sound_path: String::from("/sys/sounds/low_battery.wav"),
+            enabled: true,
+            play_count: 0
+        },
     ]
 }
 
@@ -145,7 +195,9 @@ fn default_assignments() -> Vec<SoundAssignment> {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let default_scheme = SoundScheme {
         name: String::from("Default"),
@@ -153,7 +205,13 @@ pub fn init_defaults() {
     };
     let silent = SoundScheme {
         name: String::from("Silent"),
-        assignments: default_assignments().into_iter().map(|mut a| { a.enabled = false; a }).collect(),
+        assignments: default_assignments()
+            .into_iter()
+            .map(|mut a| {
+                a.enabled = false;
+                a
+            })
+            .collect(),
     };
 
     *guard = Some(State {
@@ -171,7 +229,10 @@ pub fn play(event: SoundEvent) -> KernelResult<Option<String>> {
         if !state.global_enabled {
             return Ok(None);
         }
-        let scheme = state.schemes.iter_mut().find(|s| s.name == state.active_scheme)
+        let scheme = state
+            .schemes
+            .iter_mut()
+            .find(|s| s.name == state.active_scheme)
             .ok_or(KernelError::NotFound)?;
         if let Some(assignment) = scheme.assignments.iter_mut().find(|a| a.event == event) {
             if assignment.enabled {
@@ -187,14 +248,19 @@ pub fn play(event: SoundEvent) -> KernelResult<Option<String>> {
 /// Set sound for an event in the active scheme.
 pub fn set_sound(event: SoundEvent, path: &str) -> KernelResult<()> {
     with_state(|state| {
-        let scheme = state.schemes.iter_mut().find(|s| s.name == state.active_scheme)
+        let scheme = state
+            .schemes
+            .iter_mut()
+            .find(|s| s.name == state.active_scheme)
             .ok_or(KernelError::NotFound)?;
         if let Some(assignment) = scheme.assignments.iter_mut().find(|a| a.event == event) {
             assignment.sound_path = String::from(path);
         } else {
             scheme.assignments.push(SoundAssignment {
-                event, sound_path: String::from(path),
-                enabled: true, play_count: 0,
+                event,
+                sound_path: String::from(path),
+                enabled: true,
+                play_count: 0,
             });
         }
         Ok(())
@@ -204,7 +270,10 @@ pub fn set_sound(event: SoundEvent, path: &str) -> KernelResult<()> {
 /// Enable/disable a sound event.
 pub fn set_event_enabled(event: SoundEvent, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let scheme = state.schemes.iter_mut().find(|s| s.name == state.active_scheme)
+        let scheme = state
+            .schemes
+            .iter_mut()
+            .find(|s| s.name == state.active_scheme)
             .ok_or(KernelError::NotFound)?;
         if let Some(assignment) = scheme.assignments.iter_mut().find(|a| a.event == event) {
             assignment.enabled = enabled;
@@ -241,13 +310,18 @@ pub fn list_schemes() -> Vec<String> {
 
 /// Get active scheme name.
 pub fn active_scheme() -> String {
-    STATE.lock().as_ref().map_or(String::new(), |s| s.active_scheme.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(String::new(), |s| s.active_scheme.clone())
 }
 
 /// List assignments in active scheme.
 pub fn list_assignments() -> Vec<SoundAssignment> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.schemes.iter().find(|sc| sc.name == s.active_scheme)
+        s.schemes
+            .iter()
+            .find(|sc| sc.name == s.active_scheme)
             .map_or(Vec::new(), |sc| sc.assignments.clone())
     })
 }
@@ -257,7 +331,10 @@ pub fn stats() -> (usize, usize, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let events = s.schemes.iter().find(|sc| sc.name == s.active_scheme)
+            let events = s
+                .schemes
+                .iter()
+                .find(|sc| sc.name == s.active_scheme)
                 .map_or(0, |sc| sc.assignments.len());
             (s.schemes.len(), events, s.total_plays, s.ops)
         }

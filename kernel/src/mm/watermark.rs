@@ -25,8 +25,8 @@
 //! - Linux `/proc/meminfo` — `HardwareCorrupted`, `Committed_AS` as watermarks
 //! - Windows Performance Counters — Peak Working Set, Peak Commit Charge
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -121,7 +121,9 @@ pub fn charge(handle: MeterHandle, amount: u64) {
     }
     // SAFETY: Index is valid and meter is initialized (handle came from register).
     let meter = unsafe { &METERS[idx] };
-    let new_current = meter.current.fetch_add(amount, Ordering::Relaxed)
+    let new_current = meter
+        .current
+        .fetch_add(amount, Ordering::Relaxed)
         .saturating_add(amount);
 
     // Update peak if needed (relaxed CAS loop for concurrent updates).
@@ -131,10 +133,11 @@ pub fn charge(handle: MeterHandle, amount: u64) {
             break;
         }
         // On success we're done; on failure (Err) retry the loop.
-        if meter.peak.compare_exchange_weak(
-            old_peak, new_current,
-            Ordering::Relaxed, Ordering::Relaxed
-        ).is_ok() {
+        if meter
+            .peak
+            .compare_exchange_weak(old_peak, new_current, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
             break;
         }
     }
@@ -149,8 +152,10 @@ pub fn uncharge(handle: MeterHandle, amount: u64) {
     }
     // SAFETY: Index is valid.
     let meter = unsafe { &METERS[idx] };
-    meter.current.fetch_sub(amount.min(meter.current.load(Ordering::Relaxed)),
-        Ordering::Relaxed);
+    meter.current.fetch_sub(
+        amount.min(meter.current.load(Ordering::Relaxed)),
+        Ordering::Relaxed,
+    );
 }
 
 /// Get current and peak values for a meter.
@@ -162,7 +167,10 @@ pub fn read(handle: MeterHandle) -> (u64, u64) {
     }
     // SAFETY: Index is valid.
     let meter = unsafe { &METERS[idx] };
-    (meter.current.load(Ordering::Relaxed), meter.peak.load(Ordering::Relaxed))
+    (
+        meter.current.load(Ordering::Relaxed),
+        meter.peak.load(Ordering::Relaxed),
+    )
 }
 
 /// Reset the peak of a meter to the current value.
@@ -240,21 +248,33 @@ pub fn self_test() {
     let (current, peak) = read(handle);
     assert_eq!(current, 1000);
     assert_eq!(peak, 1000);
-    serial_println!("[watermark]   Charge 1000: OK (current={}, peak={})", current, peak);
+    serial_println!(
+        "[watermark]   Charge 1000: OK (current={}, peak={})",
+        current,
+        peak
+    );
 
     // Test 3: Charge more — peak should update.
     charge(handle, 500);
     let (current, peak) = read(handle);
     assert_eq!(current, 1500);
     assert_eq!(peak, 1500);
-    serial_println!("[watermark]   Charge +500: OK (current={}, peak={})", current, peak);
+    serial_println!(
+        "[watermark]   Charge +500: OK (current={}, peak={})",
+        current,
+        peak
+    );
 
     // Test 4: Uncharge — peak should NOT decrease.
     uncharge(handle, 800);
     let (current, peak) = read(handle);
     assert_eq!(current, 700);
     assert_eq!(peak, 1500); // Peak stays.
-    serial_println!("[watermark]   Uncharge 800: OK (current={}, peak={})", current, peak);
+    serial_println!(
+        "[watermark]   Uncharge 800: OK (current={}, peak={})",
+        current,
+        peak
+    );
 
     // Test 5: Reset peak.
     reset_peak(handle);

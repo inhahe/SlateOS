@@ -76,8 +76,7 @@ impl core::fmt::Display for DateTime {
         write!(
             f,
             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-            self.year, self.month, self.day,
-            self.hour, self.minute, self.second
+            self.year, self.month, self.day, self.hour, self.minute, self.second
         )
     }
 }
@@ -117,8 +116,12 @@ pub fn read_datetime() -> DateTime {
         let month2 = read_cmos(REG_MONTH);
         let year2 = read_cmos(REG_YEAR);
 
-        if sec == sec2 && min == min2 && hour == hour2
-            && day == day2 && month == month2 && year == year2
+        if sec == sec2
+            && min == min2
+            && hour == hour2
+            && day == day2
+            && month == month2
+            && year == year2
         {
             break;
         }
@@ -155,7 +158,11 @@ pub fn read_datetime() -> DateTime {
         u16::from(century) * 100 + u16::from(year)
     } else {
         // No century register — assume 20xx for year < 80, 19xx otherwise.
-        if year < 80 { 2000 + u16::from(year) } else { 1900 + u16::from(year) }
+        if year < 80 {
+            2000 + u16::from(year)
+        } else {
+            1900 + u16::from(year)
+        }
     };
 
     DateTime {

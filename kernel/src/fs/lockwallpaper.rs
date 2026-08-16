@@ -18,10 +18,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -129,7 +129,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         config: LockWallpaperConfig {
             mode: LockWallpaperMode::Spotlight,
@@ -194,7 +196,8 @@ pub fn rotate() -> KernelResult<String> {
         if state.config.slideshow_images.is_empty() {
             return Ok(state.config.current_image.clone());
         }
-        state.config.slideshow_index = (state.config.slideshow_index + 1) % state.config.slideshow_images.len();
+        state.config.slideshow_index =
+            (state.config.slideshow_index + 1) % state.config.slideshow_images.len();
         let img = state.config.slideshow_images[state.config.slideshow_index].clone();
         state.config.current_image = img.clone();
         state.total_rotations += 1;
@@ -247,7 +250,10 @@ pub fn get_config() -> Option<LockWallpaperConfig> {
 
 /// Get current image path.
 pub fn current_image() -> String {
-    STATE.lock().as_ref().map_or(String::new(), |s| s.config.current_image.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(String::new(), |s| s.config.current_image.clone())
 }
 
 /// Statistics: (total_rotations, total_changes, ops).

@@ -49,10 +49,10 @@
 
 #![allow(dead_code)]
 
-use alloc::vec;
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
+use alloc::vec;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -174,7 +174,8 @@ fn parse_hex8(data: &[u8]) -> KernelResult<u32> {
             b'A'..=b'F' => b - b'A' + 10,
             _ => return Err(KernelError::CorruptedData),
         };
-        val = val.checked_mul(16)
+        val = val
+            .checked_mul(16)
             .and_then(|v| v.checked_add(u32::from(digit)))
             .ok_or(KernelError::CorruptedData)?;
     }
@@ -187,7 +188,11 @@ fn format_hex8(val: u32) -> [u8; 8] {
     let mut v = val;
     for i in (0..8).rev() {
         let digit = (v & 0xF) as u8;
-        buf[i] = if digit < 10 { b'0' + digit } else { b'A' + digit - 10 };
+        buf[i] = if digit < 10 {
+            b'0' + digit
+        } else {
+            b'A' + digit - 10
+        };
         v >>= 4;
     }
     buf
@@ -211,19 +216,19 @@ fn parse_header(data: &[u8]) -> KernelResult<CpioHeader> {
     }
 
     Ok(CpioHeader {
-        ino:        parse_hex8(&data[6..14])?,
-        mode:       parse_hex8(&data[14..22])?,
-        uid:        parse_hex8(&data[22..30])?,
-        gid:        parse_hex8(&data[30..38])?,
-        nlink:      parse_hex8(&data[38..46])?,
-        mtime:      parse_hex8(&data[46..54])?,
-        filesize:   parse_hex8(&data[54..62])?,
-        devmajor:   parse_hex8(&data[62..70])?,
-        devminor:   parse_hex8(&data[70..78])?,
-        rdevmajor:  parse_hex8(&data[78..86])?,
-        rdevminor:  parse_hex8(&data[86..94])?,
-        namesize:   parse_hex8(&data[94..102])?,
-        checksum:   parse_hex8(&data[102..110])?,
+        ino: parse_hex8(&data[6..14])?,
+        mode: parse_hex8(&data[14..22])?,
+        uid: parse_hex8(&data[22..30])?,
+        gid: parse_hex8(&data[30..38])?,
+        nlink: parse_hex8(&data[38..46])?,
+        mtime: parse_hex8(&data[46..54])?,
+        filesize: parse_hex8(&data[54..62])?,
+        devmajor: parse_hex8(&data[62..70])?,
+        devminor: parse_hex8(&data[70..78])?,
+        rdevmajor: parse_hex8(&data[78..86])?,
+        rdevminor: parse_hex8(&data[86..94])?,
+        namesize: parse_hex8(&data[94..102])?,
+        checksum: parse_hex8(&data[102..110])?,
     })
 }
 
@@ -327,7 +332,8 @@ pub fn uncpio(data: &[u8]) -> KernelResult<Vec<CpioEntry>> {
             return Err(KernelError::OutOfMemory);
         }
 
-        let file_data = data.get(data_start..data_end)
+        let file_data = data
+            .get(data_start..data_end)
             .ok_or(KernelError::CorruptedData)?
             .to_vec();
 
@@ -442,7 +448,10 @@ pub fn mkcpio(entries: &[CpioEntry]) -> KernelResult<Vec<u8>> {
             nlink,
             entry.mtime,
             file_data.len() as u32,
-            0, 0, 0, 0, // dev/rdev
+            0,
+            0,
+            0,
+            0, // dev/rdev
             name_with_null as u32,
         );
 
@@ -472,8 +481,17 @@ pub fn mkcpio(entries: &[CpioEntry]) -> KernelResult<Vec<u8>> {
 
     write_header(
         &mut buf,
-        0, 0, 0, 0, 1, 0, 0, // ino=0, mode=0, uid=0, gid=0, nlink=1, mtime=0, filesize=0
-        0, 0, 0, 0,           // dev/rdev
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0, // ino=0, mode=0, uid=0, gid=0, nlink=1, mtime=0, filesize=0
+        0,
+        0,
+        0,
+        0, // dev/rdev
         trailer_namesize,
     );
 
@@ -499,7 +517,11 @@ fn align_block(offset: usize, block: usize) -> usize {
         return offset;
     }
     let rem = offset % block;
-    if rem == 0 { offset } else { offset.wrapping_add(block.wrapping_sub(rem)) }
+    if rem == 0 {
+        offset
+    } else {
+        offset.wrapping_add(block.wrapping_sub(rem))
+    }
 }
 
 /// Write a newc header to the output buffer.
@@ -578,7 +600,11 @@ fn test_hex() -> KernelResult<()> {
 
     let val2 = parse_hex8(b"FFFFFFFF")?;
     if val2 != 0xFFFF_FFFF {
-        crate::serial_println!("[cpio]   FAIL: hex(FFFFFFFF) = {} (expected {})", val2, 0xFFFF_FFFFu32);
+        crate::serial_println!(
+            "[cpio]   FAIL: hex(FFFFFFFF) = {} (expected {})",
+            val2,
+            0xFFFF_FFFFu32
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -599,7 +625,10 @@ fn test_hex() -> KernelResult<()> {
     let formatted2 = format_hex8(0xDEAD_BEEF);
     let reparsed2 = parse_hex8(&formatted2)?;
     if reparsed2 != 0xDEAD_BEEF {
-        crate::serial_println!("[cpio]   FAIL: format_hex8 round-trip: 0x{:X} != 0xDEADBEEF", reparsed2);
+        crate::serial_println!(
+            "[cpio]   FAIL: format_hex8 round-trip: 0x{:X} != 0xDEADBEEF",
+            reparsed2
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -687,7 +716,9 @@ fn test_roundtrip() -> KernelResult<()> {
     let dir = &extracted[0];
     if dir.name != PathBuf::from("testdir") || dir.entry_type != CpioEntryType::Directory {
         crate::serial_println!(
-            "[cpio]   FAIL: entry 0: name='{}', type={:?}", dir.name.display(), dir.entry_type
+            "[cpio]   FAIL: entry 0: name='{}', type={:?}",
+            dir.name.display(),
+            dir.entry_type
         );
         return Err(KernelError::InternalError);
     }
@@ -696,12 +727,17 @@ fn test_roundtrip() -> KernelResult<()> {
     let file = &extracted[1];
     if file.name != PathBuf::from("testdir/hello.txt") || file.entry_type != CpioEntryType::File {
         crate::serial_println!(
-            "[cpio]   FAIL: entry 1: name='{}', type={:?}", file.name.display(), file.entry_type
+            "[cpio]   FAIL: entry 1: name='{}', type={:?}",
+            file.name.display(),
+            file.entry_type
         );
         return Err(KernelError::InternalError);
     }
     if file.data != b"Hello, CPIO!\n" {
-        crate::serial_println!("[cpio]   FAIL: entry 1 data mismatch (len={})", file.data.len());
+        crate::serial_println!(
+            "[cpio]   FAIL: entry 1 data mismatch (len={})",
+            file.data.len()
+        );
         return Err(KernelError::InternalError);
     }
     if file.uid != 1000 || file.gid != 1000 {
@@ -713,13 +749,16 @@ fn test_roundtrip() -> KernelResult<()> {
     let link = &extracted[2];
     if link.name != PathBuf::from("testdir/link") || link.entry_type != CpioEntryType::Symlink {
         crate::serial_println!(
-            "[cpio]   FAIL: entry 2: name='{}', type={:?}", link.name.display(), link.entry_type
+            "[cpio]   FAIL: entry 2: name='{}', type={:?}",
+            link.name.display(),
+            link.entry_type
         );
         return Err(KernelError::InternalError);
     }
     if link.link_target != PathBuf::from("hello.txt") {
         crate::serial_println!(
-            "[cpio]   FAIL: entry 2 link target: '{}'", link.link_target.display()
+            "[cpio]   FAIL: entry 2 link target: '{}'",
+            link.link_target.display()
         );
         return Err(KernelError::InternalError);
     }
@@ -747,14 +786,16 @@ fn test_non_utf8_name() -> KernelResult<()> {
     let extracted = uncpio(&mkcpio(&entries)?)?;
     if extracted.len() != 1 {
         crate::serial_println!(
-            "[cpio]   FAIL: non-UTF-8 name dropped ({} entries survived)", extracted.len()
+            "[cpio]   FAIL: non-UTF-8 name dropped ({} entries survived)",
+            extracted.len()
         );
         return Err(KernelError::InternalError);
     }
     let got = &extracted[0];
     if got.name != wild || got.data != b"bytes" {
         crate::serial_println!(
-            "[cpio]   FAIL: non-UTF-8 name mangled: '{}'", got.name.display()
+            "[cpio]   FAIL: non-UTF-8 name mangled: '{}'",
+            got.name.display()
         );
         return Err(KernelError::InternalError);
     }
@@ -795,7 +836,10 @@ fn test_dotdot_name_rejected() -> KernelResult<()> {
         }];
         let out = uncpio(&mkcpio(&e)?)?;
         if out.len() != 1 || out[0].name != PathBuf::from("ok.txt") {
-            crate::serial_println!("[cpio]   FAIL: '{}' did not normalise to 'ok.txt'", spelling);
+            crate::serial_println!(
+                "[cpio]   FAIL: '{}' did not normalise to 'ok.txt'",
+                spelling
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -809,7 +853,10 @@ fn test_empty_archive() -> KernelResult<()> {
     let archive = mkcpio(&[])?;
     let entries = uncpio(&archive)?;
     if !entries.is_empty() {
-        crate::serial_println!("[cpio]   FAIL: empty archive produced {} entries", entries.len());
+        crate::serial_println!(
+            "[cpio]   FAIL: empty archive produced {} entries",
+            entries.len()
+        );
         return Err(KernelError::InternalError);
     }
 

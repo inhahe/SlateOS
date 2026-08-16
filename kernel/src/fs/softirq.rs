@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -80,9 +80,16 @@ impl SoftirqType {
 
     pub fn all() -> &'static [SoftirqType] {
         &[
-            Self::HiPri, Self::Timer, Self::NetTx, Self::NetRx,
-            Self::Block, Self::IrqPoll, Self::Tasklet, Self::Sched,
-            Self::Hrtimer, Self::Rcu,
+            Self::HiPri,
+            Self::Timer,
+            Self::NetTx,
+            Self::NetRx,
+            Self::Block,
+            Self::IrqPoll,
+            Self::Tasklet,
+            Self::Sched,
+            Self::Hrtimer,
+            Self::Rcu,
         ]
     }
 }
@@ -159,11 +166,16 @@ where
 /// tasklets).)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let mut type_stats = Vec::new();
     for st in SoftirqType::all() {
         type_stats.push(SoftirqTypeStats {
-            softirq_type: *st, raised: 0, executed: 0, total_ns: 0,
+            softirq_type: *st,
+            raised: 0,
+            executed: 0,
+            total_ns: 0,
         });
     }
     *guard = Some(State {
@@ -185,13 +197,18 @@ pub fn init_defaults() {
 /// real activity against it.
 pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.cpu_states.len() >= MAX_CPU { return Err(KernelError::ResourceExhausted); }
+        if state.cpu_states.len() >= MAX_CPU {
+            return Err(KernelError::ResourceExhausted);
+        }
         if state.cpu_states.iter().any(|c| c.cpu_id == cpu_id) {
             return Err(KernelError::AlreadyExists);
         }
         state.cpu_states.push(CpuSoftirqState {
-            cpu_id, total_softirqs: 0, total_tasklets: 0,
-            ksoftirqd_wakeups: 0, type_counts: [0; 10],
+            cpu_id,
+            total_softirqs: 0,
+            total_tasklets: 0,
+            ksoftirqd_wakeups: 0,
+            type_counts: [0; 10],
         });
         Ok(())
     })
@@ -200,7 +217,11 @@ pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
 /// Raise a softirq.
 pub fn raise(softirq_type: SoftirqType) -> KernelResult<()> {
     with_state(|state| {
-        if let Some(ts) = state.type_stats.iter_mut().find(|t| t.softirq_type == softirq_type) {
+        if let Some(ts) = state
+            .type_stats
+            .iter_mut()
+            .find(|t| t.softirq_type == softirq_type)
+        {
             ts.raised += 1;
         }
         state.total_raised += 1;
@@ -211,12 +232,19 @@ pub fn raise(softirq_type: SoftirqType) -> KernelResult<()> {
 /// Execute a softirq on a CPU.
 pub fn run(cpu: u32, softirq_type: SoftirqType, duration_ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let cs = state.cpu_states.iter_mut().find(|c| c.cpu_id == cpu)
+        let cs = state
+            .cpu_states
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu)
             .ok_or(KernelError::NotFound)?;
         let idx = softirq_type.index();
         cs.type_counts[idx] += 1;
         cs.total_softirqs += 1;
-        if let Some(ts) = state.type_stats.iter_mut().find(|t| t.softirq_type == softirq_type) {
+        if let Some(ts) = state
+            .type_stats
+            .iter_mut()
+            .find(|t| t.softirq_type == softirq_type)
+        {
             ts.executed += 1;
             ts.total_ns += duration_ns;
         }
@@ -228,7 +256,10 @@ pub fn run(cpu: u32, softirq_type: SoftirqType, duration_ns: u64) -> KernelResul
 /// Execute a tasklet on a CPU.
 pub fn tasklet_run(cpu: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cs = state.cpu_states.iter_mut().find(|c| c.cpu_id == cpu)
+        let cs = state
+            .cpu_states
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu)
             .ok_or(KernelError::NotFound)?;
         cs.total_tasklets += 1;
         cs.type_counts[SoftirqType::Tasklet.index()] += 1;
@@ -242,7 +273,10 @@ pub fn tasklet_run(cpu: u32) -> KernelResult<()> {
 /// Record ksoftirqd wakeup.
 pub fn ksoftirqd_wakeup(cpu: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cs = state.cpu_states.iter_mut().find(|c| c.cpu_id == cpu)
+        let cs = state
+            .cpu_states
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu)
             .ok_or(KernelError::NotFound)?;
         cs.ksoftirqd_wakeups += 1;
         Ok(())
@@ -251,19 +285,32 @@ pub fn ksoftirqd_wakeup(cpu: u32) -> KernelResult<()> {
 
 /// Get per-CPU state.
 pub fn per_cpu() -> Vec<CpuSoftirqState> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.cpu_states.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.cpu_states.clone())
 }
 
 /// Get per-type statistics.
 pub fn type_stats() -> Vec<SoftirqTypeStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.type_stats.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.type_stats.clone())
 }
 
 /// Statistics: (cpu_count, type_count, total_raised, total_executed, total_tasklets, ops).
 pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.cpu_states.len(), s.type_stats.len(), s.total_raised, s.total_executed, s.total_tasklets, s.ops),
+        Some(s) => (
+            s.cpu_states.len(),
+            s.type_stats.len(),
+            s.total_raised,
+            s.total_executed,
+            s.total_tasklets,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -282,9 +329,16 @@ pub fn self_test() {
     // 1: Defaults — all 10 zeroed type rows, no CPUs, all totals zero.
     assert_eq!(per_cpu().len(), 0);
     assert_eq!(type_stats().len(), 10);
-    assert!(type_stats().iter().all(|t| t.raised == 0 && t.executed == 0 && t.total_ns == 0));
+    assert!(
+        type_stats()
+            .iter()
+            .all(|t| t.raised == 0 && t.executed == 0 && t.total_ns == 0)
+    );
     let (cpus0, types0, raised0, executed0, tasklets0, _) = stats();
-    assert_eq!((cpus0, types0, raised0, executed0, tasklets0), (0, 10, 0, 0, 0));
+    assert_eq!(
+        (cpus0, types0, raised0, executed0, tasklets0),
+        (0, 10, 0, 0, 0)
+    );
     crate::serial_println!("  [1/8] empty defaults: OK");
 
     // 2: Register CPUs — duplicate registration errors.
@@ -296,7 +350,10 @@ pub fn self_test() {
 
     // 3: Raise increments the type's raised counter and the total exactly.
     raise(SoftirqType::Timer).expect("raise");
-    let ts = type_stats().into_iter().find(|t| t.softirq_type == SoftirqType::Timer).expect("ts");
+    let ts = type_stats()
+        .into_iter()
+        .find(|t| t.softirq_type == SoftirqType::Timer)
+        .expect("ts");
     assert_eq!(ts.raised, 1);
     assert_eq!(ts.executed, 0); // raised but not yet run
     crate::serial_println!("  [3/8] raise: OK");
@@ -306,7 +363,10 @@ pub fn self_test() {
     let cpu0 = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("cpu0");
     assert_eq!(cpu0.total_softirqs, 1);
     assert_eq!(cpu0.type_counts[SoftirqType::NetRx.index()], 1);
-    let ts = type_stats().into_iter().find(|t| t.softirq_type == SoftirqType::NetRx).expect("ts");
+    let ts = type_stats()
+        .into_iter()
+        .find(|t| t.softirq_type == SoftirqType::NetRx)
+        .expect("ts");
     assert_eq!(ts.executed, 1);
     assert_eq!(ts.total_ns, 1000);
     crate::serial_println!("  [4/8] run: OK");
@@ -321,7 +381,14 @@ pub fn self_test() {
 
     // 6: ksoftirqd wakeup accounting.
     ksoftirqd_wakeup(1).expect("wakeup");
-    assert_eq!(per_cpu().into_iter().find(|c| c.cpu_id == 1).expect("cpu1").ksoftirqd_wakeups, 1);
+    assert_eq!(
+        per_cpu()
+            .into_iter()
+            .find(|c| c.cpu_id == 1)
+            .expect("cpu1")
+            .ksoftirqd_wakeups,
+        1
+    );
     crate::serial_println!("  [6/8] ksoftirqd: OK");
 
     // 7: Operations on an unregistered CPU error.

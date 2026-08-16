@@ -118,8 +118,8 @@
 //! - Maximum 32 concurrent connections.
 //! - Maximum 8 listeners, each with a backlog of 16 pending connections.
 
-use alloc::vec::Vec;
 use crate::sync::Mutex;
+use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -312,17 +312,17 @@ struct TcpConnection {
     /// Remote port.
     remote_port: u16,
     /// Send sequence variables.
-    snd_una: u32,   // Oldest unacknowledged.
-    snd_nxt: u32,   // Next sequence to send.
-    snd_iss: u32,   // Initial send sequence number.
+    snd_una: u32, // Oldest unacknowledged.
+    snd_nxt: u32, // Next sequence to send.
+    snd_iss: u32, // Initial send sequence number.
     /// Peer's advertised receive window (how much data we may have in
     /// flight), *after* applying window scaling.  Updated on every
     /// incoming segment.  Stored as u32 because scaled windows can
     /// exceed 64 KiB (up to 1 GiB with scale factor 14).
     snd_wnd: u32,
     /// Receive sequence variables.
-    rcv_nxt: u32,   // Next expected receive sequence.
-    rcv_irs: u32,   // Initial receive sequence number.
+    rcv_nxt: u32, // Next expected receive sequence.
+    rcv_irs: u32, // Initial receive sequence number.
     /// Receive buffer (data delivered in-order).
     rx_buffer: Vec<u8>,
     /// Whether the remote end has closed (FIN received).
@@ -342,7 +342,6 @@ struct TcpConnection {
     retransmit_count: u16,
 
     // -- RTT estimation (Jacobson/Karels, RFC 6298) --
-
     /// Smoothed round-trip time (nanoseconds, fixed-point ×8).
     /// Stored scaled by 8 to avoid floating-point; divide by 8 for
     /// the true SRTT.
@@ -363,7 +362,6 @@ struct TcpConnection {
     rtt_sent_ns: u64,
 
     // -- Nagle algorithm --
-
     /// Whether Nagle's algorithm is enabled (TCP_NODELAY = !nagle).
     nagle_enabled: bool,
     /// Buffer for small writes delayed by Nagle's algorithm.
@@ -375,14 +373,12 @@ struct TcpConnection {
     nagle_buf: Vec<u8>,
 
     // -- Congestion control (AIMD, RFC 5681) --
-
     /// Congestion window in bytes.
     cwnd: u32,
     /// Slow-start threshold in bytes.
     ssthresh: u32,
 
     // -- Window scaling (RFC 7323) --
-
     /// Whether window scaling was negotiated during the handshake.
     /// Both sides must include the WScale option in their SYN for
     /// scaling to be active.
@@ -398,7 +394,6 @@ struct TcpConnection {
     rcv_wnd_scale: u8,
 
     // -- SACK (RFC 2018) --
-
     /// Whether SACK was negotiated during the handshake (both sides must
     /// send SACK-Permitted in their SYN).
     sack_ok: bool,
@@ -412,7 +407,6 @@ struct TcpConnection {
     sack_block_count: u8,
 
     // -- Out-of-order receive buffer --
-
     /// Buffer holding out-of-order received data indexed by sequence offset.
     ///
     /// `ooo_buf[i]` corresponds to sequence number `ooo_base + i`.  Only
@@ -425,7 +419,6 @@ struct TcpConnection {
     ooo_base: u32,
 
     // -- Duplicate ACK / fast retransmit (RFC 5681 §3.2) --
-
     /// Number of consecutive duplicate ACKs received.
     ///
     /// A "duplicate ACK" is an ACK that does not advance `snd_una`.
@@ -435,7 +428,6 @@ struct TcpConnection {
     dup_ack_count: u8,
 
     // -- Retransmit buffer --
-
     /// Sent data waiting to be acknowledged.
     ///
     /// When `send()` transmits data, a copy is appended here.  When an
@@ -451,7 +443,6 @@ struct TcpConnection {
     tx_last_send_ns: u64,
 
     // -- Peer MSS (RFC 793 §3.1, RFC 879) --
-
     /// Maximum segment size the peer will accept.  Parsed from the MSS
     /// option in the SYN/SYN-ACK.  Outgoing data segments must not
     /// exceed this value.  0 means no MSS option was present — in that
@@ -461,7 +452,6 @@ struct TcpConnection {
     peer_mss: u16,
 
     // -- ECN (Explicit Congestion Notification, RFC 3168) --
-
     /// Whether ECN was negotiated during the handshake (both sides
     /// set ECE+CWR in their SYN).
     ecn_ok: bool,
@@ -474,7 +464,6 @@ struct TcpConnection {
     ecn_cwr_sent: bool,
 
     // -- Timestamps (RFC 7323 §3-4) --
-
     /// Whether TCP timestamps were negotiated during the handshake.
     /// Both sides must include the TSopt in their SYN for timestamps
     /// to be active.
@@ -489,7 +478,6 @@ struct TcpConnection {
     ts_recent_age_ns: u64,
 
     // -- Persist timer (zero window probe, RFC 1122 §4.2.2.17) --
-
     /// Whether the persist timer is active (peer advertised zero window
     /// and we have data pending).
     persist_active: bool,
@@ -502,7 +490,6 @@ struct TcpConnection {
     persist_last_ns: u64,
 
     // -- Keepalive state (RFC 1122 §4.2.3.6) --
-
     /// Whether keepalive probes are enabled on this connection.
     keepalive_enabled: bool,
     /// Idle time (ns) before the first keepalive probe.
@@ -611,7 +598,10 @@ struct PendingConnection {
 
 impl PendingConnection {
     const fn empty() -> Self {
-        Self { conn_handle: 0, active: false }
+        Self {
+            conn_handle: 0,
+            active: false,
+        }
     }
 }
 
@@ -804,7 +794,10 @@ fn build_segment_with_options(
     // Options.
     seg.extend_from_slice(options);
     // Pad with NOP/END to 4-byte boundary.
-    seg.resize(seg.len() + opt_padded.saturating_sub(options.len()), TCP_OPT_END);
+    seg.resize(
+        seg.len() + opt_padded.saturating_sub(options.len()),
+        TCP_OPT_END,
+    );
 
     // Payload.
     seg.extend_from_slice(payload);
@@ -823,10 +816,18 @@ fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u16 {
 
     // Pseudo-header: src IP, dst IP, zero, protocol (6), TCP length.
     let pseudo = [
-        src_ip.0[0], src_ip.0[1], src_ip.0[2], src_ip.0[3],
-        dst_ip.0[0], dst_ip.0[1], dst_ip.0[2], dst_ip.0[3],
-        0, 6, // zero + protocol TCP.
-        (segment.len() >> 8) as u8, segment.len() as u8,
+        src_ip.0[0],
+        src_ip.0[1],
+        src_ip.0[2],
+        src_ip.0[3],
+        dst_ip.0[0],
+        dst_ip.0[1],
+        dst_ip.0[2],
+        dst_ip.0[3],
+        0,
+        6, // zero + protocol TCP.
+        (segment.len() >> 8) as u8,
+        segment.len() as u8,
     ];
 
     for chunk in pseudo.chunks(2) {
@@ -916,13 +917,13 @@ fn tcp_checksum_ip(segment: &[u8], src: IpAddr, dst: IpAddr) -> u16 {
 // ---------------------------------------------------------------------------
 
 /// TCP option kinds.
-const TCP_OPT_END: u8 = 0;        // End of option list.
-const TCP_OPT_NOP: u8 = 1;        // No-operation (padding).
-const TCP_OPT_MSS: u8 = 2;        // Maximum segment size.
-const TCP_OPT_WSCALE: u8 = 3;     // Window scale (RFC 7323).
-const TCP_OPT_SACK_PERM: u8 = 4;  // SACK permitted (RFC 2018).
-const TCP_OPT_SACK: u8 = 5;       // SACK blocks (RFC 2018).
-const TCP_OPT_TIMESTAMP: u8 = 8;  // Timestamps (RFC 7323).
+const TCP_OPT_END: u8 = 0; // End of option list.
+const TCP_OPT_NOP: u8 = 1; // No-operation (padding).
+const TCP_OPT_MSS: u8 = 2; // Maximum segment size.
+const TCP_OPT_WSCALE: u8 = 3; // Window scale (RFC 7323).
+const TCP_OPT_SACK_PERM: u8 = 4; // SACK permitted (RFC 2018).
+const TCP_OPT_SACK: u8 = 5; // SACK blocks (RFC 2018).
+const TCP_OPT_TIMESTAMP: u8 = 8; // Timestamps (RFC 7323).
 
 /// Our advertised window scale shift count.
 ///
@@ -965,7 +966,12 @@ struct TcpOptions {
 /// Returns the parsed `TcpOptions`.  Unknown options are skipped.
 /// Malformed options (truncated length, etc.) terminate parsing early.
 fn parse_tcp_options(option_bytes: &[u8]) -> TcpOptions {
-    let mut opts = TcpOptions { mss: 0, wscale: None, sack_permitted: false, timestamp: None };
+    let mut opts = TcpOptions {
+        mss: 0,
+        wscale: None,
+        sack_permitted: false,
+        timestamp: None,
+    };
     let mut i = 0;
     while i < option_bytes.len() {
         let kind = option_bytes[i];
@@ -1170,11 +1176,15 @@ fn send_segment_with_window(
 ) -> KernelResult<()> {
     let local_ip = local_ip_for(remote_ip);
     let seg = build_segment(
-        local_port, remote_port,
-        seq, ack, flags,
+        local_port,
+        remote_port,
+        seq,
+        ack,
+        flags,
         window,
         payload,
-        local_ip, remote_ip,
+        local_ip,
+        remote_ip,
     );
 
     ip_send_tcp(remote_ip, &seg, ip_ecn)
@@ -1194,8 +1204,15 @@ fn send_segment(
     payload: &[u8],
 ) -> KernelResult<()> {
     send_segment_with_window(
-        local_port, remote_ip, remote_port,
-        seq, ack, flags, DEFAULT_WINDOW, payload, 0,
+        local_port,
+        remote_ip,
+        remote_port,
+        seq,
+        ack,
+        flags,
+        DEFAULT_WINDOW,
+        payload,
+        0,
     )
 }
 
@@ -1218,11 +1235,15 @@ fn send_syn_segment(
 ) -> KernelResult<()> {
     let local_ip = local_ip_for(remote_ip);
     let seg = build_segment_with_syn_options(
-        local_port, remote_port,
-        seq, ack, flags,
+        local_port,
+        remote_port,
+        seq,
+        ack,
+        flags,
         window,
         &[],
-        local_ip, remote_ip,
+        local_ip,
+        remote_ip,
         wscale,
         tsval,
         tsecr,
@@ -1263,16 +1284,29 @@ fn send_data_with_ts(
 
         let local_ip = local_ip_for(remote_ip);
         let seg = build_segment_with_options(
-            local_port, remote_port,
-            seq, ack, flags, window,
-            &ts_opt, payload,
-            local_ip, remote_ip,
+            local_port,
+            remote_port,
+            seq,
+            ack,
+            flags,
+            window,
+            &ts_opt,
+            payload,
+            local_ip,
+            remote_ip,
         );
         ip_send_tcp(remote_ip, &seg, ip_ecn)
     } else {
         send_segment_with_window(
-            local_port, remote_ip, remote_port,
-            seq, ack, flags, window, payload, ip_ecn,
+            local_port,
+            remote_ip,
+            remote_port,
+            seq,
+            ack,
+            flags,
+            window,
+            payload,
+            ip_ecn,
         )
     }
 }
@@ -1304,13 +1338,16 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
         if opts_len > 0 {
             let local_ip = local_ip_for(conn.remote_ip);
             let seg = build_segment_with_options(
-                conn.local_port, conn.remote_port,
-                conn.snd_nxt, conn.rcv_nxt,
+                conn.local_port,
+                conn.remote_port,
+                conn.snd_nxt,
+                conn.rcv_nxt,
                 flags,
                 advertised_window(conn),
                 &opts[..opts_len],
                 &[],
-                local_ip, conn.remote_ip,
+                local_ip,
+                conn.remote_ip,
             );
             return ip_send_tcp(conn.remote_ip, &seg, ip_ecn);
         }
@@ -1322,20 +1359,29 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
     if sack_len > 0 {
         let local_ip = local_ip_for(conn.remote_ip);
         let seg = build_segment_with_options(
-            conn.local_port, conn.remote_port,
-            conn.snd_nxt, conn.rcv_nxt,
+            conn.local_port,
+            conn.remote_port,
+            conn.snd_nxt,
+            conn.rcv_nxt,
             flags,
             advertised_window(conn),
             &sack_opt[..sack_len],
             &[],
-            local_ip, conn.remote_ip,
+            local_ip,
+            conn.remote_ip,
         );
         ip_send_tcp(conn.remote_ip, &seg, ip_ecn)
     } else {
         send_segment_with_window(
-            conn.local_port, conn.remote_ip, conn.remote_port,
-            conn.snd_nxt, conn.rcv_nxt,
-            flags, advertised_window(conn), &[], ip_ecn,
+            conn.local_port,
+            conn.remote_ip,
+            conn.remote_port,
+            conn.snd_nxt,
+            conn.rcv_nxt,
+            flags,
+            advertised_window(conn),
+            &[],
+            ip_ecn,
         )
     }
 }
@@ -1384,7 +1430,8 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
                 // Reclaim the TIME_WAIT slot.
                 crate::serial_println!(
                     "[tcp] Recycling TIME_WAIT slot {} (port {}) for new connection",
-                    idx, conns[idx].local_port
+                    idx,
+                    conns[idx].local_port
                 );
                 conns[idx].active = false;
                 conns[idx].state = TcpState::Closed;
@@ -1465,13 +1512,23 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
     // signal ECN support.  The server responds with ECE (no CWR) if
     // it also supports ECN.
     send_syn_segment(
-        local_port, remote_ip, remote_port,
-        isn, 0, TCP_SYN | TCP_ECE | TCP_CWR, DEFAULT_WINDOW, OUR_WSCALE,
-        tcp_now_ms(), 0,
+        local_port,
+        remote_ip,
+        remote_port,
+        isn,
+        0,
+        TCP_SYN | TCP_ECE | TCP_CWR,
+        DEFAULT_WINDOW,
+        OUR_WSCALE,
+        tcp_now_ms(),
+        0,
     )?;
     crate::serial_println!(
         "[tcp] SYN sent to {}:{} (seq={}, wscale={})",
-        remote_ip, remote_port, isn, OUR_WSCALE
+        remote_ip,
+        remote_port,
+        isn,
+        OUR_WSCALE
     );
 
     // Wait for SYN-ACK with SYN retransmission (1s, 2s, 4s, 8s = ~15s total).
@@ -1483,12 +1540,22 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
         // On retry (not the first attempt), retransmit the SYN.
         if attempt > 0 {
             crate::serial_println!(
-                "[tcp] SYN retransmit #{} to {}:{}", attempt, remote_ip, remote_port
+                "[tcp] SYN retransmit #{} to {}:{}",
+                attempt,
+                remote_ip,
+                remote_port
             );
             let _ = send_syn_segment(
-                local_port, remote_ip, remote_port,
-                isn, 0, TCP_SYN | TCP_ECE | TCP_CWR, DEFAULT_WINDOW, OUR_WSCALE,
-                tcp_now_ms(), 0,
+                local_port,
+                remote_ip,
+                remote_port,
+                isn,
+                0,
+                TCP_SYN | TCP_ECE | TCP_CWR,
+                DEFAULT_WINDOW,
+                OUR_WSCALE,
+                tcp_now_ms(),
+                0,
             );
         }
 
@@ -1498,7 +1565,9 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
             let state = CONNECTIONS.lock()[handle].state;
             if state == TcpState::Established {
                 crate::serial_println!(
-                    "[tcp] Connection established to {}:{}", remote_ip, remote_port
+                    "[tcp] Connection established to {}:{}",
+                    remote_ip,
+                    remote_port
                 );
                 return Ok(handle);
             }
@@ -1638,14 +1707,23 @@ pub fn connect_start(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> Ker
 
     // Send the initial SYN.
     send_syn_segment(
-        local_port, remote_ip, remote_port,
-        isn, 0, TCP_SYN | TCP_ECE | TCP_CWR, DEFAULT_WINDOW, OUR_WSCALE,
-        tcp_now_ms(), 0,
+        local_port,
+        remote_ip,
+        remote_port,
+        isn,
+        0,
+        TCP_SYN | TCP_ECE | TCP_CWR,
+        DEFAULT_WINDOW,
+        OUR_WSCALE,
+        tcp_now_ms(),
+        0,
     )?;
 
     crate::serial_println!(
         "[tcp] SYN sent (non-blocking) to {}:{} (handle={})",
-        remote_ip, remote_port, handle
+        remote_ip,
+        remote_port,
+        handle
     );
 
     Ok(handle)
@@ -1694,12 +1772,14 @@ fn update_rtt(conn: &mut TcpConnection, sample_ns: u64) {
         let err = sample_ns.abs_diff(srtt);
 
         // RTTVAR update: 3/4 old + 1/4 |err|.
-        conn.rttvar_ns_x4 = conn.rttvar_ns_x4
+        conn.rttvar_ns_x4 = conn
+            .rttvar_ns_x4
             .saturating_sub(conn.rttvar_ns_x4 >> RTTVAR_BETA_SHIFT)
             .saturating_add(err);
 
         // SRTT update: 7/8 old + 1/8 sample.
-        conn.srtt_ns_x8 = conn.srtt_ns_x8
+        conn.srtt_ns_x8 = conn
+            .srtt_ns_x8
             .saturating_sub(conn.srtt_ns_x8 >> SRTT_ALPHA_SHIFT)
             .saturating_add(sample_ns);
     }
@@ -1820,9 +1900,7 @@ fn on_ack_congestion(conn: &mut TcpConnection, bytes_acked: u32) {
     } else {
         // Congestion avoidance: increase cwnd by MSS * MSS / cwnd per ACK
         // (approximately 1 MSS per RTT).
-        let inc = (mss as u64)
-            .saturating_mul(bytes_acked as u64)
-            / (conn.cwnd as u64).max(1);
+        let inc = (mss as u64).saturating_mul(bytes_acked as u64) / (conn.cwnd as u64).max(1);
         conn.cwnd = conn.cwnd.saturating_add(inc.min(mss as u64) as u32);
     }
 }
@@ -1869,7 +1947,18 @@ fn tx_buffer_trim(conn: &mut TcpConnection, bytes_acked: u32) {
 /// (sequence `snd_una`).
 #[allow(clippy::arithmetic_side_effects)]
 /// Retransmit info tuple.
-type RetxInfo = (u16, IpAddr, u16, u32, u32, u16, [u8; 1460], usize, bool, u32);
+type RetxInfo = (
+    u16,
+    IpAddr,
+    u16,
+    u32,
+    u32,
+    u16,
+    [u8; 1460],
+    usize,
+    bool,
+    u32,
+);
 
 fn retransmit_from_buffer(conn: &TcpConnection) -> Option<RetxInfo> {
     let retx_len = conn.tx_buffer.len().min(effective_mss(conn));
@@ -1882,7 +1971,7 @@ fn retransmit_from_buffer(conn: &TcpConnection) -> Option<RetxInfo> {
         conn.local_port,
         conn.remote_ip,
         conn.remote_port,
-        conn.snd_una,       // Retransmit from the first unacked byte.
+        conn.snd_una, // Retransmit from the first unacked byte.
         conn.rcv_nxt,
         advertised_window(conn),
         data,
@@ -2099,7 +2188,8 @@ fn ooo_deliver(conn: &mut TcpConnection) {
 
                 if deliver_len > 0 && !conn.local_read_closed {
                     let actual_end = start_off.saturating_add(deliver_len);
-                    conn.rx_buffer.extend_from_slice(&conn.ooo_buf[start_off..actual_end]);
+                    conn.rx_buffer
+                        .extend_from_slice(&conn.ooo_buf[start_off..actual_end]);
                 }
                 conn.rcv_nxt = conn.rcv_nxt.wrapping_add(deliver_len as u32);
                 found = true;
@@ -2175,7 +2265,11 @@ fn build_ts_and_sack_options(conn: &TcpConnection) -> ([u8; 40], usize) {
     if conn.sack_ok && conn.sack_block_count > 0 {
         // When timestamps are active, limit to 3 SACK blocks (28 bytes
         // remain from the 40-byte option space after the 12-byte TSopt).
-        let max_blocks = if conn.ts_ok { MAX_SACK_BLOCKS_WITH_TS } else { MAX_SACK_BLOCKS };
+        let max_blocks = if conn.ts_ok {
+            MAX_SACK_BLOCKS_WITH_TS
+        } else {
+            MAX_SACK_BLOCKS
+        };
         let n = (conn.sack_block_count as usize).min(max_blocks);
         let opt_len = 2 + n * 8; // kind + length + blocks.
 
@@ -2206,7 +2300,7 @@ fn build_sack_option(conn: &TcpConnection) -> ([u8; 36], usize) {
 
     let n = (conn.sack_block_count as usize).min(MAX_SACK_BLOCKS);
     let opt_len = 2 + n * 8; // kind + length + blocks.
-    let total = 2 + opt_len;  // NOP + NOP + option.
+    let total = 2 + opt_len; // NOP + NOP + option.
 
     buf[0] = TCP_OPT_NOP;
     buf[1] = TCP_OPT_NOP;
@@ -2233,9 +2327,22 @@ fn build_sack_option(conn: &TcpConnection) -> ([u8; 36], usize) {
 /// Returns `Ok(())` even if the effective window truncated the send.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
-    let (local_port, remote_ip, remote_port, seq, ack, eff_wnd, our_wnd,
-         nagle, has_unacked, ecn_ok, ecn_cwr, eff_mss,
-         ts_ok, ts_recent) = {
+    let (
+        local_port,
+        remote_ip,
+        remote_port,
+        seq,
+        ack,
+        eff_wnd,
+        our_wnd,
+        nagle,
+        has_unacked,
+        ecn_ok,
+        ecn_cwr,
+        eff_mss,
+        ts_ok,
+        ts_recent,
+    ) = {
         let conns = CONNECTIONS.lock();
         let conn = conns.get(handle).ok_or(KernelError::InvalidArgument)?;
         // Allow sending in Established (normal) or CloseWait (remote
@@ -2253,11 +2360,22 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
             return Err(KernelError::ChannelClosed);
         }
         let unacked = conn.snd_nxt != conn.snd_una;
-        (conn.local_port, conn.remote_ip, conn.remote_port,
-         conn.snd_nxt, conn.rcv_nxt, effective_window(conn),
-         advertised_window(conn), conn.nagle_enabled, unacked,
-         conn.ecn_ok, conn.ecn_cwr_sent, effective_mss(conn),
-         conn.ts_ok, conn.ts_recent)
+        (
+            conn.local_port,
+            conn.remote_ip,
+            conn.remote_port,
+            conn.snd_nxt,
+            conn.rcv_nxt,
+            effective_window(conn),
+            advertised_window(conn),
+            conn.nagle_enabled,
+            unacked,
+            conn.ecn_ok,
+            conn.ecn_cwr_sent,
+            effective_mss(conn),
+            conn.ts_ok,
+            conn.ts_recent,
+        )
     };
 
     // Nagle's algorithm (RFC 896): if we have unacknowledged data in
@@ -2312,9 +2430,17 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
             conn.nagle_buf.drain(..flush_len);
             drop(conns);
             let _ = send_data_with_ts(
-                lp, ri, rp, s, a, tcp_flags, w,
-                &flush_data[..flush_len], ip_ecn_val,
-                n_ts_ok, n_ts_recent,
+                lp,
+                ri,
+                rp,
+                s,
+                a,
+                tcp_flags,
+                w,
+                &flush_data[..flush_len],
+                ip_ecn_val,
+                n_ts_ok,
+                n_ts_recent,
             );
         }
         // Return the number of bytes actually buffered, not data.len().
@@ -2367,13 +2493,17 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
 
         let send_seq = seq.wrapping_add(offset as u32);
         send_data_with_ts(
-            local_port, remote_ip, remote_port,
-            send_seq, ack,
+            local_port,
+            remote_ip,
+            remote_port,
+            send_seq,
+            ack,
             data_flags,
             our_wnd,
             chunk,
             ip_ecn_data,
-            ts_ok, ts_recent,
+            ts_ok,
+            ts_recent,
         )?;
 
         if offset == 0 {
@@ -2582,7 +2712,10 @@ pub struct TcpListenerInfo {
 pub fn all_listeners() -> ([TcpListenerInfo; MAX_LISTENERS], usize) {
     let listeners = LISTENERS.lock();
     let mut result = [TcpListenerInfo {
-        handle: 0, port: 0, backlog_used: 0, backlog_max: MAX_BACKLOG,
+        handle: 0,
+        port: 0,
+        backlog_used: 0,
+        backlog_max: MAX_BACKLOG,
     }; MAX_LISTENERS];
     let mut count = 0;
     for (idx, listener) in listeners.iter().enumerate() {
@@ -2719,20 +2852,28 @@ pub fn read_up_to(handle: usize, max_bytes: usize) -> KernelResult<Vec<u8>> {
         // the peer stopped sending due to our zero window.
         let new_free = MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len());
         let mss = effective_mss(conn);
-        let should_update = (old_free < mss && new_free >= mss)
-            || (old_free == 0 && new_free > 0);
+        let should_update = (old_free < mss && new_free >= mss) || (old_free == 0 && new_free > 0);
 
-        let wnd = if should_update { advertised_window(conn) } else { 0 };
-        (result, should_update,
-         conn.local_port, conn.remote_ip, conn.remote_port,
-         conn.snd_nxt, conn.rcv_nxt, wnd)
+        let wnd = if should_update {
+            advertised_window(conn)
+        } else {
+            0
+        };
+        (
+            result,
+            should_update,
+            conn.local_port,
+            conn.remote_ip,
+            conn.remote_port,
+            conn.snd_nxt,
+            conn.rcv_nxt,
+            wnd,
+        )
     };
 
     // Send window update ACK outside the lock.
     if need_wnd_update {
-        let _ = send_segment_with_window(
-            lp, ri, rp, snd_nxt, rcv_nxt, TCP_ACK, wnd, &[], 0,
-        );
+        let _ = send_segment_with_window(lp, ri, rp, snd_nxt, rcv_nxt, TCP_ACK, wnd, &[], 0);
     }
 
     Ok(data)
@@ -2778,9 +2919,7 @@ pub fn read_blocking(handle: usize, timeout_polls: u32, max_bytes: usize) -> Ker
             }
             // Return immediately if: data available, remote closed (EOF),
             // or local read side shut down.
-            if !conn.rx_buffer.is_empty() || conn.remote_closed
-                || conn.local_read_closed
-            {
+            if !conn.rx_buffer.is_empty() || conn.remote_closed || conn.local_read_closed {
                 break;
             }
         }
@@ -2806,8 +2945,15 @@ pub fn close(handle: usize) -> KernelResult<()> {
             return Ok(());
         }
         let unread = !conn.rx_buffer.is_empty() && !conn.local_read_closed;
-        (conn.local_port, conn.remote_ip, conn.remote_port,
-         conn.snd_nxt, conn.rcv_nxt, conn.state, unread)
+        (
+            conn.local_port,
+            conn.remote_ip,
+            conn.remote_port,
+            conn.snd_nxt,
+            conn.rcv_nxt,
+            conn.state,
+            unread,
+        )
     };
 
     // RFC 1122 §4.2.2.13: if the receive buffer contains unread data
@@ -2815,12 +2961,19 @@ pub fn close(handle: usize) -> KernelResult<()> {
     // peer that the data was discarded (not consumed).
     if has_unread && (state == TcpState::Established || state == TcpState::CloseWait) {
         let _ = send_segment(
-            local_port, remote_ip, remote_port,
-            seq, ack, TCP_RST | TCP_ACK, &[],
+            local_port,
+            remote_ip,
+            remote_port,
+            seq,
+            ack,
+            TCP_RST | TCP_ACK,
+            &[],
         );
         crate::serial_println!(
             "[tcp] RST close (unread data) on port {} → {}:{}",
-            local_port, remote_ip, remote_port
+            local_port,
+            remote_ip,
+            remote_port
         );
         let mut conns = CONNECTIONS.lock();
         conns[handle].active = false;
@@ -2835,7 +2988,15 @@ pub fn close(handle: usize) -> KernelResult<()> {
     match state {
         TcpState::Established => {
             // Send FIN.
-            send_segment(local_port, remote_ip, remote_port, seq, ack, TCP_FIN | TCP_ACK, &[])?;
+            send_segment(
+                local_port,
+                remote_ip,
+                remote_port,
+                seq,
+                ack,
+                TCP_FIN | TCP_ACK,
+                &[],
+            )?;
             let mut conns = CONNECTIONS.lock();
             conns[handle].state = TcpState::FinWait1;
             conns[handle].snd_nxt = seq.wrapping_add(1);
@@ -2872,7 +3033,15 @@ pub fn close(handle: usize) -> KernelResult<()> {
         }
         TcpState::CloseWait => {
             // Remote already sent FIN; send our FIN.
-            send_segment(local_port, remote_ip, remote_port, seq, ack, TCP_FIN | TCP_ACK, &[])?;
+            send_segment(
+                local_port,
+                remote_ip,
+                remote_port,
+                seq,
+                ack,
+                TCP_FIN | TCP_ACK,
+                &[],
+            )?;
             let mut conns = CONNECTIONS.lock();
             conns[handle].state = TcpState::LastAck;
             conns[handle].snd_nxt = seq.wrapping_add(1);
@@ -2943,15 +3112,29 @@ pub fn shutdown(handle: usize, how: u32) -> KernelResult<()> {
                 // Already shut down for writing.
                 return Ok(());
             }
-            (conn.local_port, conn.remote_ip, conn.remote_port,
-             conn.snd_nxt, conn.rcv_nxt, conn.state)
+            (
+                conn.local_port,
+                conn.remote_ip,
+                conn.remote_port,
+                conn.snd_nxt,
+                conn.rcv_nxt,
+                conn.state,
+            )
         };
 
         match state {
             TcpState::Established => {
                 // Send FIN, transition to FIN_WAIT_1 but keep connection
                 // active for reading.
-                send_segment(local_port, remote_ip, remote_port, seq, ack, TCP_FIN | TCP_ACK, &[])?;
+                send_segment(
+                    local_port,
+                    remote_ip,
+                    remote_port,
+                    seq,
+                    ack,
+                    TCP_FIN | TCP_ACK,
+                    &[],
+                )?;
                 let mut conns = CONNECTIONS.lock();
                 conns[handle].state = TcpState::FinWait1;
                 conns[handle].snd_nxt = seq.wrapping_add(1);
@@ -2959,7 +3142,15 @@ pub fn shutdown(handle: usize, how: u32) -> KernelResult<()> {
             }
             TcpState::CloseWait => {
                 // Remote already sent FIN; our FIN completes the close.
-                send_segment(local_port, remote_ip, remote_port, seq, ack, TCP_FIN | TCP_ACK, &[])?;
+                send_segment(
+                    local_port,
+                    remote_ip,
+                    remote_port,
+                    seq,
+                    ack,
+                    TCP_FIN | TCP_ACK,
+                    &[],
+                )?;
                 let mut conns = CONNECTIONS.lock();
                 conns[handle].state = TcpState::LastAck;
                 conns[handle].snd_nxt = seq.wrapping_add(1);
@@ -3030,12 +3221,19 @@ pub fn abort(handle: usize) -> KernelResult<()> {
     // since we're aborting anyway).
     if should_rst {
         let _ = send_segment(
-            local_port, remote_ip, remote_port,
-            snd_nxt, rcv_nxt, TCP_RST | TCP_ACK, &[],
+            local_port,
+            remote_ip,
+            remote_port,
+            snd_nxt,
+            rcv_nxt,
+            TCP_RST | TCP_ACK,
+            &[],
         );
         crate::serial_println!(
             "[tcp] Connection aborted (RST sent): port {} → {}:{}",
-            local_port, remote_ip, remote_port
+            local_port,
+            remote_ip,
+            remote_port
         );
     }
 
@@ -3090,7 +3288,8 @@ pub fn listener_local_port(handle: usize) -> Option<u16> {
 /// (WouldBlock) from "connection is done, return EOF" (0).
 pub fn is_remote_closed(handle: usize) -> bool {
     let conns = CONNECTIONS.lock();
-    conns.get(handle)
+    conns
+        .get(handle)
         .map(|c| c.remote_closed || c.local_read_closed || c.state == TcpState::CloseWait)
         .unwrap_or(true)
 }
@@ -3145,8 +3344,8 @@ pub fn take_last_error(handle: usize) -> u8 {
 /// remote end has closed, POLLERR means the connection encountered an error.
 pub const POLL_READABLE: u16 = 0x0001;
 pub const POLL_WRITABLE: u16 = 0x0004;
-pub const POLL_ERROR: u16    = 0x0008;
-pub const POLL_HANGUP: u16   = 0x0010;
+pub const POLL_ERROR: u16 = 0x0008;
+pub const POLL_HANGUP: u16 = 0x0010;
 
 /// Query the poll readiness status of a TCP connection.
 ///
@@ -3257,7 +3456,9 @@ pub fn bind(ns_id: NetNsId, port: u16) -> KernelResult<usize> {
     }
 
     // Find a free slot.
-    let slot = listeners.iter().position(|l| !l.active)
+    let slot = listeners
+        .iter()
+        .position(|l| !l.active)
         .ok_or(KernelError::OutOfMemory)?;
 
     listeners[slot].active = true;
@@ -3287,7 +3488,8 @@ pub fn accept(listener_handle: usize) -> KernelResult<usize> {
     // Validate the listener exists.
     {
         let listeners = LISTENERS.lock();
-        let listener = listeners.get(listener_handle)
+        let listener = listeners
+            .get(listener_handle)
             .ok_or(KernelError::InvalidArgument)?;
         if !listener.active {
             return Err(KernelError::InvalidArgument);
@@ -3312,7 +3514,8 @@ pub fn accept(listener_handle: usize) -> KernelResult<usize> {
                 pending.active = false;
                 crate::serial_println!(
                     "[tcp] Accepted connection on port {} → handle {}",
-                    listener.port, conn_handle
+                    listener.port,
+                    conn_handle
                 );
                 return Ok(conn_handle);
             }
@@ -3334,7 +3537,8 @@ pub fn accept(listener_handle: usize) -> KernelResult<usize> {
 /// `Err(WouldBlock)` if no pending connections.
 pub fn try_accept(listener_handle: usize) -> KernelResult<usize> {
     let mut listeners = LISTENERS.lock();
-    let listener = listeners.get_mut(listener_handle)
+    let listener = listeners
+        .get_mut(listener_handle)
         .ok_or(KernelError::InvalidArgument)?;
     if !listener.active {
         return Err(KernelError::InvalidArgument);
@@ -3357,7 +3561,8 @@ pub fn try_accept(listener_handle: usize) -> KernelResult<usize> {
 /// reset (RST sent to the remote).
 pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
     let mut listeners = LISTENERS.lock();
-    let listener = listeners.get_mut(listener_handle)
+    let listener = listeners
+        .get_mut(listener_handle)
         .ok_or(KernelError::InvalidArgument)?;
     if !listener.active {
         return Ok(());
@@ -3417,8 +3622,13 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
     // Send RSTs to peers of unaccepted connections.
     for info in rst_targets.iter().flatten() {
         let _ = send_segment(
-            info.local_port, info.remote_ip, info.remote_port,
-            info.seq, info.ack, TCP_RST | TCP_ACK, &[],
+            info.local_port,
+            info.remote_ip,
+            info.remote_port,
+            info.seq,
+            info.ack,
+            TCP_RST | TCP_ACK,
+            &[],
         );
     }
 
@@ -3460,19 +3670,27 @@ fn handle_incoming_syn(
     // the correct namespace (not ROOT_NS from the physical NIC path).
     let listener_ns = {
         let listeners = LISTENERS.lock();
-        listeners.iter().find(|l| {
-            l.active
-                && (ns_id == crate::netns::ROOT_NS || l.ns_id == ns_id)
-                && l.port == local_port
-        }).map(|l| l.ns_id)
+        listeners
+            .iter()
+            .find(|l| {
+                l.active
+                    && (ns_id == crate::netns::ROOT_NS || l.ns_id == ns_id)
+                    && l.port == local_port
+            })
+            .map(|l| l.ns_id)
     };
 
     let Some(effective_ns) = listener_ns else {
         // No listener — send RST.
         let rst_ack = remote_seq.wrapping_add(1);
         let _ = send_segment(
-            local_port, remote_ip, remote_port,
-            0, rst_ack, TCP_RST | TCP_ACK, &[],
+            local_port,
+            remote_ip,
+            remote_port,
+            0,
+            rst_ack,
+            TCP_RST | TCP_ACK,
+            &[],
         );
         return Ok(());
     };
@@ -3502,7 +3720,8 @@ fn handle_incoming_syn(
                 let idx = best.ok_or(KernelError::OutOfMemory)?;
                 crate::serial_println!(
                     "[tcp] Recycling TIME_WAIT slot {} (port {}) for incoming SYN",
-                    idx, conns[idx].local_port
+                    idx,
+                    conns[idx].local_port
                 );
                 conns[idx].active = false;
                 conns[idx].state = TcpState::Closed;
@@ -3613,7 +3832,9 @@ fn handle_incoming_syn(
     let rcv_nxt = remote_seq.wrapping_add(1);
     let (ecn_negotiated, ts_negotiated, ts_recent_echo) = {
         let conns = CONNECTIONS.lock();
-        conns.get(handle).map_or((false, false, 0), |c| (c.ecn_ok, c.ts_ok, c.ts_recent))
+        conns
+            .get(handle)
+            .map_or((false, false, 0), |c| (c.ecn_ok, c.ts_ok, c.ts_recent))
     };
     let synack_flags = if ecn_negotiated {
         TCP_SYN | TCP_ACK | TCP_ECE
@@ -3625,24 +3846,41 @@ fn handle_incoming_syn(
         // SYN-ACK with full options (WScale + SACK-Perm + Timestamp).
         // Timestamp TSecr echoes the client's TSval from the SYN.
         send_syn_segment(
-            local_port, remote_ip, remote_port,
-            isn, rcv_nxt, synack_flags,
-            DEFAULT_WINDOW, OUR_WSCALE,
+            local_port,
+            remote_ip,
+            remote_port,
+            isn,
+            rcv_nxt,
+            synack_flags,
+            DEFAULT_WINDOW,
+            OUR_WSCALE,
             tcp_now_ms(),
             if ts_negotiated { ts_recent_echo } else { 0 },
         )?;
     } else {
         // Client doesn't support window scaling — plain SYN-ACK.
         send_segment(
-            local_port, remote_ip, remote_port,
-            isn, rcv_nxt, synack_flags, &[],
+            local_port,
+            remote_ip,
+            remote_port,
+            isn,
+            rcv_nxt,
+            synack_flags,
+            &[],
         )?;
     }
 
     crate::serial_println!(
         "[tcp] SYN-ACK sent to {}:{} (handle={}, isn={}, wscale={}, ts={})",
-        remote_ip, remote_port, handle, isn,
-        if syn_opts.wscale.is_some() { OUR_WSCALE } else { 0 },
+        remote_ip,
+        remote_port,
+        handle,
+        isn,
+        if syn_opts.wscale.is_some() {
+            OUR_WSCALE
+        } else {
+            0
+        },
         ts_negotiated
     );
 
@@ -3688,9 +3926,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>, ns_id: NetNsId) -> KernelResult<(
     }
 
     // Verify TCP checksum (IPv4 pseudo-header + segment).
-    if !ipv4::verify_transport_checksum(
-        ip_packet.src, ip_packet.dst, PROTO_TCP, data,
-    ) {
+    if !ipv4::verify_transport_checksum(ip_packet.src, ip_packet.dst, PROTO_TCP, data) {
         crate::serial_println!(
             "[tcp] Dropped segment from {} — bad checksum",
             ip_packet.src
@@ -3721,9 +3957,7 @@ pub fn process_tcp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResul
     }
 
     // Verify TCP checksum (IPv6 pseudo-header + segment).
-    if !ipv6::verify_transport_checksum(
-        &ip_packet.src, &ip_packet.dst, PROTO_TCP, data,
-    ) {
+    if !ipv6::verify_transport_checksum(&ip_packet.src, &ip_packet.dst, PROTO_TCP, data) {
         crate::serial_println!(
             "[tcp] Dropped IPv6 segment from {} — bad checksum",
             ip_packet.src
@@ -3750,7 +3984,12 @@ pub fn process_tcp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResul
 /// `data` — raw TCP segment bytes (header + options + payload).
 /// `ip_ecn_ce` — true if the IP header indicated Congestion Experienced.
 #[allow(clippy::arithmetic_side_effects)]
-fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_ce: bool) -> KernelResult<()> {
+fn process_tcp_common(
+    ns_id: NetNsId,
+    remote_addr: IpAddr,
+    data: &[u8],
+    ip_ecn_ce: bool,
+) -> KernelResult<()> {
     let src_port = u16::from_be_bytes([data[0], data[1]]);
     let dst_port = u16::from_be_bytes([data[2], data[3]]);
     let seq = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
@@ -3796,8 +4035,14 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
         if flags & TCP_SYN != 0 && flags & TCP_ACK == 0 && flags & TCP_RST == 0 {
             drop(conns);
             return handle_incoming_syn(
-                ns_id, remote_addr, src_port, dst_port, seq, window,
-                option_bytes, flags,
+                ns_id,
+                remote_addr,
+                src_port,
+                dst_port,
+                seq,
+                window,
+                option_bytes,
+                flags,
             );
         }
         // No matching connection and not a SYN for a listener.
@@ -3807,8 +4052,13 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
             let rst_seq = if flags & TCP_ACK != 0 { ack } else { 0 };
             let rst_ack = seq.wrapping_add(payload.len() as u32);
             let _ = send_segment(
-                dst_port, remote_addr, src_port,
-                rst_seq, rst_ack, TCP_RST | TCP_ACK, &[],
+                dst_port,
+                remote_addr,
+                src_port,
+                rst_seq,
+                rst_ack,
+                TCP_RST | TCP_ACK,
+                &[],
             );
         }
         return Ok(());
@@ -3858,8 +4108,7 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
             let now_ns = crate::hrtimer::now_ns();
             // 24-day aging window in nanoseconds.
             const PAWS_IDLE_NS: u64 = 24 * 86400 * 1_000_000_000;
-            let ts_recent_too_old =
-                now_ns.saturating_sub(conn.ts_recent_age_ns) > PAWS_IDLE_NS;
+            let ts_recent_too_old = now_ns.saturating_sub(conn.ts_recent_age_ns) > PAWS_IDLE_NS;
 
             if ts_delta >= 0x8000_0000 && !ts_recent_too_old && conn.ts_recent != 0 {
                 // Old duplicate — drop silently but send an ACK (RFC 7323 §5.2
@@ -3873,7 +4122,19 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
                 let ie = if conn.ecn_ok { ipv4::ECN_ECT0 } else { 0 };
                 let paws_ts_recent = conn.ts_recent;
                 drop(conns);
-                let _ = send_data_with_ts(lp, ri, rp, sn, rn, TCP_ACK, w, &[], ie, true, paws_ts_recent);
+                let _ = send_data_with_ts(
+                    lp,
+                    ri,
+                    rp,
+                    sn,
+                    rn,
+                    TCP_ACK,
+                    w,
+                    &[],
+                    ie,
+                    true,
+                    paws_ts_recent,
+                );
                 return Ok(());
             }
 
@@ -3966,8 +4227,17 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
             let ts_recent_local = conn.ts_recent;
             drop(conns);
             let _ = send_data_with_ts(
-                lp, ri, rp, sn, rn, TCP_ACK, w, &[], ie,
-                ts_ok_local, ts_recent_local,
+                lp,
+                ri,
+                rp,
+                sn,
+                rn,
+                TCP_ACK,
+                w,
+                &[],
+                ie,
+                ts_ok_local,
+                ts_recent_local,
             );
             return Ok(());
         }
@@ -3988,7 +4258,8 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
                     conn.snd_wnd_scale = peer_shift;
                     crate::serial_println!(
                         "[tcp] Window scaling negotiated: snd_shift={}, rcv_shift={}",
-                        peer_shift, conn.rcv_wnd_scale
+                        peer_shift,
+                        conn.rcv_wnd_scale
                     );
                 } else {
                     conn.wscale_ok = false;
@@ -4034,8 +4305,13 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
 
                 drop(conns);
                 let _ = send_segment(
-                    local_port, remote_ip, remote_port,
-                    snd_nxt, rcv_nxt, TCP_ACK, &[],
+                    local_port,
+                    remote_ip,
+                    remote_port,
+                    snd_nxt,
+                    rcv_nxt,
+                    TCP_ACK,
+                    &[],
                 );
             }
         }
@@ -4057,7 +4333,9 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
 
                 crate::serial_println!(
                     "[tcp] 3-way handshake complete for {}:{} → port {}",
-                    remote_addr, src_port, local_port
+                    remote_addr,
+                    src_port,
+                    local_port
                 );
             } else if flags & TCP_RST != 0 {
                 conn.last_error = TCP_ERR_REFUSED;
@@ -4087,17 +4365,21 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
 
                 if wscale || ts {
                     let _ = send_syn_segment(
-                        lp, ri, rp, our_isn, rcv, synack_flags,
-                        DEFAULT_WINDOW, OUR_WSCALE,
+                        lp,
+                        ri,
+                        rp,
+                        our_isn,
+                        rcv,
+                        synack_flags,
+                        DEFAULT_WINDOW,
+                        OUR_WSCALE,
                         tcp_now_ms(),
                         if ts { ts_recent_echo } else { 0 },
                     );
                 } else {
                     let _ = send_segment(lp, ri, rp, our_isn, rcv, synack_flags, &[]);
                 }
-                crate::serial_println!(
-                    "[tcp] SYN-ACK retransmit to {}:{} (port {})", ri, rp, lp
-                );
+                crate::serial_println!("[tcp] SYN-ACK retransmit to {}:{} (port {})", ri, rp, lp);
             }
         }
 
@@ -4164,16 +4446,13 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
                         let emss = effective_mss(conn);
                         let flush_len = conn.nagle_buf.len().min(emss);
                         let mut flush_data = [0u8; 1460];
-                        flush_data[..flush_len]
-                            .copy_from_slice(&conn.nagle_buf[..flush_len]);
+                        flush_data[..flush_len].copy_from_slice(&conn.nagle_buf[..flush_len]);
                         conn.snd_nxt = s.wrapping_add(flush_len as u32);
                         // Buffer for retransmit.
-                        let tx_space =
-                            MAX_TX_BUFFER.saturating_sub(conn.tx_buffer.len());
+                        let tx_space = MAX_TX_BUFFER.saturating_sub(conn.tx_buffer.len());
                         let tx_copy = flush_len.min(tx_space);
                         if tx_copy > 0 {
-                            conn.tx_buffer
-                                .extend_from_slice(&flush_data[..tx_copy]);
+                            conn.tx_buffer.extend_from_slice(&flush_data[..tx_copy]);
                         }
                         let now = crate::hrtimer::now_ns();
                         conn.tx_last_send_ns = now;
@@ -4182,17 +4461,29 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
                         // ECN: CWR on data segments, ECT(0) in IP header.
                         let mut nagle_flags = TCP_ACK | TCP_PSH;
                         let nagle_ecn = if conn.ecn_ok {
-                            if conn.ecn_cwr_sent { nagle_flags |= TCP_CWR; }
+                            if conn.ecn_cwr_sent {
+                                nagle_flags |= TCP_CWR;
+                            }
                             ipv4::ECN_ECT0
-                        } else { 0 };
+                        } else {
+                            0
+                        };
                         let n_ts_ok = conn.ts_ok;
                         let n_ts_recent = conn.ts_recent;
                         conn.nagle_buf.drain(..flush_len);
                         drop(conns);
                         let _ = send_data_with_ts(
-                            lp, ri, rp, s, a, nagle_flags, w,
-                            &flush_data[..flush_len], nagle_ecn,
-                            n_ts_ok, n_ts_recent,
+                            lp,
+                            ri,
+                            rp,
+                            s,
+                            a,
+                            nagle_flags,
+                            w,
+                            &flush_data[..flush_len],
+                            nagle_ecn,
+                            n_ts_ok,
+                            n_ts_recent,
                         );
                         return Ok(());
                     }
@@ -4226,13 +4517,23 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
                             retx_data[..retx_len].copy_from_slice(&conn.tx_buffer[..retx_len]);
                             drop(conns);
                             let _ = send_data_with_ts(
-                                lp, ri, rp, s, a, TCP_ACK | TCP_PSH, w,
-                                &retx_data[..retx_len], retx_ecn,
-                                r_ts_ok, r_ts_recent,
+                                lp,
+                                ri,
+                                rp,
+                                s,
+                                a,
+                                TCP_ACK | TCP_PSH,
+                                w,
+                                &retx_data[..retx_len],
+                                retx_ecn,
+                                r_ts_ok,
+                                r_ts_recent,
                             );
                             crate::serial_println!(
                                 "[tcp] Fast retransmit: {} bytes from seq {} (port {})",
-                                retx_len, s, lp
+                                retx_len,
+                                s,
+                                lp
                             );
                         } else {
                             crate::serial_println!(
@@ -4305,9 +4606,7 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
             // Process FIN — only if all preceding data has been received.
             // FIN's implicit sequence byte follows the payload, so the
             // FIN is in-order when seq + payload_len == rcv_nxt.
-            if flags & TCP_FIN != 0
-                && seq.wrapping_add(payload.len() as u32) == conn.rcv_nxt
-            {
+            if flags & TCP_FIN != 0 && seq.wrapping_add(payload.len() as u32) == conn.rcv_nxt {
                 conn.rcv_nxt = conn.rcv_nxt.wrapping_add(1);
                 conn.remote_closed = true;
                 conn.state = TcpState::CloseWait;
@@ -4321,8 +4620,13 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
 
                 drop(conns);
                 let _ = send_segment(
-                    local_port, remote_ip, remote_port,
-                    snd_nxt, rcv_nxt, TCP_ACK, &[],
+                    local_port,
+                    remote_ip,
+                    remote_port,
+                    snd_nxt,
+                    rcv_nxt,
+                    TCP_ACK,
+                    &[],
                 );
                 return Ok(());
             }
@@ -4337,9 +4641,7 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
             // --- ACK processing ---
             if flags & TCP_ACK != 0 {
                 let old_una = conn.snd_una;
-                if ack.wrapping_sub(conn.snd_una)
-                    <= conn.snd_nxt.wrapping_sub(conn.snd_una)
-                {
+                if ack.wrapping_sub(conn.snd_una) <= conn.snd_nxt.wrapping_sub(conn.snd_una) {
                     conn.snd_una = ack;
                 }
                 let bytes_acked = conn.snd_una.wrapping_sub(old_una);
@@ -4599,7 +4901,10 @@ pub fn tick_persist() {
 
         crate::serial_println!(
             "[tcp] Zero-window probe for {}:{} → {}:{} (next in {}ms)",
-            lp, rp, ri, rp,
+            lp,
+            rp,
+            ri,
+            rp,
             conn.persist_interval_ns / 1_000_000
         );
 
@@ -4607,8 +4912,17 @@ pub fn tick_persist() {
         // interface locks).
         drop(conns);
         let _ = send_data_with_ts(
-            lp, ri, rp, probe_seq, ack, TCP_ACK, wnd, &[], probe_ecn,
-            p_ts_ok, p_ts_recent,
+            lp,
+            ri,
+            rp,
+            probe_seq,
+            ack,
+            TCP_ACK,
+            wnd,
+            &[],
+            probe_ecn,
+            p_ts_ok,
+            p_ts_recent,
         );
         // Dropped lock — restart scan next tick.
         return;
@@ -4628,10 +4942,7 @@ pub fn tick_keepalive() {
 
     for idx in 0..MAX_CONNECTIONS {
         let conn = &mut conns[idx];
-        if !conn.active
-            || conn.state != TcpState::Established
-            || !conn.keepalive_enabled
-        {
+        if !conn.active || conn.state != TcpState::Established || !conn.keepalive_enabled {
             continue;
         }
 
@@ -4641,8 +4952,7 @@ pub fn tick_keepalive() {
         //  - If no probes sent yet: must exceed idle_ns.
         //  - Otherwise: must exceed idle_ns + probes_sent * interval_ns.
         let threshold = conn.keepalive_idle_ns.saturating_add(
-            (conn.keepalive_probes_sent as u64)
-                .saturating_mul(conn.keepalive_interval_ns),
+            (conn.keepalive_probes_sent as u64).saturating_mul(conn.keepalive_interval_ns),
         );
 
         if elapsed < threshold {
@@ -4653,8 +4963,10 @@ pub fn tick_keepalive() {
         if conn.keepalive_probes_sent >= conn.keepalive_probes_max {
             crate::serial_println!(
                 "[tcp] Keepalive timeout — connection {}:{} → {}:{} dead after {} probes",
-                conn.local_port, conn.remote_port,
-                conn.remote_ip, conn.remote_port,
+                conn.local_port,
+                conn.remote_port,
+                conn.remote_ip,
+                conn.remote_port,
                 conn.keepalive_probes_max
             );
 
@@ -4675,8 +4987,13 @@ pub fn tick_keepalive() {
 
             drop(conns);
             let _ = send_segment(
-                local_port, remote_ip, remote_port,
-                snd_nxt, rcv_nxt, TCP_RST | TCP_ACK, &[],
+                local_port,
+                remote_ip,
+                remote_port,
+                snd_nxt,
+                rcv_nxt,
+                TCP_RST | TCP_ACK,
+                &[],
             );
             return; // Dropped lock; restart scan next tick.
         }
@@ -4700,7 +5017,8 @@ pub fn tick_keepalive() {
         crate::serial_println!(
             "[tcp] Keepalive probe #{} for {}:{} (idle {}ms)",
             conn.keepalive_probes_sent,
-            remote_ip, remote_port,
+            remote_ip,
+            remote_port,
             elapsed / 1_000_000
         );
 
@@ -4708,9 +5026,17 @@ pub fn tick_keepalive() {
         // interface locks).
         drop(conns);
         let _ = send_data_with_ts(
-            local_port, remote_ip, remote_port,
-            probe_seq, rcv_nxt, TCP_ACK, our_wnd, &[], ka_ecn,
-            k_ts_ok, k_ts_recent,
+            local_port,
+            remote_ip,
+            remote_port,
+            probe_seq,
+            rcv_nxt,
+            TCP_ACK,
+            our_wnd,
+            &[],
+            ka_ecn,
+            k_ts_ok,
+            k_ts_recent,
         );
         return; // Dropped lock; restart scan next tick.
     }
@@ -4779,7 +5105,9 @@ pub fn tick_time_wait_cleanup() {
                 if elapsed >= TIME_WAIT_DURATION_NS {
                     crate::serial_println!(
                         "[tcp] TIME_WAIT expired for port {} → {}:{} — reclaiming slot",
-                        conn.local_port, conn.remote_ip, conn.remote_port
+                        conn.local_port,
+                        conn.remote_ip,
+                        conn.remote_port
                     );
                     conn.last_error = TCP_ERR_NONE; // Normal close.
                     conn.active = false;
@@ -4799,7 +5127,9 @@ pub fn tick_time_wait_cleanup() {
                 if elapsed >= FIN_WAIT2_TIMEOUT_NS {
                     crate::serial_println!(
                         "[tcp] FIN_WAIT_1 timeout for port {} → {}:{} — reclaiming",
-                        conn.local_port, conn.remote_ip, conn.remote_port
+                        conn.local_port,
+                        conn.remote_ip,
+                        conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
                     conn.active = false;
@@ -4820,7 +5150,9 @@ pub fn tick_time_wait_cleanup() {
                 if elapsed >= FIN_WAIT2_TIMEOUT_NS {
                     crate::serial_println!(
                         "[tcp] FIN_WAIT_2 timeout for port {} → {}:{} — reclaiming",
-                        conn.local_port, conn.remote_ip, conn.remote_port
+                        conn.local_port,
+                        conn.remote_ip,
+                        conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
                     conn.active = false;
@@ -4839,7 +5171,9 @@ pub fn tick_time_wait_cleanup() {
                 if elapsed >= 30_000_000_000 {
                     crate::serial_println!(
                         "[tcp] LAST_ACK timeout for port {} → {}:{} — reclaiming",
-                        conn.local_port, conn.remote_ip, conn.remote_port
+                        conn.local_port,
+                        conn.remote_ip,
+                        conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
                     conn.active = false;
@@ -4858,7 +5192,9 @@ pub fn tick_time_wait_cleanup() {
                 if elapsed >= SYN_RECEIVED_TIMEOUT_NS {
                     crate::serial_println!(
                         "[tcp] SYN_RECEIVED timeout for port {} ← {}:{} — reclaiming",
-                        conn.local_port, conn.remote_ip, conn.remote_port
+                        conn.local_port,
+                        conn.remote_ip,
+                        conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
                     conn.active = false;
@@ -4878,7 +5214,9 @@ pub fn tick_time_wait_cleanup() {
                 if elapsed >= SYN_RECEIVED_TIMEOUT_NS {
                     crate::serial_println!(
                         "[tcp] SYN_SENT timeout for port {} → {}:{} — reclaiming",
-                        conn.local_port, conn.remote_ip, conn.remote_port
+                        conn.local_port,
+                        conn.remote_ip,
+                        conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
                     conn.active = false;
@@ -4899,7 +5237,9 @@ pub fn tick_time_wait_cleanup() {
                 if elapsed >= CLOSE_WAIT_TIMEOUT_NS && conn.tx_buffer.is_empty() {
                     crate::serial_println!(
                         "[tcp] CLOSE_WAIT timeout for port {} → {}:{} — reclaiming (app likely crashed)",
-                        conn.local_port, conn.remote_ip, conn.remote_port
+                        conn.local_port,
+                        conn.remote_ip,
+                        conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
                     conn.active = false;
@@ -4954,7 +5294,10 @@ pub fn tick_retransmit() {
         if conn.retransmit_count > MAX_RETRANSMITS {
             crate::serial_println!(
                 "[tcp] SYN retransmit exhausted ({} retries) for port {} → {}:{}",
-                conn.retransmit_count, conn.local_port, conn.remote_ip, conn.remote_port
+                conn.retransmit_count,
+                conn.local_port,
+                conn.remote_ip,
+                conn.remote_port
             );
             conn.last_error = TCP_ERR_TIMEDOUT;
             conn.active = false;
@@ -4977,15 +5320,26 @@ pub fn tick_retransmit() {
 
         crate::serial_println!(
             "[tcp] SYN retransmit #{} to {}:{} (port {}, rto={}ms)",
-            conn.retransmit_count, ri, rp, lp, conn.rto_ns / 1_000_000
+            conn.retransmit_count,
+            ri,
+            rp,
+            lp,
+            conn.rto_ns / 1_000_000
         );
 
         // Drop lock before sending.
         drop(conns);
         let _ = send_syn_segment(
-            lp, ri, rp,
-            isn, 0, TCP_SYN | TCP_ECE | TCP_CWR, DEFAULT_WINDOW, wscale,
-            tcp_now_ms(), 0,
+            lp,
+            ri,
+            rp,
+            isn,
+            0,
+            TCP_SYN | TCP_ECE | TCP_CWR,
+            DEFAULT_WINDOW,
+            wscale,
+            tcp_now_ms(),
+            0,
         );
         // Lock dropped — can't continue scan; next tick handles rest.
         return;
@@ -5005,13 +5359,12 @@ pub fn tick_retransmit() {
         if conn.state != TcpState::FinWait1 && conn.state != TcpState::LastAck {
             continue;
         }
-        let elapsed = now.saturating_sub(
-            if !conn.tx_buffer.is_empty() && conn.tx_last_send_ns > 0 {
+        let elapsed =
+            now.saturating_sub(if !conn.tx_buffer.is_empty() && conn.tx_last_send_ns > 0 {
                 conn.tx_last_send_ns
             } else {
                 conn.last_activity_ns
-            }
-        );
+            });
         if elapsed < conn.rto_ns {
             continue;
         }
@@ -5021,7 +5374,9 @@ pub fn tick_retransmit() {
         if conn.retransmit_count > MAX_RETRANSMITS {
             crate::serial_println!(
                 "[tcp] {:?} retransmit exhausted ({} retries) for port {} — aborting",
-                conn.state, conn.retransmit_count, conn.local_port
+                conn.state,
+                conn.retransmit_count,
+                conn.local_port
             );
             conn.last_error = TCP_ERR_TIMEDOUT;
             conn.active = false;
@@ -5044,14 +5399,26 @@ pub fn tick_retransmit() {
 
                 crate::serial_println!(
                     "[tcp] RTO data retransmit ({:?}): {} bytes from seq {} (port {}, rto={}ms)",
-                    conn.state, len, seq, lp, conn.rto_ns / 1_000_000
+                    conn.state,
+                    len,
+                    seq,
+                    lp,
+                    conn.rto_ns / 1_000_000
                 );
 
                 drop(conns);
                 let _ = send_data_with_ts(
-                    lp, ri, rp, seq, ack, TCP_ACK | TCP_PSH, wnd,
-                    &data[..len], rto_ecn,
-                    r_ts_ok, r_ts_recent,
+                    lp,
+                    ri,
+                    rp,
+                    seq,
+                    ack,
+                    TCP_ACK | TCP_PSH,
+                    wnd,
+                    &data[..len],
+                    rto_ecn,
+                    r_ts_ok,
+                    r_ts_recent,
                 );
                 return;
             }
@@ -5071,13 +5438,15 @@ pub fn tick_retransmit() {
 
         crate::serial_println!(
             "[tcp] FIN retransmit ({:?}) to {}:{} (port {}, rto={}ms)",
-            conn.state, ri, rp, lp, conn.rto_ns / 1_000_000
+            conn.state,
+            ri,
+            rp,
+            lp,
+            conn.rto_ns / 1_000_000
         );
 
         drop(conns);
-        let _ = send_segment(
-            lp, ri, rp, fin_seq, ack_nr, TCP_FIN | TCP_ACK, &[],
-        );
+        let _ = send_segment(lp, ri, rp, fin_seq, ack_nr, TCP_FIN | TCP_ACK, &[]);
         return;
     }
 
@@ -5104,7 +5473,10 @@ pub fn tick_retransmit() {
         if conn.retransmit_count > MAX_RETRANSMITS {
             crate::serial_println!(
                 "[tcp] Retransmit exhausted ({} retries) for port {} → {}:{} — aborting",
-                conn.retransmit_count, conn.local_port, conn.remote_ip, conn.remote_port
+                conn.retransmit_count,
+                conn.local_port,
+                conn.remote_ip,
+                conn.remote_port
             );
             conn.last_error = TCP_ERR_TIMEDOUT;
             conn.active = false;
@@ -5114,7 +5486,9 @@ pub fn tick_retransmit() {
             continue;
         }
 
-        if let Some((lp, ri, rp, seq, ack, wnd, data, len, r_ts_ok, r_ts_recent)) = retransmit_from_buffer(conn) {
+        if let Some((lp, ri, rp, seq, ack, wnd, data, len, r_ts_ok, r_ts_recent)) =
+            retransmit_from_buffer(conn)
+        {
             // Exponential backoff (RFC 6298 §5.5).
             conn.rto_ns = conn.rto_ns.saturating_mul(2).min(RTO_MAX_NS);
             // Reset send timestamp for the next RTO measurement.
@@ -5125,15 +5499,27 @@ pub fn tick_retransmit() {
 
             crate::serial_println!(
                 "[tcp] RTO retransmit #{}: {} bytes from seq {} (port {}, rto={}ms)",
-                conn.retransmit_count, len, seq, lp, conn.rto_ns / 1_000_000
+                conn.retransmit_count,
+                len,
+                seq,
+                lp,
+                conn.rto_ns / 1_000_000
             );
 
             // Drop lock before sending.
             drop(conns);
             let _ = send_data_with_ts(
-                lp, ri, rp, seq, ack, TCP_ACK | TCP_PSH, wnd,
-                &data[..len], rto_ecn,
-                r_ts_ok, r_ts_recent,
+                lp,
+                ri,
+                rp,
+                seq,
+                ack,
+                TCP_ACK | TCP_PSH,
+                wnd,
+                &data[..len],
+                rto_ecn,
+                r_ts_ok,
+                r_ts_recent,
             );
             // We dropped the lock, so we can't continue the scan.
             // The next tick will handle remaining connections.
@@ -5174,8 +5560,8 @@ pub fn tick_retransmit() {
 /// segments fit without fragmentation.  This is the sender-side PMTUD
 /// adjustment.
 pub fn icmp_error(
-    orig_src_ip: Ipv4Addr,  // IPv4-specific (called from ICMP handler)
-    orig_dst_ip: Ipv4Addr,  // IPv4-specific (called from ICMP handler)
+    orig_src_ip: Ipv4Addr, // IPv4-specific (called from ICMP handler)
+    orig_dst_ip: Ipv4Addr, // IPv4-specific (called from ICMP handler)
     orig_tcp_hdr: &[u8],
     icmp_type: u8,
     icmp_code: u8,
@@ -5213,9 +5599,12 @@ pub fn icmp_error(
                 // is unreachable.
                 crate::serial_println!(
                     "[tcp] ICMP error (type={} code={}) for SYN_SENT {}:{} → {}:{} — aborting",
-                    icmp_type, icmp_code,
-                    orig_src_ip, src_port,
-                    orig_dst_ip, dst_port
+                    icmp_type,
+                    icmp_code,
+                    orig_src_ip,
+                    src_port,
+                    orig_dst_ip,
+                    dst_port
                 );
                 conn.last_error = TCP_ERR_REFUSED; // ICMP unreachable on connect.
                 conn.active = false;
@@ -5229,9 +5618,12 @@ pub fn icmp_error(
                 // Also abort half-open connections from the server side.
                 crate::serial_println!(
                     "[tcp] ICMP error (type={} code={}) for SYN_RECEIVED {}:{} → {}:{} — aborting",
-                    icmp_type, icmp_code,
-                    orig_src_ip, src_port,
-                    orig_dst_ip, dst_port
+                    icmp_type,
+                    icmp_code,
+                    orig_src_ip,
+                    src_port,
+                    orig_dst_ip,
+                    dst_port
                 );
                 conn.last_error = TCP_ERR_REFUSED; // ICMP unreachable on half-open.
                 conn.active = false;
@@ -5251,9 +5643,13 @@ pub fn icmp_error(
                     if new_mss > 0 && (conn.peer_mss == 0 || new_mss < conn.peer_mss) {
                         crate::serial_println!(
                             "[tcp] PMTUD: reducing MSS to {} (MTU={}) for {:?} {}:{} → {}:{}",
-                            new_mss, mtu, conn.state,
-                            orig_src_ip, src_port,
-                            orig_dst_ip, dst_port
+                            new_mss,
+                            mtu,
+                            conn.state,
+                            orig_src_ip,
+                            src_port,
+                            orig_dst_ip,
+                            dst_port
                         );
                         conn.peer_mss = new_mss;
                     }
@@ -5263,10 +5659,13 @@ pub fn icmp_error(
                 // Log but do not abort — the route may recover.
                 crate::serial_println!(
                     "[tcp] ICMP soft error (type={} code={}) for {:?} {}:{} → {}:{} — ignored",
-                    icmp_type, icmp_code,
+                    icmp_type,
+                    icmp_code,
                     conn.state,
-                    orig_src_ip, src_port,
-                    orig_dst_ip, dst_port
+                    orig_src_ip,
+                    src_port,
+                    orig_dst_ip,
+                    dst_port
                 );
             }
         }
@@ -5336,10 +5735,7 @@ fn test_bind_duplicate_rejected() -> KernelResult<()> {
         other => {
             // Best-effort cleanup — we're about to return an error anyway.
             close_listener(handle).ok();
-            crate::serial_println!(
-                "[tcp]   FAIL: duplicate bind returned {:?}",
-                other
-            );
+            crate::serial_println!("[tcp]   FAIL: duplicate bind returned {:?}", other);
             return Err(KernelError::InternalError);
         }
     }
@@ -5361,10 +5757,7 @@ fn test_try_accept_empty() -> KernelResult<()> {
         Err(KernelError::WouldBlock) => {}
         other => {
             close_listener(handle).ok();
-            crate::serial_println!(
-                "[tcp]   FAIL: try_accept on empty returned {:?}",
-                other
-            );
+            crate::serial_println!("[tcp]   FAIL: try_accept on empty returned {:?}", other);
             return Err(KernelError::InternalError);
         }
     }
@@ -5399,7 +5792,10 @@ fn test_parse_tcp_options() -> KernelResult<()> {
     let wscale_opt = [3, 3, 7];
     let opts = parse_tcp_options(&wscale_opt);
     if opts.wscale != Some(7) {
-        crate::serial_println!("[tcp]   FAIL: wscale expected Some(7), got {:?}", opts.wscale);
+        crate::serial_println!(
+            "[tcp]   FAIL: wscale expected Some(7), got {:?}",
+            opts.wscale
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -5412,7 +5808,10 @@ fn test_parse_tcp_options() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if opts.wscale != Some(7) {
-        crate::serial_println!("[tcp]   FAIL: combined wscale expected Some(7), got {:?}", opts.wscale);
+        crate::serial_println!(
+            "[tcp]   FAIL: combined wscale expected Some(7), got {:?}",
+            opts.wscale
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -5420,7 +5819,10 @@ fn test_parse_tcp_options() -> KernelResult<()> {
     let big_wscale = [3, 3, 15];
     let opts = parse_tcp_options(&big_wscale);
     if opts.wscale != Some(14) {
-        crate::serial_println!("[tcp]   FAIL: wscale clamp expected Some(14), got {:?}", opts.wscale);
+        crate::serial_println!(
+            "[tcp]   FAIL: wscale clamp expected Some(14), got {:?}",
+            opts.wscale
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -5438,7 +5840,9 @@ fn test_parse_tcp_options() -> KernelResult<()> {
     if opts.mss != 1460 || opts.wscale != Some(7) || !opts.sack_permitted {
         crate::serial_println!(
             "[tcp]   FAIL: full SYN parse: mss={} wscale={:?} sack={}",
-            opts.mss, opts.wscale, opts.sack_permitted
+            opts.mss,
+            opts.wscale,
+            opts.sack_permitted
         );
         return Err(KernelError::InternalError);
     }
@@ -5457,7 +5861,8 @@ fn test_sack_blocks() -> KernelResult<()> {
     if conn.sack_block_count != 1 || conn.sack_blocks[0] != (100, 200) {
         crate::serial_println!(
             "[tcp]   FAIL: single block: count={} block={:?}",
-            conn.sack_block_count, conn.sack_blocks[0]
+            conn.sack_block_count,
+            conn.sack_blocks[0]
         );
         return Err(KernelError::InternalError);
     }
@@ -5467,7 +5872,8 @@ fn test_sack_blocks() -> KernelResult<()> {
     if conn.sack_block_count != 1 || conn.sack_blocks[0] != (100, 300) {
         crate::serial_println!(
             "[tcp]   FAIL: merge adjacent: count={} block={:?}",
-            conn.sack_block_count, conn.sack_blocks[0]
+            conn.sack_block_count,
+            conn.sack_blocks[0]
         );
         return Err(KernelError::InternalError);
     }
@@ -5487,7 +5893,8 @@ fn test_sack_blocks() -> KernelResult<()> {
     if conn.sack_block_count != 1 || conn.sack_blocks[0] != (100, 600) {
         crate::serial_println!(
             "[tcp]   FAIL: merge overlapping: count={} block={:?}",
-            conn.sack_block_count, conn.sack_blocks[0]
+            conn.sack_block_count,
+            conn.sack_blocks[0]
         );
         return Err(KernelError::InternalError);
     }
@@ -5499,7 +5906,8 @@ fn test_sack_blocks() -> KernelResult<()> {
     if conn.sack_block_count != 1 || conn.sack_blocks[0] != (300, 600) {
         crate::serial_println!(
             "[tcp]   FAIL: advance trim: count={} block={:?}",
-            conn.sack_block_count, conn.sack_blocks[0]
+            conn.sack_block_count,
+            conn.sack_blocks[0]
         );
         return Err(KernelError::InternalError);
     }
@@ -5590,21 +5998,23 @@ fn test_seq_lt() -> KernelResult<()> {
 /// transport checksum verifier.
 fn test_ipv6_checksum() -> KernelResult<()> {
     let src = Ipv6Addr([
-        0xfe, 0x80, 0, 0, 0, 0, 0, 0,
-        0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01,
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01,
     ]);
     let dst = Ipv6Addr([
-        0xfe, 0x80, 0, 0, 0, 0, 0, 0,
-        0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x02,
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x02,
     ]);
 
     // Build a minimal SYN segment using our builder with IPv6 addresses.
     let seg = build_segment(
-        12345, 80,
-        1000, 0,
-        TCP_SYN, 65535,
+        12345,
+        80,
+        1000,
+        0,
+        TCP_SYN,
+        65535,
         &[],
-        IpAddr::V6(src), IpAddr::V6(dst),
+        IpAddr::V6(src),
+        IpAddr::V6(dst),
     );
 
     // The checksum should already be embedded in the segment.
@@ -5626,8 +6036,15 @@ fn test_ipv6_checksum() -> KernelResult<()> {
     let v4_src = Ipv4Addr::new(10, 0, 0, 1);
     let v4_dst = Ipv4Addr::new(10, 0, 0, 2);
     let v4_seg = build_segment(
-        12345, 80, 1000, 0, TCP_SYN, 65535, &[],
-        IpAddr::V4(v4_src), IpAddr::V4(v4_dst),
+        12345,
+        80,
+        1000,
+        0,
+        TCP_SYN,
+        65535,
+        &[],
+        IpAddr::V4(v4_src),
+        IpAddr::V4(v4_dst),
     );
     if !ipv4::verify_transport_checksum(v4_src, v4_dst, PROTO_TCP, &v4_seg) {
         crate::serial_println!("[tcp]   FAIL: IPv4 TCP checksum via dual-stack builder failed");
@@ -5645,8 +6062,7 @@ fn test_ipv6_checksum() -> KernelResult<()> {
 fn test_dual_stack_ip_addr() -> KernelResult<()> {
     let v4 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let v6 = IpAddr::V6(Ipv6Addr([
-        0xfe, 0x80, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 1,
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
     ]));
 
     // Different address families must not be equal.

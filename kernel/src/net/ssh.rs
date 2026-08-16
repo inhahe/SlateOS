@@ -64,13 +64,13 @@
 // one yet.
 #![allow(dead_code)]
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::vec;
 use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 
 use crate::crypto;
 use crate::error::{KernelError, KernelResult};
@@ -278,7 +278,6 @@ struct Session {
     server_version: Vec<u8>,
 
     // -- Key exchange state --
-
     /// Our ephemeral X25519 private key (32 bytes).
     kex_private: [u8; 32],
     /// Our ephemeral X25519 public key (32 bytes).
@@ -299,7 +298,6 @@ struct Session {
     first_kex: bool,
 
     // -- Encryption state (post-NEWKEYS) --
-
     /// Whether encryption is active.
     encrypted: bool,
     /// Session keys.
@@ -310,21 +308,18 @@ struct Session {
     s2c_seq: u64,
 
     // -- Authentication state --
-
     /// Authenticated username (empty if not yet authenticated).
     username: String,
     /// Number of authentication attempts.
     auth_attempts: u32,
 
     // -- Channel state --
-
     /// Active channels.
     channels: [Option<Channel>; 4],
     /// Next server channel ID.
     next_channel_id: u32,
 
     // -- Statistics --
-
     /// Remote IP.
     remote_ip: super::interface::IpAddr,
     /// Remote port.
@@ -856,8 +851,8 @@ fn build_kexinit() -> Vec<u8> {
     write_name_list(&mut payload, HOST_KEY_ALGORITHM);
     write_name_list(&mut payload, CIPHER_ALGORITHM); // c2s encryption
     write_name_list(&mut payload, CIPHER_ALGORITHM); // s2c encryption
-    write_name_list(&mut payload, MAC_ALGORITHM);    // c2s MAC
-    write_name_list(&mut payload, MAC_ALGORITHM);    // s2c MAC
+    write_name_list(&mut payload, MAC_ALGORITHM); // c2s MAC
+    write_name_list(&mut payload, MAC_ALGORITHM); // s2c MAC
     write_name_list(&mut payload, COMPRESSION_ALGORITHM); // c2s compression
     write_name_list(&mut payload, COMPRESSION_ALGORITHM); // s2c compression
     write_name_list(&mut payload, ""); // c2s languages
@@ -903,8 +898,7 @@ fn generate_ephemeral_keypair() -> ([u8; 32], [u8; 32]) {
 /// Returns true if version exchange is complete.
 fn process_version_exchange(session: &mut Session) -> KernelResult<bool> {
     // Look for CRLF in the receive buffer.
-    let crlf_pos = session.recv_buf.windows(2)
-        .position(|w| w == b"\r\n");
+    let crlf_pos = session.recv_buf.windows(2).position(|w| w == b"\r\n");
 
     let Some(pos) = crlf_pos else {
         if session.recv_buf.len() > MAX_VERSION_LEN {
@@ -918,8 +912,10 @@ fn process_version_exchange(session: &mut Session) -> KernelResult<bool> {
 
     // Validate: must start with "SSH-2.0-".
     if !version.starts_with(b"SSH-2.0-") {
-        crate::serial_println!("[ssh] Client version mismatch: {:?}",
-            core::str::from_utf8(&version).unwrap_or("<invalid>"));
+        crate::serial_println!(
+            "[ssh] Client version mismatch: {:?}",
+            core::str::from_utf8(&version).unwrap_or("<invalid>")
+        );
         return Err(KernelError::InvalidArgument);
     }
 
@@ -954,14 +950,13 @@ fn process_client_kexinit(session: &mut Session, payload: &[u8]) -> KernelResult
     ];
 
     for (required, name) in &checks {
-        let (list_bytes, consumed) = read_string(payload, offset)
-            .ok_or(KernelError::InvalidArgument)?;
+        let (list_bytes, consumed) =
+            read_string(payload, offset).ok_or(KernelError::InvalidArgument)?;
         offset += consumed;
 
         let list = core::str::from_utf8(list_bytes).unwrap_or("");
         if !list.split(',').any(|alg| alg == *required) {
-            crate::serial_println!("[ssh] Client doesn't offer {} for {}",
-                required, name);
+            crate::serial_println!("[ssh] Client doesn't offer {} for {}", required, name);
             return Ok(false);
         }
     }
@@ -988,8 +983,7 @@ fn handle_kex_ecdh_init(
         return Err(KernelError::InvalidArgument);
     }
 
-    let (q_c, _) = read_string(payload, 1)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (q_c, _) = read_string(payload, 1).ok_or(KernelError::InvalidArgument)?;
 
     if q_c.len() != 32 {
         return Err(KernelError::InvalidArgument);
@@ -1033,9 +1027,9 @@ fn handle_kex_ecdh_init(
     // Build SSH_MSG_KEX_ECDH_REPLY.
     let mut reply = Vec::with_capacity(256);
     reply.push(msg::KEX_ECDH_REPLY);
-    write_string(&mut reply, &host_key_blob);        // K_S (host key)
-    write_string(&mut reply, &session.kex_public);    // Q_S (server ephemeral)
-    write_string(&mut reply, &sig_blob);              // signature of H
+    write_string(&mut reply, &host_key_blob); // K_S (host key)
+    write_string(&mut reply, &session.kex_public); // Q_S (server ephemeral)
+    write_string(&mut reply, &sig_blob); // signature of H
 
     Ok(reply)
 }
@@ -1050,10 +1044,7 @@ fn handle_kex_ecdh_init(
 /// - "none" (returns available methods)
 /// - "password" (checked against kernel user table)
 /// - "publickey" (ssh-ed25519 against authorized keys)
-fn handle_userauth_request(
-    session: &mut Session,
-    payload: &[u8],
-) -> KernelResult<Vec<u8>> {
+fn handle_userauth_request(session: &mut Session, payload: &[u8]) -> KernelResult<Vec<u8>> {
     // Parse: byte SSH_MSG_USERAUTH_REQUEST
     //        string user name
     //        string service name ("ssh-connection")
@@ -1065,16 +1056,16 @@ fn handle_userauth_request(
 
     let mut offset = 1;
 
-    let (username_bytes, consumed) = read_string(payload, offset)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (username_bytes, consumed) =
+        read_string(payload, offset).ok_or(KernelError::InvalidArgument)?;
     offset += consumed;
 
-    let (service_bytes, consumed) = read_string(payload, offset)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (service_bytes, consumed) =
+        read_string(payload, offset).ok_or(KernelError::InvalidArgument)?;
     offset += consumed;
 
-    let (method_bytes, consumed) = read_string(payload, offset)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (method_bytes, consumed) =
+        read_string(payload, offset).ok_or(KernelError::InvalidArgument)?;
     offset += consumed;
 
     let username = core::str::from_utf8(username_bytes).unwrap_or("");
@@ -1091,12 +1082,8 @@ fn handle_userauth_request(
             // Return available authentication methods.
             build_userauth_failure()
         }
-        "password" => {
-            handle_password_auth(session, payload, offset, username)
-        }
-        "publickey" => {
-            handle_publickey_auth(session, payload, offset, username)
-        }
+        "password" => handle_password_auth(session, payload, offset, username),
+        "publickey" => handle_publickey_auth(session, payload, offset, username),
         _ => {
             session.auth_attempts += 1;
             build_userauth_failure()
@@ -1116,8 +1103,8 @@ fn handle_password_auth(
         return build_userauth_failure();
     }
 
-    let (password_bytes, _) = read_string(payload, offset + 1)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (password_bytes, _) =
+        read_string(payload, offset + 1).ok_or(KernelError::InvalidArgument)?;
 
     let password = core::str::from_utf8(password_bytes).unwrap_or("");
 
@@ -1132,8 +1119,11 @@ fn handle_password_auth(
         build_userauth_success()
     } else {
         session.auth_attempts += 1;
-        crate::serial_println!("[ssh] Password auth failed for '{}' (attempt {})",
-            username, session.auth_attempts);
+        crate::serial_println!(
+            "[ssh] Password auth failed for '{}' (attempt {})",
+            username,
+            session.auth_attempts
+        );
         TOTAL_AUTH_FAILURES.fetch_add(1, Ordering::Relaxed);
         build_userauth_failure()
     }
@@ -1151,8 +1141,7 @@ fn handle_publickey_auth(
     let mut off = offset + 1;
 
     // string public key algorithm name
-    let (algo_bytes, consumed) = read_string(payload, off)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (algo_bytes, consumed) = read_string(payload, off).ok_or(KernelError::InvalidArgument)?;
     off += consumed;
 
     let algo = core::str::from_utf8(algo_bytes).unwrap_or("");
@@ -1161,8 +1150,7 @@ fn handle_publickey_auth(
     }
 
     // string public key blob
-    let (key_blob, consumed) = read_string(payload, off)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (key_blob, consumed) = read_string(payload, off).ok_or(KernelError::InvalidArgument)?;
     off += consumed;
 
     // Extract the raw 32-byte public key from the blob.
@@ -1186,8 +1174,7 @@ fn handle_publickey_auth(
     }
 
     // Parse the signature.
-    let (sig_blob, _) = read_string(payload, off)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (sig_blob, _) = read_string(payload, off).ok_or(KernelError::InvalidArgument)?;
 
     // Extract raw 64-byte signature from blob.
     let sig = extract_ed25519_signature(sig_blob)?;
@@ -1201,11 +1188,7 @@ fn handle_publickey_auth(
     // boolean   TRUE
     // string    public key algorithm name
     // string    public key blob
-    let signed_data = build_pubkey_signed_data(
-        &session.session_id,
-        username,
-        key_blob,
-    );
+    let signed_data = build_pubkey_signed_data(&session.session_id, username, key_blob);
 
     // Verify the signature.
     if crypto::ed25519_verify(&pubkey, &signed_data, &sig) {
@@ -1214,8 +1197,11 @@ fn handle_publickey_auth(
         build_userauth_success()
     } else {
         session.auth_attempts += 1;
-        crate::serial_println!("[ssh] Public key auth failed for '{}' (attempt {})",
-            username, session.auth_attempts);
+        crate::serial_println!(
+            "[ssh] Public key auth failed for '{}' (attempt {})",
+            username,
+            session.auth_attempts
+        );
         TOTAL_AUTH_FAILURES.fetch_add(1, Ordering::Relaxed);
         build_userauth_failure()
     }
@@ -1224,13 +1210,11 @@ fn handle_publickey_auth(
 /// Extract a 32-byte Ed25519 public key from an SSH key blob.
 fn extract_ed25519_pubkey(blob: &[u8]) -> KernelResult<[u8; 32]> {
     // blob = string "ssh-ed25519" + string <32 bytes>
-    let (algo, consumed) = read_string(blob, 0)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (algo, consumed) = read_string(blob, 0).ok_or(KernelError::InvalidArgument)?;
     if algo != b"ssh-ed25519" {
         return Err(KernelError::InvalidArgument);
     }
-    let (key_data, _) = read_string(blob, consumed)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (key_data, _) = read_string(blob, consumed).ok_or(KernelError::InvalidArgument)?;
     if key_data.len() != 32 {
         return Err(KernelError::InvalidArgument);
     }
@@ -1242,13 +1226,11 @@ fn extract_ed25519_pubkey(blob: &[u8]) -> KernelResult<[u8; 32]> {
 /// Extract a 64-byte Ed25519 signature from an SSH signature blob.
 fn extract_ed25519_signature(blob: &[u8]) -> KernelResult<[u8; 64]> {
     // blob = string "ssh-ed25519" + string <64 bytes>
-    let (algo, consumed) = read_string(blob, 0)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (algo, consumed) = read_string(blob, 0).ok_or(KernelError::InvalidArgument)?;
     if algo != b"ssh-ed25519" {
         return Err(KernelError::InvalidArgument);
     }
-    let (sig_data, _) = read_string(blob, consumed)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (sig_data, _) = read_string(blob, consumed).ok_or(KernelError::InvalidArgument)?;
     if sig_data.len() != 64 {
         return Err(KernelError::InvalidArgument);
     }
@@ -1258,11 +1240,7 @@ fn extract_ed25519_signature(blob: &[u8]) -> KernelResult<[u8; 64]> {
 }
 
 /// Build the data blob signed during public key authentication.
-fn build_pubkey_signed_data(
-    session_id: &[u8; 32],
-    username: &str,
-    key_blob: &[u8],
-) -> Vec<u8> {
+fn build_pubkey_signed_data(session_id: &[u8; 32], username: &str, key_blob: &[u8]) -> Vec<u8> {
     let mut data = Vec::with_capacity(256);
     write_string(&mut data, session_id);
     data.push(msg::USERAUTH_REQUEST);
@@ -1402,10 +1380,7 @@ fn hex_digit(c: u8) -> Option<u8> {
 // ===========================================================================
 
 /// Handle SSH_MSG_CHANNEL_OPEN.
-fn handle_channel_open(
-    session: &mut Session,
-    payload: &[u8],
-) -> KernelResult<Vec<u8>> {
+fn handle_channel_open(session: &mut Session, payload: &[u8]) -> KernelResult<Vec<u8>> {
     // Parse: byte SSH_MSG_CHANNEL_OPEN
     //        string channel type
     //        uint32 sender channel
@@ -1417,22 +1392,19 @@ fn handle_channel_open(
 
     let mut offset = 1;
 
-    let (chan_type_bytes, consumed) = read_string(payload, offset)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (chan_type_bytes, consumed) =
+        read_string(payload, offset).ok_or(KernelError::InvalidArgument)?;
     offset += consumed;
 
     let chan_type = core::str::from_utf8(chan_type_bytes).unwrap_or("");
 
-    let sender_channel = read_u32(payload, offset)
-        .ok_or(KernelError::InvalidArgument)?;
+    let sender_channel = read_u32(payload, offset).ok_or(KernelError::InvalidArgument)?;
     offset += 4;
 
-    let initial_window = read_u32(payload, offset)
-        .ok_or(KernelError::InvalidArgument)?;
+    let initial_window = read_u32(payload, offset).ok_or(KernelError::InvalidArgument)?;
     offset += 4;
 
-    let max_packet = read_u32(payload, offset)
-        .ok_or(KernelError::InvalidArgument)?;
+    let max_packet = read_u32(payload, offset).ok_or(KernelError::InvalidArgument)?;
 
     // Only "session" channels are supported.
     if chan_type != "session" {
@@ -1474,39 +1446,37 @@ fn handle_channel_open(
     // Build SSH_MSG_CHANNEL_OPEN_CONFIRMATION.
     let mut reply = Vec::with_capacity(32);
     reply.push(msg::CHANNEL_OPEN_CONFIRMATION);
-    write_u32(&mut reply, sender_channel);      // recipient channel
-    write_u32(&mut reply, server_channel);       // sender channel
-    write_u32(&mut reply, 65536);               // initial window size
+    write_u32(&mut reply, sender_channel); // recipient channel
+    write_u32(&mut reply, server_channel); // sender channel
+    write_u32(&mut reply, 65536); // initial window size
     write_u32(&mut reply, MAX_PAYLOAD_SIZE as u32); // maximum packet size
 
     Ok(reply)
 }
 
 /// Handle SSH_MSG_CHANNEL_REQUEST.
-fn handle_channel_request(
-    session: &mut Session,
-    payload: &[u8],
-) -> KernelResult<Option<Vec<u8>>> {
+fn handle_channel_request(session: &mut Session, payload: &[u8]) -> KernelResult<Option<Vec<u8>>> {
     if payload.is_empty() || payload[0] != msg::CHANNEL_REQUEST {
         return Err(KernelError::InvalidArgument);
     }
 
     let mut offset = 1;
 
-    let recipient_channel = read_u32(payload, offset)
-        .ok_or(KernelError::InvalidArgument)?;
+    let recipient_channel = read_u32(payload, offset).ok_or(KernelError::InvalidArgument)?;
     offset += 4;
 
-    let (req_type_bytes, consumed) = read_string(payload, offset)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (req_type_bytes, consumed) =
+        read_string(payload, offset).ok_or(KernelError::InvalidArgument)?;
     offset += consumed;
 
     let req_type = core::str::from_utf8(req_type_bytes).unwrap_or("");
     let want_reply = payload.get(offset).copied().unwrap_or(0) != 0;
 
     // Find the channel.
-    let channel = session.channels.iter_mut()
-        .find_map(|c| c.as_mut().filter(|ch| ch.server_channel == recipient_channel));
+    let channel = session.channels.iter_mut().find_map(|c| {
+        c.as_mut()
+            .filter(|ch| ch.server_channel == recipient_channel)
+    });
 
     let Some(channel) = channel else {
         if want_reply {
@@ -1569,23 +1539,20 @@ fn handle_channel_request(
 }
 
 /// Handle SSH_MSG_CHANNEL_DATA — shell input from the client.
-fn handle_channel_data(
-    session: &mut Session,
-    payload: &[u8],
-) -> KernelResult<Option<Vec<u8>>> {
+fn handle_channel_data(session: &mut Session, payload: &[u8]) -> KernelResult<Option<Vec<u8>>> {
     if payload.is_empty() || payload[0] != msg::CHANNEL_DATA {
         return Err(KernelError::InvalidArgument);
     }
 
-    let recipient_channel = read_u32(payload, 1)
-        .ok_or(KernelError::InvalidArgument)?;
+    let recipient_channel = read_u32(payload, 1).ok_or(KernelError::InvalidArgument)?;
 
-    let (data, _) = read_string(payload, 5)
-        .ok_or(KernelError::InvalidArgument)?;
+    let (data, _) = read_string(payload, 5).ok_or(KernelError::InvalidArgument)?;
 
     // Find the channel.
-    let channel = session.channels.iter_mut()
-        .find_map(|c| c.as_mut().filter(|ch| ch.server_channel == recipient_channel));
+    let channel = session.channels.iter_mut().find_map(|c| {
+        c.as_mut()
+            .filter(|ch| ch.server_channel == recipient_channel)
+    });
 
     let Some(channel) = channel else {
         return Ok(None);
@@ -1608,9 +1575,7 @@ fn handle_channel_data(
         match byte {
             b'\r' | b'\n' => {
                 if !channel.line_buf.is_empty() {
-                    let line = String::from(
-                        core::str::from_utf8(&channel.line_buf).unwrap_or("")
-                    );
+                    let line = String::from(core::str::from_utf8(&channel.line_buf).unwrap_or(""));
                     channel.line_buf.clear();
 
                     // Execute via kshell and capture output.
@@ -1671,16 +1636,12 @@ fn handle_channel_data(
 }
 
 /// Handle SSH_MSG_CHANNEL_CLOSE.
-fn handle_channel_close(
-    session: &mut Session,
-    payload: &[u8],
-) -> KernelResult<Option<Vec<u8>>> {
+fn handle_channel_close(session: &mut Session, payload: &[u8]) -> KernelResult<Option<Vec<u8>>> {
     if payload.len() < 5 || payload[0] != msg::CHANNEL_CLOSE {
         return Err(KernelError::InvalidArgument);
     }
 
-    let recipient_channel = read_u32(payload, 1)
-        .ok_or(KernelError::InvalidArgument)?;
+    let recipient_channel = read_u32(payload, 1).ok_or(KernelError::InvalidArgument)?;
 
     // Find and close the channel.
     for slot in &mut session.channels {
@@ -1702,18 +1663,13 @@ fn handle_channel_close(
 }
 
 /// Handle SSH_MSG_CHANNEL_WINDOW_ADJUST.
-fn handle_window_adjust(
-    session: &mut Session,
-    payload: &[u8],
-) -> KernelResult<()> {
+fn handle_window_adjust(session: &mut Session, payload: &[u8]) -> KernelResult<()> {
     if payload.len() < 9 || payload[0] != msg::CHANNEL_WINDOW_ADJUST {
         return Err(KernelError::InvalidArgument);
     }
 
-    let recipient_channel = read_u32(payload, 1)
-        .ok_or(KernelError::InvalidArgument)?;
-    let bytes_to_add = read_u32(payload, 5)
-        .ok_or(KernelError::InvalidArgument)?;
+    let recipient_channel = read_u32(payload, 1).ok_or(KernelError::InvalidArgument)?;
+    let bytes_to_add = read_u32(payload, 5).ok_or(KernelError::InvalidArgument)?;
 
     // Find the channel and adjust its window.
     for ch in session.channels.iter_mut().flatten() {
@@ -1815,10 +1771,7 @@ fn process_message(
     match session.phase {
         SessionPhase::WaitKexInit => {
             if msg_type != msg::KEXINIT {
-                let reply = build_disconnect(
-                    disconnect_reason::PROTOCOL_ERROR,
-                    "Expected KEXINIT",
-                );
+                let reply = build_disconnect(disconnect_reason::PROTOCOL_ERROR, "Expected KEXINIT");
                 return Ok(vec![reply]);
             }
 
@@ -1836,16 +1789,12 @@ fn process_message(
 
         SessionPhase::WaitKexEcdhInit => {
             if msg_type != msg::KEX_ECDH_INIT {
-                let reply = build_disconnect(
-                    disconnect_reason::PROTOCOL_ERROR,
-                    "Expected KEX_ECDH_INIT",
-                );
+                let reply =
+                    build_disconnect(disconnect_reason::PROTOCOL_ERROR, "Expected KEX_ECDH_INIT");
                 return Ok(vec![reply]);
             }
 
-            let kex_reply = handle_kex_ecdh_init(
-                session, payload, host_key_seed, host_key_public,
-            )?;
+            let kex_reply = handle_kex_ecdh_init(session, payload, host_key_seed, host_key_public)?;
 
             // Derive session keys.
             let keys = derive_session_keys(
@@ -1864,10 +1813,7 @@ fn process_message(
 
         SessionPhase::WaitNewKeys => {
             if msg_type != msg::NEWKEYS {
-                let reply = build_disconnect(
-                    disconnect_reason::PROTOCOL_ERROR,
-                    "Expected NEWKEYS",
-                );
+                let reply = build_disconnect(disconnect_reason::PROTOCOL_ERROR, "Expected NEWKEYS");
                 return Ok(vec![reply]);
             }
 
@@ -1890,16 +1836,13 @@ fn process_message(
                 return Ok(vec![reply]);
             }
 
-            let (service_name, _) = read_string(payload, 1)
-                .ok_or(KernelError::InvalidArgument)?;
+            let (service_name, _) = read_string(payload, 1).ok_or(KernelError::InvalidArgument)?;
 
             let service = core::str::from_utf8(service_name).unwrap_or("");
 
             if service != "ssh-userauth" {
-                let reply = build_disconnect(
-                    disconnect_reason::SERVICE_NOT_AVAILABLE,
-                    "Unknown service",
-                );
+                let reply =
+                    build_disconnect(disconnect_reason::SERVICE_NOT_AVAILABLE, "Unknown service");
                 return Ok(vec![reply]);
             }
 
@@ -2005,8 +1948,7 @@ fn process_message(
             }
         }
 
-        SessionPhase::VersionExchange | SessionPhase::KeyExchange |
-        SessionPhase::Closed => {
+        SessionPhase::VersionExchange | SessionPhase::KeyExchange | SessionPhase::Closed => {
             // Shouldn't receive binary packets in these phases.
             Ok(Vec::new())
         }
@@ -2060,9 +2002,8 @@ fn try_read_packet_plain(recv_buf: &mut Vec<u8>) -> Option<Vec<u8>> {
         return None;
     }
 
-    let packet_length = u32::from_be_bytes([
-        recv_buf[0], recv_buf[1], recv_buf[2], recv_buf[3],
-    ]) as usize;
+    let packet_length =
+        u32::from_be_bytes([recv_buf[0], recv_buf[1], recv_buf[2], recv_buf[3]]) as usize;
 
     if packet_length > MAX_PACKET_SIZE || packet_length < 2 {
         return None; // Invalid.
@@ -2157,7 +2098,10 @@ fn generate_host_key() -> ([u8; 32], [u8; 32]) {
             return (seed, public);
         }
         // Invalid file — regenerate.
-        crate::serial_println!("[sshd] Invalid host key file ({}B), regenerating", data.len());
+        crate::serial_println!(
+            "[sshd] Invalid host key file ({}B), regenerating",
+            data.len()
+        );
     }
 
     // Generate fresh host key.
@@ -2170,9 +2114,12 @@ fn generate_host_key() -> ([u8; 32], [u8; 32]) {
     let _ = Vfs::mkdir("/etc");
     let _ = Vfs::mkdir("/etc/ssh");
     match Vfs::write_file(HOST_KEY_PATH, &seed) {
-        Ok(()) => crate::serial_println!("[sshd] Generated and saved host key to {}", HOST_KEY_PATH),
+        Ok(()) => {
+            crate::serial_println!("[sshd] Generated and saved host key to {}", HOST_KEY_PATH)
+        }
         Err(e) => crate::serial_println!(
-            "[sshd] Generated host key (save failed: {:?} — key changes on reboot)", e
+            "[sshd] Generated host key (save failed: {:?} — key changes on reboot)",
+            e
         ),
     }
 
@@ -2218,7 +2165,9 @@ pub fn init() -> KernelResult<()> {
     crate::serial_println!(
         "[ssh] Server listening on port {} (host key fingerprint: SHA256:{:02x}{:02x}{:02x}...{:02x})",
         port,
-        fingerprint[0], fingerprint[1], fingerprint[2],
+        fingerprint[0],
+        fingerprint[1],
+        fingerprint[2],
         fingerprint[31],
     );
 
@@ -2236,10 +2185,8 @@ pub fn shutdown() {
         for session in &mut state.sessions {
             if session.active {
                 // Best-effort disconnect.
-                let disconnect = build_disconnect(
-                    disconnect_reason::BY_APPLICATION,
-                    "Server shutting down",
-                );
+                let disconnect =
+                    build_disconnect(disconnect_reason::BY_APPLICATION, "Server shutting down");
                 if session.encrypted {
                     if let Some(keys) = &session.keys {
                         let _ = send_packet_encrypted(
@@ -2301,7 +2248,8 @@ pub fn tick() {
                 session.connected_at_ns = now;
 
                 // Store server version (without CRLF) for exchange hash.
-                session.server_version = SSH_VERSION_STRING[..SSH_VERSION_STRING.len() - 2].to_vec();
+                session.server_version =
+                    SSH_VERSION_STRING[..SSH_VERSION_STRING.len() - 2].to_vec();
 
                 // Get remote address.
                 if let Some((ip, port)) = super::tcp::peer_addr(tcp_handle) {
@@ -2318,7 +2266,11 @@ pub fn tick() {
                 session.kex_public = pub_key;
 
                 TOTAL_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
-                crate::serial_println!("[ssh] New connection from {:?}:{}", session.remote_ip, session.remote_port);
+                crate::serial_println!(
+                    "[ssh] New connection from {:?}:{}",
+                    session.remote_ip,
+                    session.remote_port
+                );
             } else {
                 // No free slots — reject.
                 let _ = super::tcp::close(tcp_handle);
@@ -2380,14 +2332,12 @@ pub fn tick() {
                 }
             }
 
-            SessionPhase::WaitKexInit | SessionPhase::WaitKexEcdhInit |
-            SessionPhase::WaitNewKeys => {
+            SessionPhase::WaitKexInit
+            | SessionPhase::WaitKexEcdhInit
+            | SessionPhase::WaitNewKeys => {
                 // Read unencrypted packets.
                 while let Some(payload) = try_read_packet_plain(&mut session.recv_buf) {
-                    match process_message(
-                        session, &payload,
-                        &host_key_seed, &host_key_public,
-                    ) {
+                    match process_message(session, &payload, &host_key_seed, &host_key_public) {
                         Ok(responses) => {
                             for resp in responses {
                                 // After NEWKEYS is sent, switch to encrypted mode
@@ -2428,8 +2378,9 @@ pub fn tick() {
                 }
             }
 
-            SessionPhase::WaitServiceRequest | SessionPhase::Authentication |
-            SessionPhase::Connected => {
+            SessionPhase::WaitServiceRequest
+            | SessionPhase::Authentication
+            | SessionPhase::Connected => {
                 // Read encrypted packets.
                 while let Some(keys) = &session.keys {
                     let main_key = keys.c2s_main_key;
@@ -2445,8 +2396,10 @@ pub fn tick() {
                             session.c2s_seq += 1;
 
                             match process_message(
-                                session, &payload,
-                                &host_key_seed, &host_key_public,
+                                session,
+                                &payload,
+                                &host_key_seed,
+                                &host_key_public,
                             ) {
                                 Ok(responses) => {
                                     for resp in responses {
@@ -2489,8 +2442,11 @@ pub fn tick() {
         // Clean up closed sessions.
         if session.phase == SessionPhase::Closed && session.active {
             let _ = super::tcp::close(session.tcp_handle);
-            crate::serial_println!("[ssh] Session closed for {:?}:{}",
-                session.remote_ip, session.remote_port);
+            crate::serial_println!(
+                "[ssh] Session closed for {:?}:{}",
+                session.remote_ip,
+                session.remote_port
+            );
             session.reset();
         }
     }
@@ -2569,9 +2525,8 @@ pub fn self_test() -> KernelResult<()> {
         let packet = build_packet(payload);
 
         // Verify structure.
-        let packet_length = u32::from_be_bytes([
-            packet[0], packet[1], packet[2], packet[3],
-        ]) as usize;
+        let packet_length =
+            u32::from_be_bytes([packet[0], packet[1], packet[2], packet[3]]) as usize;
         let padding_len = packet[4] as usize;
         assert!(padding_len >= MIN_PADDING, "Padding too short");
         assert_eq!(packet_length, 1 + payload.len() + padding_len);
@@ -2617,8 +2572,10 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // Decryption should fail (MAC mismatch).
-        assert!(decrypt_packet(&encrypted, seq, &main_key, &header_key).is_err(),
-            "Tampered packet should fail decryption");
+        assert!(
+            decrypt_packet(&encrypted, seq, &main_key, &header_key).is_err(),
+            "Tampered packet should fail decryption"
+        );
 
         serial_println!("[ssh]   MAC tamper detection: OK");
     }
@@ -2632,11 +2589,20 @@ pub fn self_test() -> KernelResult<()> {
         let keys1 = derive_session_keys(&shared, &hash, &sid);
         let keys2 = derive_session_keys(&shared, &hash, &sid);
 
-        assert_eq!(keys1.c2s_main_key, keys2.c2s_main_key, "Key derivation not deterministic");
-        assert_eq!(keys1.s2c_main_key, keys2.s2c_main_key, "Key derivation not deterministic");
+        assert_eq!(
+            keys1.c2s_main_key, keys2.c2s_main_key,
+            "Key derivation not deterministic"
+        );
+        assert_eq!(
+            keys1.s2c_main_key, keys2.s2c_main_key,
+            "Key derivation not deterministic"
+        );
 
         // Keys in different directions should differ.
-        assert_ne!(keys1.c2s_main_key, keys1.s2c_main_key, "C2S and S2C keys should differ");
+        assert_ne!(
+            keys1.c2s_main_key, keys1.s2c_main_key,
+            "C2S and S2C keys should differ"
+        );
 
         serial_println!("[ssh]   Key derivation: OK");
     }
@@ -2704,7 +2670,7 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(lf_to_crlf("a\nb\n"), "a\r\nb\r\n");
         assert_eq!(lf_to_crlf("\n"), "\r\n");
         assert_eq!(lf_to_crlf("a\r\nb"), "a\r\r\nb"); // Pre-existing CRLF: don't double-convert
-                                                         // (real usage won't have these, but it's safe).
+        // (real usage won't have these, but it's safe).
         serial_println!("[ssh]   LF→CRLF conversion: OK");
     }
 

@@ -40,12 +40,12 @@
 //!
 //! `SEM_TABLE` → `SCHED` (signal may call `sched::wake()`).
 
-use alloc::collections::{BTreeMap, VecDeque};
 use crate::error::{KernelError, KernelResult};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::collections::{BTreeMap, VecDeque};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -128,8 +128,7 @@ impl Semaphore {
 /// Global table of all live semaphores.
 ///
 /// Lock ordering: `SEM_TABLE` → `SCHED`.
-static SEM_TABLE: Mutex<BTreeMap<SemId, Semaphore>> =
-    Mutex::new(BTreeMap::new());
+static SEM_TABLE: Mutex<BTreeMap<SemId, Semaphore>> = Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -142,7 +141,11 @@ static SEM_TABLE: Mutex<BTreeMap<SemId, Semaphore>> =
 ///
 /// Returns a handle to the new semaphore.
 pub fn create(initial: u64, max_count: u64) -> SemHandle {
-    let max = if max_count == 0 { DEFAULT_MAX_COUNT } else { max_count };
+    let max = if max_count == 0 {
+        DEFAULT_MAX_COUNT
+    } else {
+        max_count
+    };
     let id = alloc_sem_id();
     let sem = Semaphore::new(initial, max);
 
@@ -366,12 +369,10 @@ pub fn wait_timeout(handle: SemHandle, timeout_ns: u64) -> KernelResult<()> {
     loop {
         {
             let mut table = SEM_TABLE.lock();
-            let sem = table
-                .get_mut(&handle.id())
-                .ok_or_else(|| {
-                    crate::hrtimer::cancel(timer_handle);
-                    KernelError::ChannelClosed
-                })?;
+            let sem = table.get_mut(&handle.id()).ok_or_else(|| {
+                crate::hrtimer::cancel(timer_handle);
+                KernelError::ChannelClosed
+            })?;
 
             if sem.closed {
                 crate::hrtimer::cancel(timer_handle);
@@ -441,9 +442,7 @@ pub fn wait_timeout(handle: SemHandle, timeout_ns: u64) -> KernelResult<()> {
 #[allow(dead_code)] // Used in self-test; also useful API for userspace query.
 pub fn count(handle: SemHandle) -> KernelResult<u64> {
     let table = SEM_TABLE.lock();
-    let sem = table
-        .get(&handle.id())
-        .ok_or(KernelError::InvalidHandle)?;
+    let sem = table.get(&handle.id()).ok_or(KernelError::InvalidHandle)?;
     Ok(sem.count)
 }
 
@@ -600,13 +599,7 @@ pub fn self_test() -> KernelResult<()> {
         let h = create(0, 10);
 
         // Spawn a task that will block on wait.
-        let _ = sched::spawn(
-            b"sem-close-test",
-            16,
-            sem_close_waiter_task,
-            h.raw(),
-            0,
-        );
+        let _ = sched::spawn(b"sem-close-test", 16, sem_close_waiter_task, h.raw(), 0);
 
         // Give the waiter time to block.
         sched::yield_now();
@@ -631,13 +624,7 @@ pub fn self_test() -> KernelResult<()> {
         let h = create(0, 10);
 
         // Spawn a task that blocks on wait.
-        let _ = sched::spawn(
-            b"sem-signal-test",
-            16,
-            sem_signal_waiter_task,
-            h.raw(),
-            0,
-        );
+        let _ = sched::spawn(b"sem-signal-test", 16, sem_signal_waiter_task, h.raw(), 0);
 
         // Yield to let waiter block.
         sched::yield_now();

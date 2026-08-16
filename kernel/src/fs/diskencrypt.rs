@@ -21,11 +21,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -178,21 +178,19 @@ pub fn init_defaults() {
     }
 
     // Default: one system volume, unencrypted.
-    let volumes = alloc::vec![
-        EncryptedVolume {
-            id: 1,
-            device: String::from("/dev/sda1"),
-            label: String::from("System"),
-            algorithm: EncryptAlgorithm::Aes256Xts,
-            status: VolumeStatus::Unencrypted,
-            size_bytes: 512 * 1024 * 1024 * 1024, // 512 GiB
-            key_slots: Vec::new(),
-            has_recovery_key: false,
-            tpm_sealed: false,
-            mount_point: String::from("/"),
-            progress_pct: 0,
-        },
-    ];
+    let volumes = alloc::vec![EncryptedVolume {
+        id: 1,
+        device: String::from("/dev/sda1"),
+        label: String::from("System"),
+        algorithm: EncryptAlgorithm::Aes256Xts,
+        status: VolumeStatus::Unencrypted,
+        size_bytes: 512 * 1024 * 1024 * 1024, // 512 GiB
+        key_slots: Vec::new(),
+        has_recovery_key: false,
+        tpm_sealed: false,
+        mount_point: String::from("/"),
+        progress_pct: 0,
+    },];
 
     *guard = Some(State {
         volumes,
@@ -221,14 +219,12 @@ pub fn register_volume(
             algorithm,
             status: VolumeStatus::Locked,
             size_bytes,
-            key_slots: alloc::vec![
-                KeySlot {
-                    slot: 0,
-                    active: true,
-                    kdf: Kdf::Argon2id,
-                    label: String::from("Main passphrase"),
-                },
-            ],
+            key_slots: alloc::vec![KeySlot {
+                slot: 0,
+                active: true,
+                kdf: Kdf::Argon2id,
+                label: String::from("Main passphrase"),
+            },],
             has_recovery_key: false,
             tpm_sealed: false,
             mount_point: String::new(),
@@ -242,7 +238,10 @@ pub fn register_volume(
 /// Unlock a volume (simulated — in reality would verify passphrase).
 pub fn unlock_volume(id: u32, _passphrase: &str) -> KernelResult<()> {
     with_state(|state| {
-        let vol = state.volumes.iter_mut().find(|v| v.id == id)
+        let vol = state
+            .volumes
+            .iter_mut()
+            .find(|v| v.id == id)
             .ok_or(KernelError::NotFound)?;
 
         if vol.status == VolumeStatus::Unencrypted {
@@ -267,7 +266,10 @@ pub fn unlock_volume(id: u32, _passphrase: &str) -> KernelResult<()> {
 /// Lock a volume.
 pub fn lock_volume(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let vol = state.volumes.iter_mut().find(|v| v.id == id)
+        let vol = state
+            .volumes
+            .iter_mut()
+            .find(|v| v.id == id)
             .ok_or(KernelError::NotFound)?;
         if vol.status != VolumeStatus::Unlocked {
             return Err(KernelError::InvalidArgument);
@@ -280,7 +282,10 @@ pub fn lock_volume(id: u32) -> KernelResult<()> {
 /// Add a key slot to a volume.
 pub fn add_key_slot(volume_id: u32, kdf: Kdf, label: &str) -> KernelResult<u8> {
     with_state(|state| {
-        let vol = state.volumes.iter_mut().find(|v| v.id == volume_id)
+        let vol = state
+            .volumes
+            .iter_mut()
+            .find(|v| v.id == volume_id)
             .ok_or(KernelError::NotFound)?;
         if vol.key_slots.len() >= 8 {
             return Err(KernelError::ResourceExhausted);
@@ -299,12 +304,18 @@ pub fn add_key_slot(volume_id: u32, kdf: Kdf, label: &str) -> KernelResult<u8> {
 /// Remove a key slot.
 pub fn remove_key_slot(volume_id: u32, slot: u8) -> KernelResult<()> {
     with_state(|state| {
-        let vol = state.volumes.iter_mut().find(|v| v.id == volume_id)
+        let vol = state
+            .volumes
+            .iter_mut()
+            .find(|v| v.id == volume_id)
             .ok_or(KernelError::NotFound)?;
 
         // Must keep at least one active slot.
         let active_count = vol.key_slots.iter().filter(|s| s.active).count();
-        let target = vol.key_slots.iter().find(|s| s.slot == slot)
+        let target = vol
+            .key_slots
+            .iter()
+            .find(|s| s.slot == slot)
             .ok_or(KernelError::NotFound)?;
         if target.active && active_count <= 1 {
             return Err(KernelError::InvalidArgument);
@@ -318,7 +329,10 @@ pub fn remove_key_slot(volume_id: u32, slot: u8) -> KernelResult<()> {
 /// Generate a recovery key for a volume.
 pub fn generate_recovery_key(volume_id: u32) -> KernelResult<String> {
     with_state(|state| {
-        let vol = state.volumes.iter_mut().find(|v| v.id == volume_id)
+        let vol = state
+            .volumes
+            .iter_mut()
+            .find(|v| v.id == volume_id)
             .ok_or(KernelError::NotFound)?;
 
         vol.has_recovery_key = true;
@@ -336,18 +350,23 @@ pub fn generate_recovery_key(volume_id: u32) -> KernelResult<String> {
 
         // Generate a display-friendly recovery key (simulated).
         let now = crate::hpet::elapsed_ns();
-        Ok(format!("{:08X}-{:08X}-{:08X}-{:08X}",
+        Ok(format!(
+            "{:08X}-{:08X}-{:08X}-{:08X}",
             (now & 0xFFFF_FFFF) as u32,
             ((now >> 16) & 0xFFFF_FFFF) as u32,
             ((now >> 32) & 0xFFFF_FFFF) as u32,
-            ((now >> 48) ^ 0xA5A5_A5A5) as u32))
+            ((now >> 48) ^ 0xA5A5_A5A5) as u32
+        ))
     })
 }
 
 /// Start encryption of an unencrypted volume.
 pub fn start_encryption(id: u32, algorithm: EncryptAlgorithm) -> KernelResult<()> {
     with_state(|state| {
-        let vol = state.volumes.iter_mut().find(|v| v.id == id)
+        let vol = state
+            .volumes
+            .iter_mut()
+            .find(|v| v.id == id)
             .ok_or(KernelError::NotFound)?;
         if vol.status != VolumeStatus::Unencrypted {
             return Err(KernelError::InvalidArgument);
@@ -373,7 +392,10 @@ pub fn start_encryption(id: u32, algorithm: EncryptAlgorithm) -> KernelResult<()
 /// Update encryption progress (for in-progress encryption).
 pub fn update_progress(id: u32, progress_pct: u8) -> KernelResult<()> {
     with_state(|state| {
-        let vol = state.volumes.iter_mut().find(|v| v.id == id)
+        let vol = state
+            .volumes
+            .iter_mut()
+            .find(|v| v.id == id)
             .ok_or(KernelError::NotFound)?;
         vol.progress_pct = progress_pct.min(100);
         if progress_pct >= 100 {
@@ -390,7 +412,10 @@ pub fn update_progress(id: u32, progress_pct: u8) -> KernelResult<()> {
 /// Get volume info.
 pub fn get_volume(id: u32) -> KernelResult<EncryptedVolume> {
     with_state(|state| {
-        state.volumes.iter().find(|v| v.id == id)
+        state
+            .volumes
+            .iter()
+            .find(|v| v.id == id)
             .cloned()
             .ok_or(KernelError::NotFound)
     })
@@ -423,9 +448,23 @@ pub fn stats() -> (usize, usize, usize, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let encrypted = s.volumes.iter().filter(|v| v.status != VolumeStatus::Unencrypted).count();
-            let unlocked = s.volumes.iter().filter(|v| v.status == VolumeStatus::Unlocked).count();
-            (s.volumes.len(), encrypted, unlocked, s.failed_unlocks, s.ops)
+            let encrypted = s
+                .volumes
+                .iter()
+                .filter(|v| v.status != VolumeStatus::Unencrypted)
+                .count();
+            let unlocked = s
+                .volumes
+                .iter()
+                .filter(|v| v.status == VolumeStatus::Unlocked)
+                .count();
+            (
+                s.volumes.len(),
+                encrypted,
+                unlocked,
+                s.failed_unlocks,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }
@@ -447,7 +486,13 @@ pub fn self_test() {
     crate::serial_println!("  [1/11] default volume: OK");
 
     // Test 2: Register encrypted volume.
-    let id = register_volume("/dev/sdb1", "Data", EncryptAlgorithm::Aes256Xts, 256 * 1024 * 1024 * 1024).expect("register");
+    let id = register_volume(
+        "/dev/sdb1",
+        "Data",
+        EncryptAlgorithm::Aes256Xts,
+        256 * 1024 * 1024 * 1024,
+    )
+    .expect("register");
     assert!(id > 0);
     crate::serial_println!("  [2/11] register volume: OK");
 

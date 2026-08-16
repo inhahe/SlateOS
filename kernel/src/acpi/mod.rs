@@ -30,9 +30,9 @@ mod tables;
 
 pub use madt::{InterruptOverride, IoApicInfo, LocalApicNmi, MadtInfo, ProcessorInfo};
 
-use alloc::vec::Vec;
-use crate::sync::PreemptSpinMutex as Mutex;
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Global state — parsed ACPI data
@@ -396,11 +396,7 @@ unsafe fn scan_for_rsdp(
 /// `hhdm_offset` must be valid. ACPI reclaimable memory must be mapped
 /// in the HHDM.
 #[allow(clippy::arithmetic_side_effects)]
-pub unsafe fn init(
-    rsdp_addr: u64,
-    hhdm_offset: u64,
-    memory_map: &[&crate::limine::MemmapEntry],
-) {
+pub unsafe fn init(rsdp_addr: u64, hhdm_offset: u64, memory_map: &[&crate::limine::MemmapEntry]) {
     // The RSDP address from Limine may be physical or HHDM-virtual, so both
     // are tried.  If neither validates, fall back to scanning ACPI-reclaimable
     // memory (and then low memory) for the "RSD PTR " signature.
@@ -438,7 +434,8 @@ pub unsafe fn init(
             return;
         }
     };
-    serial_println!("[acpi] RSDP revision {} (ACPI {})",
+    serial_println!(
+        "[acpi] RSDP revision {} (ACPI {})",
         revision,
         if revision >= 2 { "2.0+" } else { "1.0" }
     );
@@ -490,8 +487,10 @@ pub unsafe fn init(
     // Validate the root table checksum.
     // SAFETY: ensure_sdt_mapped guarantees the full table is mapped.
     if !unsafe { tables::validate_sdt(root_table_virt) } {
-        serial_println!("[acpi] ERROR: {} checksum validation failed",
-            if use_xsdt { "XSDT" } else { "RSDT" });
+        serial_println!(
+            "[acpi] ERROR: {} checksum validation failed",
+            if use_xsdt { "XSDT" } else { "RSDT" }
+        );
         return;
     }
 
@@ -507,7 +506,10 @@ pub unsafe fn init(
         let virt = match unsafe { ensure_sdt_mapped(phys, hhdm_offset) } {
             Some(v) => v,
             None => {
-                serial_println!("[acpi]   Table at phys={:#x}: invalid header, skipping", phys);
+                serial_println!(
+                    "[acpi]   Table at phys={:#x}: invalid header, skipping",
+                    phys
+                );
                 return;
             }
         };
@@ -594,12 +596,16 @@ pub unsafe fn init(
             // Try to extract S5 sleep type from DSDT.
             if power_info.dsdt_phys != 0 {
                 // SAFETY: dsdt_phys from a validated FADT.
-                if let Some(dsdt_virt) = unsafe { ensure_sdt_mapped(power_info.dsdt_phys, hhdm_offset) } {
+                if let Some(dsdt_virt) =
+                    unsafe { ensure_sdt_mapped(power_info.dsdt_phys, hhdm_offset) }
+                {
                     if unsafe { tables::validate_sdt(dsdt_virt) } {
                         if let Some(slp_typ) = unsafe { fadt::scan_dsdt_for_s5(dsdt_virt) } {
                             power_info.slp_typ_s5 = slp_typ;
                         } else {
-                            serial_println!("[acpi]   DSDT: \\_S5_ not found, using default SLP_TYP=5");
+                            serial_println!(
+                                "[acpi]   DSDT: \\_S5_ not found, using default SLP_TYP=5"
+                            );
                         }
                     } else {
                         serial_println!("[acpi]   DSDT checksum failed, using default SLP_TYP");
@@ -738,7 +744,11 @@ pub fn self_test() -> Result<(), &'static str> {
     if enabled == 0 {
         return Err("No enabled processors in MADT");
     }
-    serial_println!("[acpi]   Processors: {} total, {} enabled", madt.processors.len(), enabled);
+    serial_println!(
+        "[acpi]   Processors: {} total, {} enabled",
+        madt.processors.len(),
+        enabled
+    );
 
     // Should have at least one I/O APIC.
     if madt.io_apics.is_empty() {
@@ -747,11 +757,17 @@ pub fn self_test() -> Result<(), &'static str> {
     serial_println!(
         "[acpi]   I/O APIC(s): {} (primary at {:#x})",
         madt.io_apics.len(),
-        madt.io_apics.first().map(|i| u64::from(i.address)).unwrap_or(0)
+        madt.io_apics
+            .first()
+            .map(|i| u64::from(i.address))
+            .unwrap_or(0)
     );
 
     // Log interrupt overrides.
-    serial_println!("[acpi]   Interrupt overrides: {}", madt.interrupt_overrides.len());
+    serial_println!(
+        "[acpi]   Interrupt overrides: {}",
+        madt.interrupt_overrides.len()
+    );
     for ovr in &madt.interrupt_overrides {
         serial_println!(
             "[acpi]     ISA {} → GSI {} (active_low={}, level={})",

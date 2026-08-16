@@ -80,24 +80,19 @@ pub const MEDIA_TYPE_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+jso
 pub const MEDIA_TYPE_CONFIG: &str = "application/vnd.oci.image.config.v1+json";
 
 /// OCI media type for tar+gzip layers.
-pub const MEDIA_TYPE_LAYER_GZIP: &str =
-    "application/vnd.oci.image.layer.v1.tar+gzip";
+pub const MEDIA_TYPE_LAYER_GZIP: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
 
 /// OCI media type for plain tar layers.
-pub const MEDIA_TYPE_LAYER_TAR: &str =
-    "application/vnd.oci.image.layer.v1.tar";
+pub const MEDIA_TYPE_LAYER_TAR: &str = "application/vnd.oci.image.layer.v1.tar";
 
 /// Docker manifest v2 media type (compatibility).
-pub const MEDIA_TYPE_DOCKER_MANIFEST: &str =
-    "application/vnd.docker.distribution.manifest.v2+json";
+pub const MEDIA_TYPE_DOCKER_MANIFEST: &str = "application/vnd.docker.distribution.manifest.v2+json";
 
 /// Docker config media type (compatibility).
-pub const MEDIA_TYPE_DOCKER_CONFIG: &str =
-    "application/vnd.docker.container.image.v1+json";
+pub const MEDIA_TYPE_DOCKER_CONFIG: &str = "application/vnd.docker.container.image.v1+json";
 
 /// Docker layer media type (compatibility).
-pub const MEDIA_TYPE_DOCKER_LAYER: &str =
-    "application/vnd.docker.image.rootfs.diff.tar.gzip";
+pub const MEDIA_TYPE_DOCKER_LAYER: &str = "application/vnd.docker.image.rootfs.diff.tar.gzip";
 
 /// Maximum number of layers per image.
 const MAX_LAYERS: usize = 128;
@@ -125,17 +120,12 @@ pub struct Descriptor {
 impl Descriptor {
     /// Parse a descriptor from a JSON object.
     fn from_json(value: &JsonValue) -> KernelResult<Self> {
-        let media_type = value
-            .get_str("mediaType")
-            .unwrap_or("")
-            .into();
+        let media_type = value.get_str("mediaType").unwrap_or("").into();
         let digest = value
             .get_str("digest")
             .ok_or(KernelError::InvalidArgument)?
             .into();
-        let size = value
-            .get_i64("size")
-            .ok_or(KernelError::InvalidArgument)? as u64;
+        let size = value.get_i64("size").ok_or(KernelError::InvalidArgument)? as u64;
 
         Ok(Self {
             media_type,
@@ -223,9 +213,7 @@ impl ImageIndex {
         let mut manifests = Vec::with_capacity(manifests_json.len());
         for entry_val in manifests_json {
             let descriptor = Descriptor::from_json(entry_val)?;
-            let platform = entry_val
-                .get("platform")
-                .map(Platform::from_json);
+            let platform = entry_val.get("platform").map(Platform::from_json);
             manifests.push(IndexEntry {
                 descriptor,
                 platform,
@@ -294,9 +282,7 @@ impl ImageManifest {
             .unwrap_or(MEDIA_TYPE_MANIFEST)
             .into();
 
-        let config_val = root
-            .get("config")
-            .ok_or(KernelError::InvalidArgument)?;
+        let config_val = root.get("config").ok_or(KernelError::InvalidArgument)?;
         let config = Descriptor::from_json(config_val)?;
 
         let layers_json = root
@@ -463,59 +449,39 @@ impl ImageConfig {
 
         let root = json::parse(data)?;
 
-        let architecture = root
-            .get_str("architecture")
-            .unwrap_or("amd64")
-            .into();
+        let architecture = root.get_str("architecture").unwrap_or("amd64").into();
         let os = root.get_str("os").unwrap_or("linux").into();
 
         // Runtime config is nested under "config" key.
         let cfg = root.get("config");
 
-        let env = Self::parse_string_array(
-            cfg.and_then(|c| c.get_array("Env")),
-        );
-        let cmd = Self::parse_string_array(
-            cfg.and_then(|c| c.get_array("Cmd")),
-        );
-        let entrypoint = Self::parse_string_array(
-            cfg.and_then(|c| c.get_array("Entrypoint")),
-        );
+        let env = Self::parse_string_array(cfg.and_then(|c| c.get_array("Env")));
+        let cmd = Self::parse_string_array(cfg.and_then(|c| c.get_array("Cmd")));
+        let entrypoint = Self::parse_string_array(cfg.and_then(|c| c.get_array("Entrypoint")));
         let working_dir = cfg
             .and_then(|c| c.get_str("WorkingDir"))
             .unwrap_or("")
             .into();
-        let user = cfg
-            .and_then(|c| c.get_str("User"))
-            .unwrap_or("")
-            .into();
+        let user = cfg.and_then(|c| c.get_str("User")).unwrap_or("").into();
 
         // Exposed ports: object keys like "8080/tcp".
         let exposed_ports = match cfg.and_then(|c| c.get("ExposedPorts")) {
-            Some(JsonValue::Object(entries)) => {
-                entries.iter().map(|(k, _)| k.clone()).collect()
-            }
+            Some(JsonValue::Object(entries)) => entries.iter().map(|(k, _)| k.clone()).collect(),
             _ => Vec::new(),
         };
 
         // Labels.
         let labels = match cfg.and_then(|c| c.get("Labels")) {
-            Some(JsonValue::Object(entries)) => {
-                entries
-                    .iter()
-                    .filter_map(|(k, v)| {
-                        v.as_str().map(|s| (k.clone(), String::from(s)))
-                    })
-                    .collect()
-            }
+            Some(JsonValue::Object(entries)) => entries
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), String::from(s))))
+                .collect(),
             _ => Vec::new(),
         };
 
         // Volume mount points (object keys, like ExposedPorts).
         let volumes = match cfg.and_then(|c| c.get("Volumes")) {
-            Some(JsonValue::Object(entries)) => {
-                entries.iter().map(|(k, _)| k.clone()).collect()
-            }
+            Some(JsonValue::Object(entries)) => entries.iter().map(|(k, _)| k.clone()).collect(),
             _ => Vec::new(),
         };
 
@@ -553,9 +519,7 @@ impl ImageConfig {
 
         // Rootfs diff-ids.
         let rootfs = root.get("rootfs");
-        let diff_ids = Self::parse_string_array(
-            rootfs.and_then(|r| r.get_array("diff_ids")),
-        );
+        let diff_ids = Self::parse_string_array(rootfs.and_then(|r| r.get_array("diff_ids")));
 
         // Build history (top-level `history[]`); optional.
         let history = match root.get_array("history") {
@@ -734,13 +698,13 @@ pub fn verify_digest(data: &[u8], expected_digest: &str) -> KernelResult<()> {
         }
     }
 
-    let computed_hex = core::str::from_utf8(&hex_buf)
-        .map_err(|_| KernelError::InternalError)?;
+    let computed_hex = core::str::from_utf8(&hex_buf).map_err(|_| KernelError::InternalError)?;
 
     if computed_hex != expected_hex {
         serial_println!(
             "[oci] Digest mismatch: expected {}, got sha256:{}",
-            expected_digest, computed_hex
+            expected_digest,
+            computed_hex
         );
         return Err(KernelError::PermissionDenied);
     }
@@ -790,7 +754,8 @@ pub fn load_image(image_dir: &str) -> KernelResult<OciImage> {
     if version != OCI_LAYOUT_VERSION {
         serial_println!(
             "[oci] Unsupported layout version: {} (expected {})",
-            version, OCI_LAYOUT_VERSION
+            version,
+            OCI_LAYOUT_VERSION
         );
         return Err(KernelError::NotSupported);
     }
@@ -800,15 +765,14 @@ pub fn load_image(image_dir: &str) -> KernelResult<OciImage> {
     let index_data = crate::fs::Vfs::read_file(&index_path)?;
     let index = ImageIndex::parse(&index_data)?;
 
-    let manifest_desc = index
-        .find_manifest_for_host()
-        .ok_or_else(|| {
-            serial_println!("[oci] No manifest found for linux/amd64");
-            KernelError::NotFound
-        })?;
+    let manifest_desc = index.find_manifest_for_host().ok_or_else(|| {
+        serial_println!("[oci] No manifest found for linux/amd64");
+        KernelError::NotFound
+    })?;
 
     // Step 3: Read and verify the manifest blob.
-    let manifest_blob_path = manifest_desc.blob_path()
+    let manifest_blob_path = manifest_desc
+        .blob_path()
         .ok_or(KernelError::InvalidArgument)?;
     let manifest_path = format!("{image_dir}/{manifest_blob_path}");
     let manifest_data = crate::fs::Vfs::read_file(&manifest_path)?;
@@ -818,7 +782,9 @@ pub fn load_image(image_dir: &str) -> KernelResult<OciImage> {
     let manifest = ImageManifest::parse(&manifest_data)?;
 
     // Step 4: Read and verify the config blob.
-    let config_blob_path = manifest.config.blob_path()
+    let config_blob_path = manifest
+        .config
+        .blob_path()
         .ok_or(KernelError::InvalidArgument)?;
     let config_path = format!("{image_dir}/{config_blob_path}");
     let config_data = crate::fs::Vfs::read_file(&config_path)?;
@@ -848,18 +814,14 @@ pub fn load_image(image_dir: &str) -> KernelResult<OciImage> {
 /// - `image_dir`: path to the OCI image root
 /// - `layer`: the layer descriptor from the manifest
 /// - `target_dir`: VFS path to extract into (e.g., `/containers/xyz/layer0`)
-pub fn extract_layer(
-    image_dir: &str,
-    layer: &Descriptor,
-    target_dir: &str,
-) -> KernelResult<u64> {
-    let blob_path = layer.blob_path()
-        .ok_or(KernelError::InvalidArgument)?;
+pub fn extract_layer(image_dir: &str, layer: &Descriptor, target_dir: &str) -> KernelResult<u64> {
+    let blob_path = layer.blob_path().ok_or(KernelError::InvalidArgument)?;
     let full_path = format!("{image_dir}/{blob_path}");
 
     serial_println!(
         "[oci]   Extracting layer {} ({} bytes)...",
-        layer.digest, layer.size
+        layer.digest,
+        layer.size
     );
 
     let blob_data = crate::fs::Vfs::read_file(&full_path)?;
@@ -926,7 +888,8 @@ pub fn extract_layer(
 
     serial_println!(
         "[oci]   Layer extracted: {} files, {} tar entries",
-        extracted, entries.len()
+        extracted,
+        entries.len()
     );
 
     Ok(extracted)
@@ -1581,7 +1544,10 @@ fn serialize_index(entries: &[StoreEntry]) -> String {
 fn write_index_at(dir: &str, entries: &[StoreEntry]) -> KernelResult<()> {
     use crate::fs::Vfs;
     let dir = dir.trim_end_matches('/');
-    Vfs::write_file(format!("{dir}/index.json"), serialize_index(entries).as_bytes())?;
+    Vfs::write_file(
+        format!("{dir}/index.json"),
+        serialize_index(entries).as_bytes(),
+    )?;
     Vfs::write_file(
         format!("{dir}/oci-layout"),
         b"{\"imageLayoutVersion\":\"1.0.0\"}",
@@ -1742,7 +1708,9 @@ pub fn store_remove(reference: &str) -> KernelResult<()> {
             // Blob file names are hex digests, so a name that is not UTF-8
             // cannot be a blob this store wrote; leave it alone rather than
             // deleting a file we do not understand.
-            let Some(name) = de.name.to_str() else { continue };
+            let Some(name) = de.name.to_str() else {
+                continue;
+            };
             if !keep.contains(name) {
                 let _ = Vfs::remove(Path::new(blobs.as_str()).join(&de.name));
             }
@@ -1780,7 +1748,10 @@ fn copy_blob_by_digest(src: &str, dst: &str, digest: &str) -> KernelResult<()> {
     use crate::fs::Vfs;
     let (_, hex) = digest.split_once(':').ok_or(KernelError::InvalidArgument)?;
     let data = Vfs::read_file(format!("{}/blobs/sha256/{hex}", src.trim_end_matches('/')))?;
-    Vfs::write_file(format!("{}/blobs/sha256/{hex}", dst.trim_end_matches('/')), &data)?;
+    Vfs::write_file(
+        format!("{}/blobs/sha256/{hex}", dst.trim_end_matches('/')),
+        &data,
+    )?;
     Ok(())
 }
 
@@ -1804,7 +1775,10 @@ pub fn store_export_ref(reference: &str, dest_dir: &str) -> KernelResult<()> {
     create_layout_skeleton(dest_dir);
     // Manifest blob, then the config + layer blobs it references.
     copy_blob_by_digest(STORE_DIR, dest_dir, &entry.digest)?;
-    let (_, hex) = entry.digest.split_once(':').ok_or(KernelError::InvalidArgument)?;
+    let (_, hex) = entry
+        .digest
+        .split_once(':')
+        .ok_or(KernelError::InvalidArgument)?;
     let manifest_data = Vfs::read_file(format!("{STORE_DIR}/blobs/sha256/{hex}"))?;
     let manifest = ImageManifest::parse(&manifest_data)?;
     copy_blob_by_digest(STORE_DIR, dest_dir, &manifest.config.digest)?;
@@ -1856,7 +1830,10 @@ fn load_manifest_by_digest(dir: &str, manifest_digest: &str) -> KernelResult<Oci
     verify_digest(&manifest_data, manifest_digest)?;
     let manifest = ImageManifest::parse(&manifest_data)?;
 
-    let config_blob_path = manifest.config.blob_path().ok_or(KernelError::InvalidArgument)?;
+    let config_blob_path = manifest
+        .config
+        .blob_path()
+        .ok_or(KernelError::InvalidArgument)?;
     let config_data = crate::fs::Vfs::read_file(format!("{dir}/{config_blob_path}"))?;
     verify_digest(&config_data, &manifest.config.digest)?;
     let config = ImageConfig::parse(&config_data)?;
@@ -1924,7 +1901,10 @@ fn overlay_to_build_layer(upper_dir: &Path, whiteouts: &[PathBuf]) -> KernelResu
                     let mode = Vfs::metadata(&child_abs)
                         .map(|m| u32::from(m.permissions))
                         .unwrap_or(0o755);
-                    dirs.push(LayerDir { path: child_rel.clone(), mode });
+                    dirs.push(LayerDir {
+                        path: child_rel.clone(),
+                        mode,
+                    });
                     stack.push(child_rel);
                 }
                 EntryType::File => {
@@ -2196,7 +2176,10 @@ fn tokenize(input: &str) -> Vec<String> {
 
 /// Look up a build variable (ARG/ENV), last definition wins.
 fn var_value<'a>(name: &str, vars: &'a [(String, String)]) -> Option<&'a str> {
-    vars.iter().rev().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    vars.iter()
+        .rev()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_str())
 }
 
 /// Expand `$VAR`, `${VAR}` and `${VAR:-default}` references in `input` using
@@ -2398,12 +2381,14 @@ fn parse_healthcheck(rest: &str) -> Result<HealthcheckConfig, String> {
     // Consume leading `--flag=value` options until the CMD token.
     let mut remainder = trimmed;
     loop {
-        let tok_end = remainder.find(char::is_whitespace).unwrap_or(remainder.len());
+        let tok_end = remainder
+            .find(char::is_whitespace)
+            .unwrap_or(remainder.len());
         let tok = &remainder[..tok_end];
         if let Some(opt) = tok.strip_prefix("--") {
-            let (key, val) = opt.split_once('=').ok_or_else(|| {
-                format!("HEALTHCHECK option '{tok}' needs a value (--key=value)")
-            })?;
+            let (key, val) = opt
+                .split_once('=')
+                .ok_or_else(|| format!("HEALTHCHECK option '{tok}' needs a value (--key=value)"))?;
             match key {
                 "interval" => {
                     hc.interval_ns =
@@ -2418,8 +2403,7 @@ fn parse_healthcheck(rest: &str) -> Result<HealthcheckConfig, String> {
                         .ok_or_else(|| format!("bad --start-period '{val}'"))?;
                 }
                 "retries" => {
-                    hc.retries =
-                        val.parse().map_err(|_| format!("bad --retries '{val}'"))?;
+                    hc.retries = val.parse().map_err(|_| format!("bad --retries '{val}'"))?;
                 }
                 other => return Err(format!("unknown HEALTHCHECK option '--{other}'")),
             }
@@ -2430,7 +2414,9 @@ fn parse_healthcheck(rest: &str) -> Result<HealthcheckConfig, String> {
     }
 
     // The verb must be CMD (Docker only supports CMD after the options).
-    let verb_end = remainder.find(char::is_whitespace).unwrap_or(remainder.len());
+    let verb_end = remainder
+        .find(char::is_whitespace)
+        .unwrap_or(remainder.len());
     let verb = &remainder[..verb_end];
     if !verb.eq_ignore_ascii_case("CMD") {
         return Err(format!("HEALTHCHECK expects CMD (or NONE), found '{verb}'"));
@@ -2567,7 +2553,10 @@ fn path_ignored(patterns: &[(bool, String)], path: &Path) -> bool {
     candidates.push(path.to_path_buf());
     let mut ignored = false;
     for (neg, pat) in patterns {
-        if candidates.iter().any(|c| glob_match(pat.as_bytes(), c.as_bytes())) {
+        if candidates
+            .iter()
+            .any(|c| glob_match(pat.as_bytes(), c.as_bytes()))
+        {
             ignored = !neg;
         }
     }
@@ -2661,7 +2650,7 @@ fn collect_copy_src(
         Err(_) => {
             return Err(BuildError::CopySourceMissing {
                 src: alloc::format!("{}", src.display()),
-            })
+            });
         }
     };
     let dest_bytes = dest.as_bytes();
@@ -2702,8 +2691,7 @@ fn collect_copy_src(
         }
         EntryType::Directory => {
             // Docker copies the *contents* of a directory source into dest.
-            let mut stack: Vec<(PathBuf, PathBuf)> =
-                alloc::vec![(ctx.clone(), dest_norm.clone())];
+            let mut stack: Vec<(PathBuf, PathBuf)> = alloc::vec![(ctx.clone(), dest_norm.clone())];
             while let Some((cur, cur_dest)) = stack.pop() {
                 let entries = Vfs::readdir(&cur)?;
                 for de in entries {
@@ -2933,7 +2921,10 @@ pub fn build_image_targeted(
 
     // Split the Dockerfile into stages at `FROM` boundaries and collect the
     // "global" ARGs declared before the first FROM.
-    let StageSplit { global_args, stages } = split_stages(&instrs, build_args)?;
+    let StageSplit {
+        global_args,
+        stages,
+    } = split_stages(&instrs, build_args)?;
     if stages.len() > MAX_BUILD_STAGES {
         return Err(BuildError::Parse {
             line: 0,
@@ -3103,12 +3094,21 @@ fn split_stages<'a>(
 
     let mut stages: Vec<StageSpec<'a>> = Vec::new();
     for (si, &start) in starts.iter().enumerate() {
-        let end = starts.get(si.saturating_add(1)).copied().unwrap_or(instrs.len());
+        let end = starts
+            .get(si.saturating_add(1))
+            .copied()
+            .unwrap_or(instrs.len());
         let slice = instrs.get(start..end).unwrap_or(&[]);
         let name = slice.first().and_then(|(_, l)| parse_stage_name(l));
-        stages.push(StageSpec { name, instrs: slice });
+        stages.push(StageSpec {
+            name,
+            instrs: slice,
+        });
     }
-    Ok(StageSplit { global_args, stages })
+    Ok(StageSplit {
+        global_args,
+        stages,
+    })
 }
 
 /// Resolve a `FROM <ref>` / `COPY --from=<ref>` reference to a prior stage's
@@ -3265,8 +3265,19 @@ fn exec_build_run(
     let mut mounted = false;
 
     let res = exec_build_run_inner(
-        line, &lower, &upper, &merge, argv, env, working_dir, base_dir, base_layer_descs,
-        layers, &mut ct, &mut ov, &mut mounted,
+        line,
+        &lower,
+        &upper,
+        &merge,
+        argv,
+        env,
+        working_dir,
+        base_dir,
+        base_layer_descs,
+        layers,
+        &mut ct,
+        &mut ov,
+        &mut mounted,
     );
 
     // Teardown (best-effort), reverse creation order. The container recorded no
@@ -3306,7 +3317,10 @@ fn exec_build_run_inner(
     use crate::fs::Vfs;
 
     let Some(program) = argv.first() else {
-        return Err(BuildError::RunLaunch { line, msg: String::from("empty command") });
+        return Err(BuildError::RunLaunch {
+            line,
+            msg: String::from("empty command"),
+        });
     };
 
     // 1. Reconstruct the in-progress rootfs as the overlay lower.
@@ -3314,8 +3328,8 @@ fn exec_build_run_inner(
     Vfs::mkdir_all(upper).map_err(BuildError::Kernel)?;
 
     // 2. Create + mount the copy-on-write overlay (writes land in `upper`).
-    let ov_id = crate::fs::overlay::create("oci-build-run", lower, upper)
-        .map_err(BuildError::Kernel)?;
+    let ov_id =
+        crate::fs::overlay::create("oci-build-run", lower, upper).map_err(BuildError::Kernel)?;
     *ov_out = Some(ov_id);
     Vfs::mkdir_all(merge).map_err(BuildError::Kernel)?;
     let ovfs = crate::fs::overlay::OverlayFs::new(ov_id).map_err(BuildError::Kernel)?;
@@ -3339,15 +3353,23 @@ fn exec_build_run_inner(
     let argv_refs: Vec<&[u8]> = argv_bytes.iter().map(Vec::as_slice).collect();
     let env_bytes: Vec<Vec<u8>> = env.iter().map(|s| s.as_bytes().to_vec()).collect();
     let env_refs: Vec<&[u8]> = env_bytes.iter().map(Vec::as_slice).collect();
-    let cwd: Option<&[u8]> =
-        if working_dir.is_empty() { None } else { Some(working_dir.as_bytes()) };
+    let cwd: Option<&[u8]> = if working_dir.is_empty() {
+        None
+    } else {
+        Some(working_dir.as_bytes())
+    };
 
     let spawn =
         crate::container::exec_path_env(ct_id, program.as_bytes(), &argv_refs, &env_refs, cwd)
-            .map_err(|e| BuildError::RunLaunch { line, msg: format!("{e:?}") })?;
+            .map_err(|e| BuildError::RunLaunch {
+                line,
+                msg: format!("{e:?}"),
+            })?;
 
-    let code = crate::container::wait_process(spawn.pid)
-        .map_err(|e| BuildError::RunLaunch { line, msg: format!("wait failed: {e:?}") })?;
+    let code = crate::container::wait_process(spawn.pid).map_err(|e| BuildError::RunLaunch {
+        line,
+        msg: format!("wait failed: {e:?}"),
+    })?;
     let _ = crate::container::remove_process_task(ct_id, spawn.pid, spawn.task_id);
     if code != 0 {
         return Err(BuildError::RunFailed { line, code });
@@ -3577,8 +3599,7 @@ fn build_one_stage_inner(
                 } else if spec.working_dir.is_empty() {
                     spec.working_dir = format!("/{w}");
                 } else {
-                    spec.working_dir =
-                        format!("{}/{}", spec.working_dir.trim_end_matches('/'), w);
+                    spec.working_dir = format!("{}/{}", spec.working_dir.trim_end_matches('/'), w);
                 }
                 // Docker creates the working directory in the image filesystem
                 // (mode 0o755, root-owned) if it does not already exist.  Emit a
@@ -3622,7 +3643,8 @@ fn build_one_stage_inner(
                     .iter()
                     .find_map(|t| t.strip_prefix("--from=").map(String::from));
                 // `--chmod=<octal>` overrides the copied files' permission bits.
-                let chmod: Option<u32> = match toks.iter().find_map(|t| t.strip_prefix("--chmod=")) {
+                let chmod: Option<u32> = match toks.iter().find_map(|t| t.strip_prefix("--chmod="))
+                {
                     Some(m) => match u32::from_str_radix(m.trim_start_matches("0o"), 8) {
                         Ok(v) => Some(v),
                         Err(_) => {
@@ -3637,7 +3659,10 @@ fn build_one_stage_inner(
                 // `--chown=<uid>[:<gid>]` sets the owner (numeric only — name
                 // resolution needs the stage's /etc/passwd, unsupported).  A
                 // bare uid uses that value for the gid too, matching Docker.
-                let chown: Option<(u32, u32)> = match toks.iter().find_map(|t| t.strip_prefix("--chown=")) {
+                let chown: Option<(u32, u32)> = match toks
+                    .iter()
+                    .find_map(|t| t.strip_prefix("--chown="))
+                {
                     Some(spec) => {
                         let (us, gs) = match spec.split_once(':') {
                             Some((u, g)) => (u, g),
@@ -3727,16 +3752,28 @@ fn build_one_stage_inner(
                             }
                         }
                     }
-                    collect_copy_src(src_root, src, dest_target, single, eff_ignore, chmod, chown, &mut files, line)?;
+                    collect_copy_src(
+                        src_root,
+                        src,
+                        dest_target,
+                        single,
+                        eff_ignore,
+                        chmod,
+                        chown,
+                        &mut files,
+                        line,
+                    )?;
                 }
-                spec.layers.push(BuildLayer { dirs: Vec::new(), files });
+                spec.layers.push(BuildLayer {
+                    dirs: Vec::new(),
+                    files,
+                });
             }
             "VOLUME" => {
                 let expanded = expand_vars(rest_raw, &vars);
                 // Accept both the JSON exec form `["/a","/b"]` and the
                 // whitespace-separated shell form `VOLUME /a /b`.
-                let paths = parse_json_str_array(&expanded)
-                    .unwrap_or_else(|| tokenize(&expanded));
+                let paths = parse_json_str_array(&expanded).unwrap_or_else(|| tokenize(&expanded));
                 if paths.is_empty() {
                     return Err(BuildError::Parse {
                         line,
@@ -3768,7 +3805,9 @@ fn build_one_stage_inner(
                     _ => {
                         return Err(BuildError::Parse {
                             line,
-                            msg: String::from("SHELL requires a JSON array, e.g. [\"/bin/sh\",\"-c\"]"),
+                            msg: String::from(
+                                "SHELL requires a JSON array, e.g. [\"/bin/sh\",\"-c\"]",
+                            ),
                         });
                     }
                 }
@@ -3791,8 +3830,8 @@ fn build_one_stage_inner(
                 // start_health_monitor / health_tick) picks it up when the image
                 // is run. Var-expanded like the other config instructions.
                 let expanded = expand_vars(rest_raw, &vars);
-                let hc = parse_healthcheck(&expanded)
-                    .map_err(|msg| BuildError::Parse { line, msg })?;
+                let hc =
+                    parse_healthcheck(&expanded).map_err(|msg| BuildError::Parse { line, msg })?;
                 spec.healthcheck = Some(hc);
             }
             "MAINTAINER" => {
@@ -3829,7 +3868,9 @@ fn build_one_stage_inner(
     let mut diff_ids = base_diff_ids;
     if let Some(bdir) = &base_dir {
         for d in &layer_descs {
-            let bp = d.blob_path().ok_or(BuildError::Kernel(KernelError::InvalidArgument))?;
+            let bp = d
+                .blob_path()
+                .ok_or(BuildError::Kernel(KernelError::InvalidArgument))?;
             let data = Vfs::read_file(format!("{}/{}", bdir.trim_end_matches('/'), bp))?;
             Vfs::write_file(format!("{dest}/{bp}"), &data)?;
         }
@@ -3885,7 +3926,7 @@ pub fn self_test() -> KernelResult<()> {
     // Test 1: Descriptor parsing.
     {
         let desc_json = json::parse_str(
-            r#"{"mediaType": "application/vnd.oci.image.config.v1+json", "digest": "sha256:abc123", "size": 1024}"#
+            r#"{"mediaType": "application/vnd.oci.image.config.v1+json", "digest": "sha256:abc123", "size": 1024}"#,
         )?;
         let desc = Descriptor::from_json(&desc_json)?;
         assert_eq!(desc.media_type, MEDIA_TYPE_CONFIG);
@@ -3898,15 +3939,12 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 2: Platform matching.
     {
-        let plat_json = json::parse_str(
-            r#"{"os": "linux", "architecture": "amd64"}"#
-        )?;
+        let plat_json = json::parse_str(r#"{"os": "linux", "architecture": "amd64"}"#)?;
         let plat = Platform::from_json(&plat_json);
         assert!(plat.matches_host());
 
-        let plat_json = json::parse_str(
-            r#"{"os": "linux", "architecture": "arm64", "variant": "v8"}"#
-        )?;
+        let plat_json =
+            json::parse_str(r#"{"os": "linux", "architecture": "arm64", "variant": "v8"}"#)?;
         let plat = Platform::from_json(&plat_json);
         assert!(!plat.matches_host());
         serial_println!("[oci]   platform matching: OK");
@@ -3936,8 +3974,7 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(index.manifests.len(), 2);
 
         // Should find amd64 manifest.
-        let host_manifest = index.find_manifest_for_host()
-            .expect("should find amd64");
+        let host_manifest = index.find_manifest_for_host().expect("should find amd64");
         assert_eq!(host_manifest.digest, "sha256:manifest_amd64");
         serial_println!("[oci]   image index: OK");
     }
@@ -4060,8 +4097,14 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(hc.probe_args(), &["curl -f http://localhost/ || exit 1"]);
         // Unset → Docker defaults (30s interval/timeout, 3 retries).
         assert_eq!(hc.interval_ns, 0);
-        assert_eq!(hc.effective_interval_ns(), HealthcheckConfig::DEFAULT_INTERVAL_NS);
-        assert_eq!(hc.effective_timeout_ns(), HealthcheckConfig::DEFAULT_INTERVAL_NS);
+        assert_eq!(
+            hc.effective_interval_ns(),
+            HealthcheckConfig::DEFAULT_INTERVAL_NS
+        );
+        assert_eq!(
+            hc.effective_timeout_ns(),
+            HealthcheckConfig::DEFAULT_INTERVAL_NS
+        );
         assert_eq!(hc.effective_retries(), HealthcheckConfig::DEFAULT_RETRIES);
 
         // NONE: explicitly disabled — parsed but not runnable.
@@ -4108,7 +4151,8 @@ pub fn self_test() -> KernelResult<()> {
             ]
         }"#;
         let index = ImageIndex::parse(index_json.as_bytes())?;
-        let found = index.find_manifest_for_host()
+        let found = index
+            .find_manifest_for_host()
             .expect("should return the only manifest");
         assert_eq!(found.digest, "sha256:only_one");
         serial_println!("[oci]   single-manifest index: OK");
@@ -4185,14 +4229,23 @@ pub fn self_test() -> KernelResult<()> {
         let parsed = parse_env_file(&file);
         // FOO, "BAZ = qux", URL, R=<0xFF>  → 4 accepted.
         assert_eq!(parsed.entries.len(), 4, "four valid entries");
-        assert_eq!(parsed.entries.first().map(Vec::as_slice), Some(&b"FOO=bar"[..]));
-        assert_eq!(parsed.entries.get(1).map(Vec::as_slice), Some(&b"BAZ = qux"[..]));
+        assert_eq!(
+            parsed.entries.first().map(Vec::as_slice),
+            Some(&b"FOO=bar"[..])
+        );
+        assert_eq!(
+            parsed.entries.get(1).map(Vec::as_slice),
+            Some(&b"BAZ = qux"[..])
+        );
         assert_eq!(
             parsed.entries.get(2).map(Vec::as_slice),
             Some(&b"URL=http://x/?a=1&b=2"[..])
         );
         // Last entry preserves the raw 0xFF byte (no UTF-8 corruption).
-        assert_eq!(parsed.entries.get(3).map(|e| e.last().copied()), Some(Some(0xFF)));
+        assert_eq!(
+            parsed.entries.get(3).map(|e| e.last().copied()),
+            Some(Some(0xFF))
+        );
         // Bare key on line 6 and empty key on line 7 were rejected.
         assert_eq!(parsed.rejected_lines, alloc::vec![6, 7]);
 
@@ -4218,7 +4271,8 @@ pub fn self_test() -> KernelResult<()> {
         spec.working_dir = String::from("/app");
         spec.user = String::from("nobody");
         spec.exposed_ports.push(String::from("8080/tcp"));
-        spec.labels.push((String::from("version"), String::from("1.0")));
+        spec.labels
+            .push((String::from("version"), String::from("1.0")));
         // Two layers: one file each.
         spec.layers.push(BuildLayer {
             dirs: Vec::new(),
@@ -4252,7 +4306,10 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(image.config.env.len(), 2);
         assert_eq!(image.config.env[0], "PATH=/usr/bin:/bin");
         assert_eq!(image.config.cmd, alloc::vec![String::from("/bin/hello")]);
-        assert_eq!(image.config.entrypoint, alloc::vec![String::from("/entry.sh")]);
+        assert_eq!(
+            image.config.entrypoint,
+            alloc::vec![String::from("/entry.sh")]
+        );
         assert_eq!(image.config.working_dir, "/app");
         assert_eq!(image.config.user, "nobody");
         assert_eq!(image.config.exposed_ports.len(), 1);
@@ -4262,7 +4319,10 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(image.manifest.layers.len(), 2);
 
         // Extract layer 1 and confirm the file content survived tar+gzip+digest.
-        let layer1 = image.manifest.layers.get(1)
+        let layer1 = image
+            .manifest
+            .layers
+            .get(1)
             .ok_or(KernelError::InvalidArgument)?;
         let extract_dir = "/tmp/oci_wr_extract";
         let _ = Vfs::mkdir(extract_dir);
@@ -4324,9 +4384,24 @@ CMD ["--serve"]
         assert_eq!(image.config.user, "nobody");
         assert!(image.config.exposed_ports.iter().any(|p| p == "8080/tcp"));
         assert!(image.config.exposed_ports.iter().any(|p| p == "9090/udp"));
-        assert!(image.config.labels.iter().any(|(k, v)| k == "version" && v == "1.0"));
-        assert!(image.config.labels.iter().any(|(k, v)| k == "role" && v == "web"));
-        assert_eq!(image.config.entrypoint, alloc::vec![String::from("/srv/app/run.sh")]);
+        assert!(
+            image
+                .config
+                .labels
+                .iter()
+                .any(|(k, v)| k == "version" && v == "1.0")
+        );
+        assert!(
+            image
+                .config
+                .labels
+                .iter()
+                .any(|(k, v)| k == "role" && v == "web")
+        );
+        assert_eq!(
+            image.config.entrypoint,
+            alloc::vec![String::from("/srv/app/run.sh")]
+        );
         assert_eq!(image.config.cmd, alloc::vec![String::from("--serve")]);
         // WORKDIR now materialises its directory as a layer, so this build
         // yields 3 layers: WORKDIR ${APPDIR} (→ /srv), COPY app, COPY readme.txt.
@@ -4337,14 +4412,34 @@ CMD ["--serve"]
         // add an entry, with WORKDIR + the two COPY steps non-empty (1:1 with
         // layers, in Dockerfile order).
         assert_eq!(image.config.history.len(), 10, "history step count");
-        let non_empty: Vec<&HistoryEntry> =
-            image.config.history.iter().filter(|h| !h.empty_layer).collect();
+        let non_empty: Vec<&HistoryEntry> = image
+            .config
+            .history
+            .iter()
+            .filter(|h| !h.empty_layer)
+            .collect();
         assert_eq!(non_empty.len(), 3, "three layer-producing steps");
-        assert!(non_empty.first().is_some_and(|h| h.created_by.starts_with("WORKDIR")));
-        assert!(non_empty.get(1).is_some_and(|h| h.created_by.starts_with("COPY app")));
-        assert!(non_empty.get(2).is_some_and(|h| h.created_by.starts_with("COPY readme.txt")));
         assert!(
-            image.config.history.iter().any(|h| h.empty_layer && h.created_by.starts_with("LABEL")),
+            non_empty
+                .first()
+                .is_some_and(|h| h.created_by.starts_with("WORKDIR"))
+        );
+        assert!(
+            non_empty
+                .get(1)
+                .is_some_and(|h| h.created_by.starts_with("COPY app"))
+        );
+        assert!(
+            non_empty
+                .get(2)
+                .is_some_and(|h| h.created_by.starts_with("COPY readme.txt"))
+        );
+        assert!(
+            image
+                .config
+                .history
+                .iter()
+                .any(|h| h.empty_layer && h.created_by.starts_with("LABEL")),
             "LABEL recorded as empty layer"
         );
 
@@ -4380,14 +4475,29 @@ CMD ["--serve"]
         })?;
         let child = load_image(img2)?;
         assert_eq!(child.manifest.layers.len(), 4, "3 inherited + 1 new layer");
-        assert!(child.config.env.iter().any(|e| e == "PATH=/usr/bin"), "inherited env");
+        assert!(
+            child.config.env.iter().any(|e| e == "PATH=/usr/bin"),
+            "inherited env"
+        );
         assert!(child.config.env.iter().any(|e| e == "EXTRA=1"), "new env");
-        assert_eq!(child.config.entrypoint, alloc::vec![String::from("/srv/app/run.sh")]);
+        assert_eq!(
+            child.config.entrypoint,
+            alloc::vec![String::from("/srv/app/run.sh")]
+        );
         // History carried forward: base's 10 + ENV + COPY = 12; 4 non-empty
         // entries stay 1:1 with the 4 layers.
-        assert_eq!(child.config.history.len(), 12, "base history carried forward");
         assert_eq!(
-            child.config.history.iter().filter(|h| !h.empty_layer).count(),
+            child.config.history.len(),
+            12,
+            "base history carried forward"
+        );
+        assert_eq!(
+            child
+                .config
+                .history
+                .iter()
+                .filter(|h| !h.empty_layer)
+                .count(),
             4,
             "non-empty history == layer count"
         );
@@ -4406,8 +4516,16 @@ CMD ["--serve"]
             KernelError::InternalError
         })?;
         let ba = load_image(img3)?;
-        assert_eq!(ba.config.working_dir, "/prod", "--build-arg overrode ARG default");
-        assert!(ba.config.labels.iter().any(|(k, v)| k == "built" && v == "prod"));
+        assert_eq!(
+            ba.config.working_dir, "/prod",
+            "--build-arg overrode ARG default"
+        );
+        assert!(
+            ba.config
+                .labels
+                .iter()
+                .any(|(k, v)| k == "built" && v == "prod")
+        );
         cleanup_image_dir(img3);
 
         // HEALTHCHECK: parse options + command, serialize into the image
@@ -4420,14 +4538,27 @@ CMD ["--serve"]
             KernelError::InternalError
         })?;
         let hc_img = load_image(img4)?;
-        let hc = hc_img.config.healthcheck.as_ref().expect("built healthcheck present");
-        assert_eq!(hc.test, alloc::vec![
-            String::from("CMD"), String::from("/bin/health"), String::from("-q"),
-        ], "exec-form CMD → CMD + argv");
+        let hc = hc_img
+            .config
+            .healthcheck
+            .as_ref()
+            .expect("built healthcheck present");
+        assert_eq!(
+            hc.test,
+            alloc::vec![
+                String::from("CMD"),
+                String::from("/bin/health"),
+                String::from("-q"),
+            ],
+            "exec-form CMD → CMD + argv"
+        );
         assert_eq!(hc.interval_ns, 30_000_000_000, "30s interval");
         assert_eq!(hc.timeout_ns, 5_000_000_000, "5s timeout");
         assert_eq!(hc.retries, 3, "retries=3");
-        assert!(hc.is_runnable() && !hc.is_shell(), "runnable exec-form probe");
+        assert!(
+            hc.is_runnable() && !hc.is_shell(),
+            "runnable exec-form probe"
+        );
 
         // Shell-form HEALTHCHECK → CMD-SHELL + the whole line; and a child image
         // may disable it with HEALTHCHECK NONE (must override the inherited one).
@@ -4439,8 +4570,15 @@ CMD ["--serve"]
             KernelError::InternalError
         })?;
         let none_img = load_image(img5)?;
-        let nhc = none_img.config.healthcheck.as_ref().expect("NONE healthcheck present");
-        assert!(nhc.is_disabled(), "HEALTHCHECK NONE disables the inherited probe");
+        let nhc = none_img
+            .config
+            .healthcheck
+            .as_ref()
+            .expect("NONE healthcheck present");
+        assert!(
+            nhc.is_disabled(),
+            "HEALTHCHECK NONE disables the inherited probe"
+        );
         cleanup_image_dir(img5);
         cleanup_image_dir(img4);
 
@@ -4511,9 +4649,18 @@ CMD ["--serve"]
             b"important"
         );
         // Excluded: top-level log, dir log, and everything under secret/.
-        assert!(Vfs::read_file(format!("{ext}/data/debug.log")).is_err(), "*.log excluded");
-        assert!(Vfs::read_file(format!("{ext}/data/logs/app.log")).is_err(), "logs/*.log excluded");
-        assert!(Vfs::read_file(format!("{ext}/data/secret/key.pem")).is_err(), "secret/ excluded");
+        assert!(
+            Vfs::read_file(format!("{ext}/data/debug.log")).is_err(),
+            "*.log excluded"
+        );
+        assert!(
+            Vfs::read_file(format!("{ext}/data/logs/app.log")).is_err(),
+            "logs/*.log excluded"
+        );
+        assert!(
+            Vfs::read_file(format!("{ext}/data/secret/key.pem")).is_err(),
+            "secret/ excluded"
+        );
 
         // Clean up context, extract tree, and image.
         let _ = Vfs::remove(format!("{ext}/data/keep.txt"));
@@ -4574,7 +4721,10 @@ ONBUILD RUN echo triggered
             ]
         );
         // ONBUILD stores its trigger verbatim (not executed now).
-        assert_eq!(m.config.onbuild, alloc::vec![String::from("RUN echo triggered")]);
+        assert_eq!(
+            m.config.onbuild,
+            alloc::vec![String::from("RUN echo triggered")]
+        );
 
         let _ = Vfs::rmdir(ctx);
         cleanup_image_dir(img);
@@ -4663,7 +4813,10 @@ COPY --from=mid /extra.txt /extra.txt
         }
         assert_eq!(Vfs::read_file(format!("{text}/out/app.txt"))?, b"appdata");
         // The `mid`/final stages must not have been built past the target.
-        assert!(Vfs::read_file(format!("{text}/extra.txt")).is_err(), "target stops before mid");
+        assert!(
+            Vfs::read_file(format!("{text}/extra.txt")).is_err(),
+            "target stops before mid"
+        );
         let _ = Vfs::remove(format!("{text}/out/app.txt"));
         let _ = Vfs::rmdir(format!("{text}/out"));
         let _ = Vfs::rmdir(text);
@@ -4694,7 +4847,11 @@ COPY --from=mid /extra.txt /extra.txt
             KernelError::InternalError
         })?;
         let ci = load_image(img)?;
-        let layer = ci.manifest.layers.first().ok_or(KernelError::InternalError)?;
+        let layer = ci
+            .manifest
+            .layers
+            .first()
+            .ok_or(KernelError::InternalError)?;
         let bp = layer.blob_path().ok_or(KernelError::InvalidArgument)?;
         let blob = Vfs::read_file(format!("{img}/{bp}"))?;
         let tar = crate::fs::compress::gunzip(&blob)?;
@@ -4716,8 +4873,8 @@ COPY --from=mid /extra.txt /extra.txt
     // Test 17: ADD auto-extracts a local tar archive (plain + gzip), while
     // COPY of the same archive copies it verbatim.
     {
-        use crate::fs::tar::{EntryKind, TarWriteEntry};
         use crate::fs::Vfs;
+        use crate::fs::tar::{EntryKind, TarWriteEntry};
         let ctx = "/tmp/oci_addtar_ctx";
         let img = "/tmp/oci_addtar_img";
         let ext = "/tmp/oci_addtar_ext";
@@ -4807,7 +4964,10 @@ COPY --from=mid /extra.txt /extra.txt
 
         // Config records the final WorkingDir.
         let wi = load_image(img)?;
-        assert_eq!(wi.config.working_dir, "/srv/app", "WorkingDir must be /srv/app");
+        assert_eq!(
+            wi.config.working_dir, "/srv/app",
+            "WorkingDir must be /srv/app"
+        );
 
         // Three filesystem layers: `WORKDIR /srv`, `WORKDIR app` (→ /srv/app),
         // and the COPY.
@@ -4819,16 +4979,28 @@ COPY --from=mid /extra.txt /extra.txt
         );
         // OCI invariant: non-empty history entries == layer count.
         let non_empty = wi.config.history.iter().filter(|h| !h.empty_layer).count();
-        assert_eq!(non_empty, 3, "non-empty history entries must equal layer count");
+        assert_eq!(
+            non_empty, 3,
+            "non-empty history entries must equal layer count"
+        );
 
         // Extracting all layers yields the directory tree and the copied file.
         let _ = Vfs::mkdir(ext);
         for layer in &wi.manifest.layers {
             extract_layer(img, layer, ext)?;
         }
-        assert!(Vfs::is_directory(format!("{ext}/srv")), "/srv must be a directory");
-        assert!(Vfs::is_directory(format!("{ext}/srv/app")), "/srv/app must be a directory");
-        assert_eq!(Vfs::read_file(format!("{ext}/srv/app/app.txt"))?, b"payload");
+        assert!(
+            Vfs::is_directory(format!("{ext}/srv")),
+            "/srv must be a directory"
+        );
+        assert!(
+            Vfs::is_directory(format!("{ext}/srv/app")),
+            "/srv/app must be a directory"
+        );
+        assert_eq!(
+            Vfs::read_file(format!("{ext}/srv/app/app.txt"))?,
+            b"payload"
+        );
         let _ = Vfs::remove_recursive(ext);
         cleanup_image_dir(img);
 
@@ -4880,7 +5052,10 @@ COPY --from=mid /extra.txt /extra.txt
             extract_layer(img, layer, ext)?;
         }
         assert_eq!(Vfs::read_file(format!("{ext}/app/package.json"))?, b"pkg");
-        assert_eq!(Vfs::read_file(format!("{ext}/app/package-lock.json"))?, b"lock");
+        assert_eq!(
+            Vfs::read_file(format!("{ext}/app/package-lock.json"))?,
+            b"lock"
+        );
         assert!(
             Vfs::read_file(format!("{ext}/app/readme.md")).is_err(),
             "glob must not pull in non-matching files"
@@ -4892,7 +5067,10 @@ COPY --from=mid /extra.txt /extra.txt
         let df_none = b"FROM scratch\nCOPY nomatch*.zip /app/\n";
         match build_image(df_none, ctx, img) {
             Err(BuildError::CopySourceMissing { .. }) => {}
-            other => panic!("expected CopySourceMissing for empty glob, ok={}", other.is_ok()),
+            other => panic!(
+                "expected CopySourceMissing for empty glob, ok={}",
+                other.is_ok()
+            ),
         }
         cleanup_image_dir(img);
 
@@ -4924,7 +5102,10 @@ COPY --from=mid /extra.txt /extra.txt
 
         // Tag the built image into the store as `demo:v1`.
         let digest = store_tag_from_dir(img, "demo:v1")?;
-        assert!(digest.starts_with("sha256:"), "manifest digest must be sha256");
+        assert!(
+            digest.starts_with("sha256:"),
+            "manifest digest must be sha256"
+        );
 
         // `latest` default: `store_resolve("demo")` == `demo:v1`? No — different
         // tags. Resolve the explicit tag we set.
@@ -4932,8 +5113,16 @@ COPY --from=mid /extra.txt /extra.txt
 
         // List shows exactly the one reference.
         let listed = store_list()?;
-        assert_eq!(listed.len(), 1, "store must hold one tag, got {}", listed.len());
-        assert_eq!(listed.first().map(|s| s.reference.as_str()), Some("demo:v1"));
+        assert_eq!(
+            listed.len(),
+            1,
+            "store must hold one tag, got {}",
+            listed.len()
+        );
+        assert_eq!(
+            listed.first().map(|s| s.reference.as_str()),
+            Some("demo:v1")
+        );
 
         // Add a second tag (no blob recopy) pointing at the same manifest.
         store_add_tag("demo:v1", "demo:latest")?;
@@ -4954,7 +5143,11 @@ COPY --from=mid /extra.txt /extra.txt
         // blob should be GC'd.
         store_remove("demo:v1")?;
         assert!(store_resolve("demo:v1").is_err(), "removed tag is gone");
-        assert_eq!(store_resolve("demo:latest")?, digest, "surviving tag intact");
+        assert_eq!(
+            store_resolve("demo:latest")?,
+            digest,
+            "surviving tag intact"
+        );
         assert_eq!(store_list()?.len(), 1, "one tag remains");
         assert_eq!(
             blob_count(&blobs_dir),
@@ -4965,7 +5158,11 @@ COPY --from=mid /extra.txt /extra.txt
         // Remove the last tag: now every blob is unreachable and GC'd.
         store_remove("demo:latest")?;
         assert!(store_list()?.is_empty(), "store empty after last removal");
-        assert_eq!(blob_count(&blobs_dir), 0, "all blobs GC'd after last tag removed");
+        assert_eq!(
+            blob_count(&blobs_dir),
+            0,
+            "all blobs GC'd after last tag removed"
+        );
 
         let _ = Vfs::remove_recursive(STORE_DIR);
         let _ = Vfs::remove(format!("{ctx}/app.txt"));
@@ -5004,7 +5201,10 @@ COPY --from=mid /extra.txt /extra.txt
         // A store reference resolves to STORE_DIR with the tagged manifest.
         let (rsrc, rimg) = resolve_image_source("base:1")?;
         assert_eq!(rsrc, STORE_DIR, "store ref resolves to STORE_DIR");
-        assert!(rimg.config.env.iter().any(|e| e == "FOO=bar"), "config inherited");
+        assert!(
+            rimg.config.env.iter().any(|e| e == "FOO=bar"),
+            "config inherited"
+        );
         let _ = base_digest;
 
         // `FROM base:1` (resolved from the store) inherits ENV + the base layer,
@@ -5017,10 +5217,16 @@ COPY --from=mid /extra.txt /extra.txt
         })?;
         let ci = load_image(child)?;
         assert_eq!(ci.manifest.layers.len(), 2, "base layer + child COPY");
-        assert!(ci.config.env.iter().any(|e| e == "FOO=bar"), "child inherits base ENV");
+        assert!(
+            ci.config.env.iter().any(|e| e == "FOO=bar"),
+            "child inherits base ENV"
+        );
 
         // An unknown reference is a clean NotFound, not a panic.
-        assert!(resolve_image_source("nope:9").is_err(), "unknown ref errors");
+        assert!(
+            resolve_image_source("nope:9").is_err(),
+            "unknown ref errors"
+        );
 
         let _ = Vfs::remove_recursive(STORE_DIR);
         let _ = Vfs::remove(format!("{ctx}/base.txt"));
@@ -5070,8 +5276,16 @@ COPY --from=mid /extra.txt /extra.txt
         // Wipe the store and import the exported layout back.
         let _ = Vfs::remove_recursive(STORE_DIR);
         let added = store_import_dir(exp)?;
-        assert_eq!(added, alloc::vec![String::from("roundtrip:1")], "import re-adds the tag");
-        assert_eq!(store_resolve("roundtrip:1")?, digest, "digest survives round-trip");
+        assert_eq!(
+            added,
+            alloc::vec![String::from("roundtrip:1")],
+            "import re-adds the tag"
+        );
+        assert_eq!(
+            store_resolve("roundtrip:1")?,
+            digest,
+            "digest survives round-trip"
+        );
         // The imported blobs must extract to the original content.
         let (src, _img) = resolve_image_source("roundtrip:1")?;
         assert_eq!(src, STORE_DIR);
@@ -5131,7 +5345,10 @@ COPY --from=mid /extra.txt /extra.txt
         let whiteouts = alloc::vec![PathBuf::from("base.txt")];
 
         let desc = commit_image(base, Path::new(upper), &whiteouts, dest)?;
-        assert!(desc.digest.starts_with("sha256:"), "commit returns a digest");
+        assert!(
+            desc.digest.starts_with("sha256:"),
+            "commit returns a digest"
+        );
 
         // The committed image: base layers carried forward + one commit layer.
         let committed = load_image(dest)?;
@@ -5146,37 +5363,71 @@ COPY --from=mid /extra.txt /extra.txt
             "diff_ids grow with the new layer"
         );
         // Base runtime config preserved.
-        assert_eq!(committed.config.cmd, alloc::vec![String::from("/bin/sh")], "Cmd carried forward");
+        assert_eq!(
+            committed.config.cmd,
+            alloc::vec![String::from("/bin/sh")],
+            "Cmd carried forward"
+        );
         assert!(
             committed.config.env.iter().any(|e| e == "FOO=bar"),
             "Env carried forward"
         );
         // A COMMIT history entry was appended (last entry, non-empty layer).
-        let last_hist = committed.config.history.last().ok_or(KernelError::InternalError)?;
-        assert!(last_hist.created_by.contains("COMMIT"), "COMMIT history entry appended");
+        let last_hist = committed
+            .config
+            .history
+            .last()
+            .ok_or(KernelError::InternalError)?;
+        assert!(
+            last_hist.created_by.contains("COMMIT"),
+            "COMMIT history entry appended"
+        );
         assert!(!last_hist.empty_layer, "commit layer is not an empty_layer");
 
         // Inspect the commit layer (the top descriptor): decompress + parse and
         // confirm it holds the added files and the whiteout marker.
-        let commit_layer = committed.manifest.layers.last().ok_or(KernelError::InternalError)?;
+        let commit_layer = committed
+            .manifest
+            .layers
+            .last()
+            .ok_or(KernelError::InternalError)?;
         let blob = Vfs::read_file(format!(
             "{dest}/{}",
-            commit_layer.blob_path().ok_or(KernelError::InvalidArgument)?
+            commit_layer
+                .blob_path()
+                .ok_or(KernelError::InvalidArgument)?
         ))?;
         let tar = crate::fs::compress::gunzip(&blob)?;
         let entries = crate::fs::tar::parse(&tar)?;
-        let has = |n: &str| entries.iter().any(|e| archive_norm(&e.name) == PathBuf::from(n));
+        let has = |n: &str| {
+            entries
+                .iter()
+                .any(|e| archive_norm(&e.name) == PathBuf::from(n))
+        };
         assert!(has("newfile.txt"), "commit layer holds the added file");
-        assert!(has("sub/nested.txt"), "commit layer holds the nested added file");
-        assert!(has(".wh.base.txt"), "commit layer holds the whiteout marker");
+        assert!(
+            has("sub/nested.txt"),
+            "commit layer holds the nested added file"
+        );
+        assert!(
+            has(".wh.base.txt"),
+            "commit layer holds the whiteout marker"
+        );
 
         // The carried base layer blob must also be present in the new layout.
-        let base_layer = committed.manifest.layers.first().ok_or(KernelError::InternalError)?;
+        let base_layer = committed
+            .manifest
+            .layers
+            .first()
+            .ok_or(KernelError::InternalError)?;
         let base_blob = format!(
             "{dest}/{}",
             base_layer.blob_path().ok_or(KernelError::InvalidArgument)?
         );
-        assert!(Vfs::metadata(&base_blob).is_ok(), "base layer blob carried into new layout");
+        assert!(
+            Vfs::metadata(&base_blob).is_ok(),
+            "base layer blob carried into new layout"
+        );
 
         let _ = Vfs::remove_recursive(upper);
         let _ = Vfs::remove(format!("{ctx}/base.txt"));

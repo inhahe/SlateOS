@@ -46,12 +46,12 @@
 //! )?;
 //! ```
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
-use crate::error::{KernelError, KernelResult};
 use super::interface::{IpAddr, Ipv4Addr};
+use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -164,14 +164,22 @@ impl Url {
             Some(idx) => {
                 let (p, q) = path_and_query.split_at(idx);
                 // Skip the '?' character.
-                let q_str = if q.len() > 1 { Some(String::from(&q[1..])) } else { None };
+                let q_str = if q.len() > 1 {
+                    Some(String::from(&q[1..]))
+                } else {
+                    None
+                };
                 (p, q_str)
             }
             None => (path_and_query, None),
         };
 
         // Split port from host.
-        let default_port = if is_https { DEFAULT_HTTPS_PORT } else { DEFAULT_HTTP_PORT };
+        let default_port = if is_https {
+            DEFAULT_HTTPS_PORT
+        } else {
+            DEFAULT_HTTP_PORT
+        };
         let (host, port) = match authority.rfind(':') {
             Some(idx) => {
                 let h = &authority[..idx];
@@ -186,7 +194,11 @@ impl Url {
             return Err(KernelError::InvalidArgument);
         }
 
-        let path_str = if path.is_empty() { String::from("/") } else { String::from(path) };
+        let path_str = if path.is_empty() {
+            String::from("/")
+        } else {
+            String::from(path)
+        };
 
         Ok(Self {
             host: String::from(host),
@@ -343,9 +355,10 @@ impl Request {
         }
 
         // Accept all content types if not specified.
-        let has_accept = self.headers.iter().any(|(n, _)| {
-            n.eq_ignore_ascii_case("Accept")
-        });
+        let has_accept = self
+            .headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("Accept"));
         if !has_accept {
             buf.extend_from_slice(b"Accept: */*\r\n");
         }
@@ -489,7 +502,11 @@ fn execute_request(req: Request, redirect_count: u8) -> KernelResult<Response> {
     let scheme = if req.url.is_https { "https" } else { "http" };
     crate::serial_println!(
         "[{}] {} {} ({}:{})",
-        scheme, req.method.as_str(), req.url.request_uri(), ip, req.url.port
+        scheme,
+        req.method.as_str(),
+        req.url.request_uri(),
+        ip,
+        req.url.port
     );
 
     // Connect to the remote server.
@@ -507,7 +524,12 @@ fn execute_request(req: Request, redirect_count: u8) -> KernelResult<Response> {
                 return Err(e);
             }
         };
-        execute_https_request(tls_session, &raw_request, req.timeout_polls, req.method == Method::Head)?
+        execute_https_request(
+            tls_session,
+            &raw_request,
+            req.timeout_polls,
+            req.method == Method::Head,
+        )?
     } else {
         // --- HTTP: plain TCP ---
         let send_result = super::tcp::send(handle, &raw_request);
@@ -525,10 +547,7 @@ fn execute_request(req: Request, redirect_count: u8) -> KernelResult<Response> {
     if req.follow_redirects && resp.is_redirect() {
         if let Some(location) = resp.header("Location") {
             let redirect_url = resolve_redirect(&req.url, location);
-            crate::serial_println!(
-                "[http] Redirect {} → {}",
-                resp.status_code, redirect_url
-            );
+            crate::serial_println!("[http] Redirect {} → {}", resp.status_code, redirect_url);
 
             // 307 and 308 preserve the method; 301 and 302 change to GET.
             let new_method = match resp.status_code {
@@ -611,9 +630,9 @@ fn read_tls_response(
     };
 
     // Determine how to read the body.
-    let is_chunked = headers.iter().any(|(n, v)| {
-        n.eq_ignore_ascii_case("Transfer-Encoding") && v.contains("chunked")
-    });
+    let is_chunked = headers
+        .iter()
+        .any(|(n, v)| n.eq_ignore_ascii_case("Transfer-Encoding") && v.contains("chunked"));
 
     let body = if is_chunked {
         read_tls_chunked_body(tls, timeout_polls, already_read)?
@@ -736,8 +755,7 @@ fn read_tls_chunked_body(
     loop {
         // Try to parse a chunk from buf.
         if let Some(crlf_pos) = find_crlf(&buf) {
-            let size_str = core::str::from_utf8(buf.get(..crlf_pos).unwrap_or(&[]))
-                .unwrap_or("0");
+            let size_str = core::str::from_utf8(buf.get(..crlf_pos).unwrap_or(&[])).unwrap_or("0");
             let chunk_size = parse_hex_usize(size_str);
             if chunk_size == 0 {
                 break; // Final chunk.
@@ -861,7 +879,11 @@ fn resolve_redirect(base: &Url, location: &str) -> String {
     } else {
         // Relative or path-absolute redirect — preserve the base scheme.
         let scheme = if base.is_https { "https" } else { "http" };
-        let default_port = if base.is_https { DEFAULT_HTTPS_PORT } else { DEFAULT_HTTP_PORT };
+        let default_port = if base.is_https {
+            DEFAULT_HTTPS_PORT
+        } else {
+            DEFAULT_HTTP_PORT
+        };
 
         if location.starts_with('/') {
             // Absolute path relative to host.
@@ -873,15 +895,16 @@ fn resolve_redirect(base: &Url, location: &str) -> String {
         } else {
             // Relative path — resolve against current path.
             let base_path = match base.path.rfind('/') {
-                Some(idx) => {
-                    base.path.get(..idx.saturating_add(1)).unwrap_or("/")
-                }
+                Some(idx) => base.path.get(..idx.saturating_add(1)).unwrap_or("/"),
                 None => "/",
             };
             if base.port == default_port {
                 format!("{}://{}{}{}", scheme, base.host, base_path, location)
             } else {
-                format!("{}://{}:{}{}{}", scheme, base.host, base.port, base_path, location)
+                format!(
+                    "{}://{}:{}{}{}",
+                    scheme, base.host, base.port, base_path, location
+                )
             }
         }
     }
@@ -923,9 +946,9 @@ fn read_response(handle: usize, timeout_polls: u32, head_only: bool) -> KernelRe
     };
 
     // Determine how to read the body.
-    let is_chunked = headers.iter().any(|(n, v)| {
-        n.eq_ignore_ascii_case("Transfer-Encoding") && v.contains("chunked")
-    });
+    let is_chunked = headers
+        .iter()
+        .any(|(n, v)| n.eq_ignore_ascii_case("Transfer-Encoding") && v.contains("chunked"));
 
     let body = if is_chunked {
         read_chunked_body(handle, timeout_polls, already_read)?
@@ -997,10 +1020,12 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
         return None;
     }
     let limit = data.len().saturating_sub(3);
-    (0..limit).find(|&i| data.get(i) == Some(&b'\r')
+    (0..limit).find(|&i| {
+        data.get(i) == Some(&b'\r')
             && data.get(i.wrapping_add(1)) == Some(&b'\n')
             && data.get(i.wrapping_add(2)) == Some(&b'\r')
-            && data.get(i.wrapping_add(3)) == Some(&b'\n'))
+            && data.get(i.wrapping_add(3)) == Some(&b'\n')
+    })
 }
 
 /// Parsed response head: (status code, reason phrase, header name/value pairs).
@@ -1244,8 +1269,7 @@ fn find_crlf(data: &[u8]) -> Option<usize> {
 ///
 /// We only need encoding (for Authorization header), not decoding.
 pub fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let mut result = Vec::with_capacity(data.len().saturating_mul(4) / 3 + 4);
     let mut i = 0usize;
@@ -1256,9 +1280,21 @@ pub fn base64_encode(data: &[u8]) -> String {
         let b2 = *data.get(i.wrapping_add(2)).unwrap_or(&0) as u32;
         let triple = (b0 << 16) | (b1 << 8) | b2;
 
-        result.push(*ALPHABET.get(((triple >> 18) & 0x3F) as usize).unwrap_or(&b'A'));
-        result.push(*ALPHABET.get(((triple >> 12) & 0x3F) as usize).unwrap_or(&b'A'));
-        result.push(*ALPHABET.get(((triple >> 6) & 0x3F) as usize).unwrap_or(&b'A'));
+        result.push(
+            *ALPHABET
+                .get(((triple >> 18) & 0x3F) as usize)
+                .unwrap_or(&b'A'),
+        );
+        result.push(
+            *ALPHABET
+                .get(((triple >> 12) & 0x3F) as usize)
+                .unwrap_or(&b'A'),
+        );
+        result.push(
+            *ALPHABET
+                .get(((triple >> 6) & 0x3F) as usize)
+                .unwrap_or(&b'A'),
+        );
         result.push(*ALPHABET.get((triple & 0x3F) as usize).unwrap_or(&b'A'));
 
         i = i.wrapping_add(3);
@@ -1270,16 +1306,36 @@ pub fn base64_encode(data: &[u8]) -> String {
         let b1 = *data.get(i.wrapping_add(1)).unwrap_or(&0) as u32;
         let triple = (b0 << 16) | (b1 << 8);
 
-        result.push(*ALPHABET.get(((triple >> 18) & 0x3F) as usize).unwrap_or(&b'A'));
-        result.push(*ALPHABET.get(((triple >> 12) & 0x3F) as usize).unwrap_or(&b'A'));
-        result.push(*ALPHABET.get(((triple >> 6) & 0x3F) as usize).unwrap_or(&b'A'));
+        result.push(
+            *ALPHABET
+                .get(((triple >> 18) & 0x3F) as usize)
+                .unwrap_or(&b'A'),
+        );
+        result.push(
+            *ALPHABET
+                .get(((triple >> 12) & 0x3F) as usize)
+                .unwrap_or(&b'A'),
+        );
+        result.push(
+            *ALPHABET
+                .get(((triple >> 6) & 0x3F) as usize)
+                .unwrap_or(&b'A'),
+        );
         result.push(b'=');
     } else if remaining == 1 {
         let b0 = *data.get(i).unwrap_or(&0) as u32;
         let triple = b0 << 16;
 
-        result.push(*ALPHABET.get(((triple >> 18) & 0x3F) as usize).unwrap_or(&b'A'));
-        result.push(*ALPHABET.get(((triple >> 12) & 0x3F) as usize).unwrap_or(&b'A'));
+        result.push(
+            *ALPHABET
+                .get(((triple >> 18) & 0x3F) as usize)
+                .unwrap_or(&b'A'),
+        );
+        result.push(
+            *ALPHABET
+                .get(((triple >> 12) & 0x3F) as usize)
+                .unwrap_or(&b'A'),
+        );
         result.push(b'=');
         result.push(b'=');
     }
@@ -1459,11 +1515,7 @@ pub fn fetch(url: &str) -> KernelResult<Response> {
 }
 
 /// Perform an instrumented HTTP POST request (updates stats).
-pub fn fetch_post(
-    url: &str,
-    body: &[u8],
-    content_type: Option<&str>,
-) -> KernelResult<Response> {
+pub fn fetch_post(url: &str, body: &[u8], content_type: Option<&str>) -> KernelResult<Response> {
     REQUESTS_TOTAL.fetch_add(1, Ordering::Relaxed);
 
     let mut req = Request::new(Method::Post, url)?;
@@ -1540,7 +1592,10 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq_test(&url.host, "api.example.com", "host");
         assert_eq_test_u16(url.port, 8080, "port");
         assert_eq_test(&url.path, "/v1/data", "path");
-        assert!(url.query.as_deref() == Some("key=value&fmt=json"), "query mismatch");
+        assert!(
+            url.query.as_deref() == Some("key=value&fmt=json"),
+            "query mismatch"
+        );
         passed = passed.saturating_add(1);
         crate::serial_println!("[http]   test 2 (url parse port+query) PASSED");
     }
@@ -1703,7 +1758,11 @@ pub fn self_test() -> KernelResult<()> {
 
         // Cross-scheme redirect (absolute URL).
         let r = resolve_redirect(&https_base, "http://plain.example.com/downgrade");
-        assert_eq_test(&r, "http://plain.example.com/downgrade", "cross-scheme redirect");
+        assert_eq_test(
+            &r,
+            "http://plain.example.com/downgrade",
+            "cross-scheme redirect",
+        );
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[http]   test 10 (redirect resolution) PASSED");
@@ -1732,8 +1791,14 @@ pub fn self_test() -> KernelResult<()> {
         let raw = req.build();
         let text = core::str::from_utf8(&raw).unwrap_or("");
 
-        assert!(text.starts_with("POST /api HTTP/1.1\r\n"), "POST request line");
-        assert!(text.contains("Content-Type: application/x-www-form-urlencoded"), "content type");
+        assert!(
+            text.starts_with("POST /api HTTP/1.1\r\n"),
+            "POST request line"
+        );
+        assert!(
+            text.contains("Content-Type: application/x-www-form-urlencoded"),
+            "content type"
+        );
         assert!(text.contains("Content-Length: 9\r\n"), "content length");
         assert!(text.ends_with("key=value"), "body present");
 
@@ -1748,7 +1813,10 @@ pub fn self_test() -> KernelResult<()> {
         let raw = req.build();
         let text = core::str::from_utf8(&raw).unwrap_or("");
 
-        assert!(text.contains("Authorization: Basic YWRtaW46c2VjcmV0"), "basic auth");
+        assert!(
+            text.contains("Authorization: Basic YWRtaW46c2VjcmV0"),
+            "basic auth"
+        );
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[http]   test 13 (basic auth) PASSED");
@@ -1799,10 +1867,18 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 17: URL host header generation ---
     {
         let url = Url::parse("http://example.com/test")?;
-        assert_eq_test(&url.host_header(), "example.com", "host header default port");
+        assert_eq_test(
+            &url.host_header(),
+            "example.com",
+            "host header default port",
+        );
 
         let url = Url::parse("http://example.com:9090/test")?;
-        assert_eq_test(&url.host_header(), "example.com:9090", "host header custom port");
+        assert_eq_test(
+            &url.host_header(),
+            "example.com:9090",
+            "host header custom port",
+        );
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[http]   test 17 (host header) PASSED");
@@ -1828,7 +1904,9 @@ fn assert_eq_test(got: &str, expected: &str, label: &str) {
     assert!(
         got == expected,
         "[http] assertion failed: {} — got '{}', expected '{}'",
-        label, got, expected,
+        label,
+        got,
+        expected,
     );
 }
 
@@ -1837,6 +1915,8 @@ fn assert_eq_test_u16(got: u16, expected: u16, label: &str) {
     assert!(
         got == expected,
         "[http] assertion failed: {} — got {}, expected {}",
-        label, got, expected,
+        label,
+        got,
+        expected,
     );
 }

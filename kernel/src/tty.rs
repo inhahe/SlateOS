@@ -412,7 +412,10 @@ struct LineBuf {
 
 impl LineBuf {
     const fn new() -> Self {
-        Self { buf: [0u8; MAX_CANON], len: 0 }
+        Self {
+            buf: [0u8; MAX_CANON],
+            len: 0,
+        }
     }
 
     /// Append a byte; `false` if the line is already at `MAX_CANON`.
@@ -530,7 +533,11 @@ struct PendingLine {
 
 impl PendingLine {
     const fn new() -> Self {
-        Self { buf: [0u8; MAX_CANON], pos: 0, len: 0 }
+        Self {
+            buf: [0u8; MAX_CANON],
+            pos: 0,
+            len: 0,
+        }
     }
 
     fn has_data(&self) -> bool {
@@ -551,9 +558,10 @@ impl PendingLine {
     fn drain_into(&mut self, out: &mut [u8]) -> usize {
         let avail = self.len.saturating_sub(self.pos);
         let n = avail.min(out.len());
-        if let (Some(dst), Some(src)) =
-            (out.get_mut(..n), self.buf.get(self.pos..self.pos.saturating_add(n)))
-        {
+        if let (Some(dst), Some(src)) = (
+            out.get_mut(..n),
+            self.buf.get(self.pos..self.pos.saturating_add(n)),
+        ) {
             dst.copy_from_slice(src);
         }
         self.pos = self.pos.saturating_add(n);
@@ -875,7 +883,12 @@ pub fn self_test() {
     crate::serial_println!("[tty]   raw-mode flag clearing: OK");
 
     // winsize round-trips, and TIOCGWINSZ reports a live non-zero size.
-    let w = WinSize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let w = WinSize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
     assert_eq!(WinSize::from_bytes(&w.to_bytes()), w, "winsize round-trip");
     let live = get_winsize();
     assert!(
@@ -959,7 +972,9 @@ pub fn self_test() {
         assert_eq!(feed(&mut n, b'\n', &noisig), LineStep::Line);
         assert_eq!(n.as_slice(), &[3u8, b'\n'], "ISIG off ⇒ ^C is literal");
 
-        crate::serial_println!("[tty]   line discipline (canon/erase/kill/eof/intr/quit/susp/noflsh): OK");
+        crate::serial_println!(
+            "[tty]   line discipline (canon/erase/kill/eof/intr/quit/susp/noflsh): OK"
+        );
     }
 
     // PendingLine: a line longer than the reader buffer is delivered in pieces.
@@ -1036,7 +1051,12 @@ mod tests {
 
     #[test]
     fn winsize_roundtrip() {
-        let w = WinSize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+        let w = WinSize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
         let back = WinSize::from_bytes(&w.to_bytes());
         assert_eq!(w, back);
     }

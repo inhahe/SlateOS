@@ -19,8 +19,8 @@
 //! - ACPI Specification 6.5, Section 5.2.12
 //! - <https://wiki.osdev.org/MADT>
 
-use alloc::vec::Vec;
 use crate::serial_println;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // MADT header (follows the standard SDT header)
@@ -215,7 +215,11 @@ pub unsafe fn parse_madt(madt_virt: u64) -> MadtInfo {
 
         // Prevent infinite loop on malformed entries.
         if entry_len < 2 {
-            serial_println!("[acpi] MADT: entry at offset {} has length {}, stopping", offset, entry_len);
+            serial_println!(
+                "[acpi] MADT: entry at offset {} has length {}, stopping",
+                offset,
+                entry_len
+            );
             break;
         }
 
@@ -247,12 +251,8 @@ pub unsafe fn parse_madt(madt_virt: u64) -> MadtInfo {
                     let data = entry_data as *const u8;
                     let id = unsafe { *data.add(2) };
                     // Byte 3 is reserved.
-                    let address = unsafe {
-                        core::ptr::read_unaligned(data.add(4) as *const u32)
-                    };
-                    let gsi_base = unsafe {
-                        core::ptr::read_unaligned(data.add(8) as *const u32)
-                    };
+                    let address = unsafe { core::ptr::read_unaligned(data.add(4) as *const u32) };
+                    let gsi_base = unsafe { core::ptr::read_unaligned(data.add(8) as *const u32) };
 
                     serial_println!(
                         "[acpi] MADT:   I/O APIC id={}, addr={:#x}, gsi_base={}",
@@ -275,12 +275,8 @@ pub unsafe fn parse_madt(madt_virt: u64) -> MadtInfo {
                     let data = entry_data as *const u8;
                     let bus = unsafe { *data.add(2) };
                     let source_irq = unsafe { *data.add(3) };
-                    let gsi = unsafe {
-                        core::ptr::read_unaligned(data.add(4) as *const u32)
-                    };
-                    let flags = unsafe {
-                        core::ptr::read_unaligned(data.add(8) as *const u16)
-                    };
+                    let gsi = unsafe { core::ptr::read_unaligned(data.add(4) as *const u32) };
+                    let flags = unsafe { core::ptr::read_unaligned(data.add(8) as *const u16) };
 
                     serial_println!(
                         "[acpi] MADT:   IRQ override: ISA {} → GSI {} (flags={:#x})",
@@ -303,9 +299,7 @@ pub unsafe fn parse_madt(madt_virt: u64) -> MadtInfo {
                     // SAFETY: entry is at least 6 bytes.
                     let data = entry_data as *const u8;
                     let acpi_processor_id = unsafe { *data.add(2) };
-                    let flags = unsafe {
-                        core::ptr::read_unaligned(data.add(3) as *const u16)
-                    };
+                    let flags = unsafe { core::ptr::read_unaligned(data.add(3) as *const u16) };
                     let lint = unsafe { *data.add(5) };
 
                     local_apic_nmis.push(LocalApicNmi {
@@ -321,13 +315,8 @@ pub unsafe fn parse_madt(madt_virt: u64) -> MadtInfo {
                     // SAFETY: entry is at least 12 bytes.
                     let data = entry_data as *const u8;
                     // Bytes 2-3 are reserved.
-                    let addr64 = unsafe {
-                        core::ptr::read_unaligned(data.add(4) as *const u64)
-                    };
-                    serial_println!(
-                        "[acpi] MADT:   LAPIC address override: {:#x}",
-                        addr64
-                    );
+                    let addr64 = unsafe { core::ptr::read_unaligned(data.add(4) as *const u64) };
+                    serial_println!("[acpi] MADT:   LAPIC address override: {:#x}", addr64);
                     local_apic_address = addr64;
                 }
             }

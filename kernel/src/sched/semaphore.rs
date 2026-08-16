@@ -94,12 +94,7 @@ impl Semaphore {
             }
             if self
                 .count
-                .compare_exchange_weak(
-                    current,
-                    current - 1,
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                )
+                .compare_exchange_weak(current, current - 1, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
                 return true;
@@ -185,12 +180,7 @@ impl Semaphore {
             }
             if self
                 .count
-                .compare_exchange_weak(
-                    current,
-                    current - 1,
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                )
+                .compare_exchange_weak(current, current - 1, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
                 return true;

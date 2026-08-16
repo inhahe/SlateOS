@@ -302,8 +302,7 @@ fn generate_sweep(buf: &mut [u8], start_hz: u32, end_hz: u32, duration_ms: u32) 
 
     for i in 0..frames {
         // Linearly interpolate frequency.
-        let freq = start_hz as i64
-            + ((end_hz as i64 - start_hz as i64) * i as i64) / frames as i64;
+        let freq = start_hz as i64 + ((end_hz as i64 - start_hz as i64) * i as i64) / frames as i64;
         let freq = freq.max(20) as u32;
 
         let period = 48000 / freq;

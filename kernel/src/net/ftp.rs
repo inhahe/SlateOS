@@ -27,14 +27,14 @@
 //! - No TLS/FTPS support.
 //! - Single control connection (no persistent sessions).
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use alloc::format;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
+use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -134,10 +134,7 @@ pub fn parse_reply(data: &[u8]) -> Option<FtpReply> {
         String::new()
     };
 
-    Some(FtpReply {
-        code,
-        message,
-    })
+    Some(FtpReply { code, message })
 }
 
 /// Parse PASV reply to extract IP and port.
@@ -214,7 +211,12 @@ fn ftp_connect(host: super::interface::IpAddr) -> KernelResult<(FtpSession, FtpR
         }
     };
 
-    Ok((FtpSession { control_handle: handle }, reply))
+    Ok((
+        FtpSession {
+            control_handle: handle,
+        },
+        reply,
+    ))
 }
 
 /// Send an FTP command and read the reply.
@@ -646,16 +648,25 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 2: Reply classification ---
     {
-        let r150 = FtpReply { code: 150, message: String::from("Opening data connection") };
+        let r150 = FtpReply {
+            code: 150,
+            message: String::from("Opening data connection"),
+        };
         assert!(r150.is_preliminary(), "preliminary");
         assert!(r150.is_transfer_starting(), "transfer starting");
         assert!(!r150.is_success(), "not success");
 
-        let r227 = FtpReply { code: 227, message: String::from("Entering Passive Mode") };
+        let r227 = FtpReply {
+            code: 227,
+            message: String::from("Entering Passive Mode"),
+        };
         assert!(r227.is_pasv(), "is pasv");
         assert!(r227.is_success(), "is success");
 
-        let r530 = FtpReply { code: 530, message: String::from("Not logged in") };
+        let r530 = FtpReply {
+            code: 530,
+            message: String::from("Not logged in"),
+        };
         assert!(!r530.is_success(), "not success");
         assert!(!r530.is_preliminary(), "not preliminary");
 
@@ -680,7 +691,10 @@ pub fn self_test() -> KernelResult<()> {
         assert!(port == (39 * 256 + 6), "port");
 
         // Invalid PASV.
-        let bad = FtpReply { code: 200, message: String::new() };
+        let bad = FtpReply {
+            code: 200,
+            message: String::new(),
+        };
         assert!(parse_pasv(&bad).is_none(), "wrong code");
 
         passed = passed.saturating_add(1);
@@ -689,10 +703,19 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 4: Reply descriptions ---
     {
-        assert!(reply_description(220) == "Service ready for new user", "220");
+        assert!(
+            reply_description(220) == "Service ready for new user",
+            "220"
+        );
         assert!(reply_description(230) == "User logged in, proceed", "230");
-        assert!(reply_description(550) == "Requested action not taken; file unavailable", "550");
-        assert!(reply_description(150).contains("opening data connection"), "150");
+        assert!(
+            reply_description(550) == "Requested action not taken; file unavailable",
+            "550"
+        );
+        assert!(
+            reply_description(150).contains("opening data connection"),
+            "150"
+        );
         assert!(reply_description(9999) == "Unknown reply code", "unknown");
 
         passed = passed.saturating_add(1);

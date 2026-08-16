@@ -36,9 +36,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::KernelResult;
 use crate::serial_println;
@@ -316,9 +316,7 @@ pub fn run() -> Option<ReclaimResult> {
 /// Finalize the result: update stats, check final usage, clear active flag.
 fn finalize_result(result: &mut ReclaimResult) {
     // Get final usage.
-    result.usage_after = get_usage()
-        .map(|(pct, _, _)| pct / 100)
-        .unwrap_or(0);
+    result.usage_after = get_usage().map(|(pct, _, _)| pct / 100).unwrap_or(0);
 
     let mut inner = RECLAIM.lock();
     inner.stats.active = false;

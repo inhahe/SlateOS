@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -164,7 +164,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         visibility: Visibility::ContactsOnly,
         save_path: String::from("/home/Downloads"),
@@ -206,7 +208,12 @@ pub fn set_auto_accept(enabled: bool) -> KernelResult<()> {
 }
 
 /// Simulate discovering a nearby device.
-pub fn discover_device(name: &str, device_type: &str, transport: Transport, signal: i32) -> KernelResult<u32> {
+pub fn discover_device(
+    name: &str,
+    device_type: &str,
+    transport: Transport,
+    signal: i32,
+) -> KernelResult<u32> {
     with_state(|state| {
         // Check for existing device with same name.
         if let Some(d) = state.devices.iter_mut().find(|d| d.name == name) {
@@ -236,7 +243,9 @@ pub fn remove_device(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.devices.len();
         state.devices.retain(|d| d.id != id);
-        if state.devices.len() == before { return Err(KernelError::NotFound); }
+        if state.devices.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -244,13 +253,22 @@ pub fn remove_device(id: u32) -> KernelResult<()> {
 /// Initiate a file transfer (outgoing).
 pub fn send_file(device_id: u32, file_name: &str, file_size: u64) -> KernelResult<u32> {
     with_state(|state| {
-        let device = state.devices.iter().find(|d| d.id == device_id)
+        let device = state
+            .devices
+            .iter()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         if state.transfers.len() >= MAX_TRANSFERS {
             // Remove oldest completed transfers.
-            state.transfers.retain(|t| !matches!(t.status,
-                TransferStatus::Completed | TransferStatus::Rejected |
-                TransferStatus::Failed | TransferStatus::Cancelled));
+            state.transfers.retain(|t| {
+                !matches!(
+                    t.status,
+                    TransferStatus::Completed
+                        | TransferStatus::Rejected
+                        | TransferStatus::Failed
+                        | TransferStatus::Cancelled
+                )
+            });
         }
         let id = state.next_transfer_id;
         state.next_transfer_id += 1;
@@ -271,7 +289,10 @@ pub fn send_file(device_id: u32, file_name: &str, file_size: u64) -> KernelResul
 /// Accept an incoming transfer.
 pub fn accept_transfer(transfer_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let transfer = state.transfers.iter_mut().find(|t| t.id == transfer_id)
+        let transfer = state
+            .transfers
+            .iter_mut()
+            .find(|t| t.id == transfer_id)
             .ok_or(KernelError::NotFound)?;
         if transfer.status != TransferStatus::Pending {
             return Err(KernelError::NotSupported);
@@ -284,7 +305,10 @@ pub fn accept_transfer(transfer_id: u32) -> KernelResult<()> {
 /// Reject an incoming transfer.
 pub fn reject_transfer(transfer_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let transfer = state.transfers.iter_mut().find(|t| t.id == transfer_id)
+        let transfer = state
+            .transfers
+            .iter_mut()
+            .find(|t| t.id == transfer_id)
             .ok_or(KernelError::NotFound)?;
         if transfer.status != TransferStatus::Pending {
             return Err(KernelError::NotSupported);
@@ -297,7 +321,10 @@ pub fn reject_transfer(transfer_id: u32) -> KernelResult<()> {
 /// Simulate transfer progress (for testing).
 pub fn complete_transfer(transfer_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let transfer = state.transfers.iter_mut().find(|t| t.id == transfer_id)
+        let transfer = state
+            .transfers
+            .iter_mut()
+            .find(|t| t.id == transfer_id)
             .ok_or(KernelError::NotFound)?;
         transfer.bytes_transferred = transfer.file_size;
         transfer.status = TransferStatus::Completed;
@@ -315,7 +342,10 @@ pub fn complete_transfer(transfer_id: u32) -> KernelResult<()> {
 /// Cancel a transfer.
 pub fn cancel_transfer(transfer_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let transfer = state.transfers.iter_mut().find(|t| t.id == transfer_id)
+        let transfer = state
+            .transfers
+            .iter_mut()
+            .find(|t| t.id == transfer_id)
             .ok_or(KernelError::NotFound)?;
         transfer.status = TransferStatus::Cancelled;
         Ok(())
@@ -324,7 +354,10 @@ pub fn cancel_transfer(transfer_id: u32) -> KernelResult<()> {
 
 /// List nearby devices.
 pub fn list_devices() -> Vec<NearbyDevice> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// List transfers.
@@ -339,15 +372,24 @@ pub fn list_transfers(max: usize) -> Vec<Transfer> {
 
 /// Get current visibility.
 pub fn get_visibility() -> Visibility {
-    STATE.lock().as_ref().map_or(Visibility::Hidden, |s| s.visibility)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Visibility::Hidden, |s| s.visibility)
 }
 
 /// Statistics: (devices, total_sent, total_received, total_bytes_sent, total_bytes_received, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.total_sent, s.total_received,
-                    s.total_bytes_sent, s.total_bytes_received, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.total_sent,
+            s.total_received,
+            s.total_bytes_sent,
+            s.total_bytes_received,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }

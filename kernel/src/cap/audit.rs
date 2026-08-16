@@ -32,8 +32,8 @@
 //! - Windows Security Event Log — privilege audit events
 //! - Capsicum audit integration — FreeBSD capability auditing
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -155,7 +155,7 @@ struct AuditRing(core::cell::UnsafeCell<[AuditEntry; RING_SIZE]>);
 unsafe impl Sync for AuditRing {}
 
 static RING: AuditRing = AuditRing(core::cell::UnsafeCell::new(
-    [AuditEntry::empty(); RING_SIZE]
+    [AuditEntry::empty(); RING_SIZE],
 ));
 
 /// Write position.
@@ -224,8 +224,12 @@ pub fn record(op: AuditOp, pid: u32, handle: u32, rights: u8, target_pid: u16, r
                 format_args!("DENY pid={} handle={} rights={:#x}", pid, handle, rights),
             );
         }
-        AuditOp::Grant => { TOTAL_GRANTS.fetch_add(1, Ordering::Relaxed); }
-        AuditOp::Revoke => { TOTAL_REVOKES.fetch_add(1, Ordering::Relaxed); }
+        AuditOp::Grant => {
+            TOTAL_GRANTS.fetch_add(1, Ordering::Relaxed);
+        }
+        AuditOp::Revoke => {
+            TOTAL_REVOKES.fetch_add(1, Ordering::Relaxed);
+        }
         _ => {}
     }
 }
@@ -257,7 +261,14 @@ pub fn record_revoke(pid: u32, handle: u32) {
 /// Convenience: record a capability transfer.
 #[inline]
 pub fn record_transfer(from_pid: u32, to_pid: u32, handle: u32, rights: u8) {
-    record(AuditOp::Transfer, from_pid, handle, rights, to_pid as u16, 0);
+    record(
+        AuditOp::Transfer,
+        from_pid,
+        handle,
+        rights,
+        to_pid as u16,
+        0,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -354,7 +365,11 @@ pub fn recent(buf: &mut [AuditEntry]) -> usize {
 pub fn denials_for_pid(pid: u32) -> u32 {
     let write_pos = WRITE_POS.load(Ordering::Acquire) as usize;
     let count = write_pos.min(RING_SIZE);
-    let start = if write_pos <= RING_SIZE { 0 } else { write_pos & RING_MASK };
+    let start = if write_pos <= RING_SIZE {
+        0
+    } else {
+        write_pos & RING_MASK
+    };
 
     let mut denials: u32 = 0;
     for i in 0..count {

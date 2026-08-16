@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -38,8 +38,8 @@ use crate::error::{KernelError, KernelResult};
 pub struct CpuSet {
     pub id: u32,
     pub name: String,
-    pub cpu_mask: u64,      // Bitmask of CPUs
-    pub mem_mask: u64,      // Bitmask of NUMA nodes
+    pub cpu_mask: u64, // Bitmask of CPUs
+    pub mem_mask: u64, // Bitmask of NUMA nodes
     pub processes: u32,
     pub exclusive: bool,
     pub affinity_changes: u64,
@@ -79,12 +79,38 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         sets: alloc::vec![
-            CpuSet { id: 1, name: String::from("root"), cpu_mask: 0xF, mem_mask: 0x1, processes: 100, exclusive: false, affinity_changes: 500_000 },
-            CpuSet { id: 2, name: String::from("realtime"), cpu_mask: 0x3, mem_mask: 0x1, processes: 5, exclusive: true, affinity_changes: 1_000 },
-            CpuSet { id: 3, name: String::from("batch"), cpu_mask: 0xC, mem_mask: 0x1, processes: 20, exclusive: false, affinity_changes: 50_000 },
+            CpuSet {
+                id: 1,
+                name: String::from("root"),
+                cpu_mask: 0xF,
+                mem_mask: 0x1,
+                processes: 100,
+                exclusive: false,
+                affinity_changes: 500_000
+            },
+            CpuSet {
+                id: 2,
+                name: String::from("realtime"),
+                cpu_mask: 0x3,
+                mem_mask: 0x1,
+                processes: 5,
+                exclusive: true,
+                affinity_changes: 1_000
+            },
+            CpuSet {
+                id: 3,
+                name: String::from("batch"),
+                cpu_mask: 0xC,
+                mem_mask: 0x1,
+                processes: 20,
+                exclusive: false,
+                affinity_changes: 50_000
+            },
         ],
         next_id: 4,
         total_affinity_changes: 551_000,
@@ -96,12 +122,19 @@ pub fn init_defaults() {
 /// Create a cpuset.
 pub fn create(name: &str, cpu_mask: u64, mem_mask: u64, exclusive: bool) -> KernelResult<u32> {
     with_state(|state| {
-        if state.sets.len() >= MAX_SETS { return Err(KernelError::ResourceExhausted); }
+        if state.sets.len() >= MAX_SETS {
+            return Err(KernelError::ResourceExhausted);
+        }
         let id = state.next_id;
         state.next_id += 1;
         state.sets.push(CpuSet {
-            id, name: String::from(name), cpu_mask, mem_mask,
-            processes: 0, exclusive, affinity_changes: 0,
+            id,
+            name: String::from(name),
+            cpu_mask,
+            mem_mask,
+            processes: 0,
+            exclusive,
+            affinity_changes: 0,
         });
         Ok(id)
     })
@@ -110,9 +143,14 @@ pub fn create(name: &str, cpu_mask: u64, mem_mask: u64, exclusive: bool) -> Kern
 /// Destroy a cpuset.
 pub fn destroy(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.sets.iter().position(|s| s.id == id)
+        let idx = state
+            .sets
+            .iter()
+            .position(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
-        if state.sets[idx].processes > 0 { return Err(KernelError::NotEmpty); }
+        if state.sets[idx].processes > 0 {
+            return Err(KernelError::NotEmpty);
+        }
         state.sets.remove(idx);
         Ok(())
     })
@@ -121,7 +159,10 @@ pub fn destroy(id: u32) -> KernelResult<()> {
 /// Assign a process to a cpuset.
 pub fn assign(set_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let s = state.sets.iter_mut().find(|s| s.id == set_id)
+        let s = state
+            .sets
+            .iter_mut()
+            .find(|s| s.id == set_id)
             .ok_or(KernelError::NotFound)?;
         s.processes += 1;
         state.total_assignments += 1;
@@ -132,7 +173,10 @@ pub fn assign(set_id: u32) -> KernelResult<()> {
 /// Remove a process from a cpuset.
 pub fn remove_process(set_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let s = state.sets.iter_mut().find(|s| s.id == set_id)
+        let s = state
+            .sets
+            .iter_mut()
+            .find(|s| s.id == set_id)
             .ok_or(KernelError::NotFound)?;
         s.processes = s.processes.saturating_sub(1);
         Ok(())
@@ -142,7 +186,10 @@ pub fn remove_process(set_id: u32) -> KernelResult<()> {
 /// Record an affinity change.
 pub fn record_affinity_change(set_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let s = state.sets.iter_mut().find(|s| s.id == set_id)
+        let s = state
+            .sets
+            .iter_mut()
+            .find(|s| s.id == set_id)
             .ok_or(KernelError::NotFound)?;
         s.affinity_changes += 1;
         state.total_affinity_changes += 1;
@@ -159,7 +206,12 @@ pub fn list() -> Vec<CpuSet> {
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.sets.len(), s.total_assignments, s.total_affinity_changes, s.ops),
+        Some(s) => (
+            s.sets.len(),
+            s.total_assignments,
+            s.total_affinity_changes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }

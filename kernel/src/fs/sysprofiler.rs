@@ -20,11 +20,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -105,7 +105,10 @@ where
 }
 
 fn make_entry(key: &str, value: &str) -> InfoEntry {
-    InfoEntry { key: String::from(key), value: String::from(value) }
+    InfoEntry {
+        key: String::from(key),
+        value: String::from(value),
+    }
 }
 
 /// Decode a fixed-width CPUID ASCII buffer (vendor/brand string) into a
@@ -168,7 +171,11 @@ fn build_cpu_entries() -> Vec<InfoEntry> {
     entries.push(make_entry("Physical Cores", &format!("{cores}")));
     entries.push(make_entry(
         "SMT",
-        if crate::cpu_topology::smt_active() { "Active" } else { "Inactive" },
+        if crate::cpu_topology::smt_active() {
+            "Active"
+        } else {
+            "Inactive"
+        },
     ));
 
     for c in crate::cpu::cache_topology() {
@@ -186,8 +193,7 @@ fn build_cpu_entries() -> Vec<InfoEntry> {
 fn build_memory_entries() -> Vec<InfoEntry> {
     let mut entries = Vec::new();
     if let Some(s) = crate::mm::frame::stats() {
-        let total = (s.total_frames as u64)
-            .saturating_mul(crate::mm::frame::FRAME_SIZE as u64);
+        let total = (s.total_frames as u64).saturating_mul(crate::mm::frame::FRAME_SIZE as u64);
         entries.push(make_entry("Total", &format_size(total)));
         entries.push(make_entry(
             "Page Size",
@@ -223,7 +229,9 @@ fn build_memory_entries() -> Vec<InfoEntry> {
 /// they were this machine's real hardware.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let now = crate::hpet::elapsed_ns();
     let mut sections: Vec<SectionData> = Vec::new();
 
@@ -259,7 +267,11 @@ pub fn get_section(section: Section) -> Option<SectionData> {
     if let Some(state) = guard.as_mut() {
         state.ops += 1;
         state.total_queries += 1;
-        state.sections.iter().find(|s| s.section == section).cloned()
+        state
+            .sections
+            .iter()
+            .find(|s| s.section == section)
+            .cloned()
     } else {
         None
     }
@@ -267,7 +279,10 @@ pub fn get_section(section: Section) -> Option<SectionData> {
 
 /// Get all sections.
 pub fn get_all() -> Vec<SectionData> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.sections.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.sections.clone())
 }
 
 /// Add or update an entry in a section.
@@ -357,14 +372,22 @@ pub fn self_test() {
 
     // 3: Memory section reports a non-empty real total.
     let mem = get_section(Section::Memory).expect("mem");
-    let total = mem.entries.iter().find(|e| e.key == "Total").expect("total");
+    let total = mem
+        .entries
+        .iter()
+        .find(|e| e.key == "Total")
+        .expect("total");
     assert!(!total.value.is_empty());
     crate::serial_println!("  [3/8] memory section: OK");
 
     // 4: Update an existing entry in place.
     set_entry(Section::Cpu, "Logical CPUs", "test-value").expect("update");
     let cpu = get_section(Section::Cpu).expect("cpu2");
-    let lc = cpu.entries.iter().find(|e| e.key == "Logical CPUs").expect("lc");
+    let lc = cpu
+        .entries
+        .iter()
+        .find(|e| e.key == "Logical CPUs")
+        .expect("lc");
     assert_eq!(lc.value, "test-value");
     crate::serial_println!("  [4/8] update entry: OK");
 

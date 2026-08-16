@@ -28,10 +28,10 @@ use crate::sched;
 use crate::serial_println;
 use crate::syscall::dispatch::{SyscallArgs, SyscallResult};
 
+use super::DrmObjectId;
 use super::atomic::{AtomicState, ConnectorState, CrtcState, IRect, PlaneState, Rect};
 use super::connector::ConnectorType;
 use super::mode::{DrmMode, PixelFormat};
-use super::DrmObjectId;
 
 // ---------------------------------------------------------------------------
 // Device handle validation
@@ -154,9 +154,7 @@ pub fn sys_drm_gem_destroy(args: &SyscallArgs) -> SyscallResult {
 
     let gem_handle = args.arg1 as u32;
 
-    match super::with_device_mut(index, |dev| {
-        dev.gem_destroy(gem_handle)
-    }) {
+    match super::with_device_mut(index, |dev| dev.gem_destroy(gem_handle)) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -243,9 +241,7 @@ pub fn sys_drm_gem_mmap(args: &SyscallArgs) -> SyscallResult {
                 for j in 0..i {
                     let rv = base_vaddr + (j as u64) * frame_size_u64;
                     // SAFETY: We mapped these frames successfully above.
-                    let _ = unsafe {
-                        page_table::unmap_frame(pml4_phys, VirtAddr::new(rv))
-                    };
+                    let _ = unsafe { page_table::unmap_frame(pml4_phys, VirtAddr::new(rv)) };
                 }
                 return SyscallResult::err(KernelError::InvalidAddress);
             }
@@ -254,20 +250,15 @@ pub fn sys_drm_gem_mmap(args: &SyscallArgs) -> SyscallResult {
         // SAFETY: pml4_phys is the calling process's valid page table.
         // phys is a GEM-owned frame (valid physical memory).
         // va is in the user mmap region.
-        if let Err(e) = unsafe {
-            page_table::map_frame(pml4_phys, VirtAddr::new(va), phys, page_flags)
-        } {
-            serial_println!(
-                "[drm] GEM MMAP map failed at va={:#x}: {:?}",
-                va, e
-            );
+        if let Err(e) =
+            unsafe { page_table::map_frame(pml4_phys, VirtAddr::new(va), phys, page_flags) }
+        {
+            serial_println!("[drm] GEM MMAP map failed at va={:#x}: {:?}", va, e);
             // Rollback: unmap frames 0..i.
             for j in 0..i {
                 let rv = base_vaddr + (j as u64) * frame_size_u64;
                 // SAFETY: rv was successfully mapped in a prior iteration; pml4 is valid.
-                let _ = unsafe {
-                    page_table::unmap_frame(pml4_phys, VirtAddr::new(rv))
-                };
+                let _ = unsafe { page_table::unmap_frame(pml4_phys, VirtAddr::new(rv)) };
             }
             return SyscallResult::err(e);
         }
@@ -336,9 +327,7 @@ pub fn sys_drm_fb_destroy(args: &SyscallArgs) -> SyscallResult {
 
     let fb_id = DrmObjectId::new(args.arg1 as u32);
 
-    match super::with_device_mut(index, |dev| {
-        dev.fb_destroy(fb_id)
-    }) {
+    match super::with_device_mut(index, |dev| dev.fb_destroy(fb_id)) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -358,9 +347,7 @@ pub fn sys_drm_page_flip(args: &SyscallArgs) -> SyscallResult {
     let crtc_id = DrmObjectId::new(args.arg1 as u32);
     let fb_id = DrmObjectId::new(args.arg2 as u32);
 
-    match super::with_device_mut(index, |dev| {
-        dev.page_flip(crtc_id, fb_id)
-    }) {
+    match super::with_device_mut(index, |dev| dev.page_flip(crtc_id, fb_id)) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -386,9 +373,7 @@ pub fn sys_drm_flush_region(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let h = (args.arg3 >> 32) as u32;
 
-    match super::with_device_mut(index, |dev| {
-        dev.flush_region(fb_id, x, y, w, h)
-    }) {
+    match super::with_device_mut(index, |dev| dev.flush_region(fb_id, x, y, w, h)) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -411,7 +396,9 @@ pub fn sys_drm_connector_status(args: &SyscallArgs) -> SyscallResult {
     let conn_idx = args.arg1 as usize;
 
     match super::with_device(index, |dev| {
-        let conn = dev.connectors().get(conn_idx)
+        let conn = dev
+            .connectors()
+            .get(conn_idx)
             .ok_or(KernelError::NotFound)?;
 
         let status: u64 = match conn.status {
@@ -458,10 +445,11 @@ pub fn sys_drm_mode_get(args: &SyscallArgs) -> SyscallResult {
     let mode_idx = args.arg2 as usize;
 
     match super::with_device(index, |dev| {
-        let conn = dev.connectors().get(conn_idx)
+        let conn = dev
+            .connectors()
+            .get(conn_idx)
             .ok_or(KernelError::NotFound)?;
-        let mode = conn.modes.get(mode_idx)
-            .ok_or(KernelError::NotFound)?;
+        let mode = conn.modes.get(mode_idx).ok_or(KernelError::NotFound)?;
 
         let packed = (mode.hdisplay as u64)
             | ((mode.vdisplay as u64) << 16)
@@ -490,8 +478,7 @@ pub fn sys_drm_crtc_info(args: &SyscallArgs) -> SyscallResult {
     let crtc_idx = args.arg1 as usize;
 
     match super::with_device(index, |dev| {
-        let crtc = dev.crtcs().get(crtc_idx)
-            .ok_or(KernelError::NotFound)?;
+        let crtc = dev.crtcs().get(crtc_idx).ok_or(KernelError::NotFound)?;
 
         let id = crtc.id.raw() as u64;
         let active_bit = if crtc.active { 1u64 << 32 } else { 0 };
@@ -546,9 +533,7 @@ pub fn sys_drm_cursor_move(args: &SyscallArgs) -> SyscallResult {
     let x = args.arg2 as i32;
     let y = args.arg3 as i32;
 
-    match super::with_device_mut(index, |dev| {
-        dev.cursor_move(crtc_id, x, y)
-    }) {
+    match super::with_device_mut(index, |dev| dev.cursor_move(crtc_id, x, y)) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -638,7 +623,11 @@ pub fn sys_drm_atomic_commit(args: &SyscallArgs) -> SyscallResult {
             None
         };
 
-        state.add_crtc(CrtcState { id: crtc_id, active, mode });
+        state.add_crtc(CrtcState {
+            id: crtc_id,
+            active,
+            mode,
+        });
     }
 
     // Parse plane changes (32 bytes each).
@@ -657,13 +646,21 @@ pub fn sys_drm_atomic_commit(args: &SyscallArgs) -> SyscallResult {
         offset += 32;
 
         let fb_id = if (pflags & 1) != 0 {
-            if fb_raw == 0 { Some(None) } else { Some(Some(DrmObjectId::new(fb_raw))) }
+            if fb_raw == 0 {
+                Some(None)
+            } else {
+                Some(Some(DrmObjectId::new(fb_raw)))
+            }
         } else {
             None
         };
 
         let crtc_id = if (pflags & 2) != 0 {
-            if crtc_raw == 0 { Some(None) } else { Some(Some(DrmObjectId::new(crtc_raw))) }
+            if crtc_raw == 0 {
+                Some(None)
+            } else {
+                Some(Some(DrmObjectId::new(crtc_raw)))
+            }
         } else {
             None
         };
@@ -714,12 +711,13 @@ pub fn sys_drm_atomic_commit(args: &SyscallArgs) -> SyscallResult {
             Some(Some(DrmObjectId::new(crtc_raw)))
         };
 
-        state.add_connector(ConnectorState { id: conn_id, crtc_id });
+        state.add_connector(ConnectorState {
+            id: conn_id,
+            crtc_id,
+        });
     }
 
-    match super::with_device_mut(index, |dev| {
-        super::atomic::atomic_commit(dev, &state)
-    }) {
+    match super::with_device_mut(index, |dev| super::atomic::atomic_commit(dev, &state)) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }

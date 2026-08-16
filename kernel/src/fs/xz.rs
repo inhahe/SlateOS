@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
-use alloc::vec;
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
+use alloc::vec;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -148,8 +148,7 @@ impl<'a> RangeDecoder<'a> {
     fn normalize(&mut self) {
         if self.range < (1u32 << 24) {
             self.range <<= 8;
-            self.code = (self.code << 8)
-                | u32::from(self.data.get(self.pos).copied().unwrap_or(0));
+            self.code = (self.code << 8) | u32::from(self.data.get(self.pos).copied().unwrap_or(0));
             self.pos = self.pos.saturating_add(1);
         }
     }
@@ -202,11 +201,7 @@ impl<'a> RangeDecoder<'a> {
 ///
 /// The tree is stored in `probs[1..(1 << num_bits)]` (index 0 unused).
 /// Returns a value in `0..(1 << num_bits)`.
-fn decode_bit_tree(
-    rc: &mut RangeDecoder<'_>,
-    probs: &mut [u16],
-    num_bits: usize,
-) -> u32 {
+fn decode_bit_tree(rc: &mut RangeDecoder<'_>, probs: &mut [u16], num_bits: usize) -> u32 {
     let mut m: u32 = 1;
     for _ in 0..num_bits {
         let idx = m as usize;
@@ -277,8 +272,7 @@ impl LenDecoder {
 
     fn decode(&mut self, rc: &mut RangeDecoder<'_>, pos_state: usize) -> u32 {
         if rc.decode_bit(&mut self.choice) == 0 {
-            decode_bit_tree(rc, &mut self.low[pos_state], LEN_LOW_BITS)
-                .wrapping_add(2)
+            decode_bit_tree(rc, &mut self.low[pos_state], LEN_LOW_BITS).wrapping_add(2)
         } else if rc.decode_bit(&mut self.choice2) == 0 {
             decode_bit_tree(rc, &mut self.mid[pos_state], LEN_MID_BITS)
                 .wrapping_add(2 + (1 << LEN_LOW_BITS))
@@ -341,7 +335,9 @@ impl LzmaState {
         literal_probs.resize(lit_size, PROB_INIT);
 
         let mut s = Self {
-            lc, lp, pb,
+            lc,
+            lp,
+            pb,
             state: 0,
             rep: [0; 4],
             is_match: [[PROB_INIT; POS_STATES_MAX]; STATES],
@@ -366,18 +362,24 @@ impl LzmaState {
         self.state = 0;
         self.rep = [0; 4];
 
-        for row in self.is_match.iter_mut() { row.fill(PROB_INIT); }
+        for row in self.is_match.iter_mut() {
+            row.fill(PROB_INIT);
+        }
         self.is_rep.fill(PROB_INIT);
         self.is_rep_g0.fill(PROB_INIT);
         self.is_rep_g1.fill(PROB_INIT);
         self.is_rep_g2.fill(PROB_INIT);
-        for row in self.is_rep0_long.iter_mut() { row.fill(PROB_INIT); }
+        for row in self.is_rep0_long.iter_mut() {
+            row.fill(PROB_INIT);
+        }
 
         self.literal_probs.fill(PROB_INIT);
         self.match_len.reset();
         self.rep_len.reset();
 
-        for row in self.pos_slot.iter_mut() { row.fill(PROB_INIT); }
+        for row in self.pos_slot.iter_mut() {
+            row.fill(PROB_INIT);
+        }
         self.pos_decoders.fill(PROB_INIT);
         self.align_decoder.fill(PROB_INIT);
     }
@@ -435,9 +437,7 @@ pub(crate) fn lzma_decode(
         let pos_state = (pos as u32 & pos_mask) as usize;
         let state = lzma.state as usize;
 
-        if rc.decode_bit(
-            &mut lzma.is_match[state][pos_state],
-        ) == 0 {
+        if rc.decode_bit(&mut lzma.is_match[state][pos_state]) == 0 {
             // --- Literal ---
             let prev_byte = if output.is_empty() {
                 0u8
@@ -457,9 +457,7 @@ pub(crate) fn lzma_decode(
             } else {
                 // Match-byte-aware literal decode (state >= 7).
                 let match_byte = get_dict_byte(output, lzma.rep[0] as usize);
-                decode_literal_matched(
-                    &mut rc, &mut lzma.literal_probs, probs_offset, match_byte,
-                )
+                decode_literal_matched(&mut rc, &mut lzma.literal_probs, probs_offset, match_byte)
             };
 
             output.push(byte);
@@ -473,11 +471,7 @@ pub(crate) fn lzma_decode(
                 // Simple match — new distance.
                 len = lzma.match_len.decode(&mut rc, pos_state);
                 let slot_idx = len.wrapping_sub(2).min(3) as usize;
-                let slot = decode_bit_tree(
-                    &mut rc,
-                    &mut lzma.pos_slot[slot_idx],
-                    POS_SLOT_BITS,
-                );
+                let slot = decode_bit_tree(&mut rc, &mut lzma.pos_slot[slot_idx], POS_SLOT_BITS);
 
                 dist = decode_distance(&mut rc, lzma, slot)?;
 
@@ -548,11 +542,7 @@ pub(crate) fn lzma_decode(
 }
 
 /// Decode a literal byte (state < 7, no match byte context).
-fn decode_literal_normal(
-    rc: &mut RangeDecoder<'_>,
-    probs: &mut [u16],
-    offset: usize,
-) -> u8 {
+fn decode_literal_normal(rc: &mut RangeDecoder<'_>, probs: &mut [u16], offset: usize) -> u8 {
     let mut symbol: u32 = 1;
     for _ in 0..8 {
         let idx = offset.saturating_add(symbol as usize);
@@ -587,8 +577,7 @@ fn decode_literal_matched(
             offset.saturating_add(symbol as usize)
         } else {
             offset.saturating_add(
-                (((1u32.wrapping_add(match_bit)) << 8)
-                    .wrapping_add(symbol)) as usize,
+                (((1u32.wrapping_add(match_bit)) << 8).wrapping_add(symbol)) as usize,
             )
         };
 
@@ -619,12 +608,7 @@ fn decode_distance(
     if slot < END_POS_MODEL as u32 {
         // Context-decoded reversed bits from pos_decoders.
         let base = dist.wrapping_sub(slot) as usize;
-        let footer = decode_bit_tree_reverse(
-            rc,
-            &mut lzma.pos_decoders,
-            base,
-            num_direct_bits,
-        );
+        let footer = decode_bit_tree_reverse(rc, &mut lzma.pos_decoders, base, num_direct_bits);
         dist = dist.wrapping_add(footer);
     } else {
         // Direct bits (fixed 0.5 prob) for the high bits,
@@ -633,12 +617,7 @@ fn decode_distance(
         let direct = rc.decode_direct_bits(high_bits);
         dist = dist.wrapping_add(direct << ALIGN_BITS);
 
-        let align = decode_bit_tree_reverse(
-            rc,
-            &mut lzma.align_decoder,
-            0,
-            ALIGN_BITS,
-        );
+        let align = decode_bit_tree_reverse(rc, &mut lzma.align_decoder, 0, ALIGN_BITS);
         dist = dist.wrapping_add(align);
     }
 
@@ -683,7 +662,8 @@ pub(crate) fn lzma2_decode(data: &[u8], dict_size: u32) -> KernelResult<Vec<u8>>
             pos = pos.saturating_add(2);
             let chunk_size = ((size_hi << 8) | size_lo).wrapping_add(1) as usize;
 
-            let chunk = data.get(pos..pos.saturating_add(chunk_size))
+            let chunk = data
+                .get(pos..pos.saturating_add(chunk_size))
                 .ok_or(KernelError::CorruptedData)?;
             pos = pos.saturating_add(chunk_size);
 
@@ -713,10 +693,9 @@ pub(crate) fn lzma2_decode(data: &[u8], dict_size: u32) -> KernelResult<Vec<u8>>
         let uncomp_mid = u16::from(*data.get(pos).ok_or(KernelError::CorruptedData)?);
         let uncomp_lo = u16::from(*data.get(pos + 1).ok_or(KernelError::CorruptedData)?);
         pos = pos.saturating_add(2);
-        let uncompressed_size = ((uncomp_hi << 16)
-            | (u32::from(uncomp_mid) << 8)
-            | u32::from(uncomp_lo))
-            .wrapping_add(1) as usize;
+        let uncompressed_size =
+            ((uncomp_hi << 16) | (u32::from(uncomp_mid) << 8) | u32::from(uncomp_lo))
+                .wrapping_add(1) as usize;
 
         let comp_hi = u16::from(*data.get(pos).ok_or(KernelError::CorruptedData)?);
         let comp_lo = u16::from(*data.get(pos + 1).ok_or(KernelError::CorruptedData)?);
@@ -762,7 +741,8 @@ pub(crate) fn lzma2_decode(data: &[u8], dict_size: u32) -> KernelResult<Vec<u8>>
 
         // The compressed_size includes the 5-byte range coder init
         // when props are reset (the props byte is NOT included).
-        let lzma_data = data.get(pos..pos.saturating_add(compressed_size))
+        let lzma_data = data
+            .get(pos..pos.saturating_add(compressed_size))
             .ok_or(KernelError::CorruptedData)?;
         pos = pos.saturating_add(compressed_size);
 
@@ -785,7 +765,8 @@ fn read_vli(data: &[u8], start: usize) -> KernelResult<(u64, usize)> {
     let mut shift: u32 = 0;
 
     for i in 0..9 {
-        let byte = *data.get(start.saturating_add(i))
+        let byte = *data
+            .get(start.saturating_add(i))
             .ok_or(KernelError::CorruptedData)?;
         val |= u64::from(byte & 0x7F) << shift;
         shift = shift.saturating_add(7);
@@ -850,9 +831,8 @@ pub fn unxz(data: &[u8]) -> KernelResult<Vec<u8>> {
 
     // Validate header CRC-32 (covers bytes 6-7).
     let header_crc_stored = read_le32(data, 8)?;
-    let header_crc_computed = super::compress::crc32_iso_pub(
-        header.get(6..8).ok_or(KernelError::CorruptedData)?,
-    );
+    let header_crc_computed =
+        super::compress::crc32_iso_pub(header.get(6..8).ok_or(KernelError::CorruptedData)?);
     if header_crc_stored != header_crc_computed {
         return Err(KernelError::CorruptedData);
     }
@@ -870,16 +850,18 @@ pub fn unxz(data: &[u8]) -> KernelResult<Vec<u8>> {
 
         // Block header size: (indicator + 1) * 4 bytes (including the
         // indicator byte itself and the 4-byte CRC at the end).
-        let block_header_size = (u32::from(indicator).wrapping_add(1))
-            .saturating_mul(4) as usize;
-        let block_header = data.get(pos..pos.saturating_add(block_header_size))
+        let block_header_size = (u32::from(indicator).wrapping_add(1)).saturating_mul(4) as usize;
+        let block_header = data
+            .get(pos..pos.saturating_add(block_header_size))
             .ok_or(KernelError::CorruptedData)?;
 
         // Validate block header CRC-32 (covers all but last 4 bytes).
         let bh_crc_start = block_header_size.saturating_sub(4);
         let bh_crc_stored = read_le32(block_header, bh_crc_start)?;
         let bh_crc_computed = super::compress::crc32_iso_pub(
-            block_header.get(..bh_crc_start).ok_or(KernelError::CorruptedData)?,
+            block_header
+                .get(..bh_crc_start)
+                .ok_or(KernelError::CorruptedData)?,
         );
         if bh_crc_stored != bh_crc_computed {
             return Err(KernelError::CorruptedData);
@@ -966,7 +948,7 @@ pub fn unxz(data: &[u8]) -> KernelResult<Vec<u8>> {
             CHECK_CRC32 => 4,
             CHECK_CRC64 => 8,
             0x0A => 32, // SHA-256
-            _ => 0, // Unknown — skip nothing
+            _ => 0,     // Unknown — skip nothing
         };
 
         // Validate check if possible.
@@ -1011,7 +993,9 @@ fn lzma2_stream_size(data: &[u8]) -> KernelResult<usize> {
             // Uncompressed chunk.
             let size_hi = u16::from(*data.get(pos).ok_or(KernelError::CorruptedData)?);
             let size_lo = u16::from(
-                *data.get(pos.saturating_add(1)).ok_or(KernelError::CorruptedData)?,
+                *data
+                    .get(pos.saturating_add(1))
+                    .ok_or(KernelError::CorruptedData)?,
             );
             pos = pos.saturating_add(2);
             let chunk_size = ((size_hi << 8) | size_lo).wrapping_add(1) as usize;
@@ -1028,7 +1012,9 @@ fn lzma2_stream_size(data: &[u8]) -> KernelResult<usize> {
         pos = pos.saturating_add(2); // uncompressed size low
         let comp_hi = u16::from(*data.get(pos).ok_or(KernelError::CorruptedData)?);
         let comp_lo = u16::from(
-            *data.get(pos.saturating_add(1)).ok_or(KernelError::CorruptedData)?,
+            *data
+                .get(pos.saturating_add(1))
+                .ok_or(KernelError::CorruptedData)?,
         );
         pos = pos.saturating_add(2);
         let compressed_size = ((comp_hi << 8) | comp_lo).wrapping_add(1) as usize;
@@ -1048,18 +1034,19 @@ fn lzma2_stream_size(data: &[u8]) -> KernelResult<usize> {
 
 /// Read a little-endian u32 from `data[offset..offset+4]`.
 fn read_le32(data: &[u8], offset: usize) -> KernelResult<u32> {
-    let bytes = data.get(offset..offset.saturating_add(4))
+    let bytes = data
+        .get(offset..offset.saturating_add(4))
         .ok_or(KernelError::CorruptedData)?;
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 /// Read a little-endian u64 from `data[offset..offset+8]`.
 fn read_le64(data: &[u8], offset: usize) -> KernelResult<u64> {
-    let bytes = data.get(offset..offset.saturating_add(8))
+    let bytes = data
+        .get(offset..offset.saturating_add(8))
         .ok_or(KernelError::CorruptedData)?;
     Ok(u64::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
     ]))
 }
 
@@ -1181,12 +1168,7 @@ impl RangeEncoder {
 ///
 /// Mirror of `decode_bit_tree`.  The tree is stored in
 /// `probs[1..(1 << num_bits)]` (index 0 unused).
-fn encode_bit_tree(
-    rc: &mut RangeEncoder,
-    probs: &mut [u16],
-    num_bits: usize,
-    value: u32,
-) {
+fn encode_bit_tree(rc: &mut RangeEncoder, probs: &mut [u16], num_bits: usize, value: u32) {
     let mut m: u32 = 1;
     for i in (0..num_bits).rev() {
         let bit = (value >> i) & 1;
@@ -1307,7 +1289,9 @@ impl LzmaEncoderState {
         let num_lit = 1usize << (lc.saturating_add(lp) as usize);
         let lit_size = num_lit.saturating_mul(0x300);
         Self {
-            lc, lp, pb,
+            lc,
+            lp,
+            pb,
             state: 0,
             rep: [0; 4],
             is_match: [[PROB_INIT; POS_STATES_MAX]; STATES],
@@ -1370,13 +1354,7 @@ impl LzmaEncoderState {
     }
 
     /// Encode a match (new distance).
-    fn encode_match(
-        &mut self,
-        rc: &mut RangeEncoder,
-        pos: usize,
-        dist: u32,
-        len: u32,
-    ) {
+    fn encode_match(&mut self, rc: &mut RangeEncoder, pos: usize, dist: u32, len: u32) {
         let pos_state = (pos as u32 & ((1u32 << self.pb).wrapping_sub(1))) as usize;
         let state = self.state as usize;
 
@@ -1390,12 +1368,7 @@ impl LzmaEncoderState {
         // Encode distance.
         let slot = distance_to_slot(dist);
         let slot_idx = len.wrapping_sub(2).min(3) as usize;
-        encode_bit_tree(
-            rc,
-            &mut self.pos_slot[slot_idx],
-            POS_SLOT_BITS,
-            slot,
-        );
+        encode_bit_tree(rc, &mut self.pos_slot[slot_idx], POS_SLOT_BITS, slot);
 
         if slot >= START_POS_MODEL as u32 {
             let num_direct_bits = (slot >> 1).wrapping_sub(1) as usize;
@@ -1435,12 +1408,7 @@ impl LzmaEncoderState {
     }
 
     /// Encode a rep0 match (repeat distance 0, length >= 2).
-    fn encode_rep0(
-        &mut self,
-        rc: &mut RangeEncoder,
-        pos: usize,
-        len: u32,
-    ) {
+    fn encode_rep0(&mut self, rc: &mut RangeEncoder, pos: usize, len: u32) {
         let pos_state = (pos as u32 & ((1u32 << self.pb).wrapping_sub(1))) as usize;
         let state = self.state as usize;
 
@@ -1462,13 +1430,7 @@ impl LzmaEncoderState {
     }
 
     /// Encode a rep1/rep2/rep3 match.
-    fn encode_rep_n(
-        &mut self,
-        rc: &mut RangeEncoder,
-        pos: usize,
-        rep_idx: usize,
-        len: u32,
-    ) {
+    fn encode_rep_n(&mut self, rc: &mut RangeEncoder, pos: usize, rep_idx: usize, len: u32) {
         let pos_state = (pos as u32 & ((1u32 << self.pb).wrapping_sub(1))) as usize;
         let state = self.state as usize;
 
@@ -1506,12 +1468,7 @@ impl LzmaEncoderState {
 }
 
 /// Encode a literal byte (state < 7, no match byte context).
-fn encode_literal_normal(
-    rc: &mut RangeEncoder,
-    probs: &mut [u16],
-    offset: usize,
-    byte: u8,
-) {
+fn encode_literal_normal(rc: &mut RangeEncoder, probs: &mut [u16], offset: usize, byte: u8) {
     let mut symbol: u32 = 1;
     for i in (0..8).rev() {
         let bit = (u32::from(byte) >> i) & 1;
@@ -1546,8 +1503,7 @@ fn encode_literal_matched(
             offset.saturating_add(symbol as usize)
         } else {
             offset.saturating_add(
-                (((1u32.wrapping_add(match_bit)) << 8)
-                    .wrapping_add(symbol)) as usize,
+                (((1u32.wrapping_add(match_bit)) << 8).wrapping_add(symbol)) as usize,
             )
         };
 
@@ -1571,8 +1527,9 @@ fn distance_to_slot(dist: u32) -> u32 {
     // Find the highest set bit position.
     let msb = 31u32.wrapping_sub(dist.leading_zeros());
     // Slot = 2*msb + bit below msb.
-    
-    msb.wrapping_mul(2).wrapping_add((dist >> (msb.wrapping_sub(1))) & 1)
+
+    msb.wrapping_mul(2)
+        .wrapping_add((dist >> (msb.wrapping_sub(1))) & 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -1714,9 +1671,15 @@ fn lzma_tokenize(data: &[u8]) -> Vec<LzmaToken> {
         if use_rep && best_rep_len >= LZMA_MIN_MATCH {
             let ri = best_rep_idx.unwrap_or(0);
             if ri == 0 {
-                tokens.push(LzmaToken::Rep { rep_idx: 0, len: best_rep_len as u32 });
+                tokens.push(LzmaToken::Rep {
+                    rep_idx: 0,
+                    len: best_rep_len as u32,
+                });
             } else {
-                tokens.push(LzmaToken::Rep { rep_idx: ri, len: best_rep_len as u32 });
+                tokens.push(LzmaToken::Rep {
+                    rep_idx: ri,
+                    len: best_rep_len as u32,
+                });
                 // Promote rep[ri] to rep[0].
                 let d = rep[ri];
                 for j in (1..=ri).rev() {
@@ -1734,10 +1697,11 @@ fn lzma_tokenize(data: &[u8]) -> Vec<LzmaToken> {
                 }
             }
             pos += best_rep_len;
-        } else if hash_len >= LZMA_MIN_MATCH
-            && (hash_len >= 3 || hash_dist < 128)
-        {
-            tokens.push(LzmaToken::Match { dist: hash_dist, len: hash_len as u32 });
+        } else if hash_len >= LZMA_MIN_MATCH && (hash_len >= 3 || hash_dist < 128) {
+            tokens.push(LzmaToken::Match {
+                dist: hash_dist,
+                len: hash_len as u32,
+            });
             // Update rep distances.
             rep[3] = rep[2];
             rep[2] = rep[1];
@@ -1789,11 +1753,7 @@ fn lzma_encode(data: &[u8]) -> Vec<u8> {
     let mut data_pos = 0usize; // Position in input data.
 
     for token in &tokens {
-        let prev_byte = if data_pos > 0 {
-            data[data_pos - 1]
-        } else {
-            0
-        };
+        let prev_byte = if data_pos > 0 { data[data_pos - 1] } else { 0 };
 
         match token {
             LzmaToken::Literal(byte) => {
@@ -1860,9 +1820,7 @@ fn lzma2_encode(data: &[u8]) -> Vec<u8> {
         // Control byte: bits 7-5 = 110 (LZMA + new props), bits 4-0 = high
         // bits of uncompressed size.
         let uncomp_minus1 = (data.len() as u32).wrapping_sub(1);
-        let control = 0xC0u8
-            | ((uncomp_minus1 >> 16) as u8 & 0x1F)
-            | 0x20; // bit 5 = reset state + new props
+        let control = 0xC0u8 | ((uncomp_minus1 >> 16) as u8 & 0x1F) | 0x20; // bit 5 = reset state + new props
 
         out.push(control);
 
@@ -2120,7 +2078,11 @@ fn test_vli() -> KernelResult<()> {
     let data2 = [0x80u8, 0x01];
     let (val2, consumed2) = read_vli(&data2, 0)?;
     if val2 != 128 || consumed2 != 2 {
-        serial_println!("[xz]   FAIL: VLI two byte: val={}, consumed={}", val2, consumed2);
+        serial_println!(
+            "[xz]   FAIL: VLI two byte: val={}, consumed={}",
+            val2,
+            consumed2
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -2360,7 +2322,9 @@ fn test_range_encoder_roundtrip() -> KernelResult<()> {
         if got != expected {
             serial_println!(
                 "[xz]   FAIL: range encoder roundtrip bit {} = {}, expected {}",
-                i, got, expected,
+                i,
+                got,
+                expected,
             );
             return Err(KernelError::InternalError);
         }
@@ -2375,15 +2339,23 @@ fn test_distance_slots() -> KernelResult<()> {
     // Mapping: slots 0-3 = dist 0-3 (1:1).  Slot 4 = dist 4-5, slot 5 = dist 6-7,
     // slot 6 = dist 8-11, slot 7 = dist 12-15, etc.
     let cases: [(u32, u32); 8] = [
-        (0, 0), (1, 1), (2, 2), (3, 3),
-        (4, 4), (5, 4), (6, 5), (7, 5),
+        (0, 0),
+        (1, 1),
+        (2, 2),
+        (3, 3),
+        (4, 4),
+        (5, 4),
+        (6, 5),
+        (7, 5),
     ];
     for &(dist, expected_slot) in &cases {
         let slot = distance_to_slot(dist);
         if slot != expected_slot {
             serial_println!(
                 "[xz]   FAIL: distance_to_slot({}) = {}, expected {}",
-                dist, slot, expected_slot,
+                dist,
+                slot,
+                expected_slot,
             );
             return Err(KernelError::InternalError);
         }
@@ -2405,7 +2377,9 @@ fn test_distance_slots() -> KernelResult<()> {
         if recovered != dist {
             serial_println!(
                 "[xz]   FAIL: distance {} → slot {} → recovered {}",
-                dist, slot, recovered,
+                dist,
+                slot,
+                recovered,
             );
             return Err(KernelError::InternalError);
         }
@@ -2428,7 +2402,8 @@ fn test_compress_roundtrip() -> KernelResult<()> {
     }
     serial_println!(
         "[xz]   text round-trip ({}B → {}B, {}%) ✓",
-        text.len(), compressed.len(),
+        text.len(),
+        compressed.len(),
         compressed.len().wrapping_mul(100) / text.len().max(1),
     );
 
@@ -2456,7 +2431,8 @@ fn test_compress_roundtrip() -> KernelResult<()> {
     }
     serial_println!(
         "[xz]   repetitive data round-trip ({}B → {}B, {}%) ✓",
-        rep_data.len(), compressed_rep.len(),
+        rep_data.len(),
+        compressed_rep.len(),
         compressed_rep.len().wrapping_mul(100) / rep_data.len().max(1),
     );
 

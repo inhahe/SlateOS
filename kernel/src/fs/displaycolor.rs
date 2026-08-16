@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -155,7 +155,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     // Standard ICC color-space definitions ship by default: sRGB, Adobe RGB
     // (1998), and Display P3 are well-known industry standards with fixed white
@@ -166,25 +168,37 @@ pub fn init_defaults() {
     // the color data itself is embedded here and does not depend on those files.
     let profiles = alloc::vec![
         ColorProfile {
-            id: 1, name: String::from("sRGB IEC61966-2.1"),
+            id: 1,
+            name: String::from("sRGB IEC61966-2.1"),
             path: String::from("/usr/share/color/srgb.icc"),
-            color_space: ColorSpace::Srgb, intent: RenderIntent::Perceptual,
-            is_default: true, version: String::from("2.1.0"),
-            white_point_k: 6500, gamma_100: 220,
+            color_space: ColorSpace::Srgb,
+            intent: RenderIntent::Perceptual,
+            is_default: true,
+            version: String::from("2.1.0"),
+            white_point_k: 6500,
+            gamma_100: 220,
         },
         ColorProfile {
-            id: 2, name: String::from("Adobe RGB (1998)"),
+            id: 2,
+            name: String::from("Adobe RGB (1998)"),
             path: String::from("/usr/share/color/adobergb.icc"),
-            color_space: ColorSpace::AdobeRgb, intent: RenderIntent::RelativeColorimetric,
-            is_default: false, version: String::from("2.1.0"),
-            white_point_k: 6500, gamma_100: 220,
+            color_space: ColorSpace::AdobeRgb,
+            intent: RenderIntent::RelativeColorimetric,
+            is_default: false,
+            version: String::from("2.1.0"),
+            white_point_k: 6500,
+            gamma_100: 220,
         },
         ColorProfile {
-            id: 3, name: String::from("Display P3"),
+            id: 3,
+            name: String::from("Display P3"),
             path: String::from("/usr/share/color/displayp3.icc"),
-            color_space: ColorSpace::DciP3, intent: RenderIntent::Perceptual,
-            is_default: false, version: String::from("4.0.0"),
-            white_point_k: 6500, gamma_100: 220,
+            color_space: ColorSpace::DciP3,
+            intent: RenderIntent::Perceptual,
+            is_default: false,
+            version: String::from("4.0.0"),
+            white_point_k: 6500,
+            gamma_100: 220,
         },
     ];
 
@@ -206,8 +220,11 @@ pub fn init_defaults() {
 
 /// Install a new color profile.
 pub fn install_profile(
-    name: &str, path: &str, color_space: ColorSpace,
-    white_point_k: u32, gamma_100: u32,
+    name: &str,
+    path: &str,
+    color_space: ColorSpace,
+    white_point_k: u32,
+    gamma_100: u32,
 ) -> KernelResult<u32> {
     with_state(|state| {
         if state.profiles.len() >= MAX_PROFILES {
@@ -216,10 +233,15 @@ pub fn install_profile(
         let id = state.next_profile_id;
         state.next_profile_id += 1;
         state.profiles.push(ColorProfile {
-            id, name: String::from(name), path: String::from(path),
-            color_space, intent: RenderIntent::Perceptual,
-            is_default: false, version: String::from("2.1.0"),
-            white_point_k, gamma_100,
+            id,
+            name: String::from(name),
+            path: String::from(path),
+            color_space,
+            intent: RenderIntent::Perceptual,
+            is_default: false,
+            version: String::from("2.1.0"),
+            white_point_k,
+            gamma_100,
         });
         Ok(id)
     })
@@ -231,7 +253,10 @@ pub fn remove_profile(id: u32) -> KernelResult<()> {
         if state.profiles.iter().any(|p| p.id == id && p.is_default) {
             return Err(KernelError::InvalidArgument); // Can't remove default.
         }
-        let pos = state.profiles.iter().position(|p| p.id == id)
+        let pos = state
+            .profiles
+            .iter()
+            .position(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         state.profiles.remove(pos);
         // Unassign from any displays using this profile.
@@ -250,7 +275,11 @@ pub fn assign_profile(display_id: u32, profile_id: u32) -> KernelResult<()> {
         if !state.profiles.iter().any(|p| p.id == profile_id) {
             return Err(KernelError::NotFound);
         }
-        if let Some(a) = state.assignments.iter_mut().find(|a| a.display_id == display_id) {
+        if let Some(a) = state
+            .assignments
+            .iter_mut()
+            .find(|a| a.display_id == display_id)
+        {
             a.profile_id = profile_id;
         } else {
             return Err(KernelError::NotFound);
@@ -262,7 +291,10 @@ pub fn assign_profile(display_id: u32, profile_id: u32) -> KernelResult<()> {
 /// Mark a display as calibrated.
 pub fn mark_calibrated(display_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let a = state.assignments.iter_mut().find(|a| a.display_id == display_id)
+        let a = state
+            .assignments
+            .iter_mut()
+            .find(|a| a.display_id == display_id)
             .ok_or(KernelError::NotFound)?;
         a.calibrated = true;
         a.calibrated_ns = crate::hpet::elapsed_ns();
@@ -281,9 +313,13 @@ pub fn register_display(display_id: u32, name: &str) -> KernelResult<()> {
             return Err(KernelError::ResourceExhausted);
         }
         state.assignments.push(DisplayAssignment {
-            display_id, display_name: String::from(name),
-            profile_id: 1, calibrated: false, calibrated_ns: 0,
-            brightness: 0, contrast: 0,
+            display_id,
+            display_name: String::from(name),
+            profile_id: 1,
+            calibrated: false,
+            calibrated_ns: 0,
+            brightness: 0,
+            contrast: 0,
         });
         Ok(())
     })
@@ -291,18 +327,29 @@ pub fn register_display(display_id: u32, name: &str) -> KernelResult<()> {
 
 /// List profiles.
 pub fn list_profiles() -> Vec<ColorProfile> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.profiles.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.profiles.clone())
 }
 
 /// List display assignments.
 pub fn list_assignments() -> Vec<DisplayAssignment> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.assignments.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.assignments.clone())
 }
 
 /// Get profile by ID.
 pub fn get_profile(id: u32) -> KernelResult<ColorProfile> {
     with_state(|state| {
-        state.profiles.iter().find(|p| p.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -312,7 +359,13 @@ pub fn stats() -> (usize, usize, usize, u64, u64) {
     match guard.as_ref() {
         Some(s) => {
             let calibrated = s.assignments.iter().filter(|a| a.calibrated).count();
-            (s.profiles.len(), s.assignments.len(), calibrated, s.total_calibrations, s.ops)
+            (
+                s.profiles.len(),
+                s.assignments.len(),
+                calibrated,
+                s.total_calibrations,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }
@@ -346,8 +399,14 @@ pub fn self_test() {
     crate::serial_println!("  [2/11] default display: OK");
 
     // 3: Install profile.
-    let id = install_profile("Custom Profile", "/home/user/custom.icc",
-        ColorSpace::Custom, 5500, 240).expect("install");
+    let id = install_profile(
+        "Custom Profile",
+        "/home/user/custom.icc",
+        ColorSpace::Custom,
+        5500,
+        240,
+    )
+    .expect("install");
     assert!(id > 0);
     assert_eq!(list_profiles().len(), 4);
     crate::serial_println!("  [3/11] install profile: OK");

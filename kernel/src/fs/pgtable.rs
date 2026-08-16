@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -35,10 +35,10 @@ use crate::error::{KernelError, KernelResult};
 /// Page table level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PtLevel {
-    Pml4,  // Level 4 (PGD)
-    Pdpt,  // Level 3 (PUD)
-    Pd,    // Level 2 (PMD)
-    Pt,    // Level 1 (PTE)
+    Pml4, // Level 4 (PGD)
+    Pdpt, // Level 3 (PUD)
+    Pd,   // Level 2 (PMD)
+    Pt,   // Level 1 (PTE)
 }
 
 impl PtLevel {
@@ -63,10 +63,10 @@ impl PtLevel {
 /// TLB flush scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlushScope {
-    Single,    // Single page INVLPG
-    Range,     // Range of pages
-    Full,      // Full TLB flush (mov cr3)
-    Global,    // Cross-CPU IPI shootdown
+    Single, // Single page INVLPG
+    Range,  // Range of pages
+    Full,   // Full TLB flush (mov cr3)
+    Global, // Cross-CPU IPI shootdown
 }
 
 impl FlushScope {
@@ -97,7 +97,7 @@ struct State {
     level_allocs: [u64; 4],
     level_frees: [u64; 4],
     walks: u64,
-    walk_levels_total: u64,   // Sum of levels walked (for average)
+    walk_levels_total: u64, // Sum of levels walked (for average)
     flush_single: u64,
     flush_range: u64,
     flush_full: u64,
@@ -143,7 +143,9 @@ where
 /// 1,550,503 active page-table pages.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         level_allocs: [0; 4],
         level_frees: [0; 4],
@@ -203,12 +205,16 @@ pub fn per_level() -> Vec<LevelStats> {
     let guard = STATE.lock();
     guard.as_ref().map_or(Vec::new(), |s| {
         let levels = [PtLevel::Pml4, PtLevel::Pdpt, PtLevel::Pd, PtLevel::Pt];
-        levels.iter().enumerate().map(|(i, &lvl)| LevelStats {
-            level: lvl,
-            allocated: s.level_allocs[i],
-            freed: s.level_frees[i],
-            active: s.level_allocs[i].saturating_sub(s.level_frees[i]),
-        }).collect()
+        levels
+            .iter()
+            .enumerate()
+            .map(|(i, &lvl)| LevelStats {
+                level: lvl,
+                allocated: s.level_allocs[i],
+                freed: s.level_frees[i],
+                active: s.level_allocs[i].saturating_sub(s.level_frees[i]),
+            })
+            .collect()
     })
 }
 
@@ -236,7 +242,11 @@ pub fn stats() -> (u64, u64, u64, u64, u64) {
     match guard.as_ref() {
         Some(s) => {
             let total_flushes = s.flush_single + s.flush_range + s.flush_full + s.flush_global;
-            let avg = if s.walks > 0 { s.walk_levels_total * 100 / s.walks } else { 0 };
+            let avg = if s.walks > 0 {
+                s.walk_levels_total * 100 / s.walks
+            } else {
+                0
+            };
             (s.total_pages_used, s.walks, total_flushes, avg, s.ops)
         }
         None => (0, 0, 0, 0, 0),

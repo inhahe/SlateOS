@@ -54,13 +54,13 @@
 //! `CP_TABLE` → individual IPC table locks (to poll sources).
 //! `CP_TABLE` → `SCHED` (to wake blocked waiters).
 
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Source types
@@ -224,8 +224,7 @@ impl CompletionPort {
 ///
 /// Lock ordering: `CP_TABLE` → source tables (channel/pipe/eventfd)
 /// → `SCHED`.
-static CP_TABLE: Mutex<BTreeMap<CpId, CompletionPort>> =
-    Mutex::new(BTreeMap::new());
+static CP_TABLE: Mutex<BTreeMap<CpId, CompletionPort>> = Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
 // Source polling helpers
@@ -309,15 +308,9 @@ pub fn create() -> CpHandle {
 /// - `InvalidHandle` — completion port not found.
 /// - `InvalidArgument` — source already registered, or too many
 ///   registrations.
-pub fn register(
-    cp: CpHandle,
-    source: WaitSource,
-    user_data: u64,
-) -> KernelResult<()> {
+pub fn register(cp: CpHandle, source: WaitSource, user_data: u64) -> KernelResult<()> {
     let mut table = CP_TABLE.lock();
-    let port = table
-        .get_mut(&cp.id())
-        .ok_or(KernelError::InvalidHandle)?;
+    let port = table.get_mut(&cp.id()).ok_or(KernelError::InvalidHandle)?;
 
     if port.closed {
         return Err(KernelError::ChannelClosed);
@@ -325,10 +318,7 @@ pub fn register(
 
     // Check for duplicate registration.
     let key = source.key();
-    let already = port
-        .registrations
-        .iter()
-        .any(|r| r.source.key() == key);
+    let already = port.registrations.iter().any(|r| r.source.key() == key);
     if already {
         return Err(KernelError::AlreadyExists);
     }
@@ -372,9 +362,7 @@ pub fn register(
 /// - `NotFound` — source was not registered.
 pub fn unregister(cp: CpHandle, source: WaitSource) -> KernelResult<()> {
     let mut table = CP_TABLE.lock();
-    let port = table
-        .get_mut(&cp.id())
-        .ok_or(KernelError::InvalidHandle)?;
+    let port = table.get_mut(&cp.id()).ok_or(KernelError::InvalidHandle)?;
 
     let key = source.key();
     let pos = port
@@ -425,11 +413,7 @@ pub fn notify(cp: CpHandle, source: WaitSource) {
 
         // Find the registration to get user_data.
         let key = source.key();
-        let Some(reg) = port
-            .registrations
-            .iter()
-            .find(|r| r.source.key() == key)
-        else {
+        let Some(reg) = port.registrations.iter().find(|r| r.source.key() == key) else {
             return; // Source was unregistered — ignore.
         };
 
@@ -477,11 +461,7 @@ pub fn try_notify(cp: CpHandle, source: WaitSource) -> bool {
 
     // Find the registration to get user_data.
     let key = source.key();
-    let Some(reg) = port
-        .registrations
-        .iter()
-        .find(|r| r.source.key() == key)
-    else {
+    let Some(reg) = port.registrations.iter().find(|r| r.source.key() == key) else {
         return true; // Source was unregistered — nothing to do.
     };
     let user_data = reg.user_data;
@@ -516,9 +496,7 @@ pub fn wait(cp: CpHandle) -> KernelResult<Vec<CompletionEvent>> {
     loop {
         {
             let mut table = CP_TABLE.lock();
-            let port = table
-                .get_mut(&cp.id())
-                .ok_or(KernelError::InvalidHandle)?;
+            let port = table.get_mut(&cp.id()).ok_or(KernelError::InvalidHandle)?;
 
             if port.closed {
                 return Err(KernelError::ChannelClosed);
@@ -527,8 +505,7 @@ pub fn wait(cp: CpHandle) -> KernelResult<Vec<CompletionEvent>> {
             // First: drain any queued events from notify().
             if !port.event_queue.is_empty() {
                 let drain_count = port.event_queue.len().min(MAX_EVENTS_PER_WAIT);
-                let events: Vec<CompletionEvent> =
-                    port.event_queue.drain(..drain_count).collect();
+                let events: Vec<CompletionEvent> = port.event_queue.drain(..drain_count).collect();
                 super::stats::completion_wait();
                 return Ok(events);
             }
@@ -596,9 +573,7 @@ pub fn try_wait(cp: CpHandle) -> KernelResult<Vec<CompletionEvent>> {
 
     {
         let mut table = CP_TABLE.lock();
-        let port = table
-            .get_mut(&cp.id())
-            .ok_or(KernelError::InvalidHandle)?;
+        let port = table.get_mut(&cp.id()).ok_or(KernelError::InvalidHandle)?;
 
         if port.closed {
             return Err(KernelError::ChannelClosed);
@@ -607,8 +582,7 @@ pub fn try_wait(cp: CpHandle) -> KernelResult<Vec<CompletionEvent>> {
         // Drain queued events first.
         if !port.event_queue.is_empty() {
             let drain_count = port.event_queue.len().min(MAX_EVENTS_PER_WAIT);
-            let events: Vec<CompletionEvent> =
-                port.event_queue.drain(..drain_count).collect();
+            let events: Vec<CompletionEvent> = port.event_queue.drain(..drain_count).collect();
             super::stats::completion_wait();
             return Ok(events);
         }
@@ -707,10 +681,7 @@ fn test_create_and_poll() -> KernelResult<()> {
     match try_wait(cp) {
         Err(KernelError::WouldBlock) => {} // Expected.
         other => {
-            serial_println!(
-                "[completion]   FAIL: try_wait on empty: {:?}",
-                other
-            );
+            serial_println!("[completion]   FAIL: try_wait on empty: {:?}", other);
             eventfd::close(efd);
             close(cp);
             return Err(KernelError::InternalError);
@@ -754,10 +725,7 @@ fn test_try_wait_empty() -> KernelResult<()> {
     match try_wait(cp) {
         Err(KernelError::WouldBlock) => {}
         other => {
-            serial_println!(
-                "[completion]   FAIL: try_wait(empty): {:?}",
-                other
-            );
+            serial_println!("[completion]   FAIL: try_wait(empty): {:?}", other);
             close(cp);
             return Err(KernelError::InternalError);
         }
@@ -769,8 +737,7 @@ fn test_try_wait_empty() -> KernelResult<()> {
 }
 
 /// Atomic result for the blocking wait test.
-static CP_TEST_RESULT: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static CP_TEST_RESULT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Task that blocks on a completion port wait.
 extern "C" fn cp_waiter_task(cp_raw: u64) {
@@ -944,8 +911,7 @@ fn test_io_completion() -> KernelResult<()> {
 
     // Submit 2 NOP SQEs.
     #[allow(clippy::arithmetic_side_effects)]
-    let sq_base = (base_virt + size_of::<io_ring::IoRingHeader>() as u64)
-        as *mut io_ring::SqEntry;
+    let sq_base = (base_virt + size_of::<io_ring::IoRingHeader>() as u64) as *mut io_ring::SqEntry;
 
     for i in 0u32..2 {
         let sqe = io_ring::SqEntry {
@@ -970,7 +936,9 @@ fn test_io_completion() -> KernelResult<()> {
     // Advance SQ tail.
     // SAFETY: base_virt is a valid mapped page from setup_ring; header is at offset 0.
     let header = unsafe { &mut *(base_virt as *mut io_ring::IoRingHeader) };
-    header.sq_tail.store(2, core::sync::atomic::Ordering::Release);
+    header
+        .sq_tail
+        .store(2, core::sync::atomic::Ordering::Release);
 
     // Process — this should post CQEs and notify our CP.
     let processed = io_ring::enter(ring_handle, 0)?;
@@ -987,9 +955,7 @@ fn test_io_completion() -> KernelResult<()> {
     // CP should now have an event (io_ring has pending CQEs).
     let events = try_wait(cp)?;
     if events.is_empty() {
-        serial_println!(
-            "[completion]   FAIL: CP try_wait empty after io_ring submit"
-        );
+        serial_println!("[completion]   FAIL: CP try_wait empty after io_ring submit");
         io_ring::destroy(ring_handle)?;
         close(cp);
         return Err(KernelError::InternalError);
@@ -1010,9 +976,7 @@ fn test_io_completion() -> KernelResult<()> {
     match ev.source {
         WaitSource::IoCompletion(h) if h == ring_handle => {}
         _ => {
-            serial_println!(
-                "[completion]   FAIL: event source not IoCompletion"
-            );
+            serial_println!("[completion]   FAIL: event source not IoCompletion");
             io_ring::destroy(ring_handle)?;
             close(cp);
             return Err(KernelError::InternalError);

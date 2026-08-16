@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -150,7 +150,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         sessions: Vec::new(),
         next_session_id: 1,
@@ -184,11 +186,17 @@ pub fn start_session(auto_triggered: bool) -> KernelResult<u32> {
 
 /// Add a check result to a session.
 pub fn add_check(
-    session_id: u32, category: CheckCategory, description: &str,
-    result: CheckResult, detail: &str, repair_attempted: bool,
+    session_id: u32,
+    category: CheckCategory,
+    description: &str,
+    result: CheckResult,
+    detail: &str,
+    repair_attempted: bool,
 ) -> KernelResult<u32> {
     with_state(|state| {
-        let session = state.sessions.iter_mut()
+        let session = state
+            .sessions
+            .iter_mut()
             .find(|s| s.session_id == session_id)
             .ok_or(KernelError::NotFound)?;
 
@@ -201,9 +209,11 @@ pub fn add_check(
         }
 
         session.checks.push(DiagCheck {
-            id: check_id, category,
+            id: check_id,
+            category,
             description: String::from(description),
-            result, detail: String::from(detail),
+            result,
+            detail: String::from(detail),
             repair_attempted,
             timestamp_ns: crate::hpet::elapsed_ns(),
         });
@@ -215,7 +225,9 @@ pub fn add_check(
 /// Complete a session.
 pub fn complete_session(session_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut()
+        let session = state
+            .sessions
+            .iter_mut()
             .find(|s| s.session_id == session_id)
             .ok_or(KernelError::NotFound)?;
         session.completed_ns = crate::hpet::elapsed_ns();
@@ -227,20 +239,62 @@ pub fn complete_session(session_id: u32) -> KernelResult<()> {
 pub fn run_all_checks() -> KernelResult<u32> {
     let sid = start_session(false)?;
 
-    add_check(sid, CheckCategory::BootLoader, "Boot loader integrity",
-        CheckResult::Pass, "Boot loader files intact", false)?;
-    add_check(sid, CheckCategory::BootConfig, "Boot configuration",
-        CheckResult::Pass, "Boot entries valid", false)?;
-    add_check(sid, CheckCategory::FileSystem, "Root filesystem",
-        CheckResult::Pass, "No errors detected", false)?;
-    add_check(sid, CheckCategory::SystemFiles, "Critical system files",
-        CheckResult::Pass, "All files present and valid", false)?;
-    add_check(sid, CheckCategory::Drivers, "Essential drivers",
-        CheckResult::Pass, "All drivers loaded", false)?;
-    add_check(sid, CheckCategory::Services, "System services",
-        CheckResult::Pass, "Services responding", false)?;
-    add_check(sid, CheckCategory::Permissions, "File permissions",
-        CheckResult::Pass, "Permissions correct", false)?;
+    add_check(
+        sid,
+        CheckCategory::BootLoader,
+        "Boot loader integrity",
+        CheckResult::Pass,
+        "Boot loader files intact",
+        false,
+    )?;
+    add_check(
+        sid,
+        CheckCategory::BootConfig,
+        "Boot configuration",
+        CheckResult::Pass,
+        "Boot entries valid",
+        false,
+    )?;
+    add_check(
+        sid,
+        CheckCategory::FileSystem,
+        "Root filesystem",
+        CheckResult::Pass,
+        "No errors detected",
+        false,
+    )?;
+    add_check(
+        sid,
+        CheckCategory::SystemFiles,
+        "Critical system files",
+        CheckResult::Pass,
+        "All files present and valid",
+        false,
+    )?;
+    add_check(
+        sid,
+        CheckCategory::Drivers,
+        "Essential drivers",
+        CheckResult::Pass,
+        "All drivers loaded",
+        false,
+    )?;
+    add_check(
+        sid,
+        CheckCategory::Services,
+        "System services",
+        CheckResult::Pass,
+        "Services responding",
+        false,
+    )?;
+    add_check(
+        sid,
+        CheckCategory::Permissions,
+        "File permissions",
+        CheckResult::Pass,
+        "Permissions correct",
+        false,
+    )?;
 
     complete_session(sid)?;
     Ok(sid)
@@ -256,27 +310,43 @@ pub fn record_failed_boot() -> KernelResult<bool> {
 
 /// Reset failed boot counter (called on successful boot).
 pub fn reset_failed_boots() -> KernelResult<()> {
-    with_state(|state| { state.failed_boots = 0; Ok(()) })
+    with_state(|state| {
+        state.failed_boots = 0;
+        Ok(())
+    })
 }
 
 /// Get session results.
 pub fn get_session(session_id: u32) -> KernelResult<RepairSession> {
     with_state(|state| {
-        state.sessions.iter().find(|s| s.session_id == session_id)
-            .cloned().ok_or(KernelError::NotFound)
+        state
+            .sessions
+            .iter()
+            .find(|s| s.session_id == session_id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// List sessions.
 pub fn list_sessions() -> Vec<RepairSession> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.sessions.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.sessions.clone())
 }
 
 /// Statistics: (session_count, total_checks, total_repairs, failed_boots, ops).
 pub fn stats() -> (usize, u64, u64, u32, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.sessions.len(), s.total_checks, s.total_repairs, s.failed_boots, s.ops),
+        Some(s) => (
+            s.sessions.len(),
+            s.total_checks,
+            s.total_repairs,
+            s.failed_boots,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -299,18 +369,39 @@ pub fn self_test() {
     crate::serial_println!("  [2/11] start session: OK");
 
     // 3: Add passing check.
-    add_check(sid, CheckCategory::BootLoader, "Boot check",
-        CheckResult::Pass, "OK", false).expect("add pass");
+    add_check(
+        sid,
+        CheckCategory::BootLoader,
+        "Boot check",
+        CheckResult::Pass,
+        "OK",
+        false,
+    )
+    .expect("add pass");
     crate::serial_println!("  [3/11] pass check: OK");
 
     // 4: Add failing check.
-    add_check(sid, CheckCategory::FileSystem, "FS check",
-        CheckResult::Fail, "Corruption detected", false).expect("add fail");
+    add_check(
+        sid,
+        CheckCategory::FileSystem,
+        "FS check",
+        CheckResult::Fail,
+        "Corruption detected",
+        false,
+    )
+    .expect("add fail");
     crate::serial_println!("  [4/11] fail check: OK");
 
     // 5: Add repaired check.
-    add_check(sid, CheckCategory::FileSystem, "FS repair",
-        CheckResult::Repaired, "Corruption fixed", true).expect("add repair");
+    add_check(
+        sid,
+        CheckCategory::FileSystem,
+        "FS repair",
+        CheckResult::Repaired,
+        "Corruption fixed",
+        true,
+    )
+    .expect("add repair");
     crate::serial_println!("  [5/11] repaired check: OK");
 
     // 6: Complete session.
@@ -324,7 +415,12 @@ pub fn self_test() {
     let sid2 = run_all_checks().expect("run all");
     let session2 = get_session(sid2).expect("get session 2");
     assert_eq!(session2.checks.len(), 7);
-    assert!(session2.checks.iter().all(|c| c.result == CheckResult::Pass));
+    assert!(
+        session2
+            .checks
+            .iter()
+            .all(|c| c.result == CheckResult::Pass)
+    );
     crate::serial_println!("  [7/11] run all checks: OK");
 
     // 8: Failed boot counter.

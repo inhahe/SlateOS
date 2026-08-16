@@ -23,9 +23,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -43,7 +43,7 @@ pub struct TaskIoStats {
     pub write_syscalls: u64,
     pub cancelled_write_bytes: u64,
     pub io_wait_ns: u64,
-    pub page_faults_io: u64,  // Major page faults (disk I/O)
+    pub page_faults_io: u64, // Major page faults (disk I/O)
 }
 
 // ---------------------------------------------------------------------------
@@ -103,7 +103,9 @@ where
 /// every I/O event.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         tasks: Vec::new(),
         total_read_bytes: 0,
@@ -117,11 +119,20 @@ pub fn init_defaults() {
 /// Register a task.
 pub fn register(pid: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.tasks.len() >= MAX_TASKS { return Err(KernelError::ResourceExhausted); }
-        if state.tasks.iter().any(|t| t.pid == pid) { return Err(KernelError::AlreadyExists); }
+        if state.tasks.len() >= MAX_TASKS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.tasks.iter().any(|t| t.pid == pid) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.tasks.push(TaskIoStats {
-            pid, read_bytes: 0, write_bytes: 0, read_syscalls: 0,
-            write_syscalls: 0, cancelled_write_bytes: 0, io_wait_ns: 0,
+            pid,
+            read_bytes: 0,
+            write_bytes: 0,
+            read_syscalls: 0,
+            write_syscalls: 0,
+            cancelled_write_bytes: 0,
+            io_wait_ns: 0,
             page_faults_io: 0,
         });
         Ok(())
@@ -131,7 +142,10 @@ pub fn register(pid: u32) -> KernelResult<()> {
 /// Unregister a task.
 pub fn unregister(pid: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.tasks.iter().position(|t| t.pid == pid)
+        let idx = state
+            .tasks
+            .iter()
+            .position(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
         state.tasks.remove(idx);
         Ok(())
@@ -141,7 +155,10 @@ pub fn unregister(pid: u32) -> KernelResult<()> {
 /// Record a read.
 pub fn record_read(pid: u32, bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let t = state.tasks.iter_mut().find(|t| t.pid == pid)
+        let t = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
         t.read_bytes += bytes;
         t.read_syscalls += 1;
@@ -153,7 +170,10 @@ pub fn record_read(pid: u32, bytes: u64) -> KernelResult<()> {
 /// Record a write.
 pub fn record_write(pid: u32, bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let t = state.tasks.iter_mut().find(|t| t.pid == pid)
+        let t = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
         t.write_bytes += bytes;
         t.write_syscalls += 1;
@@ -165,7 +185,10 @@ pub fn record_write(pid: u32, bytes: u64) -> KernelResult<()> {
 /// Record cancelled write bytes.
 pub fn record_cancelled(pid: u32, bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let t = state.tasks.iter_mut().find(|t| t.pid == pid)
+        let t = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
         t.cancelled_write_bytes += bytes;
         state.total_cancelled += bytes;
@@ -176,7 +199,10 @@ pub fn record_cancelled(pid: u32, bytes: u64) -> KernelResult<()> {
 /// Record I/O wait time.
 pub fn record_io_wait(pid: u32, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let t = state.tasks.iter_mut().find(|t| t.pid == pid)
+        let t = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
         t.io_wait_ns += ns;
         state.total_io_wait_ns += ns;
@@ -187,7 +213,10 @@ pub fn record_io_wait(pid: u32, ns: u64) -> KernelResult<()> {
 /// Record a major page fault.
 pub fn record_page_fault_io(pid: u32) -> KernelResult<()> {
     with_state(|state| {
-        let t = state.tasks.iter_mut().find(|t| t.pid == pid)
+        let t = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
         t.page_faults_io += 1;
         Ok(())
@@ -196,14 +225,24 @@ pub fn record_page_fault_io(pid: u32) -> KernelResult<()> {
 
 /// Per-task stats.
 pub fn per_task() -> Vec<TaskIoStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.tasks.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.tasks.clone())
 }
 
 /// Statistics: (task_count, total_read_bytes, total_write_bytes, total_cancelled, total_io_wait_ns, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.tasks.len(), s.total_read_bytes, s.total_write_bytes, s.total_cancelled, s.total_io_wait_ns, s.ops),
+        Some(s) => (
+            s.tasks.len(),
+            s.total_read_bytes,
+            s.total_write_bytes,
+            s.total_cancelled,
+            s.total_io_wait_ns,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }

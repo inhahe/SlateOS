@@ -43,8 +43,8 @@
 
 use crate::sync::Mutex;
 
-use super::rights::Rights;
 use super::ResourceType;
+use super::rights::Rights;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 
@@ -172,90 +172,164 @@ pub fn init() {
     let mut groups = GROUPS.lock();
 
     // admin: all resource types, all rights.
-    install_builtin(&mut groups, GROUP_ADMIN, b"admin", &[
-        CapGrant { resource_type: ResourceType::Channel, rights: Rights::ALL },
-        CapGrant { resource_type: ResourceType::Pipe, rights: Rights::ALL },
-        CapGrant { resource_type: ResourceType::SharedMemory, rights: Rights::ALL },
-        CapGrant { resource_type: ResourceType::EventFd, rights: Rights::ALL },
-        CapGrant { resource_type: ResourceType::CompletionPort, rights: Rights::ALL },
-        CapGrant { resource_type: ResourceType::Process, rights: Rights::ALL },
-        CapGrant { resource_type: ResourceType::Thread, rights: Rights::ALL },
-        CapGrant { resource_type: ResourceType::PortIo, rights: Rights::ALL },
-        CapGrant { resource_type: ResourceType::DeviceIrq, rights: Rights::ALL },
-        CapGrant { resource_type: ResourceType::File, rights: Rights::ALL },
-        CapGrant { resource_type: ResourceType::Socket, rights: Rights::ALL },
-        CapGrant { resource_type: ResourceType::Service, rights: Rights::ALL },
-        CapGrant { resource_type: ResourceType::Namespace, rights: Rights::ALL },
-        CapGrant { resource_type: ResourceType::IoScheduler, rights: Rights::ALL },
-    ], 0); // gid 0 = root
+    install_builtin(
+        &mut groups,
+        GROUP_ADMIN,
+        b"admin",
+        &[
+            CapGrant {
+                resource_type: ResourceType::Channel,
+                rights: Rights::ALL,
+            },
+            CapGrant {
+                resource_type: ResourceType::Pipe,
+                rights: Rights::ALL,
+            },
+            CapGrant {
+                resource_type: ResourceType::SharedMemory,
+                rights: Rights::ALL,
+            },
+            CapGrant {
+                resource_type: ResourceType::EventFd,
+                rights: Rights::ALL,
+            },
+            CapGrant {
+                resource_type: ResourceType::CompletionPort,
+                rights: Rights::ALL,
+            },
+            CapGrant {
+                resource_type: ResourceType::Process,
+                rights: Rights::ALL,
+            },
+            CapGrant {
+                resource_type: ResourceType::Thread,
+                rights: Rights::ALL,
+            },
+            CapGrant {
+                resource_type: ResourceType::PortIo,
+                rights: Rights::ALL,
+            },
+            CapGrant {
+                resource_type: ResourceType::DeviceIrq,
+                rights: Rights::ALL,
+            },
+            CapGrant {
+                resource_type: ResourceType::File,
+                rights: Rights::ALL,
+            },
+            CapGrant {
+                resource_type: ResourceType::Socket,
+                rights: Rights::ALL,
+            },
+            CapGrant {
+                resource_type: ResourceType::Service,
+                rights: Rights::ALL,
+            },
+            CapGrant {
+                resource_type: ResourceType::Namespace,
+                rights: Rights::ALL,
+            },
+            CapGrant {
+                resource_type: ResourceType::IoScheduler,
+                rights: Rights::ALL,
+            },
+        ],
+        0,
+    ); // gid 0 = root
 
     // network: socket access.
-    install_builtin(&mut groups, GROUP_NETWORK, b"network", &[
-        CapGrant {
+    install_builtin(
+        &mut groups,
+        GROUP_NETWORK,
+        b"network",
+        &[CapGrant {
             resource_type: ResourceType::Socket,
             rights: Rights::READ.union(Rights::WRITE),
-        },
-    ], 0);
+        }],
+        0,
+    );
 
     // filesystem: file access.
-    install_builtin(&mut groups, GROUP_FILESYSTEM, b"filesystem", &[
-        CapGrant {
+    install_builtin(
+        &mut groups,
+        GROUP_FILESYSTEM,
+        b"filesystem",
+        &[CapGrant {
             resource_type: ResourceType::File,
             rights: Rights::READ
                 .union(Rights::WRITE)
                 .union(Rights::CREATE)
                 .union(Rights::DELETE)
                 .union(Rights::METADATA),
-        },
-    ], 0);
+        }],
+        0,
+    );
 
     // driver: port I/O and IRQ access.
-    install_builtin(&mut groups, GROUP_DRIVER, b"driver", &[
-        CapGrant {
-            resource_type: ResourceType::PortIo,
-            rights: Rights::READ.union(Rights::WRITE),
-        },
-        CapGrant {
-            resource_type: ResourceType::DeviceIrq,
-            rights: Rights::READ.union(Rights::WRITE),
-        },
-    ], 0);
+    install_builtin(
+        &mut groups,
+        GROUP_DRIVER,
+        b"driver",
+        &[
+            CapGrant {
+                resource_type: ResourceType::PortIo,
+                rights: Rights::READ.union(Rights::WRITE),
+            },
+            CapGrant {
+                resource_type: ResourceType::DeviceIrq,
+                rights: Rights::READ.union(Rights::WRITE),
+            },
+        ],
+        0,
+    );
 
     // process: process and thread management.
-    install_builtin(&mut groups, GROUP_PROCESS, b"process", &[
-        CapGrant {
-            resource_type: ResourceType::Process,
-            rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
-        },
-        CapGrant {
-            resource_type: ResourceType::Thread,
-            rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
-        },
-    ], 0);
+    install_builtin(
+        &mut groups,
+        GROUP_PROCESS,
+        b"process",
+        &[
+            CapGrant {
+                resource_type: ResourceType::Process,
+                rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
+            },
+            CapGrant {
+                resource_type: ResourceType::Thread,
+                rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
+            },
+        ],
+        0,
+    );
 
     // ipc: IPC primitive access.
-    install_builtin(&mut groups, GROUP_IPC, b"ipc", &[
-        CapGrant {
-            resource_type: ResourceType::Channel,
-            rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
-        },
-        CapGrant {
-            resource_type: ResourceType::Pipe,
-            rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
-        },
-        CapGrant {
-            resource_type: ResourceType::SharedMemory,
-            rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
-        },
-        CapGrant {
-            resource_type: ResourceType::EventFd,
-            rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
-        },
-        CapGrant {
-            resource_type: ResourceType::CompletionPort,
-            rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
-        },
-    ], 0);
+    install_builtin(
+        &mut groups,
+        GROUP_IPC,
+        b"ipc",
+        &[
+            CapGrant {
+                resource_type: ResourceType::Channel,
+                rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
+            },
+            CapGrant {
+                resource_type: ResourceType::Pipe,
+                rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
+            },
+            CapGrant {
+                resource_type: ResourceType::SharedMemory,
+                rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
+            },
+            CapGrant {
+                resource_type: ResourceType::EventFd,
+                rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
+            },
+            CapGrant {
+                resource_type: ResourceType::CompletionPort,
+                rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
+            },
+        ],
+        0,
+    );
 
     serial_println!("[cap] 6 built-in capability groups initialized");
 }
@@ -309,7 +383,9 @@ pub fn create(name: &str) -> KernelResult<CapGroupId> {
     }
 
     // Find a free slot.
-    let slot = groups.iter().position(|g| !g.active)
+    let slot = groups
+        .iter()
+        .position(|g| !g.active)
         .ok_or(KernelError::OutOfMemory)?;
 
     let id = {
@@ -615,10 +691,13 @@ fn test_access_check() -> KernelResult<()> {
     let id = create("test_access")?;
 
     // Grant Socket(READ|WRITE) to this group.
-    add_cap(id, CapGrant {
-        resource_type: ResourceType::Socket,
-        rights: Rights::READ.union(Rights::WRITE),
-    })?;
+    add_cap(
+        id,
+        CapGrant {
+            resource_type: ResourceType::Socket,
+            rights: Rights::READ.union(Rights::WRITE),
+        },
+    )?;
 
     // Add gid 500 as member.
     add_member(id, 500)?;

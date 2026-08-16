@@ -21,11 +21,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -142,26 +142,40 @@ where
 /// are deliberately kept — they are settings, not invented activity.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         rules: alloc::vec![
             RotateRule {
-                id: 1, log_path: String::from("/var/log/syslog"),
+                id: 1,
+                log_path: String::from("/var/log/syslog"),
                 trigger: RotateTrigger::SizeOrDaily(10_000_000),
-                compress: CompressMethod::Gzip, max_archives: 7,
-                enabled: true, last_rotated_ns: 0, total_rotations: 0,
+                compress: CompressMethod::Gzip,
+                max_archives: 7,
+                enabled: true,
+                last_rotated_ns: 0,
+                total_rotations: 0,
             },
             RotateRule {
-                id: 2, log_path: String::from("/var/log/kern.log"),
+                id: 2,
+                log_path: String::from("/var/log/kern.log"),
                 trigger: RotateTrigger::Weekly,
-                compress: CompressMethod::Gzip, max_archives: 4,
-                enabled: true, last_rotated_ns: 0, total_rotations: 0,
+                compress: CompressMethod::Gzip,
+                max_archives: 4,
+                enabled: true,
+                last_rotated_ns: 0,
+                total_rotations: 0,
             },
             RotateRule {
-                id: 3, log_path: String::from("/var/log/auth.log"),
+                id: 3,
+                log_path: String::from("/var/log/auth.log"),
                 trigger: RotateTrigger::Size(5_000_000),
-                compress: CompressMethod::Zstd, max_archives: 12,
-                enabled: true, last_rotated_ns: 0, total_rotations: 0,
+                compress: CompressMethod::Zstd,
+                max_archives: 12,
+                enabled: true,
+                last_rotated_ns: 0,
+                total_rotations: 0,
             },
         ],
         events: Vec::new(),
@@ -174,7 +188,12 @@ pub fn init_defaults() {
 }
 
 /// Add a rotation rule.
-pub fn add_rule(log_path: &str, trigger: RotateTrigger, compress: CompressMethod, max_archives: u32) -> KernelResult<u32> {
+pub fn add_rule(
+    log_path: &str,
+    trigger: RotateTrigger,
+    compress: CompressMethod,
+    max_archives: u32,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.rules.len() >= MAX_RULES {
             return Err(KernelError::ResourceExhausted);
@@ -185,8 +204,14 @@ pub fn add_rule(log_path: &str, trigger: RotateTrigger, compress: CompressMethod
         let id = state.next_id;
         state.next_id += 1;
         state.rules.push(RotateRule {
-            id, log_path: String::from(log_path), trigger, compress,
-            max_archives, enabled: true, last_rotated_ns: 0, total_rotations: 0,
+            id,
+            log_path: String::from(log_path),
+            trigger,
+            compress,
+            max_archives,
+            enabled: true,
+            last_rotated_ns: 0,
+            total_rotations: 0,
         });
         Ok(id)
     })
@@ -197,7 +222,9 @@ pub fn remove_rule(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.rules.len();
         state.rules.retain(|r| r.id != id);
-        if state.rules.len() == before { return Err(KernelError::NotFound); }
+        if state.rules.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -205,7 +232,10 @@ pub fn remove_rule(id: u32) -> KernelResult<()> {
 /// Enable/disable a rule.
 pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let rule = state.rules.iter_mut().find(|r| r.id == id)
+        let rule = state
+            .rules
+            .iter_mut()
+            .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         rule.enabled = enabled;
         Ok(())
@@ -216,7 +246,10 @@ pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
 pub fn rotate(id: u32) -> KernelResult<u64> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let rule = state.rules.iter_mut().find(|r| r.id == id)
+        let rule = state
+            .rules
+            .iter_mut()
+            .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         // Simulate rotation: generate archive name and size.
         let simulated_size = 1_000_000u64; // 1 MB simulated
@@ -230,7 +263,9 @@ pub fn rotate(id: u32) -> KernelResult<u64> {
             state.events.remove(0);
         }
         state.events.push(RotateEvent {
-            rule_id, timestamp_ns: now, original_size: simulated_size,
+            rule_id,
+            timestamp_ns: now,
+            original_size: simulated_size,
             archive_name,
         });
         Ok(simulated_size)
@@ -242,7 +277,9 @@ pub fn check_all() -> KernelResult<u32> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         let mut rotated = 0u32;
-        let rule_ids: Vec<u32> = state.rules.iter()
+        let rule_ids: Vec<u32> = state
+            .rules
+            .iter()
             .filter(|r| r.enabled)
             .map(|r| r.id)
             .collect();
@@ -258,7 +295,9 @@ pub fn check_all() -> KernelResult<u32> {
                     state.events.remove(0);
                 }
                 state.events.push(RotateEvent {
-                    rule_id: rid, timestamp_ns: now, original_size: simulated_size,
+                    rule_id: rid,
+                    timestamp_ns: now,
+                    original_size: simulated_size,
                     archive_name,
                 });
                 rotated += 1;
@@ -279,19 +318,31 @@ pub fn cleanup() -> KernelResult<u32> {
 
 /// List all rules.
 pub fn list_rules() -> Vec<RotateRule> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.rules.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.rules.clone())
 }
 
 /// Get recent rotation events.
 pub fn list_events() -> Vec<RotateEvent> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.events.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.events.clone())
 }
 
 /// Statistics.
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.rules.len(), s.total_rotations, s.total_bytes_rotated, s.total_cleanups, s.ops),
+        Some(s) => (
+            s.rules.len(),
+            s.total_rotations,
+            s.total_bytes_rotated,
+            s.total_cleanups,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -316,13 +367,27 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] defaults: OK");
 
     // 2: Add rule — the fourth rule gets id 4 (next_id after the 3 defaults).
-    let id = add_rule("/var/log/app.log", RotateTrigger::Daily, CompressMethod::Zstd, 5).expect("add");
+    let id = add_rule(
+        "/var/log/app.log",
+        RotateTrigger::Daily,
+        CompressMethod::Zstd,
+        5,
+    )
+    .expect("add");
     assert_eq!(id, 4);
     assert_eq!(list_rules().len(), 4);
     crate::serial_println!("  [2/8] add rule: OK");
 
     // 3: Duplicate path rejected.
-    assert!(add_rule("/var/log/app.log", RotateTrigger::Weekly, CompressMethod::None, 3).is_err());
+    assert!(
+        add_rule(
+            "/var/log/app.log",
+            RotateTrigger::Weekly,
+            CompressMethod::None,
+            3
+        )
+        .is_err()
+    );
     crate::serial_println!("  [3/8] duplicate: OK");
 
     // 4: Rotate single — one simulated 1 MB rotation; one event recorded.
@@ -355,7 +420,10 @@ pub fn self_test() {
     // 8: Final stats reflect only the real activity above: 3 rules, 5 rotations,
     //    5 MB rotated, 0 cleanups.
     let (rule_count, rotations, bytes_rotated, cleanups, ops) = stats();
-    assert_eq!((rule_count, rotations, bytes_rotated, cleanups), (3, 5, 5_000_000, 0));
+    assert_eq!(
+        (rule_count, rotations, bytes_rotated, cleanups),
+        (3, 5, 5_000_000, 0)
+    );
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

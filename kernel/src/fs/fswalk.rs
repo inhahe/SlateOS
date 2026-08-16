@@ -34,10 +34,10 @@
 
 #![allow(dead_code)]
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
@@ -222,8 +222,7 @@ static TOTAL_ERRORS: AtomicU64 = AtomicU64::new(0);
 /// Walk a directory tree, collecting matching entries.
 ///
 /// Returns a `WalkResult` with entries and statistics.
-pub fn walk<P: AsRef<Path> + ?Sized>(root: &P, opts: &WalkOptions)
-    -> KernelResult<WalkResult> {
+pub fn walk<P: AsRef<Path> + ?Sized>(root: &P, opts: &WalkOptions) -> KernelResult<WalkResult> {
     let root = root.as_ref();
     WALK_COUNT.fetch_add(1, Ordering::Relaxed);
 
@@ -233,7 +232,11 @@ pub fn walk<P: AsRef<Path> + ?Sized>(root: &P, opts: &WalkOptions)
         truncated: false,
     };
 
-    let effective_limit = if opts.limit > 0 { opts.limit.min(MAX_RESULTS) } else { MAX_RESULTS };
+    let effective_limit = if opts.limit > 0 {
+        opts.limit.min(MAX_RESULTS)
+    } else {
+        MAX_RESULTS
+    };
 
     // Verify root exists and is a directory.
     let meta = Vfs::metadata(root)?;
@@ -348,8 +351,11 @@ pub fn walk<P: AsRef<Path> + ?Sized>(root: &P, opts: &WalkOptions)
 ///
 /// The visitor can control traversal by returning `WalkAction`.
 /// This avoids collecting all entries in memory.
-pub fn walk_visit<P: AsRef<Path> + ?Sized, F>(root: &P, opts: &WalkOptions, mut visitor: F)
-    -> KernelResult<WalkStats>
+pub fn walk_visit<P: AsRef<Path> + ?Sized, F>(
+    root: &P,
+    opts: &WalkOptions,
+    mut visitor: F,
+) -> KernelResult<WalkStats>
 where
     F: FnMut(&WalkEntry) -> WalkAction,
 {
@@ -444,8 +450,13 @@ where
                 let action = visitor(&walk_entry);
                 match action {
                     WalkAction::Continue => {}
-                    WalkAction::Skip => { should_queue = false; }
-                    WalkAction::Stop => { stopped = true; break; }
+                    WalkAction::Skip => {
+                        should_queue = false;
+                    }
+                    WalkAction::Stop => {
+                        stopped = true;
+                        break;
+                    }
                 }
             }
 
@@ -543,13 +554,19 @@ fn matches_filter(entry: &WalkEntry, opts: &WalkOptions) -> bool {
     match opts.filter {
         WalkFilter::All => {}
         WalkFilter::FilesOnly => {
-            if entry.entry_type != EntryType::File { return false; }
+            if entry.entry_type != EntryType::File {
+                return false;
+            }
         }
         WalkFilter::DirsOnly => {
-            if entry.entry_type != EntryType::Directory { return false; }
+            if entry.entry_type != EntryType::Directory {
+                return false;
+            }
         }
         WalkFilter::SymlinksOnly => {
-            if entry.entry_type != EntryType::Symlink { return false; }
+            if entry.entry_type != EntryType::Symlink {
+                return false;
+            }
         }
     }
 
@@ -557,10 +574,10 @@ fn matches_filter(entry: &WalkEntry, opts: &WalkOptions) -> bool {
     // case-sensitively: this is a case-sensitive filesystem, so two names that
     // differ only in case are two different files and a glob must say so.
     if !opts.pattern.is_empty() {
-        let name = entry.path.file_name().map_or_else(
-            || entry.path.as_bytes(),
-            Path::as_bytes,
-        );
+        let name = entry
+            .path
+            .file_name()
+            .map_or_else(|| entry.path.as_bytes(), Path::as_bytes);
         if !crate::fs::vfs::glob_match(name, &opts.pattern, false) {
             return false;
         }
@@ -633,11 +650,17 @@ fn test_non_utf8_names() {
         depth: 1,
     };
 
-    let by_ext = WalkOptions { pattern: b"*.txt".to_vec(), ..Default::default() };
+    let by_ext = WalkOptions {
+        pattern: b"*.txt".to_vec(),
+        ..Default::default()
+    };
     assert!(matches_filter(&entry, &by_ext));
 
     // `?` matches the single undecodable byte.
-    let by_wildcard = WalkOptions { pattern: b"re?port.*".to_vec(), ..Default::default() };
+    let by_wildcard = WalkOptions {
+        pattern: b"re?port.*".to_vec(),
+        ..Default::default()
+    };
     assert!(matches_filter(&entry, &by_wildcard));
 
     // The pattern itself may be undecodable too.
@@ -648,7 +671,10 @@ fn test_non_utf8_names() {
     assert!(matches_filter(&entry, &by_literal));
 
     // The pattern applies to the final component, not the whole path.
-    let by_dir = WalkOptions { pattern: b"data*".to_vec(), ..Default::default() };
+    let by_dir = WalkOptions {
+        pattern: b"data*".to_vec(),
+        ..Default::default()
+    };
     assert!(!matches_filter(&entry, &by_dir));
 
     // And an exclude with an undecodable component still prunes.
@@ -656,7 +682,10 @@ fn test_non_utf8_names() {
         excludes: vec![PathBuf::from(b"/da\xffta".as_slice())],
         ..Default::default()
     };
-    assert!(is_excluded(Path::new(b"/da\xffta/file".as_slice()), &excluded));
+    assert!(is_excluded(
+        Path::new(b"/da\xffta/file".as_slice()),
+        &excluded
+    ));
     assert!(!is_excluded(Path::new("/data/file"), &excluded));
 
     serial_println!("[fswalk]   non-UTF-8 names: ok");
@@ -680,7 +709,10 @@ fn test_matches_filter() {
     assert!(matches_filter(&file_entry, &all_opts));
     assert!(matches_filter(&dir_entry, &all_opts));
 
-    let files_only = WalkOptions { filter: WalkFilter::FilesOnly, ..Default::default() };
+    let files_only = WalkOptions {
+        filter: WalkFilter::FilesOnly,
+        ..Default::default()
+    };
     assert!(matches_filter(&file_entry, &files_only));
     assert!(!matches_filter(&dir_entry, &files_only));
 
@@ -692,7 +724,10 @@ fn test_matches_filter() {
     assert!(!matches_filter(&dir_entry, &with_pattern));
 
     // Case-sensitive: `FILE.TXT` and `file.txt` are two different files here.
-    let upper = WalkOptions { pattern: b"*.TXT".to_vec(), ..Default::default() };
+    let upper = WalkOptions {
+        pattern: b"*.TXT".to_vec(),
+        ..Default::default()
+    };
     assert!(!matches_filter(&file_entry, &upper));
 
     serial_println!("[fswalk]   matches_filter: ok");

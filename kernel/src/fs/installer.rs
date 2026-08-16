@@ -36,10 +36,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -250,7 +250,12 @@ pub fn create_session(mode: InstallMode) -> KernelResult<u64> {
 
 /// Get a session by ID.
 pub fn get_session(session_id: u64) -> KernelResult<InstallSession> {
-    STATE.lock().sessions.iter().find(|s| s.id == session_id).cloned()
+    STATE
+        .lock()
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .cloned()
         .ok_or(KernelError::NotFound)
 }
 
@@ -262,9 +267,13 @@ pub fn list_sessions() -> Vec<InstallSession> {
 /// Remove a completed/failed session.
 pub fn remove_session(session_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let s = state.sessions.iter().find(|s| s.id == session_id)
+    let s = state
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
         .ok_or(KernelError::NotFound)?;
-    if s.phase != InstallPhase::Complete && s.phase != InstallPhase::Failed
+    if s.phase != InstallPhase::Complete
+        && s.phase != InstallPhase::Failed
         && s.phase != InstallPhase::NotStarted
     {
         return Err(KernelError::WouldBlock);
@@ -342,7 +351,10 @@ pub fn set_workload(session_id: u64, workload: WorkloadType) -> KernelResult<()>
 pub fn sanity_check(session_id: u64) -> KernelResult<SanityResult> {
     use alloc::format;
     let state = STATE.lock();
-    let s = state.sessions.iter().find(|s| s.id == session_id)
+    let s = state
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
         .ok_or(KernelError::NotFound)?;
 
     let mut result = SanityResult {
@@ -353,25 +365,35 @@ pub fn sanity_check(session_id: u64) -> KernelResult<SanityResult> {
 
     // Check partition plan exists for manual mode.
     if s.mode == InstallMode::Manual && s.partition_plan.is_none() {
-        result.errors.push(String::from("No partition plan set for manual install"));
+        result
+            .errors
+            .push(String::from("No partition plan set for manual install"));
         result.passed = false;
     }
 
     // Check partition sizes.
     if let Some(ref plan) = s.partition_plan {
         if plan.boot_mib < 512 {
-            result.errors.push(String::from("Boot partition too small (min 512 MiB)"));
+            result
+                .errors
+                .push(String::from("Boot partition too small (min 512 MiB)"));
             result.passed = false;
         }
         if plan.boot_mib > 4096 {
-            result.warnings.push(String::from("Boot partition unusually large (> 4 GiB)"));
+            result
+                .warnings
+                .push(String::from("Boot partition unusually large (> 4 GiB)"));
         }
         if let Some(swap) = plan.swap_mib {
             if swap < 512 {
-                result.warnings.push(String::from("Swap partition small (< 512 MiB)"));
+                result
+                    .warnings
+                    .push(String::from("Swap partition small (< 512 MiB)"));
             }
             if swap > 65536 {
-                result.warnings.push(format!("Swap partition very large ({} MiB)", swap));
+                result
+                    .warnings
+                    .push(format!("Swap partition very large ({} MiB)", swap));
             }
         }
         if plan.disk.is_empty() {
@@ -382,7 +404,9 @@ pub fn sanity_check(session_id: u64) -> KernelResult<SanityResult> {
 
     // Unattended mode needs a config path.
     if s.mode == InstallMode::Unattended && s.config_path.is_empty() {
-        result.errors.push(String::from("No config file path for unattended install"));
+        result
+            .errors
+            .push(String::from("No config file path for unattended install"));
         result.passed = false;
     }
 
@@ -457,7 +481,12 @@ pub fn set_timezone(session_id: u64, tz: &str) -> KernelResult<()> {
 }
 
 /// Set user account.
-pub fn set_user(session_id: u64, username: &str, has_password: bool, auto_login: bool) -> KernelResult<()> {
+pub fn set_user(
+    session_id: u64,
+    username: &str,
+    has_password: bool,
+    auto_login: bool,
+) -> KernelResult<()> {
     if username.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -542,7 +571,10 @@ pub fn mark_failed(session_id: u64, error: &str) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 fn find_session_mut(state: &mut State, id: u64) -> KernelResult<&mut InstallSession> {
-    state.sessions.iter_mut().find(|s| s.id == id)
+    state
+        .sessions
+        .iter_mut()
+        .find(|s| s.id == id)
         .ok_or(KernelError::NotFound)
 }
 
@@ -598,8 +630,16 @@ pub fn init_defaults() {
 pub fn stats() -> (usize, usize, usize, u64) {
     let state = STATE.lock();
     let total = state.sessions.len();
-    let complete = state.sessions.iter().filter(|s| s.phase == InstallPhase::Complete).count();
-    let failed = state.sessions.iter().filter(|s| s.phase == InstallPhase::Failed).count();
+    let complete = state
+        .sessions
+        .iter()
+        .filter(|s| s.phase == InstallPhase::Complete)
+        .count();
+    let failed = state
+        .sessions
+        .iter()
+        .filter(|s| s.phase == InstallPhase::Failed)
+        .count();
     let ops = OP_COUNT.load(Ordering::Relaxed);
     (total, complete, failed, ops)
 }
@@ -648,13 +688,16 @@ pub fn self_test() -> KernelResult<()> {
     assert!(!check.passed);
     assert!(!check.errors.is_empty());
     // Set plan and check again.
-    set_partition_plan(s2, PartitionPlan {
-        disk: String::from("/dev/sda"),
-        boot_mib: 1024,
-        swap_mib: Some(4096),
-        root_label: String::from("MintOS"),
-        erase_disk: true,
-    })?;
+    set_partition_plan(
+        s2,
+        PartitionPlan {
+            disk: String::from("/dev/sda"),
+            boot_mib: 1024,
+            swap_mib: Some(4096),
+            root_label: String::from("MintOS"),
+            erase_disk: true,
+        },
+    )?;
     let check = sanity_check(s2)?;
     assert!(check.passed);
 

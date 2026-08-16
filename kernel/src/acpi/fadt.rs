@@ -200,17 +200,28 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
     let header = unsafe { (*fadt).header };
     let total_len = header.length as usize;
 
-    serial_println!("[acpi]   PM1a_CNT: {:#x}, PM1b_CNT: {:#x}, SCI: IRQ {}",
-        pm1a, pm1b, sci_irq);
-    serial_println!("[acpi]   Flags: {:#010x} (RESET_REG_SUP={})",
-        flags, (flags >> 10) & 1);
+    serial_println!(
+        "[acpi]   PM1a_CNT: {:#x}, PM1b_CNT: {:#x}, SCI: IRQ {}",
+        pm1a,
+        pm1b,
+        sci_irq
+    );
+    serial_println!(
+        "[acpi]   Flags: {:#010x} (RESET_REG_SUP={})",
+        flags,
+        (flags >> 10) & 1
+    );
 
     // Get 64-bit DSDT address (ACPI 2.0+) or fall back to 32-bit.
     let dsdt_phys = if total_len > FADT_X_DSDT_OFFSET + 8 {
         let x_dsdt_ptr = (fadt_virt as usize + FADT_X_DSDT_OFFSET) as *const u64;
         // SAFETY: within bounds of the FADT.
         let x_dsdt = unsafe { core::ptr::read_unaligned(x_dsdt_ptr) };
-        if x_dsdt != 0 { x_dsdt } else { u64::from(dsdt_32) }
+        if x_dsdt != 0 {
+            x_dsdt
+        } else {
+            u64::from(dsdt_32)
+        }
     } else {
         u64::from(dsdt_32)
     };
@@ -228,8 +239,12 @@ pub unsafe fn parse_fadt(fadt_virt: u64) -> PowerInfo {
             // Copy fields before logging (packed struct fields can't be referenced).
             let gas_space = gas.address_space;
             let gas_addr = gas.address;
-            serial_println!("[acpi]   Reset register: space={}, addr={:#x}, val={:#x}",
-                gas_space, gas_addr, val);
+            serial_println!(
+                "[acpi]   Reset register: space={}, addr={:#x}, val={:#x}",
+                gas_space,
+                gas_addr,
+                val
+            );
 
             (true, gas_space, gas_addr, val)
         } else {
@@ -326,7 +341,7 @@ pub unsafe fn scan_dsdt_for_s5(dsdt_virt: u64) -> Option<u8> {
                         data.get(first_elem_offset + 1).copied().unwrap_or(5)
                     }
                     v if v <= 0x0F => v, // Small integer constants in some AML variants.
-                    _ => continue, // Not a recognized encoding; try next match.
+                    _ => continue,       // Not a recognized encoding; try next match.
                 };
 
                 serial_println!("[acpi]   DSDT: found \\_S5_ SLP_TYP = {}", slp_typ);

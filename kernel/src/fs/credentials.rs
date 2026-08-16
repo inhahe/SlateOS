@@ -36,11 +36,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -195,9 +195,7 @@ impl CredentialStore {
     }
 
     fn count_for_app(&self, app_id: &str) -> usize {
-        self.credentials.keys()
-            .filter(|(a, _)| a == app_id)
-            .count()
+        self.credentials.keys().filter(|(a, _)| a == app_id).count()
     }
 }
 
@@ -230,8 +228,13 @@ pub fn is_unlocked() -> bool {
 // ---------------------------------------------------------------------------
 
 /// Store a credential. Overwrites existing for same (app_id, service).
-pub fn store(app_id: &str, service: &str, username: &str,
-             secret: &str, kind: CredentialKind) -> KernelResult<()> {
+pub fn store(
+    app_id: &str,
+    service: &str,
+    username: &str,
+    secret: &str,
+    kind: CredentialKind,
+) -> KernelResult<()> {
     if app_id.is_empty() || service.is_empty() || secret.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -251,26 +254,35 @@ pub fn store(app_id: &str, service: &str, username: &str,
         }
     }
 
-    state.credentials.insert(key, Credential {
-        app_id: String::from(app_id),
-        service: String::from(service),
-        username: String::from(username),
-        secret: String::from(secret),
-        kind,
-        created_ns: now,
-        accessed_ns: now,
-        modified_ns: now,
-        expires_ns: 0,
-        label: String::new(),
-    });
+    state.credentials.insert(
+        key,
+        Credential {
+            app_id: String::from(app_id),
+            service: String::from(service),
+            username: String::from(username),
+            secret: String::from(secret),
+            kind,
+            created_ns: now,
+            accessed_ns: now,
+            modified_ns: now,
+            expires_ns: 0,
+            label: String::new(),
+        },
+    );
 
     Ok(())
 }
 
 /// Store with full options.
-pub fn store_full(app_id: &str, service: &str, username: &str,
-                  secret: &str, kind: CredentialKind,
-                  label: &str, expires_ns: u64) -> KernelResult<()> {
+pub fn store_full(
+    app_id: &str,
+    service: &str,
+    username: &str,
+    secret: &str,
+    kind: CredentialKind,
+    label: &str,
+    expires_ns: u64,
+) -> KernelResult<()> {
     store(app_id, service, username, secret, kind)?;
     let mut state = STORE.lock();
     let key = (String::from(app_id), String::from(service));
@@ -291,7 +303,9 @@ pub fn retrieve(app_id: &str, service: &str) -> KernelResult<Credential> {
         return Err(KernelError::PermissionDenied);
     }
     let key = (String::from(app_id), String::from(service));
-    let cred = state.credentials.get_mut(&key)
+    let cred = state
+        .credentials
+        .get_mut(&key)
         .ok_or(KernelError::NotFound)?;
 
     // Check expiry.
@@ -307,14 +321,19 @@ pub fn retrieve(app_id: &str, service: &str) -> KernelResult<Credential> {
 pub fn delete(app_id: &str, service: &str) -> KernelResult<()> {
     let mut state = STORE.lock();
     let key = (String::from(app_id), String::from(service));
-    state.credentials.remove(&key).ok_or(KernelError::NotFound)?;
+    state
+        .credentials
+        .remove(&key)
+        .ok_or(KernelError::NotFound)?;
     Ok(())
 }
 
 /// Delete all credentials for an application.
 pub fn delete_app(app_id: &str) -> usize {
     let mut state = STORE.lock();
-    let keys_to_remove: Vec<CredKey> = state.credentials.keys()
+    let keys_to_remove: Vec<CredKey> = state
+        .credentials
+        .keys()
         .filter(|(a, _)| a == app_id)
         .cloned()
         .collect();
@@ -329,7 +348,9 @@ pub fn delete_app(app_id: &str) -> usize {
 pub fn list_for_app(app_id: &str) -> Vec<CredentialSummary> {
     let now = crate::timekeeping::clock_monotonic();
     let state = STORE.lock();
-    state.credentials.values()
+    state
+        .credentials
+        .values()
         .filter(|c| c.app_id == app_id)
         .map(|c| CredentialSummary {
             app_id: c.app_id.clone(),
@@ -347,7 +368,9 @@ pub fn list_for_app(app_id: &str) -> Vec<CredentialSummary> {
 pub fn list_all() -> Vec<CredentialSummary> {
     let now = crate::timekeeping::clock_monotonic();
     let state = STORE.lock();
-    state.credentials.values()
+    state
+        .credentials
+        .values()
         .map(|c| CredentialSummary {
             app_id: c.app_id.clone(),
             service: c.service.clone(),
@@ -365,7 +388,9 @@ pub fn update_username(app_id: &str, service: &str, username: &str) -> KernelRes
     let now = crate::timekeeping::clock_monotonic();
     let mut state = STORE.lock();
     let key = (String::from(app_id), String::from(service));
-    let cred = state.credentials.get_mut(&key)
+    let cred = state
+        .credentials
+        .get_mut(&key)
         .ok_or(KernelError::NotFound)?;
     cred.username = String::from(username);
     cred.modified_ns = now;
@@ -380,7 +405,9 @@ pub fn update_secret(app_id: &str, service: &str, secret: &str) -> KernelResult<
     let now = crate::timekeeping::clock_monotonic();
     let mut state = STORE.lock();
     let key = (String::from(app_id), String::from(service));
-    let cred = state.credentials.get_mut(&key)
+    let cred = state
+        .credentials
+        .get_mut(&key)
         .ok_or(KernelError::NotFound)?;
     cred.secret = String::from(secret);
     cred.modified_ns = now;
@@ -391,7 +418,9 @@ pub fn update_secret(app_id: &str, service: &str, secret: &str) -> KernelResult<
 pub fn set_label(app_id: &str, service: &str, label: &str) -> KernelResult<()> {
     let mut state = STORE.lock();
     let key = (String::from(app_id), String::from(service));
-    let cred = state.credentials.get_mut(&key)
+    let cred = state
+        .credentials
+        .get_mut(&key)
         .ok_or(KernelError::NotFound)?;
     cred.label = String::from(label);
     Ok(())
@@ -402,8 +431,7 @@ pub fn set_label(app_id: &str, service: &str, label: &str) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Add an autofill rule.
-pub fn add_autofill(app_id: &str, field_type: &str,
-                    service: &str, auto: bool) -> KernelResult<()> {
+pub fn add_autofill(app_id: &str, field_type: &str, service: &str, auto: bool) -> KernelResult<()> {
     if app_id.is_empty() || field_type.is_empty() || service.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -412,8 +440,10 @@ pub fn add_autofill(app_id: &str, field_type: &str,
         return Err(KernelError::ResourceExhausted);
     }
     // Check for duplicates.
-    let exists = state.autofill.iter().any(|r|
-        r.app_id == app_id && r.field_type == field_type && r.service == service);
+    let exists = state
+        .autofill
+        .iter()
+        .any(|r| r.app_id == app_id && r.field_type == field_type && r.service == service);
     if exists {
         return Err(KernelError::AlreadyExists);
     }
@@ -430,7 +460,9 @@ pub fn add_autofill(app_id: &str, field_type: &str,
 pub fn remove_autofill(app_id: &str, field_type: &str) -> KernelResult<()> {
     let mut state = STORE.lock();
     let before = state.autofill.len();
-    state.autofill.retain(|r| !(r.app_id == app_id && r.field_type == field_type));
+    state
+        .autofill
+        .retain(|r| !(r.app_id == app_id && r.field_type == field_type));
     if state.autofill.len() == before {
         return Err(KernelError::NotFound);
     }
@@ -443,18 +475,22 @@ pub fn lookup_autofill(app_id: &str, field_type: &str) -> KernelResult<(String, 
     if !state.unlocked {
         return Err(KernelError::PermissionDenied);
     }
-    let rule = state.autofill.iter()
+    let rule = state
+        .autofill
+        .iter()
         .find(|r| r.app_id == app_id && r.field_type == field_type)
         .ok_or(KernelError::NotFound)?;
     let key = (String::from(app_id), rule.service.clone());
-    let cred = state.credentials.get(&key)
-        .ok_or(KernelError::NotFound)?;
+    let cred = state.credentials.get(&key).ok_or(KernelError::NotFound)?;
     Ok((cred.username.clone(), cred.secret.clone()))
 }
 
 /// List autofill rules for an app.
 pub fn list_autofill(app_id: &str) -> Vec<AutofillRule> {
-    STORE.lock().autofill.iter()
+    STORE
+        .lock()
+        .autofill
+        .iter()
         .filter(|r| r.app_id == app_id)
         .cloned()
         .collect()
@@ -489,7 +525,9 @@ pub fn confirm_identity(user_id: &str) {
 pub fn time_since_verify(user_id: &str) -> u64 {
     let now = crate::timekeeping::clock_monotonic();
     let state = STORE.lock();
-    state.verify_times.get(user_id)
+    state
+        .verify_times
+        .get(user_id)
         .map(|&t| now.saturating_sub(t))
         .unwrap_or(0)
 }
@@ -503,7 +541,9 @@ pub fn search(query: &str) -> Vec<CredentialSummary> {
     let now = crate::timekeeping::clock_monotonic();
     let query_lower = query.to_ascii_lowercase();
     let state = STORE.lock();
-    state.credentials.values()
+    state
+        .credentials
+        .values()
         .filter(|c| {
             c.service.to_ascii_lowercase().contains(&query_lower)
                 || c.username.to_ascii_lowercase().contains(&query_lower)
@@ -564,7 +604,13 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: Store and retrieve.
     serial_println!("  credentials::test 1: store and retrieve");
-    store("browser", "github.com", "user@example.com", "s3cret!", CredentialKind::Password)?;
+    store(
+        "browser",
+        "github.com",
+        "user@example.com",
+        "s3cret!",
+        CredentialKind::Password,
+    )?;
     // Must unlock first.
     assert!(retrieve("browser", "github.com").is_err()); // Locked.
     unlock();
@@ -575,8 +621,20 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 2: App isolation — list only own credentials.
     serial_println!("  credentials::test 2: per-app isolation");
-    store("email", "smtp.gmail.com", "me@gmail.com", "mailpass", CredentialKind::Password)?;
-    store("browser", "gitlab.com", "dev", "gl_tok_123", CredentialKind::Token)?;
+    store(
+        "email",
+        "smtp.gmail.com",
+        "me@gmail.com",
+        "mailpass",
+        CredentialKind::Password,
+    )?;
+    store(
+        "browser",
+        "gitlab.com",
+        "dev",
+        "gl_tok_123",
+        CredentialKind::Token,
+    )?;
     let browser_creds = list_for_app("browser");
     assert_eq!(browser_creds.len(), 2);
     let email_creds = list_for_app("email");
@@ -611,7 +669,10 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("  credentials::test 6: search");
     let results = search("gmail");
     assert_eq!(results.len(), 1);
-    assert_eq!(results.first().map(|r| r.service.as_str()), Some("smtp.gmail.com"));
+    assert_eq!(
+        results.first().map(|r| r.service.as_str()),
+        Some("smtp.gmail.com")
+    );
 
     // Test 7: Bulk operations.
     serial_println!("  credentials::test 7: bulk ops");

@@ -21,11 +21,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -34,7 +34,7 @@ use crate::error::{KernelError, KernelResult};
 // ---------------------------------------------------------------------------
 
 const MAX_APPS: usize = 256;
-const MAX_DAILY_RECORDS: usize = 90;   // 90 days of history
+const MAX_DAILY_RECORDS: usize = 90; // 90 days of history
 const MAX_LIMITS: usize = 16;
 
 // ---------------------------------------------------------------------------
@@ -228,7 +228,9 @@ pub fn record_usage(app_id: &str, rx_bytes: u64, tx_bytes: u64) -> KernelResult<
         } else {
             if state.apps.len() >= MAX_APPS {
                 // Remove least recently used.
-                if let Some(pos) = state.apps.iter()
+                if let Some(pos) = state
+                    .apps
+                    .iter()
                     .enumerate()
                     .min_by_key(|(_, a)| a.last_activity_ns)
                     .map(|(i, _)| i)
@@ -303,7 +305,9 @@ pub fn set_metered(status: MeteredStatus) -> KernelResult<()> {
 /// Get metered connection status.
 pub fn metered_status() -> MeteredStatus {
     let guard = STATE.lock();
-    guard.as_ref().map_or(MeteredStatus::Unmetered, |s| s.metered)
+    guard
+        .as_ref()
+        .map_or(MeteredStatus::Unmetered, |s| s.metered)
 }
 
 /// Check if background data should be restricted.
@@ -363,7 +367,9 @@ pub fn list_limits() -> Vec<UsageLimit> {
 /// Set block-on-exceed for a limit.
 pub fn set_block_on_exceed(name: &str, block: bool) -> KernelResult<()> {
     with_state(|state| {
-        let limit = state.limits.iter_mut()
+        let limit = state
+            .limits
+            .iter_mut()
             .find(|l| l.name == name)
             .ok_or(KernelError::NotFound)?;
         limit.block_on_exceed = block;
@@ -377,7 +383,9 @@ pub fn set_alert_threshold(name: &str, pct: u8) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        let limit = state.limits.iter_mut()
+        let limit = state
+            .limits
+            .iter_mut()
             .find(|l| l.name == name)
             .ok_or(KernelError::NotFound)?;
         limit.alert_pct = pct;
@@ -403,7 +411,9 @@ pub fn app_usage() -> Vec<AppUsage> {
 pub fn usage_for_app(app_id: &str) -> KernelResult<AppUsage> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.apps.iter()
+    state
+        .apps
+        .iter()
         .find(|a| a.app_id == app_id)
         .cloned()
         .ok_or(KernelError::NotFound)
@@ -420,13 +430,15 @@ pub fn usage_summary(period: UsagePeriod) -> UsageSummary {
     let guard = STATE.lock();
     let state = match guard.as_ref() {
         Some(s) => s,
-        None => return UsageSummary {
-            period,
-            rx_bytes: 0,
-            tx_bytes: 0,
-            app_count: 0,
-            top_apps: Vec::new(),
-        },
+        None => {
+            return UsageSummary {
+                period,
+                rx_bytes: 0,
+                tx_bytes: 0,
+                app_count: 0,
+                top_apps: Vec::new(),
+            };
+        }
     };
 
     // For simplicity, use cumulative totals (a real implementation
@@ -455,7 +467,9 @@ pub fn usage_summary(period: UsagePeriod) -> UsageSummary {
         }
     };
 
-    let mut top: Vec<(String, u64)> = state.apps.iter()
+    let mut top: Vec<(String, u64)> = state
+        .apps
+        .iter()
         .map(|a| (a.app_id.clone(), a.total_bytes()))
         .collect();
     top.sort_by_key(|e| core::cmp::Reverse(e.1));
@@ -491,7 +505,11 @@ pub fn reset_usage() -> KernelResult<()> {
 /// Format byte count as human-readable string.
 pub fn format_bytes(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
-        format!("{}.{} GB", bytes / 1_073_741_824, (bytes % 1_073_741_824) / 107_374_182)
+        format!(
+            "{}.{} GB",
+            bytes / 1_073_741_824,
+            (bytes % 1_073_741_824) / 107_374_182
+        )
     } else if bytes >= 1_048_576 {
         format!("{}.{} MB", bytes / 1_048_576, (bytes % 1_048_576) / 104_857)
     } else if bytes >= 1024 {
@@ -509,7 +527,14 @@ pub fn format_bytes(bytes: u64) -> String {
 pub fn stats() -> (usize, usize, u64, u64, usize, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.apps.len(), s.daily.len(), s.total_rx, s.total_tx, s.limits.len(), s.ops),
+        Some(s) => (
+            s.apps.len(),
+            s.daily.len(),
+            s.total_rx,
+            s.total_tx,
+            s.limits.len(),
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }

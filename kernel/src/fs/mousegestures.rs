@@ -19,10 +19,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -141,33 +141,71 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let bindings = alloc::vec![
-        GestureBinding { id: 1,
-            pattern: GesturePattern { directions: alloc::vec![Direction::Left] },
-            action: String::from("navigate_back"), description: String::from("Go Back"),
-            enabled: true, use_count: 0 },
-        GestureBinding { id: 2,
-            pattern: GesturePattern { directions: alloc::vec![Direction::Right] },
-            action: String::from("navigate_forward"), description: String::from("Go Forward"),
-            enabled: true, use_count: 0 },
-        GestureBinding { id: 3,
-            pattern: GesturePattern { directions: alloc::vec![Direction::Down, Direction::Right] },
-            action: String::from("close_tab"), description: String::from("Close Tab"),
-            enabled: true, use_count: 0 },
-        GestureBinding { id: 4,
-            pattern: GesturePattern { directions: alloc::vec![Direction::Up] },
-            action: String::from("scroll_top"), description: String::from("Scroll to Top"),
-            enabled: true, use_count: 0 },
-        GestureBinding { id: 5,
-            pattern: GesturePattern { directions: alloc::vec![Direction::Down] },
-            action: String::from("scroll_bottom"), description: String::from("Scroll to Bottom"),
-            enabled: true, use_count: 0 },
-        GestureBinding { id: 6,
-            pattern: GesturePattern { directions: alloc::vec![Direction::Up, Direction::Down] },
-            action: String::from("refresh"), description: String::from("Refresh Page"),
-            enabled: true, use_count: 0 },
+        GestureBinding {
+            id: 1,
+            pattern: GesturePattern {
+                directions: alloc::vec![Direction::Left]
+            },
+            action: String::from("navigate_back"),
+            description: String::from("Go Back"),
+            enabled: true,
+            use_count: 0
+        },
+        GestureBinding {
+            id: 2,
+            pattern: GesturePattern {
+                directions: alloc::vec![Direction::Right]
+            },
+            action: String::from("navigate_forward"),
+            description: String::from("Go Forward"),
+            enabled: true,
+            use_count: 0
+        },
+        GestureBinding {
+            id: 3,
+            pattern: GesturePattern {
+                directions: alloc::vec![Direction::Down, Direction::Right]
+            },
+            action: String::from("close_tab"),
+            description: String::from("Close Tab"),
+            enabled: true,
+            use_count: 0
+        },
+        GestureBinding {
+            id: 4,
+            pattern: GesturePattern {
+                directions: alloc::vec![Direction::Up]
+            },
+            action: String::from("scroll_top"),
+            description: String::from("Scroll to Top"),
+            enabled: true,
+            use_count: 0
+        },
+        GestureBinding {
+            id: 5,
+            pattern: GesturePattern {
+                directions: alloc::vec![Direction::Down]
+            },
+            action: String::from("scroll_bottom"),
+            description: String::from("Scroll to Bottom"),
+            enabled: true,
+            use_count: 0
+        },
+        GestureBinding {
+            id: 6,
+            pattern: GesturePattern {
+                directions: alloc::vec![Direction::Up, Direction::Down]
+            },
+            action: String::from("refresh"),
+            description: String::from("Refresh Page"),
+            enabled: true,
+            use_count: 0
+        },
     ];
 
     *guard = Some(State {
@@ -187,7 +225,9 @@ pub fn recognize(directions: &[Direction]) -> KernelResult<Option<String>> {
     with_state(|state| {
         state.total_gestures += 1;
         for binding in &mut state.bindings {
-            if !binding.enabled { continue; }
+            if !binding.enabled {
+                continue;
+            }
             if binding.pattern.directions == directions {
                 binding.use_count += 1;
                 state.total_recognized += 1;
@@ -205,16 +245,22 @@ pub fn bind(directions: Vec<Direction>, action: &str, description: &str) -> Kern
             return Err(KernelError::ResourceExhausted);
         }
         // Check for conflict.
-        if state.bindings.iter().any(|b| b.pattern.directions == directions && b.enabled) {
+        if state
+            .bindings
+            .iter()
+            .any(|b| b.pattern.directions == directions && b.enabled)
+        {
             return Err(KernelError::AlreadyExists);
         }
         let id = state.next_id;
         state.next_id += 1;
         state.bindings.push(GestureBinding {
-            id, pattern: GesturePattern { directions },
+            id,
+            pattern: GesturePattern { directions },
             action: String::from(action),
             description: String::from(description),
-            enabled: true, use_count: 0,
+            enabled: true,
+            use_count: 0,
         });
         Ok(id)
     })
@@ -223,7 +269,10 @@ pub fn bind(directions: Vec<Direction>, action: &str, description: &str) -> Kern
 /// Unbind a gesture.
 pub fn unbind(binding_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.bindings.iter().position(|b| b.id == binding_id)
+        let pos = state
+            .bindings
+            .iter()
+            .position(|b| b.id == binding_id)
             .ok_or(KernelError::NotFound)?;
         state.bindings.remove(pos);
         Ok(())
@@ -256,13 +305,21 @@ pub fn set_sensitivity(px: i32) -> KernelResult<()> {
 
 /// List all bindings.
 pub fn list_bindings() -> Vec<GestureBinding> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.bindings.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.bindings.clone())
 }
 
 /// Get binding.
 pub fn get_binding(id: u32) -> KernelResult<GestureBinding> {
     with_state(|state| {
-        state.bindings.iter().find(|b| b.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .bindings
+            .iter()
+            .find(|b| b.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -270,7 +327,12 @@ pub fn get_binding(id: u32) -> KernelResult<GestureBinding> {
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.bindings.len(), s.total_gestures, s.total_recognized, s.ops),
+        Some(s) => (
+            s.bindings.len(),
+            s.total_gestures,
+            s.total_recognized,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }
@@ -306,8 +368,10 @@ pub fn self_test() {
     // 5: Bind new gesture.
     let id = bind(
         alloc::vec![Direction::Left, Direction::Up],
-        "new_tab", "New Tab"
-    ).expect("bind");
+        "new_tab",
+        "New Tab",
+    )
+    .expect("bind");
     let action = recognize(&[Direction::Left, Direction::Up]).expect("rec4");
     assert_eq!(action, Some(String::from("new_tab")));
     crate::serial_println!("  [5/8] bind: OK");
@@ -315,7 +379,8 @@ pub fn self_test() {
     // 6: Conflict rejected.
     let result = bind(
         alloc::vec![Direction::Left, Direction::Up],
-        "other", "Other"
+        "other",
+        "Other",
     );
     assert!(result.is_err());
     crate::serial_println!("  [6/8] conflict: OK");

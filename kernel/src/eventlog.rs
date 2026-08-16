@@ -41,10 +41,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -318,7 +318,11 @@ impl EventEntry {
     /// Iterate over non-empty payload pairs.
     pub fn payload_iter(&self) -> impl Iterator<Item = (&str, &str)> {
         let count = self.payload_count as usize;
-        self.payload.iter().take(count).filter(|p| !p.is_empty()).map(|p| (p.key_str(), p.value_str()))
+        self.payload
+            .iter()
+            .take(count)
+            .filter(|p| !p.is_empty())
+            .map(|p| (p.key_str(), p.value_str()))
     }
 
     /// Check if namespace matches a prefix (for filtering).
@@ -345,19 +349,34 @@ impl EventEntry {
         }
         let msg = self.message_str();
         // Simple case-insensitive substring search
-        let needle_lower: Vec<u8> = needle.bytes().map(|b| {
-            if b.is_ascii_uppercase() { b.wrapping_add(32) } else { b }
-        }).collect();
-        let msg_lower: Vec<u8> = msg.bytes().map(|b| {
-            if b.is_ascii_uppercase() { b.wrapping_add(32) } else { b }
-        }).collect();
+        let needle_lower: Vec<u8> = needle
+            .bytes()
+            .map(|b| {
+                if b.is_ascii_uppercase() {
+                    b.wrapping_add(32)
+                } else {
+                    b
+                }
+            })
+            .collect();
+        let msg_lower: Vec<u8> = msg
+            .bytes()
+            .map(|b| {
+                if b.is_ascii_uppercase() {
+                    b.wrapping_add(32)
+                } else {
+                    b
+                }
+            })
+            .collect();
         // Sliding window search
         if needle_lower.len() > msg_lower.len() {
             return false;
         }
         let limit = msg_lower.len().saturating_sub(needle_lower.len());
         for i in 0..=limit {
-            if msg_lower.get(i..i.wrapping_add(needle_lower.len())) == Some(needle_lower.as_slice()) {
+            if msg_lower.get(i..i.wrapping_add(needle_lower.len())) == Some(needle_lower.as_slice())
+            {
                 return true;
             }
         }
@@ -470,7 +489,9 @@ impl core::fmt::Write for MsgWriter<'_> {
             }
         }
         #[allow(clippy::arithmetic_side_effects)]
-        { self.pos += len; }
+        {
+            self.pos += len;
+        }
         Ok(())
     }
 }
@@ -542,16 +563,22 @@ impl EventRing {
         let sev_idx = entry.severity.numeric() as usize;
         if sev_idx < self.severity_counts.len() {
             #[allow(clippy::arithmetic_side_effects)]
-            { self.severity_counts[sev_idx] = self.severity_counts[sev_idx].wrapping_add(1); }
+            {
+                self.severity_counts[sev_idx] = self.severity_counts[sev_idx].wrapping_add(1);
+            }
         }
 
         // Update namespace root counter.
         let ns = entry.namespace_str();
         for (i, root) in NAMESPACE_ROOTS.iter().enumerate() {
-            if ns == *root || (ns.starts_with(root) && ns.as_bytes().get(root.len()).copied() == Some(b'.')) {
+            if ns == *root
+                || (ns.starts_with(root) && ns.as_bytes().get(root.len()).copied() == Some(b'.'))
+            {
                 if i < self.namespace_counts.len() {
                     #[allow(clippy::arithmetic_side_effects)]
-                    { self.namespace_counts[i] = self.namespace_counts[i].wrapping_add(1); }
+                    {
+                        self.namespace_counts[i] = self.namespace_counts[i].wrapping_add(1);
+                    }
                 }
                 break;
             }
@@ -584,7 +611,11 @@ fn echo_serial(entry: &EventEntry) {
         entry.severity().as_str(),
         entry.namespace_str(),
         entry.source_pid(),
-        if entry.source_service_len > 0 { entry.service_str() } else { "-" },
+        if entry.source_service_len > 0 {
+            entry.service_str()
+        } else {
+            "-"
+        },
         entry.message_str(),
     );
 }
@@ -599,7 +630,9 @@ fn current_timestamp_ns() -> u64 {
     } else {
         // APIC timer at 100 Hz → each tick = 10 ms = 10_000_000 ns.
         #[allow(clippy::arithmetic_side_effects)]
-        { crate::apic::tick_count() * 10_000_000 }
+        {
+            crate::apic::tick_count() * 10_000_000
+        }
     }
 }
 
@@ -855,11 +888,15 @@ pub fn query(filter: &EventFilter, max_results: usize) -> QueryResult {
         if let Some(entry) = ring.entries.get(idx) {
             if entry.seq == seq {
                 #[allow(clippy::arithmetic_side_effects)]
-                { result.scanned += 1; }
+                {
+                    result.scanned += 1;
+                }
 
                 if filter.matches(entry) {
                     #[allow(clippy::arithmetic_side_effects)]
-                    { result.matched += 1; }
+                    {
+                        result.matched += 1;
+                    }
 
                     if result.events.len() < max_results {
                         result.events.push(entry.clone());
@@ -871,7 +908,9 @@ pub fn query(filter: &EventFilter, max_results: usize) -> QueryResult {
         }
 
         #[allow(clippy::arithmetic_side_effects)]
-        { seq += 1; }
+        {
+            seq += 1;
+        }
     }
 
     result
@@ -997,11 +1036,17 @@ pub fn procfs_content() -> String {
 
     out.push_str("Event Log Statistics\n");
     out.push_str("====================\n");
-    out.push_str(&alloc::format!("Total events written: {}\n", st.total_written));
+    out.push_str(&alloc::format!(
+        "Total events written: {}\n",
+        st.total_written
+    ));
     out.push_str(&alloc::format!("Events in buffer:     {}\n", st.buffered));
     out.push_str(&alloc::format!("Buffer capacity:      {}\n", RING_SIZE));
     out.push_str(&alloc::format!("Events dropped:       {}\n", st.dropped));
-    out.push_str(&alloc::format!("Serial echo level:    {}\n", st.serial_echo_level.as_str()));
+    out.push_str(&alloc::format!(
+        "Serial echo level:    {}\n",
+        st.serial_echo_level.as_str()
+    ));
     out.push_str("\nBy Severity:\n");
     for (sev, count) in &st.by_severity {
         if *count > 0 {
@@ -1043,7 +1088,10 @@ pub fn self_test() -> KernelResult<()> {
     // Test 2: Query with no filter.
     let result = query(&EventFilter::all(), 100);
     if result.matched != 1 {
-        crate::serial_println!("[eventlog]   FAIL: expected 1 match, got {}", result.matched);
+        crate::serial_println!(
+            "[eventlog]   FAIL: expected 1 match, got {}",
+            result.matched
+        );
         return Err(KernelError::InternalError);
     }
     if let Some(ev) = result.events.first() {
@@ -1079,7 +1127,10 @@ pub fn self_test() -> KernelResult<()> {
 
     let sec_result = query(&EventFilter::all().namespace("security"), 100);
     if sec_result.matched != 2 {
-        crate::serial_println!("[eventlog]   FAIL: expected 2 security events, got {}", sec_result.matched);
+        crate::serial_println!(
+            "[eventlog]   FAIL: expected 2 security events, got {}",
+            sec_result.matched
+        );
         return Err(KernelError::InternalError);
     }
     crate::serial_println!("[eventlog]   3. Namespace filtering: OK");
@@ -1092,10 +1143,7 @@ pub fn self_test() -> KernelResult<()> {
         .message("Out of memory")
         .emit();
 
-    let warn_plus = query(
-        &EventFilter::all().min_severity(Severity::Warning),
-        100,
-    );
+    let warn_plus = query(&EventFilter::all().min_severity(Severity::Warning), 100);
     // Should get: 1 Notice (network.dhcp) + 1 Error + 1 Critical = 3
     // Wait — Notice is below Warning in our enum.  Let me check:
     // Debug=0, Info=1, Notice=2, Warning=3, Error=4, Critical=5
@@ -1110,23 +1158,23 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[eventlog]   4. Severity filtering: OK");
 
     // Test 5: PID filtering.
-    let pid_result = query(
-        &EventFilter::all().pid(100),
-        100,
-    );
+    let pid_result = query(&EventFilter::all().pid(100), 100);
     if pid_result.matched != 2 {
-        crate::serial_println!("[eventlog]   FAIL: expected 2 pid=100 events, got {}", pid_result.matched);
+        crate::serial_println!(
+            "[eventlog]   FAIL: expected 2 pid=100 events, got {}",
+            pid_result.matched
+        );
         return Err(KernelError::InternalError);
     }
     crate::serial_println!("[eventlog]   5. PID filtering: OK");
 
     // Test 6: Text search.
-    let text_result = query(
-        &EventFilter::all().search("logged"),
-        100,
-    );
+    let text_result = query(&EventFilter::all().search("logged"), 100);
     if text_result.matched != 2 {
-        crate::serial_println!("[eventlog]   FAIL: expected 2 'logged' matches, got {}", text_result.matched);
+        crate::serial_println!(
+            "[eventlog]   FAIL: expected 2 'logged' matches, got {}",
+            text_result.matched
+        );
         return Err(KernelError::InternalError);
     }
     crate::serial_println!("[eventlog]   6. Text search: OK");
@@ -1136,12 +1184,12 @@ pub fn self_test() -> KernelResult<()> {
     EventBuilder::new("application.test", Severity::Debug)
         .message("Streaming test event")
         .emit();
-    let stream_result = query(
-        &EventFilter::all().after(seq_before.saturating_sub(1)),
-        100,
-    );
+    let stream_result = query(&EventFilter::all().after(seq_before.saturating_sub(1)), 100);
     // Should get at least the new event.
-    let found_streaming = stream_result.events.iter().any(|e| e.message_str() == "Streaming test event");
+    let found_streaming = stream_result
+        .events
+        .iter()
+        .any(|e| e.message_str() == "Streaming test event");
     if !found_streaming {
         crate::serial_println!("[eventlog]   FAIL: streaming event not found");
         return Err(KernelError::InternalError);
@@ -1149,14 +1197,14 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[eventlog]   7. Sequence-based streaming: OK");
 
     // Test 8: Payload key-value pairs.
-    let dhcp_events = query(
-        &EventFilter::all().namespace("network.dhcp"),
-        100,
-    );
+    let dhcp_events = query(&EventFilter::all().namespace("network.dhcp"), 100);
     if let Some(ev) = dhcp_events.events.first() {
         let pairs: Vec<_> = ev.payload_iter().collect();
         if pairs.len() != 2 {
-            crate::serial_println!("[eventlog]   FAIL: expected 2 payload pairs, got {}", pairs.len());
+            crate::serial_println!(
+                "[eventlog]   FAIL: expected 2 payload pairs, got {}",
+                pairs.len()
+            );
             return Err(KernelError::InternalError);
         }
         if pairs[0] != ("ip", "10.0.2.15") {
@@ -1172,7 +1220,10 @@ pub fn self_test() -> KernelResult<()> {
     // Test 9: Statistics.
     let st = stats();
     if st.total_written < 7 {
-        crate::serial_println!("[eventlog]   FAIL: stats total_written < 7: {}", st.total_written);
+        crate::serial_println!(
+            "[eventlog]   FAIL: stats total_written < 7: {}",
+            st.total_written
+        );
         return Err(KernelError::InternalError);
     }
     // Check that severity counts make sense.

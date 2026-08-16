@@ -36,8 +36,8 @@
 
 use crate::proc::pcb::ProcessId;
 use crate::serial_println;
-use alloc::collections::BTreeMap;
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
 // Exception codes — hardware exceptions mapped to stable numeric codes
@@ -141,8 +141,7 @@ pub const EXCEPTION_CONTEXT_SIZE: usize = core::mem::size_of::<ExceptionContext>
 /// ```c
 /// void exception_handler(ExceptionContext *ctx);
 /// ```
-static EXCEPTION_HANDLERS: Mutex<BTreeMap<ProcessId, u64>> =
-    Mutex::new(BTreeMap::new());
+static EXCEPTION_HANDLERS: Mutex<BTreeMap<ProcessId, u64>> = Mutex::new(BTreeMap::new());
 
 /// Register an exception handler for a process.
 ///
@@ -157,7 +156,8 @@ pub fn set_handler(pid: ProcessId, handler_addr: u64) {
         handlers.insert(pid, handler_addr);
         serial_println!(
             "[exception] Process {} registered exception handler at {:#x}",
-            pid, handler_addr
+            pid,
+            handler_addr
         );
     }
 }
@@ -220,7 +220,9 @@ fn test_exception_code_abi() -> crate::error::KernelResult<()> {
         if code as u64 != val {
             serial_println!(
                 "[exception]   FAIL: {:?} = {} (expected {})",
-                code, code as u64, val
+                code,
+                code as u64,
+                val
             );
             return Err(KernelError::InternalError);
         }
@@ -241,7 +243,8 @@ fn test_exception_context_size() -> crate::error::KernelResult<()> {
     if EXCEPTION_CONTEXT_SIZE != expected {
         serial_println!(
             "[exception]   FAIL: EXCEPTION_CONTEXT_SIZE = {} (expected {})",
-            EXCEPTION_CONTEXT_SIZE, expected
+            EXCEPTION_CONTEXT_SIZE,
+            expected
         );
         return Err(KernelError::InternalError);
     }
@@ -252,7 +255,10 @@ fn test_exception_context_size() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    serial_println!("[exception]   exception context size ({}B): OK", EXCEPTION_CONTEXT_SIZE);
+    serial_println!(
+        "[exception]   exception context size ({}B): OK",
+        EXCEPTION_CONTEXT_SIZE
+    );
     Ok(())
 }
 
@@ -265,7 +271,8 @@ fn test_exception_context_alignment() -> crate::error::KernelResult<()> {
     if align != core::mem::align_of::<u64>() {
         serial_println!(
             "[exception]   FAIL: alignment = {} (expected {})",
-            align, core::mem::align_of::<u64>()
+            align,
+            core::mem::align_of::<u64>()
         );
         return Err(KernelError::InternalError);
     }
@@ -291,7 +298,8 @@ fn test_set_and_get_handler() -> crate::error::KernelResult<()> {
     if got != Some(handler_addr) {
         serial_println!(
             "[exception]   FAIL: get_handler = {:?} (expected Some({:#x}))",
-            got, handler_addr
+            got,
+            handler_addr
         );
         return Err(KernelError::InternalError);
     }

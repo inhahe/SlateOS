@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -59,14 +59,14 @@ impl Controller {
 #[derive(Debug, Clone)]
 pub struct Cgroup {
     pub path: String,
-    pub cpu_weight: u32,          // 1..10000, default 100.
-    pub cpu_max_us: u64,          // Max CPU time per period (0 = unlimited).
-    pub memory_max: u64,          // Max memory bytes (0 = unlimited).
-    pub memory_current: u64,      // Current memory usage.
-    pub io_weight: u32,           // 1..10000, default 100.
-    pub pids_max: u32,            // Max PIDs (0 = unlimited).
-    pub pids_current: u32,        // Current PID count.
-    pub processes: Vec<u32>,      // Assigned PIDs.
+    pub cpu_weight: u32,     // 1..10000, default 100.
+    pub cpu_max_us: u64,     // Max CPU time per period (0 = unlimited).
+    pub memory_max: u64,     // Max memory bytes (0 = unlimited).
+    pub memory_current: u64, // Current memory usage.
+    pub io_weight: u32,      // 1..10000, default 100.
+    pub pids_max: u32,       // Max PIDs (0 = unlimited).
+    pub pids_current: u32,   // Current PID count.
+    pub processes: Vec<u32>, // Assigned PIDs.
     pub created_ns: u64,
     /// Backing in-kernel resource controller group
     /// (`crate::cgroup::CgroupId`).
@@ -132,18 +132,25 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        groups: alloc::vec![
-            Cgroup {
-                path: String::from("/"), cpu_weight: 100, cpu_max_us: 0,
-                memory_max: 0, memory_current: 0, io_weight: 100,
-                pids_max: 0, pids_current: 0, processes: Vec::new(), created_ns: now,
-                // The cgroupfs root mirrors the kernel root cgroup.
-                kernel_id: crate::cgroup::ROOT_CGROUP,
-            },
-        ],
+        groups: alloc::vec![Cgroup {
+            path: String::from("/"),
+            cpu_weight: 100,
+            cpu_max_us: 0,
+            memory_max: 0,
+            memory_current: 0,
+            io_weight: 100,
+            pids_max: 0,
+            pids_current: 0,
+            processes: Vec::new(),
+            created_ns: now,
+            // The cgroupfs root mirrors the kernel root cgroup.
+            kernel_id: crate::cgroup::ROOT_CGROUP,
+        },],
         total_created: 1,
         total_deleted: 0,
         total_limit_changes: 0,
@@ -153,19 +160,29 @@ pub fn init_defaults() {
 
 /// List all cgroups.
 pub fn list_groups() -> Vec<Cgroup> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.groups.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.groups.clone())
 }
 
 /// Get cgroup by path.
 pub fn get_group(path: &str) -> Option<Cgroup> {
-    STATE.lock().as_ref().and_then(|s| s.groups.iter().find(|g| g.path == path).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.groups.iter().find(|g| g.path == path).cloned())
 }
 
 /// Create a cgroup.
 pub fn create_group(path: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.groups.len() >= MAX_CGROUPS { return Err(KernelError::ResourceExhausted); }
-        if state.groups.iter().any(|g| g.path == path) { return Err(KernelError::AlreadyExists); }
+        if state.groups.len() >= MAX_CGROUPS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.groups.iter().any(|g| g.path == path) {
+            return Err(KernelError::AlreadyExists);
+        }
 
         // Create the backing kernel cgroup under the parent's kernel
         // group so the kernel hierarchy mirrors the cgroupfs path tree
@@ -173,16 +190,26 @@ pub fn create_group(path: &str) -> KernelResult<()> {
         // unknown parent path falls back to the kernel root.
         let parent_kernel_id = {
             let pp = parent_path(path);
-            state.groups.iter().find(|g| g.path == pp)
+            state
+                .groups
+                .iter()
+                .find(|g| g.path == pp)
                 .map_or(crate::cgroup::ROOT_CGROUP, |g| g.kernel_id)
         };
         let kernel_id = crate::cgroup::create(parent_kernel_id)?;
 
         let now = crate::hpet::elapsed_ns();
         state.groups.push(Cgroup {
-            path: String::from(path), cpu_weight: 100, cpu_max_us: 0,
-            memory_max: 0, memory_current: 0, io_weight: 100,
-            pids_max: 0, pids_current: 0, processes: Vec::new(), created_ns: now,
+            path: String::from(path),
+            cpu_weight: 100,
+            cpu_max_us: 0,
+            memory_max: 0,
+            memory_current: 0,
+            io_weight: 100,
+            pids_max: 0,
+            pids_current: 0,
+            processes: Vec::new(),
+            created_ns: now,
             kernel_id,
         });
         state.total_created += 1;
@@ -193,15 +220,21 @@ pub fn create_group(path: &str) -> KernelResult<()> {
 /// Delete a cgroup.
 pub fn delete_group(path: &str) -> KernelResult<()> {
     with_state(|state| {
-        if path == "/" { return Err(KernelError::PermissionDenied); }
+        if path == "/" {
+            return Err(KernelError::PermissionDenied);
+        }
         // Capture the backing kernel group before removing the frontend
         // entry so we can release it too.
-        let kernel_id = state.groups.iter()
+        let kernel_id = state
+            .groups
+            .iter()
             .find(|g| g.path == path)
             .map(|g| g.kernel_id);
         let before = state.groups.len();
         state.groups.retain(|g| g.path != path);
-        if state.groups.len() == before { return Err(KernelError::NotFound); }
+        if state.groups.len() == before {
+            return Err(KernelError::NotFound);
+        }
 
         // Release the backing kernel cgroup.  This is best-effort: the
         // kernel controller refuses to delete a group that still has
@@ -220,8 +253,14 @@ pub fn delete_group(path: &str) -> KernelResult<()> {
 /// Set CPU weight.
 pub fn set_cpu_weight(path: &str, weight: u32) -> KernelResult<()> {
     with_state(|state| {
-        if weight == 0 || weight > 10000 { return Err(KernelError::InvalidArgument); }
-        let g = state.groups.iter_mut().find(|g| g.path == path).ok_or(KernelError::NotFound)?;
+        if weight == 0 || weight > 10000 {
+            return Err(KernelError::InvalidArgument);
+        }
+        let g = state
+            .groups
+            .iter_mut()
+            .find(|g| g.path == path)
+            .ok_or(KernelError::NotFound)?;
         g.cpu_weight = weight;
         state.total_limit_changes += 1;
         Ok(())
@@ -231,7 +270,11 @@ pub fn set_cpu_weight(path: &str, weight: u32) -> KernelResult<()> {
 /// Set memory limit.
 pub fn set_memory_max(path: &str, bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let g = state.groups.iter_mut().find(|g| g.path == path).ok_or(KernelError::NotFound)?;
+        let g = state
+            .groups
+            .iter_mut()
+            .find(|g| g.path == path)
+            .ok_or(KernelError::NotFound)?;
         g.memory_max = bytes;
         let kernel_id = g.kernel_id;
         state.total_limit_changes += 1;
@@ -240,7 +283,11 @@ pub fn set_memory_max(path: &str, bytes: u64) -> KernelResult<()> {
         // expresses the limit in bytes; the kernel memory controller
         // charges whole 16 KiB frames, so round up.  `bytes == 0` means
         // "unlimited" in both models → 0 frames.
-        let frames = if bytes == 0 { 0 } else { bytes.div_ceil(FRAME_BYTES) };
+        let frames = if bytes == 0 {
+            0
+        } else {
+            bytes.div_ceil(FRAME_BYTES)
+        };
         crate::cgroup::set_mem_limit(kernel_id, crate::cgroup::MemLimit::frames(frames))?;
         Ok(())
     })
@@ -249,7 +296,11 @@ pub fn set_memory_max(path: &str, bytes: u64) -> KernelResult<()> {
 /// Set PID limit.
 pub fn set_pids_max(path: &str, max: u32) -> KernelResult<()> {
     with_state(|state| {
-        let g = state.groups.iter_mut().find(|g| g.path == path).ok_or(KernelError::NotFound)?;
+        let g = state
+            .groups
+            .iter_mut()
+            .find(|g| g.path == path)
+            .ok_or(KernelError::NotFound)?;
         g.pids_max = max;
         state.total_limit_changes += 1;
         Ok(())
@@ -259,11 +310,17 @@ pub fn set_pids_max(path: &str, max: u32) -> KernelResult<()> {
 /// Add a PID to a cgroup.
 pub fn add_pid(path: &str, pid: u32) -> KernelResult<()> {
     with_state(|state| {
-        let g = state.groups.iter_mut().find(|g| g.path == path).ok_or(KernelError::NotFound)?;
+        let g = state
+            .groups
+            .iter_mut()
+            .find(|g| g.path == path)
+            .ok_or(KernelError::NotFound)?;
         if g.pids_max > 0 && g.pids_current >= g.pids_max {
             return Err(KernelError::ResourceExhausted);
         }
-        if g.processes.contains(&pid) { return Err(KernelError::AlreadyExists); }
+        if g.processes.contains(&pid) {
+            return Err(KernelError::AlreadyExists);
+        }
         let kernel_id = g.kernel_id;
         g.processes.push(pid);
         g.pids_current += 1;
@@ -284,10 +341,16 @@ pub fn add_pid(path: &str, pid: u32) -> KernelResult<()> {
 /// Remove a PID from a cgroup.
 pub fn remove_pid(path: &str, pid: u32) -> KernelResult<()> {
     with_state(|state| {
-        let g = state.groups.iter_mut().find(|g| g.path == path).ok_or(KernelError::NotFound)?;
+        let g = state
+            .groups
+            .iter_mut()
+            .find(|g| g.path == path)
+            .ok_or(KernelError::NotFound)?;
         let before = g.processes.len();
         g.processes.retain(|&p| p != pid);
-        if g.processes.len() == before { return Err(KernelError::NotFound); }
+        if g.processes.len() == before {
+            return Err(KernelError::NotFound);
+        }
         g.pids_current -= 1;
 
         // Return the task to the root cgroup (symmetric with `add_pid`).
@@ -302,7 +365,13 @@ pub fn remove_pid(path: &str, pid: u32) -> KernelResult<()> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.groups.len(), s.total_created, s.total_deleted, s.total_limit_changes, s.ops),
+        Some(s) => (
+            s.groups.len(),
+            s.total_created,
+            s.total_deleted,
+            s.total_limit_changes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -122,24 +122,34 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let configs = alloc::vec![
         SaverConfig {
-            id: 1, name: String::from("Blank"),
+            id: 1,
+            name: String::from("Blank"),
             saver_type: SaverType::Blank,
-            timeout_secs: 300, password_required: true,
-            enabled: true, state: SaverState::Inactive,
+            timeout_secs: 300,
+            password_required: true,
+            enabled: true,
+            state: SaverState::Inactive,
             activated_ns: 0,
-            slideshow_dir: String::new(), custom_cmd: String::new(),
+            slideshow_dir: String::new(),
+            custom_cmd: String::new(),
         },
         SaverConfig {
-            id: 2, name: String::from("Starfield"),
+            id: 2,
+            name: String::from("Starfield"),
             saver_type: SaverType::Starfield,
-            timeout_secs: 600, password_required: true,
-            enabled: true, state: SaverState::Inactive,
+            timeout_secs: 600,
+            password_required: true,
+            enabled: true,
+            state: SaverState::Inactive,
             activated_ns: 0,
-            slideshow_dir: String::new(), custom_cmd: String::new(),
+            slideshow_dir: String::new(),
+            custom_cmd: String::new(),
         },
     ];
 
@@ -167,7 +177,10 @@ pub fn set_active(config_id: u32) -> KernelResult<()> {
 /// Activate the screen saver.
 pub fn activate() -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == state.active_config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == state.active_config_id)
             .ok_or(KernelError::NotFound)?;
         if !cfg.enabled {
             return Err(KernelError::InvalidArgument);
@@ -182,7 +195,10 @@ pub fn activate() -> KernelResult<()> {
 /// Deactivate (dismiss) the screen saver.
 pub fn deactivate() -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == state.active_config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == state.active_config_id)
             .ok_or(KernelError::NotFound)?;
         cfg.state = SaverState::Inactive;
         state.total_deactivations += 1;
@@ -193,7 +209,10 @@ pub fn deactivate() -> KernelResult<()> {
 /// Preview the screen saver (activates in preview mode).
 pub fn preview(config_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
         cfg.state = SaverState::Preview;
         Ok(())
@@ -203,7 +222,10 @@ pub fn preview(config_id: u32) -> KernelResult<()> {
 /// Stop previewing.
 pub fn stop_preview(config_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
         cfg.state = SaverState::Inactive;
         Ok(())
@@ -213,7 +235,10 @@ pub fn stop_preview(config_id: u32) -> KernelResult<()> {
 /// Set idle timeout in seconds.
 pub fn set_timeout(config_id: u32, secs: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
         cfg.timeout_secs = secs.clamp(30, 7200);
         Ok(())
@@ -223,7 +248,10 @@ pub fn set_timeout(config_id: u32, secs: u32) -> KernelResult<()> {
 /// Set password-on-wake requirement.
 pub fn set_password_required(config_id: u32, required: bool) -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
         cfg.password_required = required;
         Ok(())
@@ -233,7 +261,10 @@ pub fn set_password_required(config_id: u32, required: bool) -> KernelResult<()>
 /// Enable/disable a saver.
 pub fn set_enabled(config_id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
         cfg.enabled = enabled;
         Ok(())
@@ -249,12 +280,16 @@ pub fn register_saver(name: &str, saver_type: SaverType) -> KernelResult<u32> {
         let id = state.next_id;
         state.next_id += 1;
         state.configs.push(SaverConfig {
-            id, name: String::from(name),
+            id,
+            name: String::from(name),
             saver_type,
-            timeout_secs: 300, password_required: true,
-            enabled: true, state: SaverState::Inactive,
+            timeout_secs: 300,
+            password_required: true,
+            enabled: true,
+            state: SaverState::Inactive,
             activated_ns: 0,
-            slideshow_dir: String::new(), custom_cmd: String::new(),
+            slideshow_dir: String::new(),
+            custom_cmd: String::new(),
         });
         Ok(id)
     })
@@ -262,13 +297,21 @@ pub fn register_saver(name: &str, saver_type: SaverType) -> KernelResult<u32> {
 
 /// List all savers.
 pub fn list_savers() -> Vec<SaverConfig> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.configs.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.configs.clone())
 }
 
 /// Get a saver config.
 pub fn get_saver(id: u32) -> KernelResult<SaverConfig> {
     with_state(|state| {
-        state.configs.iter().find(|c| c.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .configs
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -281,7 +324,12 @@ pub fn active_saver_id() -> u32 {
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.configs.len(), s.total_activations, s.total_deactivations, s.ops),
+        Some(s) => (
+            s.configs.len(),
+            s.total_activations,
+            s.total_deactivations,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }

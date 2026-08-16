@@ -64,8 +64,8 @@
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
-use core::sync::atomic::{AtomicU32, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------
 // Ring entry structures
@@ -342,8 +342,7 @@ static RING_TABLE: Mutex<alloc::collections::BTreeMap<u64, IoRing>> =
     Mutex::new(alloc::collections::BTreeMap::new());
 
 /// Counter for ring handle generation.
-static NEXT_RING_ID: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(1);
+static NEXT_RING_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -374,17 +373,16 @@ static NEXT_RING_ID: core::sync::atomic::AtomicU64 =
 /// register the result with [`attach_user_mapping`], returning *that* address:
 /// leaking an HHDM pointer to ring 3 discloses the direct-map base and thus
 /// defeats kernel address-space randomisation for every subsequent attack.
-pub fn setup(
-    sq_entries: u32,
-    cq_entries: u32,
-) -> KernelResult<(u64, u64, alloc::vec::Vec<u64>)> {
+pub fn setup(sq_entries: u32, cq_entries: u32) -> KernelResult<(u64, u64, alloc::vec::Vec<u64>)> {
     use crate::mm::frame::{self, FRAME_SIZE};
     use crate::mm::page_table;
 
     // Clamp and round up to power of 2.
-    let sq = sq_entries.clamp(MIN_RING_ENTRIES, MAX_RING_ENTRIES)
+    let sq = sq_entries
+        .clamp(MIN_RING_ENTRIES, MAX_RING_ENTRIES)
         .next_power_of_two();
-    let cq = cq_entries.clamp(MIN_RING_ENTRIES, MAX_RING_ENTRIES)
+    let cq = cq_entries
+        .clamp(MIN_RING_ENTRIES, MAX_RING_ENTRIES)
         .next_power_of_two();
 
     // Check ring table capacity.
@@ -465,7 +463,10 @@ pub fn setup(
 
     serial_println!(
         "[io_ring] Created ring {} (sq={}, cq={}, frames={})",
-        handle, sq, cq, frames_needed
+        handle,
+        sq,
+        cq,
+        frames_needed
     );
 
     Ok((handle, base_virt, phys_frames))
@@ -673,10 +674,7 @@ pub fn destroy(ring_handle: u64) -> KernelResult<()> {
                 }
                 va = va.saturating_add(frame_size);
             }
-            crate::proc::pcb::remove_vma(
-                current_owner_process().unwrap_or(0),
-                ring.user_base,
-            );
+            crate::proc::pcb::remove_vma(current_owner_process().unwrap_or(0), ring.user_base);
         }
     }
 
@@ -695,7 +693,8 @@ pub fn destroy(ring_handle: u64) -> KernelResult<()> {
 
     serial_println!(
         "[io_ring] Destroyed ring {} ({} frames freed)",
-        ring_handle, ring.phys_frames.len()
+        ring_handle,
+        ring.phys_frames.len()
     );
 
     Ok(())
@@ -780,7 +779,8 @@ pub fn has_completions_ready(ring_handle: u64) -> bool {
 #[allow(dead_code)]
 pub fn pending_completions(ring_handle: u64) -> KernelResult<u32> {
     let table = RING_TABLE.lock();
-    let ring = table.get(&ring_handle)
+    let ring = table
+        .get(&ring_handle)
         .ok_or(KernelError::InvalidArgument)?;
 
     // SAFETY: header_ptr was set during io_ring_create and points to the
@@ -1387,10 +1387,7 @@ fn test_nop_submission() -> KernelResult<()> {
     // Process.
     let processed = enter(handle, 0)?;
     if processed != 3 {
-        serial_println!(
-            "[io_ring]   FAIL: processed {} SQEs, expected 3",
-            processed
-        );
+        serial_println!("[io_ring]   FAIL: processed {} SQEs, expected 3", processed);
         destroy(handle)?;
         return Err(KernelError::InternalError);
     }
@@ -1398,10 +1395,7 @@ fn test_nop_submission() -> KernelResult<()> {
     // Verify CQEs.
     let cq_tail = header.cq_tail.load(Ordering::Acquire);
     if cq_tail != 3 {
-        serial_println!(
-            "[io_ring]   FAIL: cq_tail should be 3, got {}",
-            cq_tail
-        );
+        serial_println!("[io_ring]   FAIL: cq_tail should be 3, got {}", cq_tail);
         destroy(handle)?;
         return Err(KernelError::InternalError);
     }
@@ -1413,7 +1407,9 @@ fn test_nop_submission() -> KernelResult<()> {
         if cqe.user_data != expected_ud {
             serial_println!(
                 "[io_ring]   FAIL: CQE[{}] user_data={}, expected {}",
-                i, cqe.user_data, expected_ud
+                i,
+                cqe.user_data,
+                expected_ud
             );
             destroy(handle)?;
             return Err(KernelError::InternalError);
@@ -1421,7 +1417,8 @@ fn test_nop_submission() -> KernelResult<()> {
         if cqe.result != 0 {
             serial_println!(
                 "[io_ring]   FAIL: CQE[{}] result={}, expected 0",
-                i, cqe.result
+                i,
+                cqe.result
             );
             destroy(handle)?;
             return Err(KernelError::InternalError);
@@ -1486,10 +1483,7 @@ fn test_console_write_batch() -> KernelResult<()> {
 
     let processed = enter(handle, 0)?;
     if processed != 2 {
-        serial_println!(
-            "[io_ring]   FAIL: processed {} SQEs, expected 2",
-            processed
-        );
+        serial_println!("[io_ring]   FAIL: processed {} SQEs, expected 2", processed);
         destroy(handle)?;
         return Err(KernelError::InternalError);
     }
@@ -1499,10 +1493,7 @@ fn test_console_write_batch() -> KernelResult<()> {
         // SAFETY: cq_base points to the CQ array; i < cq_entries.
         let cqe = unsafe { &*cq_base.add(i as usize) };
         if cqe.result < 0 {
-            serial_println!(
-                "[io_ring]   FAIL: CQE[{}] result={} (error)",
-                i, cqe.result
-            );
+            serial_println!("[io_ring]   FAIL: CQE[{}] result={} (error)", i, cqe.result);
             destroy(handle)?;
             return Err(KernelError::InternalError);
         }
@@ -1531,10 +1522,7 @@ fn test_fh_read_write() -> KernelResult<()> {
     }
 
     // Open the file for read.
-    let fh = crate::fs::handle::open(
-        test_path,
-        crate::fs::handle::OpenFlags::READ,
-    )?;
+    let fh = crate::fs::handle::open(test_path, crate::fs::handle::OpenFlags::READ)?;
 
     // Create io_ring.
     let (ring_handle, base_virt, _frames) = setup(8, 16)?;
@@ -1565,7 +1553,9 @@ fn test_fh_read_write() -> KernelResult<()> {
         arg2: 0,
     };
     // SAFETY: sq_base points to the SQ array; index 0 < sq_entries (8).
-    unsafe { *sq_base.add(0) = sqe; }
+    unsafe {
+        *sq_base.add(0) = sqe;
+    }
     header.sq_tail.store(1, Ordering::Release);
 
     let processed = enter(ring_handle, 0)?;
@@ -1585,7 +1575,8 @@ fn test_fh_read_write() -> KernelResult<()> {
     if cqe.result != test_data.len() as i64 {
         serial_println!(
             "[io_ring]   FAIL: fh_read CQE result={}, expected {}",
-            cqe.result, test_data.len()
+            cqe.result,
+            test_data.len()
         );
         let _ = crate::fs::handle::close(fh);
         destroy(ring_handle)?;
@@ -1667,7 +1658,9 @@ fn test_fh_positioned_io_leaves_the_cursor_alone() -> KernelResult<()> {
         header.cq_head.store(0, Ordering::Release);
         header.cq_tail.store(0, Ordering::Release);
         // SAFETY: sq_base points to the SQ array; index 0 < sq_entries (8).
-        unsafe { *sq_base.add(0) = sqe; }
+        unsafe {
+            *sq_base.add(0) = sqe;
+        }
         header.sq_tail.store(1, Ordering::Release);
         if enter(ring_handle, 0)? != 1 {
             return Err(KernelError::InternalError);
@@ -1706,19 +1699,30 @@ fn test_fh_positioned_io_leaves_the_cursor_alone() -> KernelResult<()> {
     // 1. Sequential read of 4 bytes leaves the cursor at 4.
     let r = submit(sqe(IO_OP_FH_READ, buf.as_mut_ptr() as u64, 4, 0))?;
     if r != 4 || buf.get(..4) != Some(b"ABCD".as_slice()) {
-        fail!("[io_ring]   FAIL: pio setup read result={} buf={:?}", r, &buf[..4]);
+        fail!(
+            "[io_ring]   FAIL: pio setup read result={} buf={:?}",
+            r,
+            &buf[..4]
+        );
     }
 
     // 2. A pread at a far offset returns that offset's bytes...
     buf = [0; 8];
     let r = submit(sqe(IO_OP_FH_PREAD, buf.as_mut_ptr() as u64, 4, 20))?;
     if r != 4 || buf.get(..4) != Some(b"UVWX".as_slice()) {
-        fail!("[io_ring]   FAIL: pread result={} buf={:?}, expected 4/UVWX", r, &buf[..4]);
+        fail!(
+            "[io_ring]   FAIL: pread result={} buf={:?}, expected 4/UVWX",
+            r,
+            &buf[..4]
+        );
     }
     // ...and does not move the cursor.
     let pos = crate::fs::handle::seek(fh, SeekFrom::Current(0))?;
     if pos != 4 {
-        fail!("[io_ring]   FAIL: pread moved the cursor to {}, expected 4", pos);
+        fail!(
+            "[io_ring]   FAIL: pread moved the cursor to {}, expected 4",
+            pos
+        );
     }
 
     // 3. A pwrite at another offset lands there and also leaves the cursor.
@@ -1729,7 +1733,10 @@ fn test_fh_positioned_io_leaves_the_cursor_alone() -> KernelResult<()> {
     }
     let pos = crate::fs::handle::seek(fh, SeekFrom::Current(0))?;
     if pos != 4 {
-        fail!("[io_ring]   FAIL: pwrite moved the cursor to {}, expected 4", pos);
+        fail!(
+            "[io_ring]   FAIL: pwrite moved the cursor to {}, expected 4",
+            pos
+        );
     }
 
     // 4. The sequential stream picks up exactly where step 1 left it — the
@@ -1737,13 +1744,20 @@ fn test_fh_positioned_io_leaves_the_cursor_alone() -> KernelResult<()> {
     buf = [0; 8];
     let r = submit(sqe(IO_OP_FH_READ, buf.as_mut_ptr() as u64, 4, 0))?;
     if r != 4 || buf.get(..4) != Some(b"EFGH".as_slice()) {
-        fail!("[io_ring]   FAIL: post-pio sequential read={} buf={:?}, expected 4/EFGH", r, &buf[..4]);
+        fail!(
+            "[io_ring]   FAIL: post-pio sequential read={} buf={:?}, expected 4/EFGH",
+            r,
+            &buf[..4]
+        );
     }
 
     // 5. The pwrite really reached the file, at the offset asked for.
     match crate::fs::Vfs::read_file(test_path) {
         Ok(data) if data.get(10..14) == Some(b"zzzz".as_slice()) => {}
-        Ok(data) => fail!("[io_ring]   FAIL: pwrite landed wrong: {:?}", data.get(8..16)),
+        Ok(data) => fail!(
+            "[io_ring]   FAIL: pwrite landed wrong: {:?}",
+            data.get(8..16)
+        ),
         Err(e) => fail!("[io_ring]   FAIL: re-reading the pwrite target: {:?}", e),
     }
 
@@ -1790,12 +1804,17 @@ fn test_timeout_and_service() -> KernelResult<()> {
         arg2: 0,
     };
     // SAFETY: sq_base points to the SQ array; index 0 < sq_entries (8).
-    unsafe { *sq_base.add(0) = sqe_timeout_zero; }
+    unsafe {
+        *sq_base.add(0) = sqe_timeout_zero;
+    }
     header.sq_tail.store(1, Ordering::Release);
 
     let processed = enter(ring_handle, 0)?;
     if processed != 1 {
-        serial_println!("[io_ring]   FAIL: timeout(0ns) processed {}, expected 1", processed);
+        serial_println!(
+            "[io_ring]   FAIL: timeout(0ns) processed {}, expected 1",
+            processed
+        );
         destroy(ring_handle)?;
         return Err(KernelError::InternalError);
     }
@@ -1805,7 +1824,8 @@ fn test_timeout_and_service() -> KernelResult<()> {
     if cqe.user_data != 1000 || cqe.result != 0 {
         serial_println!(
             "[io_ring]   FAIL: timeout(0ns) CQE ud={} result={}, expected ud=1000 result=0",
-            cqe.user_data, cqe.result
+            cqe.user_data,
+            cqe.result
         );
         destroy(ring_handle)?;
         return Err(KernelError::InternalError);
@@ -1832,12 +1852,17 @@ fn test_timeout_and_service() -> KernelResult<()> {
         arg2: 0,
     };
     // SAFETY: sq_base points to the SQ array; index 0 < sq_entries.
-    unsafe { *sq_base.add(0) = sqe_cancel; }
+    unsafe {
+        *sq_base.add(0) = sqe_cancel;
+    }
     header.sq_tail.store(1, Ordering::Release);
 
     let processed = enter(ring_handle, 0)?;
     if processed != 1 {
-        serial_println!("[io_ring]   FAIL: timeout_cancel processed {}, expected 1", processed);
+        serial_println!(
+            "[io_ring]   FAIL: timeout_cancel processed {}, expected 1",
+            processed
+        );
         destroy(ring_handle)?;
         return Err(KernelError::InternalError);
     }
@@ -1848,7 +1873,8 @@ fn test_timeout_and_service() -> KernelResult<()> {
     if cqe.result != expected_cancel_result {
         serial_println!(
             "[io_ring]   FAIL: timeout_cancel result={}, expected {}",
-            cqe.result, expected_cancel_result
+            cqe.result,
+            expected_cancel_result
         );
         destroy(ring_handle)?;
         return Err(KernelError::InternalError);
@@ -1879,12 +1905,17 @@ fn test_timeout_and_service() -> KernelResult<()> {
         arg2: 0,
     };
     // SAFETY: sq_base points to the SQ array; index 0 < sq_entries.
-    unsafe { *sq_base.add(0) = sqe_connect; }
+    unsafe {
+        *sq_base.add(0) = sqe_connect;
+    }
     header.sq_tail.store(1, Ordering::Release);
 
     let processed = enter(ring_handle, 0)?;
     if processed != 1 {
-        serial_println!("[io_ring]   FAIL: service_connect processed {}, expected 1", processed);
+        serial_println!(
+            "[io_ring]   FAIL: service_connect processed {}, expected 1",
+            processed
+        );
         let _ = service::unregister(listener);
         destroy(ring_handle)?;
         return Err(KernelError::InternalError);
@@ -1905,18 +1936,15 @@ fn test_timeout_and_service() -> KernelResult<()> {
     // The result is the raw channel handle.  Accept the server side
     // and verify we can send a message across.
     let client_handle = channel::ChannelHandle::from_raw(cqe.result as u64);
-    let server_handle = service::try_accept(listener)?
-        .ok_or(KernelError::InternalError)?;
+    let server_handle = service::try_accept(listener)?.ok_or(KernelError::InternalError)?;
 
     // Send from client → server.
     let test_msg = b"hello from io_ring";
-    let msg = channel::Message::from_bytes(test_msg)
-        .map_err(|_| KernelError::InternalError)?;
+    let msg = channel::Message::from_bytes(test_msg).map_err(|_| KernelError::InternalError)?;
     channel::send(client_handle, msg)?;
 
     // Receive on server side.
-    let received = channel::try_recv(server_handle)?
-        .ok_or(KernelError::InternalError)?;
+    let received = channel::try_recv(server_handle)?.ok_or(KernelError::InternalError)?;
     if received.data() != test_msg {
         serial_println!("[io_ring]   FAIL: service message data mismatch");
         channel::close(client_handle);

@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -181,7 +181,9 @@ where
 /// transition, energy update, and wake event.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         domains: Vec::new(),
         wake_log: Vec::new(),
@@ -221,7 +223,10 @@ pub fn register_domain(domain: PowerDomain, initial_state: PowerState) -> Kernel
 pub fn record_transition(domain: PowerDomain, new_state: PowerState) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let d = state.domains.iter_mut().find(|d| d.domain == domain)
+        let d = state
+            .domains
+            .iter_mut()
+            .find(|d| d.domain == domain)
             .ok_or(KernelError::NotFound)?;
         let elapsed = now.saturating_sub(d.last_transition_ns);
         match d.current_state {
@@ -239,7 +244,10 @@ pub fn record_transition(domain: PowerDomain, new_state: PowerState) -> KernelRe
 /// Record energy consumed (in microjoules).
 pub fn update_energy(domain: PowerDomain, uj: u64) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.domains.iter_mut().find(|d| d.domain == domain)
+        let d = state
+            .domains
+            .iter_mut()
+            .find(|d| d.domain == domain)
             .ok_or(KernelError::NotFound)?;
         d.energy_uj += uj;
         state.total_energy_uj += uj;
@@ -252,21 +260,34 @@ pub fn record_wake(source: WakeSource, domain: PowerDomain) -> KernelResult<()> 
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         state.total_wakes += 1;
-        if state.wake_log.len() >= MAX_WAKE_LOG { state.wake_log.remove(0); }
-        state.wake_log.push(WakeEvent { source, timestamp_ns: now, domain });
+        if state.wake_log.len() >= MAX_WAKE_LOG {
+            state.wake_log.remove(0);
+        }
+        state.wake_log.push(WakeEvent {
+            source,
+            timestamp_ns: now,
+            domain,
+        });
         Ok(())
     })
 }
 
 /// Get per-domain stats.
 pub fn domain_stats() -> Vec<DomainStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.domains.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.domains.clone())
 }
 
 /// Recent wake events.
 pub fn wake_log(n: usize) -> Vec<WakeEvent> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let start = if n >= s.wake_log.len() { 0 } else { s.wake_log.len() - n };
+        let start = if n >= s.wake_log.len() {
+            0
+        } else {
+            s.wake_log.len() - n
+        };
         s.wake_log[start..].to_vec()
     })
 }
@@ -275,7 +296,13 @@ pub fn wake_log(n: usize) -> Vec<WakeEvent> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.domains.len(), s.total_energy_uj, s.total_transitions, s.total_wakes, s.ops),
+        Some(s) => (
+            s.domains.len(),
+            s.total_energy_uj,
+            s.total_transitions,
+            s.total_wakes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -306,21 +333,36 @@ pub fn self_test() {
     register_domain(PowerDomain::Gpu, PowerState::Idle).expect("reg gpu");
     assert!(register_domain(PowerDomain::Cpu, PowerState::Off).is_err()); // AlreadyExists
     assert_eq!(domain_stats().len(), 2);
-    let cpu = domain_stats().iter().find(|d| d.domain == PowerDomain::Cpu).cloned().expect("cpu");
+    let cpu = domain_stats()
+        .iter()
+        .find(|d| d.domain == PowerDomain::Cpu)
+        .cloned()
+        .expect("cpu");
     assert_eq!(cpu.current_state, PowerState::Active);
-    assert_eq!((cpu.energy_uj, cpu.transitions, cpu.active_time_ns), (0, 0, 0));
+    assert_eq!(
+        (cpu.energy_uj, cpu.transitions, cpu.active_time_ns),
+        (0, 0, 0)
+    );
     crate::serial_println!("  [2/8] register: OK");
 
     // 3: Transition updates state + transition count exactly from zero.
     record_transition(PowerDomain::Cpu, PowerState::Idle).expect("transition");
-    let cpu = domain_stats().iter().find(|d| d.domain == PowerDomain::Cpu).cloned().expect("cpu");
+    let cpu = domain_stats()
+        .iter()
+        .find(|d| d.domain == PowerDomain::Cpu)
+        .cloned()
+        .expect("cpu");
     assert_eq!(cpu.current_state, PowerState::Idle);
     assert_eq!(cpu.transitions, 1);
     crate::serial_println!("  [3/8] transition: OK");
 
     // 4: Second transition counts again; state follows.
     record_transition(PowerDomain::Cpu, PowerState::Active).expect("transition2");
-    let cpu = domain_stats().iter().find(|d| d.domain == PowerDomain::Cpu).cloned().expect("cpu");
+    let cpu = domain_stats()
+        .iter()
+        .find(|d| d.domain == PowerDomain::Cpu)
+        .cloned()
+        .expect("cpu");
     assert_eq!(cpu.current_state, PowerState::Active);
     assert_eq!(cpu.transitions, 2);
     crate::serial_println!("  [4/8] back to active: OK");
@@ -328,7 +370,11 @@ pub fn self_test() {
     // 5: Energy accumulates exactly from zero.
     update_energy(PowerDomain::Gpu, 1000).expect("energy");
     update_energy(PowerDomain::Gpu, 500).expect("energy2");
-    let gpu = domain_stats().iter().find(|d| d.domain == PowerDomain::Gpu).cloned().expect("gpu");
+    let gpu = domain_stats()
+        .iter()
+        .find(|d| d.domain == PowerDomain::Gpu)
+        .cloned()
+        .expect("gpu");
     assert_eq!(gpu.energy_uj, 1500);
     crate::serial_println!("  [5/8] energy: OK");
 
@@ -349,9 +395,9 @@ pub fn self_test() {
     // 8: Aggregate totals equal the exact sums of the operations above.
     let (domains, energy, transitions, wakes, ops) = stats();
     assert_eq!(domains, 2);
-    assert_eq!(energy, 1500);     // 1000 + 500 on gpu
-    assert_eq!(transitions, 2);   // 2 cpu transitions
-    assert_eq!(wakes, 2);         // 2 wake events
+    assert_eq!(energy, 1500); // 1000 + 500 on gpu
+    assert_eq!(transitions, 2); // 2 cpu transitions
+    assert_eq!(wakes, 2); // 2 wake events
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

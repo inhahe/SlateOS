@@ -26,10 +26,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -161,22 +161,34 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let outputs = alloc::vec![
         AudioOutput {
-            id: 1, name: String::from("Built-in Speakers"),
-            endpoint: EndpointType::Speakers, volume: 80,
-            is_default: true, muted: false, active_streams: 0,
+            id: 1,
+            name: String::from("Built-in Speakers"),
+            endpoint: EndpointType::Speakers,
+            volume: 80,
+            is_default: true,
+            muted: false,
+            active_streams: 0,
         },
         AudioOutput {
-            id: 2, name: String::from("HDMI Audio"),
-            endpoint: EndpointType::Hdmi, volume: 100,
-            is_default: false, muted: false, active_streams: 0,
+            id: 2,
+            name: String::from("HDMI Audio"),
+            endpoint: EndpointType::Hdmi,
+            volume: 100,
+            is_default: false,
+            muted: false,
+            active_streams: 0,
         },
     ];
     *guard = Some(State {
-        outputs, streams: Vec::new(),
-        next_output_id: 3, next_stream_id: 1,
+        outputs,
+        streams: Vec::new(),
+        next_output_id: 3,
+        next_stream_id: 1,
         default_output: 1,
         total_streams_created: 0,
         total_reroutes: 0,
@@ -193,8 +205,13 @@ pub fn add_output(name: &str, endpoint: EndpointType) -> KernelResult<u32> {
         let id = state.next_output_id;
         state.next_output_id += 1;
         state.outputs.push(AudioOutput {
-            id, name: String::from(name), endpoint,
-            volume: 100, is_default: false, muted: false, active_streams: 0,
+            id,
+            name: String::from(name),
+            endpoint,
+            volume: 100,
+            is_default: false,
+            muted: false,
+            active_streams: 0,
         });
         Ok(id)
     })
@@ -203,7 +220,10 @@ pub fn add_output(name: &str, endpoint: EndpointType) -> KernelResult<u32> {
 /// Remove an output device.
 pub fn remove_output(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.outputs.iter().position(|o| o.id == id)
+        let pos = state
+            .outputs
+            .iter()
+            .position(|o| o.id == id)
             .ok_or(KernelError::NotFound)?;
         // Reroute any streams on this output to default.
         for stream in state.streams.iter_mut() {
@@ -247,9 +267,13 @@ pub fn create_stream(app_name: &str, app_pid: u32, output_id: Option<u32>) -> Ke
         state.total_streams_created += 1;
 
         state.streams.push(AudioStream {
-            id, app_name: String::from(app_name), app_pid,
-            output_id: out_id, volume: 100,
-            state: StreamState::Playing, muted: false,
+            id,
+            app_name: String::from(app_name),
+            app_pid,
+            output_id: out_id,
+            volume: 100,
+            state: StreamState::Playing,
+            muted: false,
             created_ns: crate::hpet::elapsed_ns(),
         });
 
@@ -264,7 +288,10 @@ pub fn create_stream(app_name: &str, app_pid: u32, output_id: Option<u32>) -> Ke
 /// Destroy a stream.
 pub fn destroy_stream(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.streams.iter().position(|s| s.id == id)
+        let pos = state
+            .streams
+            .iter()
+            .position(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         let out_id = state.streams[pos].output_id;
         state.streams.remove(pos);
@@ -280,7 +307,10 @@ pub fn destroy_stream(id: u32) -> KernelResult<()> {
 /// Set stream volume (0-100).
 pub fn set_stream_volume(id: u32, volume: u32) -> KernelResult<()> {
     with_state(|state| {
-        let stream = state.streams.iter_mut().find(|s| s.id == id)
+        let stream = state
+            .streams
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         stream.volume = volume.min(100);
         Ok(())
@@ -290,10 +320,17 @@ pub fn set_stream_volume(id: u32, volume: u32) -> KernelResult<()> {
 /// Mute/unmute a stream.
 pub fn set_stream_muted(id: u32, muted: bool) -> KernelResult<()> {
     with_state(|state| {
-        let stream = state.streams.iter_mut().find(|s| s.id == id)
+        let stream = state
+            .streams
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         stream.muted = muted;
-        stream.state = if muted { StreamState::Muted } else { StreamState::Playing };
+        stream.state = if muted {
+            StreamState::Muted
+        } else {
+            StreamState::Playing
+        };
         Ok(())
     })
 }
@@ -304,7 +341,10 @@ pub fn reroute_stream(stream_id: u32, new_output_id: u32) -> KernelResult<()> {
         if !state.outputs.iter().any(|o| o.id == new_output_id) {
             return Err(KernelError::NotFound);
         }
-        let stream = state.streams.iter_mut().find(|s| s.id == stream_id)
+        let stream = state
+            .streams
+            .iter_mut()
+            .find(|s| s.id == stream_id)
             .ok_or(KernelError::NotFound)?;
         let old_out = stream.output_id;
         stream.output_id = new_output_id;
@@ -324,7 +364,10 @@ pub fn reroute_stream(stream_id: u32, new_output_id: u32) -> KernelResult<()> {
 /// Set output device volume.
 pub fn set_output_volume(id: u32, volume: u32) -> KernelResult<()> {
     with_state(|state| {
-        let out = state.outputs.iter_mut().find(|o| o.id == id)
+        let out = state
+            .outputs
+            .iter_mut()
+            .find(|o| o.id == id)
             .ok_or(KernelError::NotFound)?;
         out.volume = volume.min(100);
         Ok(())
@@ -333,19 +376,31 @@ pub fn set_output_volume(id: u32, volume: u32) -> KernelResult<()> {
 
 /// List all outputs.
 pub fn list_outputs() -> Vec<AudioOutput> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.outputs.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.outputs.clone())
 }
 
 /// List all streams.
 pub fn list_streams() -> Vec<AudioStream> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.streams.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.streams.clone())
 }
 
 /// Statistics: (output_count, stream_count, total_created, total_reroutes, ops).
 pub fn stats() -> (usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.outputs.len(), s.streams.len(), s.total_streams_created, s.total_reroutes, s.ops),
+        Some(s) => (
+            s.outputs.len(),
+            s.streams.len(),
+            s.total_streams_created,
+            s.total_reroutes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

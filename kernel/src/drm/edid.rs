@@ -197,9 +197,14 @@ pub fn parse(data: &[u8]) -> KernelResult<EdidInfo> {
     for i in 0..8 {
         #[allow(clippy::arithmetic_side_effects)]
         let offset = 38 + i * 2;
-        if let Some(mode) = parse_standard_timing(data[offset], data[offset + 1], version, revision) {
+        if let Some(mode) = parse_standard_timing(data[offset], data[offset + 1], version, revision)
+        {
             // Don't add duplicates (detailed timings already cover the preferred mode).
-            if !modes.iter().any(|m| m.hdisplay == mode.hdisplay && m.vdisplay == mode.vdisplay && m.vrefresh == mode.vrefresh) {
+            if !modes.iter().any(|m| {
+                m.hdisplay == mode.hdisplay
+                    && m.vdisplay == mode.vdisplay
+                    && m.vrefresh == mode.vrefresh
+            }) {
                 modes.push(mode);
             }
         }
@@ -208,7 +213,11 @@ pub fn parse(data: &[u8]) -> KernelResult<EdidInfo> {
     // 3. Established timings (bytes 35-37).
     let established = parse_established_timings(data[35], data[36], data[37]);
     for mode in established {
-        if !modes.iter().any(|m| m.hdisplay == mode.hdisplay && m.vdisplay == mode.vdisplay && m.vrefresh == mode.vrefresh) {
+        if !modes.iter().any(|m| {
+            m.hdisplay == mode.hdisplay
+                && m.vdisplay == mode.vdisplay
+                && m.vrefresh == mode.vrefresh
+        }) {
             modes.push(mode);
         }
     }
@@ -226,7 +235,11 @@ pub fn parse(data: &[u8]) -> KernelResult<EdidInfo> {
                 if ext_block[0] == CEA_EXTENSION_TAG && validate_checksum(ext_block) {
                     let cea_modes = parse_cea_extension(ext_block);
                     for mode in cea_modes {
-                        if !modes.iter().any(|m| m.hdisplay == mode.hdisplay && m.vdisplay == mode.vdisplay && m.vrefresh == mode.vrefresh) {
+                        if !modes.iter().any(|m| {
+                            m.hdisplay == mode.hdisplay
+                                && m.vdisplay == mode.vdisplay
+                                && m.vrefresh == mode.vrefresh
+                        }) {
                             modes.push(mode);
                         }
                     }
@@ -284,9 +297,21 @@ fn decode_manufacturer_id(raw: u16) -> [u8; 3] {
     let c3 = (raw & 0x1F) as u8;
     // Convert 1-based to ASCII: 1='A', 2='B', ...
     [
-        if c1 > 0 && c1 <= 26 { b'A' + c1 - 1 } else { b'?' },
-        if c2 > 0 && c2 <= 26 { b'A' + c2 - 1 } else { b'?' },
-        if c3 > 0 && c3 <= 26 { b'A' + c3 - 1 } else { b'?' },
+        if c1 > 0 && c1 <= 26 {
+            b'A' + c1 - 1
+        } else {
+            b'?'
+        },
+        if c2 > 0 && c2 <= 26 {
+            b'A' + c2 - 1
+        } else {
+            b'?'
+        },
+        if c3 > 0 && c3 <= 26 {
+            b'A' + c3 - 1
+        } else {
+            b'?'
+        },
     ]
 }
 
@@ -337,7 +362,11 @@ fn parse_detailed_timing(desc: &[u8]) -> Option<DrmMode> {
         // Use u64 to avoid overflow: clock_khz * 1000 / (htotal * vtotal).
         let numer = (clock_khz as u64) * 1000;
         let denom = (htotal as u64) * (vtotal as u64);
-        if denom > 0 { (numer / denom) as u32 } else { 60 }
+        if denom > 0 {
+            (numer / denom) as u32
+        } else {
+            60
+        }
     } else {
         60
     };
@@ -386,9 +415,9 @@ fn parse_standard_timing(byte0: u8, byte1: u8, version: u8, revision: u8) -> Opt
                 h_active
             }
         }
-        0b01 => h_active * 3 / 4,   // 4:3
-        0b10 => h_active * 4 / 5,   // 5:4
-        0b11 => h_active * 9 / 16,  // 16:9
+        0b01 => h_active * 3 / 4,  // 4:3
+        0b10 => h_active * 4 / 5,  // 5:4
+        0b11 => h_active * 9 / 16, // 16:9
         _ => return None,
     };
 
@@ -427,7 +456,7 @@ fn parse_established_timings(byte0: u8, byte1: u8, byte2: u8) -> Vec<DrmMode> {
         (0x80, 800, 600, 72),
         (0x40, 800, 600, 75),
         (0x20, 832, 624, 75),
-        (0x10, 1024, 768, 87),  // Interlaced, but we report as 87Hz.
+        (0x10, 1024, 768, 87), // Interlaced, but we report as 87Hz.
         (0x08, 1024, 768, 60),
         (0x04, 1024, 768, 70),
         (0x02, 1024, 768, 75),
@@ -522,11 +551,11 @@ fn vic_to_mode(vic: u8) -> Option<DrmMode> {
         1 => (640, 480, 60),
         2 | 3 => (720, 480, 60),
         4 => (1280, 720, 60),
-        5 => (1920, 1080, 60),    // 1080i, but report as 60Hz
+        5 => (1920, 1080, 60), // 1080i, but report as 60Hz
         16 => (1920, 1080, 60),
         17 | 18 => (720, 576, 50),
         19 => (1280, 720, 50),
-        20 => (1920, 1080, 50),   // 1080i @ 50
+        20 => (1920, 1080, 50), // 1080i @ 50
         31 => (1920, 1080, 50),
         32 => (1920, 1080, 24),
         33 => (1920, 1080, 25),
@@ -653,8 +682,14 @@ pub(crate) fn self_test() -> KernelResult<()> {
     }
 
     // 8. Established timings: we set 640x480@60 and 800x600@60.
-    let has_640 = info.modes.iter().any(|m| m.hdisplay == 640 && m.vdisplay == 480 && m.vrefresh == 60);
-    let has_800 = info.modes.iter().any(|m| m.hdisplay == 800 && m.vdisplay == 600 && m.vrefresh == 60);
+    let has_640 = info
+        .modes
+        .iter()
+        .any(|m| m.hdisplay == 640 && m.vdisplay == 480 && m.vrefresh == 60);
+    let has_800 = info
+        .modes
+        .iter()
+        .any(|m| m.hdisplay == 800 && m.vdisplay == 600 && m.vrefresh == 60);
     if !has_640 || !has_800 {
         serial_println!("[drm]   FAIL: established timings not found");
         return Err(KernelError::InternalError);
@@ -762,18 +797,18 @@ fn build_test_edid() -> Vec<u8> {
     let h_blank: u32 = 280;
     let v_active: u32 = 1080;
     let v_blank: u32 = 45;
-    dtd1[2] = (h_active & 0xFF) as u8;         // H active lo
-    dtd1[3] = (h_blank & 0xFF) as u8;          // H blank lo
+    dtd1[2] = (h_active & 0xFF) as u8; // H active lo
+    dtd1[3] = (h_blank & 0xFF) as u8; // H blank lo
     dtd1[4] = (((h_active >> 8) & 0x0F) << 4) as u8 | ((h_blank >> 8) & 0x0F) as u8;
-    dtd1[5] = (v_active & 0xFF) as u8;         // V active lo
-    dtd1[6] = (v_blank & 0xFF) as u8;          // V blank lo
+    dtd1[5] = (v_active & 0xFF) as u8; // V active lo
+    dtd1[6] = (v_blank & 0xFF) as u8; // V blank lo
     dtd1[7] = (((v_active >> 8) & 0x0F) << 4) as u8 | ((v_blank >> 8) & 0x0F) as u8;
     // H front porch = 88, H sync = 44.
-    dtd1[8] = 88;  // H front porch lo
-    dtd1[9] = 44;  // H sync width lo
+    dtd1[8] = 88; // H front porch lo
+    dtd1[9] = 44; // H sync width lo
     // V front porch = 4, V sync = 5.
     dtd1[10] = (4 << 4) | 5; // V front porch hi nibble + V sync width lo nibble
-    dtd1[11] = 0;   // High bits of front porches/syncs.
+    dtd1[11] = 0; // High bits of front porches/syncs.
     // Image size: 530mm x 300mm (matching our 53cm x 30cm).
     dtd1[12] = (530 & 0xFF) as u8;
     dtd1[13] = (300 & 0xFF) as u8;

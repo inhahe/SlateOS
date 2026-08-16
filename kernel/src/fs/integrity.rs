@@ -28,9 +28,9 @@
 //! This module provides per-file hashing as the first layer; per-block
 //! hashing can be added later on top of the CAS.
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::cas::Hash256;
@@ -109,7 +109,14 @@ pub struct VerifySummary {
 
 impl VerifySummary {
     fn new() -> Self {
-        Self { total: 0, ok: 0, modified: 0, missing: 0, new: 0, errors: 0 }
+        Self {
+            total: 0,
+            ok: 0,
+            modified: 0,
+            missing: 0,
+            new: 0,
+            errors: 0,
+        }
     }
 }
 
@@ -232,12 +239,15 @@ pub fn baseline_file<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<Hash256>
 
     // Store in the baseline.
     let mut inner = INTEGRITY.lock();
-    inner.baseline.insert(path.to_path_buf(), BaselineEntry {
-        path: path.to_path_buf(),
-        hash,
-        size: data.len() as u64,
-        mtime_ns,
-    });
+    inner.baseline.insert(
+        path.to_path_buf(),
+        BaselineEntry {
+            path: path.to_path_buf(),
+            hash,
+            size: data.len() as u64,
+            mtime_ns,
+        },
+    );
 
     Ok(hash)
 }
@@ -250,7 +260,7 @@ pub fn baseline_file<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<Hash256>
 /// Skips files that are too large or in excluded directories.
 /// Stops early if the baseline reaches max capacity.
 pub fn baseline_dir<D: AsRef<Path> + ?Sized>(dir: &D) -> KernelResult<u64> {
-    use crate::fs::{Vfs, EntryType};
+    use crate::fs::{EntryType, Vfs};
 
     // Snapshot config (drop lock before I/O).
     let config = INTEGRITY.lock().config.clone();
@@ -306,17 +316,18 @@ pub fn baseline_dir<D: AsRef<Path> + ?Sized>(dir: &D) -> KernelResult<u64> {
                             let hash = crate::crypto::sha256(&data);
 
                             // Get mtime.
-                            let mtime_ns = Vfs::metadata(&path)
-                                .map(|m| m.modified_ns)
-                                .unwrap_or(0);
+                            let mtime_ns = Vfs::metadata(&path).map(|m| m.modified_ns).unwrap_or(0);
 
                             let mut inner = INTEGRITY.lock();
-                            inner.baseline.insert(path.clone(), BaselineEntry {
-                                path,
-                                hash,
-                                size: data.len() as u64,
-                                mtime_ns,
-                            });
+                            inner.baseline.insert(
+                                path.clone(),
+                                BaselineEntry {
+                                    path,
+                                    hash,
+                                    size: data.len() as u64,
+                                    mtime_ns,
+                                },
+                            );
                             count = count.saturating_add(1);
                         }
                         Err(_) => continue, // Skip unreadable files.
@@ -357,10 +368,7 @@ pub fn baseline_timestamp() -> u64 {
 ///
 /// Returns up to `max` entries starting with `prefix` (or all if None).
 /// Each entry is (path, hash, size).
-pub fn list_entries(
-    prefix: Option<&Path>,
-    max: usize,
-) -> (Vec<(PathBuf, Hash256, u64)>, usize) {
+pub fn list_entries(prefix: Option<&Path>, max: usize) -> (Vec<(PathBuf, Hash256, u64)>, usize) {
     let inner = INTEGRITY.lock();
     let total = inner.baseline.len();
     let mut results = Vec::new();
@@ -419,26 +427,22 @@ pub fn verify_file<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<VerifyResu
                 current_size: Some(current_size),
             })
         }
-        Err(KernelError::NotFound) => {
-            Ok(VerifyResult {
-                path: path.to_path_buf(),
-                status: VerifyStatus::Missing,
-                baseline_hash: Some(baseline_hash),
-                current_hash: None,
-                baseline_size: Some(baseline_size),
-                current_size: None,
-            })
-        }
-        Err(_) => {
-            Ok(VerifyResult {
-                path: path.to_path_buf(),
-                status: VerifyStatus::Error,
-                baseline_hash: Some(baseline_hash),
-                current_hash: None,
-                baseline_size: Some(baseline_size),
-                current_size: None,
-            })
-        }
+        Err(KernelError::NotFound) => Ok(VerifyResult {
+            path: path.to_path_buf(),
+            status: VerifyStatus::Missing,
+            baseline_hash: Some(baseline_hash),
+            current_hash: None,
+            baseline_size: Some(baseline_size),
+            current_size: None,
+        }),
+        Err(_) => Ok(VerifyResult {
+            path: path.to_path_buf(),
+            status: VerifyStatus::Error,
+            baseline_hash: Some(baseline_hash),
+            current_hash: None,
+            baseline_size: Some(baseline_size),
+            current_size: None,
+        }),
     }
 }
 
@@ -447,7 +451,7 @@ pub fn verify_file<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<VerifyResu
 /// Also walks the directory tree to detect new files not in the baseline.
 /// Returns a list of results and a summary.
 pub fn verify_dir<D: AsRef<Path> + ?Sized>(dir: &D) -> (Vec<VerifyResult>, VerifySummary) {
-    use crate::fs::{Vfs, EntryType};
+    use crate::fs::{EntryType, Vfs};
 
     let dir = dir.as_ref();
     let mut results = Vec::new();
@@ -461,7 +465,8 @@ pub fn verify_dir<D: AsRef<Path> + ?Sized>(dir: &D) -> (Vec<VerifyResult>, Verif
     // double-slash paths, so no real file was ever included and "missing"
     // detection in verify_dir silently never fired.  See fs::pathutil.
     let inner = INTEGRITY.lock();
-    let baseline_paths: Vec<(PathBuf, Hash256, u64)> = inner.baseline
+    let baseline_paths: Vec<(PathBuf, Hash256, u64)> = inner
+        .baseline
         .iter()
         .filter(|(p, _)| crate::fs::pathutil::path_in_subtree(p, dir))
         .map(|(p, e)| (p.clone(), e.hash, e.size))
@@ -534,7 +539,9 @@ pub fn verify_dir<D: AsRef<Path> + ?Sized>(dir: &D) -> (Vec<VerifyResult>, Verif
 
                                 match status {
                                     VerifyStatus::Ok => summary.ok = summary.ok.saturating_add(1),
-                                    VerifyStatus::Modified => summary.modified = summary.modified.saturating_add(1),
+                                    VerifyStatus::Modified => {
+                                        summary.modified = summary.modified.saturating_add(1)
+                                    }
                                     _ => {}
                                 }
                                 summary.total = summary.total.saturating_add(1);
@@ -692,7 +699,10 @@ pub fn self_test() -> KernelResult<()> {
         // Verify (should be Modified).
         let result = verify_file(test_path)?;
         if result.status != VerifyStatus::Modified {
-            serial_println!("[integrity]   ERROR: expected Modified, got {:?}", result.status);
+            serial_println!(
+                "[integrity]   ERROR: expected Modified, got {:?}",
+                result.status
+            );
             Vfs::remove(test_path).ok();
             return Err(KernelError::InternalError);
         }
@@ -705,7 +715,10 @@ pub fn self_test() -> KernelResult<()> {
         // Verify (should be Missing).
         let result = verify_file(test_path)?;
         if result.status != VerifyStatus::Missing {
-            serial_println!("[integrity]   ERROR: expected Missing, got {:?}", result.status);
+            serial_println!(
+                "[integrity]   ERROR: expected Missing, got {:?}",
+                result.status
+            );
             return Err(KernelError::InternalError);
         }
 
@@ -726,7 +739,10 @@ pub fn self_test() -> KernelResult<()> {
         // Baseline the directory.
         let count = baseline_dir("/tmp/_integrity_dir")?;
         if count < 2 {
-            serial_println!("[integrity]   ERROR: expected at least 2 baselined files, got {}", count);
+            serial_println!(
+                "[integrity]   ERROR: expected at least 2 baselined files, got {}",
+                count
+            );
             Vfs::remove("/tmp/_integrity_dir/file1.txt").ok();
             Vfs::remove("/tmp/_integrity_dir/file2.txt").ok();
             Vfs::rmdir("/tmp/_integrity_dir").ok();
@@ -736,7 +752,10 @@ pub fn self_test() -> KernelResult<()> {
         // Verify (all should be OK).
         let (_changes, summary) = verify_dir("/tmp/_integrity_dir");
         if summary.ok < 2 {
-            serial_println!("[integrity]   ERROR: expected at least 2 OK files, got {}", summary.ok);
+            serial_println!(
+                "[integrity]   ERROR: expected at least 2 OK files, got {}",
+                summary.ok
+            );
             Vfs::remove("/tmp/_integrity_dir/file1.txt").ok();
             Vfs::remove("/tmp/_integrity_dir/file2.txt").ok();
             Vfs::rmdir("/tmp/_integrity_dir").ok();
@@ -749,7 +768,10 @@ pub fn self_test() -> KernelResult<()> {
         // Verify (should detect 1 modified).
         let (_changes, summary) = verify_dir("/tmp/_integrity_dir");
         if summary.modified < 1 {
-            serial_println!("[integrity]   ERROR: expected at least 1 modified, got {}", summary.modified);
+            serial_println!(
+                "[integrity]   ERROR: expected at least 1 modified, got {}",
+                summary.modified
+            );
             Vfs::remove("/tmp/_integrity_dir/file1.txt").ok();
             Vfs::remove("/tmp/_integrity_dir/file2.txt").ok();
             Vfs::rmdir("/tmp/_integrity_dir").ok();
@@ -762,7 +784,10 @@ pub fn self_test() -> KernelResult<()> {
         // Verify (should detect 1 new).
         let (_, summary) = verify_dir("/tmp/_integrity_dir");
         if summary.new < 1 {
-            serial_println!("[integrity]   ERROR: expected at least 1 new, got {}", summary.new);
+            serial_println!(
+                "[integrity]   ERROR: expected at least 1 new, got {}",
+                summary.new
+            );
         }
 
         // Delete one baselined file.
@@ -771,7 +796,10 @@ pub fn self_test() -> KernelResult<()> {
         // Verify (should detect 1 missing).
         let (_, summary) = verify_dir("/tmp/_integrity_dir");
         if summary.missing < 1 {
-            serial_println!("[integrity]   ERROR: expected at least 1 missing, got {}", summary.missing);
+            serial_println!(
+                "[integrity]   ERROR: expected at least 1 missing, got {}",
+                summary.missing
+            );
         }
 
         // Cleanup.
@@ -789,8 +817,12 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[integrity]   ERROR: baseline_count should be >= 1");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[integrity]   stats OK (entries: {}, baselines: {}, verifies: {})",
-            st.baseline_entries, st.baseline_count, st.verify_count);
+        serial_println!(
+            "[integrity]   stats OK (entries: {}, baselines: {}, verifies: {})",
+            st.baseline_entries,
+            st.baseline_count,
+            st.verify_count
+        );
     }
 
     // --- Test 4: clear baseline ---
@@ -808,7 +840,10 @@ pub fn self_test() -> KernelResult<()> {
         match baseline_file("/tmp") {
             Err(KernelError::InvalidArgument) => {}
             other => {
-                serial_println!("[integrity]   ERROR: baselining a directory should return InvalidArgument, got {:?}", other);
+                serial_println!(
+                    "[integrity]   ERROR: baselining a directory should return InvalidArgument, got {:?}",
+                    other
+                );
                 return Err(KernelError::InternalError);
             }
         }
@@ -820,7 +855,10 @@ pub fn self_test() -> KernelResult<()> {
         match verify_file("/nonexistent_baseline_entry") {
             Err(KernelError::NotFound) => {}
             other => {
-                serial_println!("[integrity]   ERROR: verifying non-baselined file should return NotFound, got {:?}", other);
+                serial_println!(
+                    "[integrity]   ERROR: verifying non-baselined file should return NotFound, got {:?}",
+                    other
+                );
                 return Err(KernelError::InternalError);
             }
         }

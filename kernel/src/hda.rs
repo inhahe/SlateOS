@@ -114,43 +114,43 @@ const STREAM_BASE: usize = 0x80;
 const STREAM_SIZE: usize = 0x20;
 
 // Stream descriptor register offsets (relative to stream base)
-const SD_CTL: usize = 0x00;   // 24-bit control (read as u32, bits 23:0)
+const SD_CTL: usize = 0x00; // 24-bit control (read as u32, bits 23:0)
 #[allow(dead_code)]
-const SD_STS: usize = 0x03;   // 8-bit status
+const SD_STS: usize = 0x03; // 8-bit status
 #[allow(dead_code)]
-const SD_LPIB: usize = 0x04;  // 32-bit link position in buffer
-const SD_CBL: usize = 0x08;   // 32-bit cyclic buffer length
-const SD_LVI: usize = 0x0C;   // 16-bit last valid BDL index
-const SD_FMT: usize = 0x12;   // 16-bit stream format
-const SD_BDPL: usize = 0x18;  // 32-bit BDL physical address low
-const SD_BDPU: usize = 0x1C;  // 32-bit BDL physical address high
+const SD_LPIB: usize = 0x04; // 32-bit link position in buffer
+const SD_CBL: usize = 0x08; // 32-bit cyclic buffer length
+const SD_LVI: usize = 0x0C; // 16-bit last valid BDL index
+const SD_FMT: usize = 0x12; // 16-bit stream format
+const SD_BDPL: usize = 0x18; // 32-bit BDL physical address low
+const SD_BDPU: usize = 0x1C; // 32-bit BDL physical address high
 
 // GCTL bits
-const GCTL_CRST: u32 = 1 << 0;  // Controller reset
+const GCTL_CRST: u32 = 1 << 0; // Controller reset
 const GCTL_UNSOL: u32 = 1 << 8; // Accept unsolicited responses
 
 // CORBCTL bits
-const CORBCTL_RUN: u8 = 1 << 1;  // CORB DMA engine run
+const CORBCTL_RUN: u8 = 1 << 1; // CORB DMA engine run
 
 // RIRBCTL bits
 const RIRBCTL_RINTCTL: u8 = 1 << 0; // Response interrupt enable
-const RIRBCTL_DMAEN: u8 = 1 << 1;   // RIRB DMA engine enable
+const RIRBCTL_DMAEN: u8 = 1 << 1; // RIRB DMA engine enable
 
 // Stream CTL bits
-const SDCTL_SRST: u32 = 1 << 0;  // Stream reset
-const SDCTL_RUN: u32 = 1 << 1;   // Stream run
-const SDCTL_IOCE: u32 = 1 << 2;  // Interrupt on completion enable
+const SDCTL_SRST: u32 = 1 << 0; // Stream reset
+const SDCTL_RUN: u32 = 1 << 1; // Stream run
+const SDCTL_IOCE: u32 = 1 << 2; // Interrupt on completion enable
 
 // Stream format bits (for SD_FMT register)
-const FMT_BASE_48K: u16 = 0 << 14;      // 48 kHz base
+const FMT_BASE_48K: u16 = 0 << 14; // 48 kHz base
 #[allow(dead_code)]
-const FMT_BASE_44K: u16 = 1 << 14;      // 44.1 kHz base
-const FMT_BITS_16: u16 = 0b001 << 4;    // 16-bit samples
+const FMT_BASE_44K: u16 = 1 << 14; // 44.1 kHz base
+const FMT_BITS_16: u16 = 0b001 << 4; // 16-bit samples
 #[allow(dead_code)]
-const FMT_BITS_24: u16 = 0b011 << 4;    // 24-bit samples
-const FMT_CHAN_STEREO: u16 = 1;          // channels - 1 (stereo = 1)
+const FMT_BITS_24: u16 = 0b011 << 4; // 24-bit samples
+const FMT_CHAN_STEREO: u16 = 1; // channels - 1 (stereo = 1)
 #[allow(dead_code)]
-const FMT_CHAN_MONO: u16 = 0;            // channels - 1 (mono = 0)
+const FMT_CHAN_MONO: u16 = 0; // channels - 1 (mono = 0)
 
 /// Standard format: 48 kHz, 16-bit, stereo.
 const FMT_48K_16BIT_STEREO: u16 = FMT_BASE_48K | FMT_BITS_16 | FMT_CHAN_STEREO;
@@ -164,7 +164,7 @@ const RIRB_ENTRIES: usize = 256;
 const MAX_BDL_ENTRIES: usize = 256;
 
 // Timeouts (in microseconds)
-const RESET_TIMEOUT_US: u64 = 100_000;   // 100 ms
+const RESET_TIMEOUT_US: u64 = 100_000; // 100 ms
 const CODEC_RESPONSE_TIMEOUT_US: u64 = 50_000; // 50 ms
 
 // ---------------------------------------------------------------------------
@@ -176,10 +176,7 @@ const CODEC_RESPONSE_TIMEOUT_US: u64 = 50_000; // 50 ms
 /// Format: `[CAD:4][NID:8][verb:12][payload:8]`
 #[inline]
 const fn verb12(cad: u8, nid: u8, verb: u16, payload: u8) -> u32 {
-    ((cad as u32) << 28)
-        | ((nid as u32) << 20)
-        | (((verb & 0xFFF) as u32) << 8)
-        | (payload as u32)
+    ((cad as u32) << 28) | ((nid as u32) << 20) | (((verb & 0xFFF) as u32) << 8) | (payload as u32)
 }
 
 /// Build a 4-bit verb with 16-bit payload (used for SET_AMP_GAIN, etc.).
@@ -187,10 +184,7 @@ const fn verb12(cad: u8, nid: u8, verb: u16, payload: u8) -> u32 {
 /// Format: `[CAD:4][NID:8][verb:4][payload:16]`
 #[inline]
 const fn verb4(cad: u8, nid: u8, verb: u8, payload: u16) -> u32 {
-    ((cad as u32) << 28)
-        | ((nid as u32) << 20)
-        | (((verb & 0xF) as u32) << 16)
-        | (payload as u32)
+    ((cad as u32) << 28) | ((nid as u32) << 20) | (((verb & 0xF) as u32) << 16) | (payload as u32)
 }
 
 // Common 12-bit verbs
@@ -228,23 +222,23 @@ const PARAM_AMP_OUT_CAP: u8 = 0x12;
 // Audio widget types (bits 23:20 of AUDIO_WIDGET_CAP)
 const WIDGET_TYPE_AUDIO_OUTPUT: u8 = 0x0; // DAC
 #[allow(dead_code)]
-const WIDGET_TYPE_AUDIO_INPUT: u8 = 0x1;  // ADC
+const WIDGET_TYPE_AUDIO_INPUT: u8 = 0x1; // ADC
 const WIDGET_TYPE_AUDIO_MIXER: u8 = 0x2;
 const WIDGET_TYPE_AUDIO_SELECTOR: u8 = 0x3;
 const WIDGET_TYPE_PIN_COMPLEX: u8 = 0x4;
 
 // Pin widget control bits
-const PIN_CTL_OUT_EN: u8 = 0x40;  // Output enable
-const PIN_CTL_HP_EN: u8 = 0x80;   // Headphone amplifier enable
+const PIN_CTL_OUT_EN: u8 = 0x40; // Output enable
+const PIN_CTL_HP_EN: u8 = 0x80; // Headphone amplifier enable
 
 // Amp gain/mute bits (for SET_AMP_GAIN payload)
-const AMP_OUT: u16 = 1 << 15;     // Output amp
+const AMP_OUT: u16 = 1 << 15; // Output amp
 #[allow(dead_code)]
-const AMP_IN: u16 = 1 << 14;      // Input amp
-const AMP_LEFT: u16 = 1 << 13;    // Left channel
-const AMP_RIGHT: u16 = 1 << 12;   // Right channel
+const AMP_IN: u16 = 1 << 14; // Input amp
+const AMP_LEFT: u16 = 1 << 13; // Left channel
+const AMP_RIGHT: u16 = 1 << 12; // Right channel
 #[allow(dead_code)]
-const AMP_MUTE: u16 = 1 << 7;     // Mute
+const AMP_MUTE: u16 = 1 << 7; // Mute
 
 // ---------------------------------------------------------------------------
 // Buffer Descriptor List entry
@@ -344,9 +338,7 @@ struct HdaDevice {
 #[inline]
 fn mmio_read32(base: u64, offset: usize) -> u32 {
     // SAFETY: base is a valid mapped MMIO address (mapped during init).
-    unsafe {
-        core::ptr::read_volatile((base as *const u8).add(offset) as *const u32)
-    }
+    unsafe { core::ptr::read_volatile((base as *const u8).add(offset) as *const u32) }
 }
 
 /// Write a 32-bit MMIO register.
@@ -362,9 +354,7 @@ fn mmio_write32(base: u64, offset: usize, val: u32) {
 #[inline]
 fn mmio_read16(base: u64, offset: usize) -> u16 {
     // SAFETY: base is a valid mapped MMIO address.
-    unsafe {
-        core::ptr::read_volatile((base as *const u8).add(offset) as *const u16)
-    }
+    unsafe { core::ptr::read_volatile((base as *const u8).add(offset) as *const u16) }
 }
 
 /// Write a 16-bit MMIO register.
@@ -380,9 +370,7 @@ fn mmio_write16(base: u64, offset: usize, val: u16) {
 #[inline]
 fn mmio_read8(base: u64, offset: usize) -> u8 {
     // SAFETY: base is a valid mapped MMIO address.
-    unsafe {
-        core::ptr::read_volatile((base as *const u8).add(offset))
-    }
+    unsafe { core::ptr::read_volatile((base as *const u8).add(offset)) }
 }
 
 /// Write an 8-bit MMIO register.
@@ -435,8 +423,11 @@ pub fn init(hhdm_offset: u64) {
 
     serial_println!(
         "[hda] Found HDA controller: {:04x}:{:04x} at bus={} dev={} func={}",
-        pci_dev.vendor_id, pci_dev.device_id,
-        pci_dev.address.bus, pci_dev.address.device, pci_dev.address.function
+        pci_dev.vendor_id,
+        pci_dev.device_id,
+        pci_dev.address.bus,
+        pci_dev.address.device,
+        pci_dev.address.function
     );
 
     // Read BAR0 (MMIO).
@@ -490,11 +481,18 @@ pub fn init(hhdm_offset: u64) {
     let vmaj = mmio_read8(mmio_base, REG_VMAJ);
     let vmin = mmio_read8(mmio_base, REG_VMIN);
 
-    let iss = ((gcap >> 8) & 0xF) as u8;  // Input streams
+    let iss = ((gcap >> 8) & 0xF) as u8; // Input streams
     let oss = ((gcap >> 12) & 0xF) as u8; // Output streams
     let bss = ((gcap >> 3) & 0x1F) as u8; // Bidirectional streams (bits 7:3)
 
-    serial_println!("[hda] Version {}.{}, ISS={} OSS={} BSS={}", vmaj, vmin, iss, oss, bss);
+    serial_println!(
+        "[hda] Version {}.{}, ISS={} OSS={} BSS={}",
+        vmaj,
+        vmin,
+        iss,
+        oss,
+        bss
+    );
 
     if oss == 0 && bss == 0 {
         serial_println!("[hda] No output or bidirectional streams — cannot play audio");
@@ -564,7 +562,11 @@ pub fn init(hhdm_offset: u64) {
         serial_println!("[hda] Hint: QEMU needs '-device hda-duplex' or '-device hda-output'");
         // Still store state — controller works, just no codecs attached.
     } else {
-        serial_println!("[hda] {} codec(s) detected (mask={:#06x})", codec_count, codec_mask);
+        serial_println!(
+            "[hda] {} codec(s) detected (mask={:#06x})",
+            codec_count,
+            codec_mask
+        );
     }
 
     CODEC_COUNT.store(codec_count, Ordering::Release);
@@ -678,7 +680,7 @@ fn controller_reset(base: u64) -> KernelResult<()> {
     let gcap = mmio_read16(base, REG_GCAP);
     let total_streams = ((gcap >> 8) & 0xF)  // ISS
         + ((gcap >> 12) & 0xF)               // OSS
-        + ((gcap >> 3) & 0x1F);       // BSS
+        + ((gcap >> 3) & 0x1F); // BSS
 
     for i in 0..total_streams {
         let stream_off = STREAM_BASE + (i as usize) * STREAM_SIZE;
@@ -851,8 +853,13 @@ fn probe_codec(dev: &mut HdaDevice, cad: u8) {
 
     // Get revision.
     if let Ok(rev) = send_verb(dev, verb12(cad, 0, VERB_GET_PARAM, PARAM_REVISION_ID)) {
-        serial_println!("[hda]   Revision: {}.{}.{}.{}",
-            (rev >> 20) & 0xF, (rev >> 16) & 0xF, (rev >> 8) & 0xFF, rev & 0xFF);
+        serial_println!(
+            "[hda]   Revision: {}.{}.{}.{}",
+            (rev >> 20) & 0xF,
+            (rev >> 16) & 0xF,
+            (rev >> 8) & 0xFF,
+            rev & 0xFF
+        );
     }
 
     // Get subordinate node count (tells us where the AFG starts).
@@ -866,11 +873,17 @@ fn probe_codec(dev: &mut HdaDevice, cad: u8) {
 
     let start_nid = ((subord >> 16) & 0xFF) as u8;
     let num_nodes = (subord & 0xFF) as u8;
-    serial_println!("[hda]   Root nodes: start={} count={}", start_nid, num_nodes);
+    serial_println!(
+        "[hda]   Root nodes: start={} count={}",
+        start_nid,
+        num_nodes
+    );
 
     // Walk Audio Function Group nodes.
     for nid in start_nid..(start_nid.saturating_add(num_nodes)) {
-        if let Ok(func_type) = send_verb(dev, verb12(cad, nid, VERB_GET_PARAM, PARAM_FUNC_GROUP_TYPE)) {
+        if let Ok(func_type) =
+            send_verb(dev, verb12(cad, nid, VERB_GET_PARAM, PARAM_FUNC_GROUP_TYPE))
+        {
             let ftype = func_type & 0xFF;
             if ftype == 0x01 {
                 // Audio Function Group found.
@@ -889,20 +902,30 @@ fn probe_codec(dev: &mut HdaDevice, cad: u8) {
 /// Probe an Audio Function Group to find DAC and output pin nodes.
 fn probe_afg(dev: &mut HdaDevice, cad: u8, afg_nid: u8) {
     // Get subordinate nodes of the AFG.
-    let subord = match send_verb(dev, verb12(cad, afg_nid, VERB_GET_PARAM, PARAM_SUBORD_NODE_COUNT)) {
+    let subord = match send_verb(
+        dev,
+        verb12(cad, afg_nid, VERB_GET_PARAM, PARAM_SUBORD_NODE_COUNT),
+    ) {
         Ok(v) => v,
         Err(_) => return,
     };
 
     let start_nid = ((subord >> 16) & 0xFF) as u8;
     let num_nodes = (subord & 0xFF) as u8;
-    serial_println!("[hda]   AFG widgets: start={} count={}", start_nid, num_nodes);
+    serial_println!(
+        "[hda]   AFG widgets: start={} count={}",
+        start_nid,
+        num_nodes
+    );
 
     let mut dac_nid: u8 = 0;
     let mut pin_nid: u8 = 0;
 
     for nid in start_nid..(start_nid.saturating_add(num_nodes)) {
-        let wcap = match send_verb(dev, verb12(cad, nid, VERB_GET_PARAM, PARAM_AUDIO_WIDGET_CAP)) {
+        let wcap = match send_verb(
+            dev,
+            verb12(cad, nid, VERB_GET_PARAM, PARAM_AUDIO_WIDGET_CAP),
+        ) {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -917,7 +940,8 @@ fn probe_afg(dev: &mut HdaDevice, cad: u8, afg_nid: u8) {
             }
             WIDGET_TYPE_PIN_COMPLEX => {
                 // Check pin capabilities to find an output pin.
-                if let Ok(pincap) = send_verb(dev, verb12(cad, nid, VERB_GET_PARAM, PARAM_PIN_CAP)) {
+                if let Ok(pincap) = send_verb(dev, verb12(cad, nid, VERB_GET_PARAM, PARAM_PIN_CAP))
+                {
                     let is_output = pincap & (1 << 4) != 0; // Output capable
                     if is_output && pin_nid == 0 {
                         pin_nid = nid;
@@ -939,9 +963,17 @@ fn probe_afg(dev: &mut HdaDevice, cad: u8, afg_nid: u8) {
     dev.pin_nid = pin_nid;
 
     if dac_nid != 0 && pin_nid != 0 {
-        serial_println!("[hda]   Output path: DAC(NID {}) → Pin(NID {})", dac_nid, pin_nid);
+        serial_println!(
+            "[hda]   Output path: DAC(NID {}) → Pin(NID {})",
+            dac_nid,
+            pin_nid
+        );
     } else {
-        serial_println!("[hda]   WARNING: incomplete output path (dac={}, pin={})", dac_nid, pin_nid);
+        serial_println!(
+            "[hda]   WARNING: incomplete output path (dac={}, pin={})",
+            dac_nid,
+            pin_nid
+        );
     }
 }
 
@@ -965,7 +997,7 @@ pub fn configure_output() -> KernelResult<()> {
 
     let base = dev.mmio_base;
     let stream_tag: u8 = 1; // Use stream tag 1 for output.
-    let cad: u8 = 0;        // Codec 0.
+    let cad: u8 = 0; // Codec 0.
 
     // Calculate output stream descriptor offset.
     let stream_idx = dev.iss + dev.out_stream_idx;
@@ -977,7 +1009,9 @@ pub fn configure_output() -> KernelResult<()> {
     // Wait for reset to complete.
     let mut timeout = 1000u32;
     while mmio_read32(base, stream_off + SD_CTL) & SDCTL_SRST == 0 {
-        if timeout == 0 { break; }
+        if timeout == 0 {
+            break;
+        }
         timeout -= 1;
         delay_us(10);
     }
@@ -985,7 +1019,9 @@ pub fn configure_output() -> KernelResult<()> {
     mmio_write32(base, stream_off + SD_CTL, 0);
     timeout = 1000;
     while mmio_read32(base, stream_off + SD_CTL) & SDCTL_SRST != 0 {
-        if timeout == 0 { break; }
+        if timeout == 0 {
+            break;
+        }
         timeout -= 1;
         delay_us(10);
     }
@@ -1019,23 +1055,40 @@ pub fn configure_output() -> KernelResult<()> {
     // Configure codec: set stream/channel on DAC.
     // Stream tag in bits 7:4, channel 0 in bits 3:0.
     let stream_chan = stream_tag << 4;
-    let _ = send_verb(dev, verb12(cad, dev.dac_nid, VERB_SET_CONV_STREAM_CHAN, stream_chan));
+    let _ = send_verb(
+        dev,
+        verb12(cad, dev.dac_nid, VERB_SET_CONV_STREAM_CHAN, stream_chan),
+    );
 
     // Set format on DAC (4-bit verb: verb=2, payload=format).
     let _ = send_verb(dev, verb4(cad, dev.dac_nid, 0x2, FMT_48K_16BIT_STEREO));
 
     // Enable output on pin widget.
-    let _ = send_verb(dev, verb12(cad, dev.pin_nid, VERB_SET_PIN_WIDGET_CTL, PIN_CTL_OUT_EN | PIN_CTL_HP_EN));
+    let _ = send_verb(
+        dev,
+        verb12(
+            cad,
+            dev.pin_nid,
+            VERB_SET_PIN_WIDGET_CTL,
+            PIN_CTL_OUT_EN | PIN_CTL_HP_EN,
+        ),
+    );
 
     // Set EAPD on pin (some codecs need this).
     let _ = send_verb(dev, verb12(cad, dev.pin_nid, VERB_SET_EAPD_BTLENABLE, 0x02));
 
     // Unmute output amp on DAC: set output amp, both channels, gain=max (0x7F).
     let amp_payload = AMP_OUT | AMP_LEFT | AMP_RIGHT | 0x7F;
-    let _ = send_verb(dev, verb4(cad, dev.dac_nid, VERB4_SET_AMP_GAIN, amp_payload));
+    let _ = send_verb(
+        dev,
+        verb4(cad, dev.dac_nid, VERB4_SET_AMP_GAIN, amp_payload),
+    );
 
     // Unmute output amp on pin.
-    let _ = send_verb(dev, verb4(cad, dev.pin_nid, VERB4_SET_AMP_GAIN, amp_payload));
+    let _ = send_verb(
+        dev,
+        verb4(cad, dev.pin_nid, VERB4_SET_AMP_GAIN, amp_payload),
+    );
 
     // Enable the stream interrupt in INTCTL.
     let intctl = mmio_read32(base, REG_INTCTL);
@@ -1043,7 +1096,8 @@ pub fn configure_output() -> KernelResult<()> {
 
     serial_println!(
         "[hda] Output stream configured: tag={}, format=48kHz/16bit/stereo, buf={}KiB",
-        stream_tag, dev.pcm_size / 1024
+        stream_tag,
+        dev.pcm_size / 1024
     );
 
     Ok(())
@@ -1123,7 +1177,11 @@ pub fn fill_test_tone() -> KernelResult<()> {
         }
     }
 
-    serial_println!("[hda] Test tone generated: {}Hz, {} samples", frequency, total_samples);
+    serial_println!(
+        "[hda] Test tone generated: {}Hz, {} samples",
+        frequency,
+        total_samples
+    );
     Ok(())
 }
 
@@ -1146,7 +1204,7 @@ fn sine_approx(phase: u16, amplitude: i16) -> i16 {
     // Simplified integer version:
     let p = half_phase as i32;
     let complement = 32767 - p;
-    let numerator = (4 * p * complement) >> 2;   // Scale down to avoid overflow
+    let numerator = (4 * p * complement) >> 2; // Scale down to avoid overflow
     let denominator = 40500i32 - (p * complement / (32767 / 4));
 
     let result = if denominator == 0 {
@@ -1156,7 +1214,11 @@ fn sine_approx(phase: u16, amplitude: i16) -> i16 {
         val.clamp(i16::MIN as i32, i16::MAX as i32) as i16
     };
 
-    if negative { result.wrapping_neg() } else { result }
+    if negative {
+        result.wrapping_neg()
+    } else {
+        result
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1238,7 +1300,12 @@ pub fn self_test() -> KernelResult<()> {
     // Test 1: Controller is initialized and has stream counts.
     let (iss, oss, bss) = stream_counts().ok_or(KernelError::NoSuchDevice)?;
     assert!(oss > 0 || bss > 0, "must have output streams");
-    serial_println!("[hda]   Stream counts OK (ISS={} OSS={} BSS={})", iss, oss, bss);
+    serial_println!(
+        "[hda]   Stream counts OK (ISS={} OSS={} BSS={})",
+        iss,
+        oss,
+        bss
+    );
 
     // Test 2: Codec detection.
     let count = codec_count();
@@ -1248,17 +1315,28 @@ pub fn self_test() -> KernelResult<()> {
         // Test 3: Vendor ID was read.
         let vid = vendor_id().unwrap_or(0);
         assert!(vid != 0, "vendor ID should be non-zero for detected codec");
-        serial_println!("[hda]   Vendor ID: {:04x}:{:04x}", (vid >> 16) & 0xFFFF, vid & 0xFFFF);
+        serial_println!(
+            "[hda]   Vendor ID: {:04x}:{:04x}",
+            (vid >> 16) & 0xFFFF,
+            vid & 0xFFFF
+        );
 
         // Test 4: Output path discovered.
         {
             let guard = DEVICE.lock();
             let dev = guard.as_ref().unwrap();
             if dev.dac_nid != 0 && dev.pin_nid != 0 {
-                serial_println!("[hda]   Output path: DAC={} Pin={}", dev.dac_nid, dev.pin_nid);
+                serial_println!(
+                    "[hda]   Output path: DAC={} Pin={}",
+                    dev.dac_nid,
+                    dev.pin_nid
+                );
             } else {
-                serial_println!("[hda]   WARNING: no output path found (dac={} pin={})",
-                    dev.dac_nid, dev.pin_nid);
+                serial_println!(
+                    "[hda]   WARNING: no output path found (dac={} pin={})",
+                    dev.dac_nid,
+                    dev.pin_nid
+                );
             }
         }
 

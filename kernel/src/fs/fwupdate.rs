@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -145,26 +145,40 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
         devices: alloc::vec![
             FirmwareDevice {
-                id: 1, name: String::from("System UEFI"), fw_type: FirmwareType::Uefi,
-                current_version: String::from("1.20"), available_version: Some(String::from("1.22")),
-                status: UpdateStatus::UpdateAvailable, vendor: String::from("SystemVendor"),
+                id: 1,
+                name: String::from("System UEFI"),
+                fw_type: FirmwareType::Uefi,
+                current_version: String::from("1.20"),
+                available_version: Some(String::from("1.22")),
+                status: UpdateStatus::UpdateAvailable,
+                vendor: String::from("SystemVendor"),
                 last_updated_ns: now,
             },
             FirmwareDevice {
-                id: 2, name: String::from("TPM 2.0"), fw_type: FirmwareType::Tpm,
-                current_version: String::from("7.85"), available_version: None,
-                status: UpdateStatus::UpToDate, vendor: String::from("TPMVendor"),
+                id: 2,
+                name: String::from("TPM 2.0"),
+                fw_type: FirmwareType::Tpm,
+                current_version: String::from("7.85"),
+                available_version: None,
+                status: UpdateStatus::UpToDate,
+                vendor: String::from("TPMVendor"),
                 last_updated_ns: now,
             },
             FirmwareDevice {
-                id: 3, name: String::from("Intel I225-V"), fw_type: FirmwareType::NetworkCard,
-                current_version: String::from("1.68"), available_version: Some(String::from("1.70")),
-                status: UpdateStatus::UpdateAvailable, vendor: String::from("Intel"),
+                id: 3,
+                name: String::from("Intel I225-V"),
+                fw_type: FirmwareType::NetworkCard,
+                current_version: String::from("1.68"),
+                available_version: Some(String::from("1.70")),
+                status: UpdateStatus::UpdateAvailable,
+                vendor: String::from("Intel"),
                 last_updated_ns: now,
             },
         ],
@@ -179,19 +193,27 @@ pub fn init_defaults() {
 
 /// List all firmware devices.
 pub fn list_devices() -> Vec<FirmwareDevice> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Get device by ID.
 pub fn get_device(id: u32) -> Option<FirmwareDevice> {
-    STATE.lock().as_ref().and_then(|s| s.devices.iter().find(|d| d.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.devices.iter().find(|d| d.id == id).cloned())
 }
 
 /// Check for updates (simulated).
 pub fn check_updates() -> KernelResult<u32> {
     with_state(|state| {
         state.total_checks += 1;
-        let available = state.devices.iter()
+        let available = state
+            .devices
+            .iter()
             .filter(|d| d.status == UpdateStatus::UpdateAvailable)
             .count();
         Ok(available as u32)
@@ -202,7 +224,10 @@ pub fn check_updates() -> KernelResult<u32> {
 pub fn apply_update(device_id: u32) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let dev = state.devices.iter_mut().find(|d| d.id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         if dev.status != UpdateStatus::UpdateAvailable {
             return Err(KernelError::InvalidArgument);
@@ -219,9 +244,12 @@ pub fn apply_update(device_id: u32) -> KernelResult<()> {
             state.history.remove(0);
         }
         state.history.push(UpdateRecord {
-            device_id, device_name: dev_name,
-            from_version: from, to_version: to,
-            timestamp_ns: now, success: true,
+            device_id,
+            device_name: dev_name,
+            from_version: from,
+            to_version: to,
+            timestamp_ns: now,
+            success: true,
         });
         Ok(())
     })
@@ -229,14 +257,23 @@ pub fn apply_update(device_id: u32) -> KernelResult<()> {
 
 /// Get update history.
 pub fn update_history() -> Vec<UpdateRecord> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.history.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.history.clone())
 }
 
 /// Statistics: (device_count, total_updates, total_failures, total_checks, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.total_updates, s.total_failures, s.total_checks, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.total_updates,
+            s.total_failures,
+            s.total_checks,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

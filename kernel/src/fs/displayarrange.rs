@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -124,13 +124,20 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let primary = ArrangedDisplay {
-        id: 1, name: String::from("Primary"),
-        x: 0, y: 0, width: 1920, height: 1080,
+        id: 1,
+        name: String::from("Primary"),
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
         orientation: Orientation::Landscape,
-        is_primary: true, enabled: true,
+        is_primary: true,
+        enabled: true,
     };
 
     *guard = Some(State {
@@ -149,7 +156,9 @@ pub fn add_display(name: &str, width: u32, height: u32) -> KernelResult<u32> {
             return Err(KernelError::ResourceExhausted);
         }
         // Auto-place to the right of the rightmost display.
-        let right_edge = state.displays.iter()
+        let right_edge = state
+            .displays
+            .iter()
             .filter(|d| d.enabled)
             .map(|d| d.x + d.width as i32)
             .max()
@@ -157,10 +166,15 @@ pub fn add_display(name: &str, width: u32, height: u32) -> KernelResult<u32> {
         let id = state.next_id;
         state.next_id += 1;
         state.displays.push(ArrangedDisplay {
-            id, name: String::from(name),
-            x: right_edge, y: 0, width, height,
+            id,
+            name: String::from(name),
+            x: right_edge,
+            y: 0,
+            width,
+            height,
             orientation: Orientation::Landscape,
-            is_primary: false, enabled: true,
+            is_primary: false,
+            enabled: true,
         });
         Ok(id)
     })
@@ -169,7 +183,10 @@ pub fn add_display(name: &str, width: u32, height: u32) -> KernelResult<u32> {
 /// Set display position.
 pub fn set_position(display_id: u32, x: i32, y: i32) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         d.x = x;
         d.y = y;
@@ -181,7 +198,10 @@ pub fn set_position(display_id: u32, x: i32, y: i32) -> KernelResult<()> {
 /// Set display orientation.
 pub fn set_orientation(display_id: u32, orientation: Orientation) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         if orientation == Orientation::Portrait || orientation == Orientation::PortraitFlipped {
             let (w, h) = (d.width, d.height);
@@ -210,7 +230,10 @@ pub fn set_primary(display_id: u32) -> KernelResult<()> {
 /// Enable/disable a display.
 pub fn set_enabled(display_id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         d.enabled = enabled;
         Ok(())
@@ -229,7 +252,10 @@ pub fn set_topology(topology: Topology) -> KernelResult<()> {
 /// Remove a display.
 pub fn remove_display(display_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.displays.iter().position(|d| d.id == display_id)
+        let pos = state
+            .displays
+            .iter()
+            .position(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         state.displays.remove(pos);
         Ok(())
@@ -238,26 +264,42 @@ pub fn remove_display(display_id: u32) -> KernelResult<()> {
 
 /// List displays.
 pub fn list_displays() -> Vec<ArrangedDisplay> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.displays.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.displays.clone())
 }
 
 /// Get display.
 pub fn get_display(id: u32) -> KernelResult<ArrangedDisplay> {
     with_state(|state| {
-        state.displays.iter().find(|d| d.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .displays
+            .iter()
+            .find(|d| d.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// Current topology.
 pub fn topology() -> Topology {
-    STATE.lock().as_ref().map_or(Topology::Extend, |s| s.topology)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Topology::Extend, |s| s.topology)
 }
 
 /// Statistics: (display_count, topology, total_rearrangements, ops).
 pub fn stats() -> (usize, &'static str, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.displays.len(), s.topology.label(), s.total_rearrangements, s.ops),
+        Some(s) => (
+            s.displays.len(),
+            s.topology.label(),
+            s.total_rearrangements,
+            s.ops,
+        ),
         None => (0, "Unknown", 0, 0),
     }
 }

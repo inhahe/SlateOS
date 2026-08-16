@@ -32,11 +32,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -290,17 +290,37 @@ impl ColorRole {
     /// All color roles.
     pub fn all() -> &'static [ColorRole] {
         &[
-            Self::Background, Self::Surface, Self::SurfaceHighlight,
-            Self::SidebarBackground, Self::TitlebarBackground,
-            Self::TaskbarBackground, Self::TooltipBackground,
-            Self::TextPrimary, Self::TextSecondary, Self::TextDisabled,
-            Self::TextOnAccent, Self::TitlebarText, Self::TooltipText,
-            Self::Accent, Self::AccentHover, Self::AccentPressed,
-            Self::Border, Self::BorderStrong, Self::Divider,
-            Self::Error, Self::Warning, Self::Success, Self::Info,
-            Self::ButtonBackground, Self::ButtonHover, Self::ButtonText,
-            Self::InputBackground, Self::InputBorder,
-            Self::ScrollbarThumb, Self::ScrollbarTrack, Self::Selection,
+            Self::Background,
+            Self::Surface,
+            Self::SurfaceHighlight,
+            Self::SidebarBackground,
+            Self::TitlebarBackground,
+            Self::TaskbarBackground,
+            Self::TooltipBackground,
+            Self::TextPrimary,
+            Self::TextSecondary,
+            Self::TextDisabled,
+            Self::TextOnAccent,
+            Self::TitlebarText,
+            Self::TooltipText,
+            Self::Accent,
+            Self::AccentHover,
+            Self::AccentPressed,
+            Self::Border,
+            Self::BorderStrong,
+            Self::Divider,
+            Self::Error,
+            Self::Warning,
+            Self::Success,
+            Self::Info,
+            Self::ButtonBackground,
+            Self::ButtonHover,
+            Self::ButtonText,
+            Self::InputBackground,
+            Self::InputBorder,
+            Self::ScrollbarThumb,
+            Self::ScrollbarTrack,
+            Self::Selection,
         ]
     }
 }
@@ -583,7 +603,8 @@ pub fn clear_accent() {
 /// Get the current accent color.
 pub fn accent() -> Color {
     let t = THEME.lock();
-    t.accent_override.unwrap_or_else(|| default_color(ColorRole::Accent, t.mode))
+    t.accent_override
+        .unwrap_or_else(|| default_color(ColorRole::Accent, t.mode))
 }
 
 // ---------------------------------------------------------------------------
@@ -623,7 +644,11 @@ pub fn list_overrides() -> Vec<(ColorRole, Color)> {
 // ---------------------------------------------------------------------------
 
 /// Save a custom theme.
-pub fn save_custom(name: &str, base: ThemeMode, overrides: BTreeMap<ColorRole, Color>) -> KernelResult<()> {
+pub fn save_custom(
+    name: &str,
+    base: ThemeMode,
+    overrides: BTreeMap<ColorRole, Color>,
+) -> KernelResult<()> {
     if name.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -631,11 +656,14 @@ pub fn save_custom(name: &str, base: ThemeMode, overrides: BTreeMap<ColorRole, C
     if !t.custom_themes.contains_key(name) && t.custom_themes.len() >= MAX_CUSTOM_THEMES {
         return Err(KernelError::ResourceExhausted);
     }
-    t.custom_themes.insert(String::from(name), CustomTheme {
-        name: String::from(name),
-        base_mode: base,
-        overrides,
-    });
+    t.custom_themes.insert(
+        String::from(name),
+        CustomTheme {
+            name: String::from(name),
+            base_mode: base,
+            overrides,
+        },
+    );
     Ok(())
 }
 
@@ -656,7 +684,10 @@ pub fn apply_custom(name: &str) -> KernelResult<()> {
     if !t.custom_themes.contains_key(name) {
         return Err(KernelError::NotFound);
     }
-    let base = t.custom_themes.get(name).map(|ct| ct.base_mode)
+    let base = t
+        .custom_themes
+        .get(name)
+        .map(|ct| ct.base_mode)
         .unwrap_or(ThemeMode::Light);
     t.mode = base;
     t.active_custom = Some(String::from(name));

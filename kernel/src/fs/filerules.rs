@@ -19,10 +19,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -142,7 +142,9 @@ pub fn init_defaults() {
     // evaluate() ever wired to real file events, those enabled rules would
     // silently act on the user's files. Rules appear only via add_rule().
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         rules: Vec::new(),
         next_id: 1,
@@ -154,7 +156,13 @@ pub fn init_defaults() {
 }
 
 /// Add a rule.
-pub fn add_rule(name: &str, condition: MatchCondition, pattern: &str, action: RuleAction, param: &str) -> KernelResult<u32> {
+pub fn add_rule(
+    name: &str,
+    condition: MatchCondition,
+    pattern: &str,
+    action: RuleAction,
+    param: &str,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.rules.len() >= MAX_RULES {
             return Err(KernelError::ResourceExhausted);
@@ -162,10 +170,15 @@ pub fn add_rule(name: &str, condition: MatchCondition, pattern: &str, action: Ru
         let id = state.next_id;
         state.next_id += 1;
         state.rules.push(FileRule {
-            id, name: String::from(name), condition,
-            pattern: String::from(pattern), action,
-            action_param: String::from(param), enabled: true,
-            hit_count: 0, last_hit_ns: 0,
+            id,
+            name: String::from(name),
+            condition,
+            pattern: String::from(pattern),
+            action,
+            action_param: String::from(param),
+            enabled: true,
+            hit_count: 0,
+            last_hit_ns: 0,
         });
         Ok(id)
     })
@@ -176,7 +189,9 @@ pub fn remove_rule(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.rules.len();
         state.rules.retain(|r| r.id != id);
-        if state.rules.len() == before { return Err(KernelError::NotFound); }
+        if state.rules.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -184,7 +199,10 @@ pub fn remove_rule(id: u32) -> KernelResult<()> {
 /// Enable/disable a rule.
 pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let rule = state.rules.iter_mut().find(|r| r.id == id)
+        let rule = state
+            .rules
+            .iter_mut()
+            .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         rule.enabled = enabled;
         Ok(())
@@ -192,7 +210,12 @@ pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
 }
 
 /// Evaluate a file against all enabled rules. Returns matching rule IDs and actions.
-pub fn evaluate(filename: &str, extension: &str, size_bytes: u64, directory: &str) -> KernelResult<Vec<(u32, RuleAction, String)>> {
+pub fn evaluate(
+    filename: &str,
+    extension: &str,
+    size_bytes: u64,
+    directory: &str,
+) -> KernelResult<Vec<(u32, RuleAction, String)>> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         state.total_evaluations += 1;
@@ -202,17 +225,23 @@ pub fn evaluate(filename: &str, extension: &str, size_bytes: u64, directory: &st
         let dir_lower = directory.to_lowercase();
 
         for rule in &mut state.rules {
-            if !rule.enabled { continue; }
+            if !rule.enabled {
+                continue;
+            }
             let matched = match rule.condition {
                 MatchCondition::ExtensionIs => ext_lower == rule.pattern.to_lowercase(),
                 MatchCondition::NameContains => fname_lower.contains(&rule.pattern.to_lowercase()),
-                MatchCondition::NameStartsWith => fname_lower.starts_with(&rule.pattern.to_lowercase()),
-                MatchCondition::SizeGreaterThan => {
-                    rule.pattern.parse::<u64>().is_ok_and(|limit| size_bytes > limit)
+                MatchCondition::NameStartsWith => {
+                    fname_lower.starts_with(&rule.pattern.to_lowercase())
                 }
-                MatchCondition::SizeLessThan => {
-                    rule.pattern.parse::<u64>().is_ok_and(|limit| size_bytes < limit)
-                }
+                MatchCondition::SizeGreaterThan => rule
+                    .pattern
+                    .parse::<u64>()
+                    .is_ok_and(|limit| size_bytes > limit),
+                MatchCondition::SizeLessThan => rule
+                    .pattern
+                    .parse::<u64>()
+                    .is_ok_and(|limit| size_bytes < limit),
                 MatchCondition::InDirectory => dir_lower.starts_with(&rule.pattern.to_lowercase()),
                 MatchCondition::AnyFile => true,
             };
@@ -237,14 +266,23 @@ pub fn record_applied(count: usize) -> KernelResult<()> {
 
 /// List all rules.
 pub fn list_rules() -> Vec<FileRule> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.rules.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.rules.clone())
 }
 
 /// Statistics: (rule_count, total_evaluations, total_matches, total_applied, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.rules.len(), s.total_evaluations, s.total_matches, s.total_applied, s.ops),
+        Some(s) => (
+            s.rules.len(),
+            s.total_evaluations,
+            s.total_matches,
+            s.total_applied,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -267,10 +305,22 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] empty defaults: OK");
 
     // Build a fixture: a Tag-images rule and a Compress-large-logs rule.
-    let _tag_id = add_rule("Tag images", MatchCondition::ExtensionIs, "png",
-        RuleAction::AddTag, "image").expect("add tag");
-    let _zip_id = add_rule("Compress large logs", MatchCondition::SizeGreaterThan,
-        "10485760", RuleAction::Compress, "gzip").expect("add zip");
+    let _tag_id = add_rule(
+        "Tag images",
+        MatchCondition::ExtensionIs,
+        "png",
+        RuleAction::AddTag,
+        "image",
+    )
+    .expect("add tag");
+    let _zip_id = add_rule(
+        "Compress large logs",
+        MatchCondition::SizeGreaterThan,
+        "10485760",
+        RuleAction::Compress,
+        "gzip",
+    )
+    .expect("add zip");
     assert_eq!(list_rules().len(), 2);
 
     // 2: Extension match.
@@ -290,7 +340,14 @@ pub fn self_test() {
     crate::serial_println!("  [4/8] no match: OK");
 
     // 5: Add custom rule.
-    let rid = add_rule("Backup docs", MatchCondition::ExtensionIs, "doc", RuleAction::CopyTo, "/backup/docs").expect("add");
+    let rid = add_rule(
+        "Backup docs",
+        MatchCondition::ExtensionIs,
+        "doc",
+        RuleAction::CopyTo,
+        "/backup/docs",
+    )
+    .expect("add");
     let matches = evaluate("report.doc", "doc", 5000, "/work").expect("eval4");
     assert!(matches.iter().any(|m| m.0 == rid));
     crate::serial_println!("  [5/8] custom rule: OK");

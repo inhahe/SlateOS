@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -38,12 +38,12 @@ use crate::error::{KernelError, KernelResult};
 pub struct MemCgroup {
     pub path: String,
     pub usage_bytes: u64,
-    pub limit_bytes: u64,       // 0 = unlimited.
-    pub soft_limit_bytes: u64,  // 0 = no soft limit.
+    pub limit_bytes: u64,      // 0 = unlimited.
+    pub soft_limit_bytes: u64, // 0 = no soft limit.
     pub swap_usage: u64,
     pub swap_limit: u64,
-    pub max_usage: u64,         // High watermark.
-    pub failcnt: u64,           // Allocation failures due to limit.
+    pub max_usage: u64, // High watermark.
+    pub failcnt: u64,   // Allocation failures due to limit.
     pub oom_kills: u64,
     pub charge_count: u64,
     pub uncharge_count: u64,
@@ -100,7 +100,9 @@ where
 /// failures).)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         groups: Vec::new(),
         total_charges: 0,
@@ -114,7 +116,10 @@ pub fn init_defaults() {
 /// Charge memory to a cgroup.
 pub fn charge(path: &str, bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let g = state.groups.iter_mut().find(|g| g.path == path)
+        let g = state
+            .groups
+            .iter_mut()
+            .find(|g| g.path == path)
             .ok_or(KernelError::NotFound)?;
         let new_usage = g.usage_bytes.saturating_add(bytes);
         if g.limit_bytes > 0 && new_usage > g.limit_bytes {
@@ -123,7 +128,9 @@ pub fn charge(path: &str, bytes: u64) -> KernelResult<()> {
             return Err(KernelError::OutOfMemory);
         }
         g.usage_bytes = new_usage;
-        if g.usage_bytes > g.max_usage { g.max_usage = g.usage_bytes; }
+        if g.usage_bytes > g.max_usage {
+            g.max_usage = g.usage_bytes;
+        }
         g.charge_count += 1;
         state.total_charges += 1;
         Ok(())
@@ -133,7 +140,10 @@ pub fn charge(path: &str, bytes: u64) -> KernelResult<()> {
 /// Uncharge memory from a cgroup.
 pub fn uncharge(path: &str, bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let g = state.groups.iter_mut().find(|g| g.path == path)
+        let g = state
+            .groups
+            .iter_mut()
+            .find(|g| g.path == path)
             .ok_or(KernelError::NotFound)?;
         g.usage_bytes = g.usage_bytes.saturating_sub(bytes);
         g.uncharge_count += 1;
@@ -145,7 +155,10 @@ pub fn uncharge(path: &str, bytes: u64) -> KernelResult<()> {
 /// Set memory limit.
 pub fn set_limit(path: &str, limit: u64) -> KernelResult<()> {
     with_state(|state| {
-        let g = state.groups.iter_mut().find(|g| g.path == path)
+        let g = state
+            .groups
+            .iter_mut()
+            .find(|g| g.path == path)
             .ok_or(KernelError::NotFound)?;
         g.limit_bytes = limit;
         Ok(())
@@ -155,7 +168,10 @@ pub fn set_limit(path: &str, limit: u64) -> KernelResult<()> {
 /// Set soft limit.
 pub fn set_soft_limit(path: &str, limit: u64) -> KernelResult<()> {
     with_state(|state| {
-        let g = state.groups.iter_mut().find(|g| g.path == path)
+        let g = state
+            .groups
+            .iter_mut()
+            .find(|g| g.path == path)
             .ok_or(KernelError::NotFound)?;
         g.soft_limit_bytes = limit;
         Ok(())
@@ -165,7 +181,10 @@ pub fn set_soft_limit(path: &str, limit: u64) -> KernelResult<()> {
 /// Record an OOM kill in a cgroup.
 pub fn record_oom(path: &str) -> KernelResult<()> {
     with_state(|state| {
-        let g = state.groups.iter_mut().find(|g| g.path == path)
+        let g = state
+            .groups
+            .iter_mut()
+            .find(|g| g.path == path)
             .ok_or(KernelError::NotFound)?;
         g.oom_kills += 1;
         state.total_oom += 1;
@@ -176,13 +195,25 @@ pub fn record_oom(path: &str) -> KernelResult<()> {
 /// Create a memory cgroup.
 pub fn create(path: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.groups.len() >= MAX_CGROUPS { return Err(KernelError::ResourceExhausted); }
-        if state.groups.iter().any(|g| g.path == path) { return Err(KernelError::AlreadyExists); }
+        if state.groups.len() >= MAX_CGROUPS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.groups.iter().any(|g| g.path == path) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.groups.push(MemCgroup {
-            path: String::from(path), usage_bytes: 0, limit_bytes: 0,
-            soft_limit_bytes: 0, swap_usage: 0, swap_limit: 0,
-            max_usage: 0, failcnt: 0, oom_kills: 0,
-            charge_count: 0, uncharge_count: 0, processes: 0,
+            path: String::from(path),
+            usage_bytes: 0,
+            limit_bytes: 0,
+            soft_limit_bytes: 0,
+            swap_usage: 0,
+            swap_limit: 0,
+            max_usage: 0,
+            failcnt: 0,
+            oom_kills: 0,
+            charge_count: 0,
+            uncharge_count: 0,
+            processes: 0,
         });
         Ok(())
     })
@@ -190,20 +221,28 @@ pub fn create(path: &str) -> KernelResult<()> {
 
 /// Get cgroup info.
 pub fn get(path: &str) -> Option<MemCgroup> {
-    STATE.lock().as_ref().and_then(|s| s.groups.iter().find(|g| g.path == path).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.groups.iter().find(|g| g.path == path).cloned())
 }
 
 /// List all cgroups.
 pub fn list() -> Vec<MemCgroup> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.groups.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.groups.clone())
 }
 
 /// Check if any cgroup is over soft limit.
 pub fn over_soft_limit() -> Vec<MemCgroup> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.groups.iter()
+        s.groups
+            .iter()
             .filter(|g| g.soft_limit_bytes > 0 && g.usage_bytes > g.soft_limit_bytes)
-            .cloned().collect()
+            .cloned()
+            .collect()
     })
 }
 
@@ -211,7 +250,14 @@ pub fn over_soft_limit() -> Vec<MemCgroup> {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.groups.len(), s.total_charges, s.total_uncharges, s.total_failures, s.total_oom, s.ops),
+        Some(s) => (
+            s.groups.len(),
+            s.total_charges,
+            s.total_uncharges,
+            s.total_failures,
+            s.total_oom,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -230,7 +276,10 @@ pub fn self_test() {
     // 1: Empty defaults — no fabricated cgroups, all totals zero.
     assert_eq!(list().len(), 0);
     let (count0, charges0, uncharges0, failures0, oom0, _) = stats();
-    assert_eq!((count0, charges0, uncharges0, failures0, oom0), (0, 0, 0, 0, 0));
+    assert_eq!(
+        (count0, charges0, uncharges0, failures0, oom0),
+        (0, 0, 0, 0, 0)
+    );
     crate::serial_println!("  [1/8] empty defaults: OK");
 
     // 2: Create cgroups; charging an unknown cgroup errors.

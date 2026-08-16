@@ -325,9 +325,7 @@ pub const DRIVER_VERSION_PATCHLEVEL: i32 = 0;
 pub const fn client_cap_supported(cap: u64) -> bool {
     matches!(
         cap,
-        DRM_CLIENT_CAP_UNIVERSAL_PLANES
-            | DRM_CLIENT_CAP_ATOMIC
-            | DRM_CLIENT_CAP_ASPECT_RATIO
+        DRM_CLIENT_CAP_UNIVERSAL_PLANES | DRM_CLIENT_CAP_ATOMIC | DRM_CLIENT_CAP_ASPECT_RATIO
     )
 }
 
@@ -1028,7 +1026,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         "drm_unique size {}",
         size_of::<DrmUnique>()
     );
-    check!(size_of::<DrmAuth>() == 4, "drm_auth size {}", size_of::<DrmAuth>());
+    check!(
+        size_of::<DrmAuth>() == 4,
+        "drm_auth size {}",
+        size_of::<DrmAuth>()
+    );
     check!(
         size_of::<DrmGetCap>() == 16,
         "drm_get_cap size {}",
@@ -1123,11 +1125,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         "crtc-in-vblank-event cap value"
     );
     check!(
-        cap_value(DRM_CAP_CURSOR_WIDTH) == Some(64)
-            && cap_value(DRM_CAP_CURSOR_HEIGHT) == Some(64),
+        cap_value(DRM_CAP_CURSOR_WIDTH) == Some(64) && cap_value(DRM_CAP_CURSOR_HEIGHT) == Some(64),
         "cursor-size cap hint"
     );
-    check!(cap_value(DRM_CAP_PRIME) == Some(0), "prime cap not yet supported");
+    check!(
+        cap_value(DRM_CAP_PRIME) == Some(0),
+        "prime cap not yet supported"
+    );
     check!(
         cap_value(DRM_CAP_DUMB_BUFFER) == Some(1),
         "dumb-buffer cap supported (CREATE/MAP/DESTROY_DUMB wired)"

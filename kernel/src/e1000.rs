@@ -397,7 +397,8 @@ impl E1000Device {
     /// and RX/TX enable.
     pub fn init(pci_dev: &PciDevice, hhdm_offset: u64) -> KernelResult<Self> {
         // Get BAR0 MMIO address.
-        let bar0_phys = pci_dev.bar0_mmio_addr()
+        let bar0_phys = pci_dev
+            .bar0_mmio_addr()
             .ok_or(KernelError::InvalidArgument)?;
 
         // For 64-bit BAR: combine BAR0 (low) + BAR1 (high).
@@ -426,9 +427,9 @@ impl E1000Device {
                 let virt = VirtAddr::new(mmio_virt.wrapping_add(i.wrapping_mul(16384)));
                 // SAFETY: frame_phys is the PCI BAR MMIO region.
                 // Mapping device registers into kernel VA space.
-                if let Err(_e) = unsafe {
-                    page_table::map_frame(pml4_phys, virt, frame, mmio_flags)
-                } {
+                if let Err(_e) =
+                    unsafe { page_table::map_frame(pml4_phys, virt, frame, mmio_flags) }
+                {
                     // May already be mapped (e.g., within HHDM range on large-RAM systems).
                     // Continue — the mapping might work via existing HHDM.
                 }
@@ -469,7 +470,8 @@ impl E1000Device {
         dev.write_reg(REG_IMC, 0xFFFF_FFFF);
 
         // Step 3: Read MAC address (try registers first, then EEPROM).
-        dev.mac = dev.read_mac_from_regs()
+        dev.mac = dev
+            .read_mac_from_regs()
             .or_else(|| dev.read_mac_from_eeprom())
             .ok_or(KernelError::InternalError)?;
 
@@ -562,9 +564,13 @@ impl E1000Device {
         // Descriptors 0..7 use buf_frame0, descriptors 8..15 use buf_frame1.
         for i in 0..RX_DESC_COUNT {
             let buf_phys = if i < 8 {
-                buf_frame0.addr().wrapping_add((i as u64).wrapping_mul(RX_BUF_SIZE as u64))
+                buf_frame0
+                    .addr()
+                    .wrapping_add((i as u64).wrapping_mul(RX_BUF_SIZE as u64))
             } else {
-                buf_frame1.addr().wrapping_add(((i - 8) as u64).wrapping_mul(RX_BUF_SIZE as u64))
+                buf_frame1
+                    .addr()
+                    .wrapping_add(((i - 8) as u64).wrapping_mul(RX_BUF_SIZE as u64))
             };
 
             // SAFETY: ring_virt points to zeroed, owned memory within bounds.
@@ -641,9 +647,7 @@ impl E1000Device {
 
         // Configure TCTL: enable TX, pad short packets,
         // collision threshold = 15, collision distance = 64.
-        let tctl = TCTL_EN | TCTL_PSP
-            | (15u32 << TCTL_CT_SHIFT)
-            | (64u32 << TCTL_COLD_SHIFT);
+        let tctl = TCTL_EN | TCTL_PSP | (15u32 << TCTL_CT_SHIFT) | (64u32 << TCTL_COLD_SHIFT);
         self.write_reg(REG_TCTL, tctl);
 
         // Configure TIPG (Inter-Packet Gap) — standard IEEE 802.3 values.
@@ -689,9 +693,7 @@ impl E1000Device {
         // Check that the descriptor is free (DD bit set by hardware on completion).
         // Volatile read because hardware writes this field asynchronously.
         // SAFETY: desc points to valid DMA memory within the ring.
-        let status = unsafe {
-            core::ptr::read_volatile(core::ptr::addr_of!((*desc).status))
-        };
+        let status = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*desc).status)) };
         if status & TXD_STAT_DD == 0 {
             // Descriptor not yet completed by hardware — TX ring is full.
             return Err(KernelError::ResourceExhausted);
@@ -710,10 +712,7 @@ impl E1000Device {
         unsafe {
             core::ptr::write_volatile(core::ptr::addr_of_mut!((*desc).addr), buf_phys);
             #[allow(clippy::cast_possible_truncation)]
-            core::ptr::write_volatile(
-                core::ptr::addr_of_mut!((*desc).length),
-                frame.len() as u16,
-            );
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*desc).length), frame.len() as u16);
             core::ptr::write_volatile(
                 core::ptr::addr_of_mut!((*desc).cmd),
                 TXD_CMD_EOP | TXD_CMD_IFCS | TXD_CMD_RS,
@@ -737,9 +736,7 @@ impl E1000Device {
         // Poll for completion (RS + DD).
         for _ in 0..100_000 {
             // SAFETY: desc still points to the same valid descriptor.
-            let st = unsafe {
-                core::ptr::read_volatile(core::ptr::addr_of!((*desc).status))
-            };
+            let st = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*desc).status)) };
             if st & TXD_STAT_DD != 0 {
                 return Ok(());
             }
@@ -763,17 +760,14 @@ impl E1000Device {
         // Check if the current descriptor has data (DD bit set by hardware).
         // Volatile read because hardware writes status asynchronously.
         // SAFETY: desc points to valid DMA memory within the ring.
-        let status = unsafe {
-            core::ptr::read_volatile(core::ptr::addr_of!((*desc).status))
-        };
+        let status = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*desc).status)) };
         if status & RXD_STAT_DD == 0 {
             return None; // No packet available.
         }
 
         // Read the packet length (hardware-written field, volatile read).
-        let length = unsafe {
-            core::ptr::read_volatile(core::ptr::addr_of!((*desc).length)) as usize
-        };
+        let length =
+            unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*desc).length)) as usize };
         if length == 0 || length > RX_BUF_SIZE {
             // Invalid length — reset descriptor and move on.
             // Volatile write: hardware must see the status reset via DMA.
@@ -782,7 +776,9 @@ impl E1000Device {
                 core::ptr::write_volatile(core::ptr::addr_of_mut!((*desc).status), 0);
             }
             #[allow(clippy::cast_possible_truncation)]
-            { self.rx_tail = ((tail + 1) % RX_DESC_COUNT) as u16; }
+            {
+                self.rx_tail = ((tail + 1) % RX_DESC_COUNT) as u16;
+            }
             // Ensure status reset is visible before updating tail pointer.
             compiler_fence(Ordering::Release);
             self.write_reg(REG_RDT, tail as u32);
@@ -820,7 +816,9 @@ impl E1000Device {
         // Advance tail — tell hardware this buffer is available again.
         let old_tail = tail;
         #[allow(clippy::cast_possible_truncation)]
-        { self.rx_tail = ((tail + 1) % RX_DESC_COUNT) as u16; }
+        {
+            self.rx_tail = ((tail + 1) % RX_DESC_COUNT) as u16;
+        }
         // Ensure the descriptor status reset commits before hardware sees
         // the new tail pointer.
         compiler_fence(Ordering::Release);
@@ -981,11 +979,17 @@ pub fn self_test() {
 
     // Test 2: Link status readable.
     let link = with_device(|dev| dev.link_up()).unwrap();
-    serial_println!("[e1000]   Link status: {}", if link { "UP" } else { "DOWN" });
+    serial_println!(
+        "[e1000]   Link status: {}",
+        if link { "UP" } else { "DOWN" }
+    );
 
     // Test 3: Registers are accessible (read STATUS).
     let status = with_device(|dev| dev.read_reg(REG_STATUS)).unwrap();
-    assert!(status != 0xFFFF_FFFF, "STATUS should not be all-ones (unmapped MMIO)");
+    assert!(
+        status != 0xFFFF_FFFF,
+        "STATUS should not be all-ones (unmapped MMIO)"
+    );
     serial_println!("[e1000]   STATUS register: {:#010x}", status);
 
     // Test 4: RCTL is configured (EN bit should be set).

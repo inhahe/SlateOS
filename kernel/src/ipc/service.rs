@@ -42,16 +42,16 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
-use alloc::collections::BTreeMap;
-use alloc::collections::VecDeque;
-use alloc::string::String;
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::ipc::channel::{self, ChannelHandle};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::Mutex;
+use alloc::collections::BTreeMap;
+use alloc::collections::VecDeque;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -307,12 +307,11 @@ pub fn connect(name: &[u8]) -> KernelResult<ChannelHandle> {
         match listener_id_opt {
             Some(listener_id) => {
                 // Service is registered — standard connect path.
-                let entry = reg.listeners.get_mut(&listener_id)
-                    .ok_or_else(|| {
-                        channel::close(client_ep);
-                        channel::close(server_ep);
-                        KernelError::NotFound
-                    })?;
+                let entry = reg.listeners.get_mut(&listener_id).ok_or_else(|| {
+                    channel::close(client_ep);
+                    channel::close(server_ep);
+                    KernelError::NotFound
+                })?;
 
                 if entry.closed {
                     channel::close(client_ep);
@@ -357,9 +356,7 @@ pub fn connect(name: &[u8]) -> KernelResult<ChannelHandle> {
                 let mut activated = false;
                 {
                     let mut activations = SOCKET_ACTIVATIONS.lock();
-                    if let Some(entry) = activations.iter_mut()
-                        .find(|e| e.name == name)
-                    {
+                    if let Some(entry) = activations.iter_mut().find(|e| e.name == name) {
                         // Queue the connection for when the service registers.
                         if entry.pre_queue.len() >= MAX_PENDING_CONNECTIONS {
                             channel::close(client_ep);
@@ -417,7 +414,9 @@ pub fn accept(listener: ServiceListenerHandle) -> KernelResult<ChannelHandle> {
     loop {
         {
             let mut reg = SERVICE_REGISTRY.lock();
-            let entry = reg.listeners.get_mut(&listener.0)
+            let entry = reg
+                .listeners
+                .get_mut(&listener.0)
                 .ok_or(KernelError::InvalidHandle)?;
 
             if let Some(handle) = entry.pending.pop_front() {
@@ -447,7 +446,9 @@ pub fn accept(listener: ServiceListenerHandle) -> KernelResult<ChannelHandle> {
 /// - [`ChannelClosed`] — listener was unregistered.
 pub fn try_accept(listener: ServiceListenerHandle) -> KernelResult<Option<ChannelHandle>> {
     let mut reg = SERVICE_REGISTRY.lock();
-    let entry = reg.listeners.get_mut(&listener.0)
+    let entry = reg
+        .listeners
+        .get_mut(&listener.0)
         .ok_or(KernelError::InvalidHandle)?;
 
     if let Some(handle) = entry.pending.pop_front() {
@@ -475,7 +476,9 @@ pub fn accept_timeout(
     // Fast path.
     {
         let mut reg = SERVICE_REGISTRY.lock();
-        let entry = reg.listeners.get_mut(&listener.0)
+        let entry = reg
+            .listeners
+            .get_mut(&listener.0)
             .ok_or(KernelError::InvalidHandle)?;
 
         if let Some(handle) = entry.pending.pop_front() {
@@ -500,20 +503,16 @@ pub fn accept_timeout(
         }
     }
 
-    let timer_handle = crate::hrtimer::schedule_ns(
-        timeout_ns,
-        timeout_wake,
-        sched::current_task_id(),
-    );
+    let timer_handle =
+        crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, sched::current_task_id());
 
     loop {
         {
             let mut reg = SERVICE_REGISTRY.lock();
-            let entry = reg.listeners.get_mut(&listener.0)
-                .ok_or_else(|| {
-                    crate::hrtimer::cancel(timer_handle);
-                    KernelError::InvalidHandle
-                })?;
+            let entry = reg.listeners.get_mut(&listener.0).ok_or_else(|| {
+                crate::hrtimer::cancel(timer_handle);
+                KernelError::InvalidHandle
+            })?;
 
             if let Some(handle) = entry.pending.pop_front() {
                 crate::hrtimer::cancel(timer_handle);
@@ -570,7 +569,9 @@ pub fn unregister(listener: ServiceListenerHandle) -> KernelResult<()> {
 
     {
         let mut reg = SERVICE_REGISTRY.lock();
-        let entry = reg.listeners.get_mut(&listener.0)
+        let entry = reg
+            .listeners
+            .get_mut(&listener.0)
             .ok_or(KernelError::InvalidHandle)?;
 
         entry.closed = true;
@@ -621,7 +622,9 @@ pub fn is_registered(name: &[u8]) -> bool {
 /// Useful for monitoring/diagnostics.
 pub fn pending_count(listener: ServiceListenerHandle) -> KernelResult<usize> {
     let reg = SERVICE_REGISTRY.lock();
-    let entry = reg.listeners.get(&listener.0)
+    let entry = reg
+        .listeners
+        .get(&listener.0)
         .ok_or(KernelError::InvalidHandle)?;
     Ok(entry.pending.len())
 }
@@ -676,8 +679,11 @@ pub fn register_socket_activation(name: &[u8], spawn_path: &str) -> KernelResult
         pre_queue: VecDeque::new(),
     });
 
-    serial_println!("[service] Socket activation registered: {:?} → {}",
-        core::str::from_utf8(name).unwrap_or("<bin>"), spawn_path);
+    serial_println!(
+        "[service] Socket activation registered: {:?} → {}",
+        core::str::from_utf8(name).unwrap_or("<bin>"),
+        spawn_path
+    );
     Ok(())
 }
 
@@ -704,10 +710,19 @@ pub fn unregister_socket_activation(name: &[u8]) -> KernelResult<()> {
 /// Returns (name, spawn_path, status, start_count, pre_queue_len).
 pub fn list_socket_activations() -> Vec<(String, String, ActivationStatus, u32, usize)> {
     let activations = SOCKET_ACTIVATIONS.lock();
-    activations.iter().map(|e| {
-        let name = String::from(core::str::from_utf8(&e.name).unwrap_or("<bin>"));
-        (name, e.spawn_path.clone(), e.status, e.start_count, e.pre_queue.len())
-    }).collect()
+    activations
+        .iter()
+        .map(|e| {
+            let name = String::from(core::str::from_utf8(&e.name).unwrap_or("<bin>"));
+            (
+                name,
+                e.spawn_path.clone(),
+                e.status,
+                e.start_count,
+                e.pre_queue.len(),
+            )
+        })
+        .collect()
 }
 
 /// Mark a socket-activated service as failed (e.g., after crash).
@@ -753,7 +768,6 @@ pub fn is_socket_activated(name: &[u8]) -> bool {
 fn drain_pre_queue(name: &[u8]) -> VecDeque<ChannelHandle> {
     let mut activations = SOCKET_ACTIVATIONS.lock();
     if let Some(entry) = activations.iter_mut().find(|e| e.name == name) {
-        
         core::mem::take(&mut entry.pre_queue)
     } else {
         VecDeque::new()
@@ -774,8 +788,11 @@ fn mark_activation_running(name: &[u8]) {
 /// process spawner to start the service binary.
 fn trigger_service_spawn(path: &str, name: &[u8]) {
     let name_str = core::str::from_utf8(name).unwrap_or("<bin>");
-    serial_println!("[service] Socket activation: spawning '{}' for service '{}'",
-        path, name_str);
+    serial_println!(
+        "[service] Socket activation: spawning '{}' for service '{}'",
+        path,
+        name_str
+    );
 
     // In the future, this calls proc::spawn::spawn_process(path, ...) or
     // similar. For now we just log it — actual spawning requires the process
@@ -820,8 +837,7 @@ fn test_register_connect() -> KernelResult<()> {
     let client_ep = connect(b"test.basic")?;
 
     // Service accepts.
-    let server_ep = try_accept(listener)?
-        .ok_or(KernelError::InternalError)?;
+    let server_ep = try_accept(listener)?.ok_or(KernelError::InternalError)?;
 
     // Verify the channel works: client sends, server receives.
     let msg = channel::Message::from_bytes(b"hello service")?;
@@ -944,8 +960,7 @@ fn test_duplicate_name() -> KernelResult<()> {
 }
 
 /// Atomic result for blocking accept test.
-static ACCEPT_TEST_RESULT: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+static ACCEPT_TEST_RESULT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Task that accepts a connection and reads a message.
 extern "C" fn accept_task(listener_raw: u64) {
@@ -1019,16 +1034,24 @@ fn test_socket_activation() -> KernelResult<()> {
     // Verify the connection was pre-queued (activation should be Starting).
     {
         let activations = SOCKET_ACTIVATIONS.lock();
-        let entry = activations.iter().find(|e| e.name == name)
+        let entry = activations
+            .iter()
+            .find(|e| e.name == name)
             .ok_or(KernelError::InternalError)?;
         if entry.status != ActivationStatus::Starting {
-            serial_println!("[service]   FAIL: expected Starting, got {:?}", entry.status);
+            serial_println!(
+                "[service]   FAIL: expected Starting, got {:?}",
+                entry.status
+            );
             channel::close(client_ep);
             unregister_socket_activation(name).ok();
             return Err(KernelError::InternalError);
         }
         if entry.pre_queue.len() != 1 {
-            serial_println!("[service]   FAIL: expected 1 pre-queued, got {}", entry.pre_queue.len());
+            serial_println!(
+                "[service]   FAIL: expected 1 pre-queued, got {}",
+                entry.pre_queue.len()
+            );
             channel::close(client_ep);
             unregister_socket_activation(name).ok();
             return Err(KernelError::InternalError);
@@ -1050,8 +1073,7 @@ fn test_socket_activation() -> KernelResult<()> {
     }
 
     // Accept the connection and verify it works.
-    let server_ep = try_accept(listener)?
-        .ok_or(KernelError::InternalError)?;
+    let server_ep = try_accept(listener)?.ok_or(KernelError::InternalError)?;
 
     // Send a message through the channel.
     let msg = channel::Message::from_bytes(b"socket activated!")?;

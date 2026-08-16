@@ -38,9 +38,9 @@
 //! [`super::thread::on_thread_exit`] while CR3 still points at the
 //! dying thread's address space.
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::sched::task::TaskId;
@@ -285,8 +285,9 @@ pub fn on_thread_exit_hook(task_id: TaskId) {
     // the in-kernel registration drops always run so the tables never
     // leak regardless of which AS is current.
     let as_active = match crate::proc::thread::owner_process(task_id) {
-        Some(pid) => crate::proc::pcb::get_pml4(pid)
-            == Some(crate::mm::page_table::active_pml4_phys()),
+        Some(pid) => {
+            crate::proc::pcb::get_pml4(pid) == Some(crate::mm::page_table::active_pml4_phys())
+        }
         None => false,
     };
 
@@ -484,9 +485,8 @@ pub fn clone_thread(
     let image_raw = Box::into_raw(Box::new(regs)) as u64;
 
     // Inherit the calling thread's effective scheduling priority.
-    let priority =
-        crate::sched::get_effective_priority(crate::sched::current_task_id())
-            .unwrap_or(crate::sched::task::DEFAULT_PRIORITY);
+    let priority = crate::sched::get_effective_priority(crate::sched::current_task_id())
+        .unwrap_or(crate::sched::task::DEFAULT_PRIORITY);
 
     // Compute the child's persistent FS (TLS) base *before* spawning so it can
     // be seeded onto the Task while it is still suspended.  IA32_FS_BASE is a
@@ -606,10 +606,7 @@ pub fn clone_thread(
 }
 
 /// Build the register image consumed by [`clone_thread_trampoline`].
-fn build_register_image(
-    frame: &SyscallFrame,
-    args: &CloneThreadArgs,
-) -> [u64; REG_IMAGE_LEN] {
+fn build_register_image(frame: &SyscallFrame, args: &CloneThreadArgs) -> [u64; REG_IMAGE_LEN] {
     // RFLAGS must have the reserved bit 1 set and IF (interrupts
     // enabled).  If the parent's saved RFLAGS is somehow zero (a
     // synthetic frame in a test, for example) substitute the
@@ -621,24 +618,24 @@ fn build_register_image(
     };
 
     [
-        frame.user_rip,                  // 0: RIP
-        u64::from(crate::gdt::USER_CS),  // 1: CS
-        rflags,                          // 2: RFLAGS
-        args.child_stack,                // 3: RSP (caller-supplied)
-        u64::from(crate::gdt::USER_DS),  // 4: SS
-        frame.arg0,                      // 5: RDI
-        frame.arg1,                      // 6: RSI
-        frame.arg2,                      // 7: RDX
-        frame.arg3,                      // 8: R10
-        frame.arg4,                      // 9: R8
-        frame.arg5,                      // 10: R9
-        frame.rbx,                       // 11: RBX
-        frame.rbp,                       // 12: RBP
-        frame.r12,                       // 13: R12
-        frame.r13,                       // 14: R13
-        frame.r14,                       // 15: R14
-        frame.r15,                       // 16: R15
-        args.new_tls,                    // 17: FS_BASE (0 = leave MSR alone)
+        frame.user_rip,                 // 0: RIP
+        u64::from(crate::gdt::USER_CS), // 1: CS
+        rflags,                         // 2: RFLAGS
+        args.child_stack,               // 3: RSP (caller-supplied)
+        u64::from(crate::gdt::USER_DS), // 4: SS
+        frame.arg0,                     // 5: RDI
+        frame.arg1,                     // 6: RSI
+        frame.arg2,                     // 7: RDX
+        frame.arg3,                     // 8: R10
+        frame.arg4,                     // 9: R8
+        frame.arg5,                     // 10: R9
+        frame.rbx,                      // 11: RBX
+        frame.rbp,                      // 12: RBP
+        frame.r12,                      // 13: R12
+        frame.r13,                      // 14: R13
+        frame.r14,                      // 15: R14
+        frame.r15,                      // 16: R15
+        args.new_tls,                   // 17: FS_BASE (0 = leave MSR alone)
     ]
 }
 
@@ -702,7 +699,10 @@ pub fn self_test() -> KernelResult<()> {
         if regs[idx] != expected {
             crate::serial_println!(
                 "[thread_clone]   FAIL: regs[{}] ({}) = {:#x}, expected {:#x}",
-                idx, name, regs[idx], expected,
+                idx,
+                name,
+                regs[idx],
+                expected,
             );
             return Err(KernelError::InternalError);
         }
@@ -731,9 +731,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         let map = CLEAR_CHILD_TID.lock();
         if map.get(&test_tid) != Some(&test_ctid) {
-            crate::serial_println!(
-                "[thread_clone]   FAIL: ctid registration did not stick"
-            );
+            crate::serial_println!("[thread_clone]   FAIL: ctid registration did not stick");
             return Err(KernelError::InternalError);
         }
     }
@@ -743,9 +741,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         let map = CLEAR_CHILD_TID.lock();
         if map.contains_key(&test_tid) {
-            crate::serial_println!(
-                "[thread_clone]   FAIL: ctid registration to 0 did not clear"
-            );
+            crate::serial_println!("[thread_clone]   FAIL: ctid registration to 0 did not clear");
             return Err(KernelError::InternalError);
         }
     }

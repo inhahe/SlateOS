@@ -26,10 +26,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 use tzrules::Tz;
 
 use crate::error::{KernelError, KernelResult};
@@ -130,7 +130,8 @@ impl TzEntry {
     /// January, -240 for the same zone in July.
     #[must_use]
     pub fn offset_minutes_at(&self, utc_secs: i64) -> i32 {
-        self.rule().map_or(0, |r| r.lookup(utc_secs).gmtoff.div_euclid(60))
+        self.rule()
+            .map_or(0, |r| r.lookup(utc_secs).gmtoff.div_euclid(60))
     }
 
     /// Whether the zone is shifted at `utc_secs`.
@@ -168,7 +169,8 @@ impl TzEntry {
     /// The standard abbreviation (`EST`).
     #[must_use]
     pub fn std_abbrev(&self) -> String {
-        self.rule().map_or_else(|| String::from("UTC"), |r| name_to_string(r.std_name))
+        self.rule()
+            .map_or_else(|| String::from("UTC"), |r| name_to_string(r.std_name))
     }
 
     /// The DST abbreviation (`EDT`), equal to the standard one when the zone
@@ -290,7 +292,10 @@ pub fn current_timezone() -> String {
 /// assumed.
 pub fn timezone_info_at(utc_secs: i64) -> KernelResult<TzInfo> {
     let state = STATE.lock();
-    let entry = state.tz_database.iter().find(|t| t.name == state.current_tz)
+    let entry = state
+        .tz_database
+        .iter()
+        .find(|t| t.name == state.current_tz)
         .ok_or(KernelError::NotFound)?;
     Ok(TzInfo {
         name: entry.name.clone(),
@@ -312,7 +317,9 @@ pub fn list_timezones(region_filter: &str) -> Vec<TzEntry> {
     if region_filter.is_empty() {
         state.tz_database.clone()
     } else {
-        state.tz_database.iter()
+        state
+            .tz_database
+            .iter()
             .filter(|t| t.region == region_filter)
             .cloned()
             .collect()
@@ -368,7 +375,11 @@ pub fn detect_from_location(lat: f32, lon: f32) -> KernelResult<String> {
 pub fn set_ntp_enabled(enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
     state.ntp_enabled = enabled;
-    state.ntp_status = if enabled { NtpStatus::Syncing } else { NtpStatus::Disabled };
+    state.ntp_status = if enabled {
+        NtpStatus::Syncing
+    } else {
+        NtpStatus::Disabled
+    };
     state.changes += 1;
     Ok(())
 }
@@ -418,7 +429,10 @@ pub fn list_ntp_servers() -> Vec<NtpServer> {
 /// Simulate NTP sync (record an offset).
 pub fn simulate_sync(hostname: &str, offset_us: i64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let server = state.ntp_servers.iter_mut().find(|s| s.hostname == hostname)
+    let server = state
+        .ntp_servers
+        .iter_mut()
+        .find(|s| s.hostname == hostname)
         .ok_or(KernelError::NotFound)?;
     server.last_sync_ns = crate::hpet::elapsed_ns();
     server.offset_us = offset_us;
@@ -469,7 +483,13 @@ pub fn set_show_date(show: bool) {
 /// Get current format settings.
 pub fn format_settings() -> (TimeFormat, DateFormat, WeekStart, bool, bool) {
     let state = STATE.lock();
-    (state.time_format, state.date_format, state.week_start, state.show_seconds, state.show_date)
+    (
+        state.time_format,
+        state.date_format,
+        state.week_start,
+        state.show_seconds,
+        state.show_date,
+    )
 }
 
 /// Set manual time offset (when NTP is disabled).
@@ -488,10 +508,18 @@ pub fn set_manual_offset(offset_ns: i64) -> KernelResult<()> {
 /// because an unparseable entry would silently read as UTC forever after —
 /// the table is a compile-time constant, so a dropped row is a bug caught by
 /// the self-test's count assertion.
-fn add_tz(db: &mut Vec<TzEntry>, name: &str, display: &str, posix_tz: &str,
-    region: &str, lat: f32, lon: f32)
-{
-    if Tz::parse(posix_tz.as_bytes()).is_none() { return; }
+fn add_tz(
+    db: &mut Vec<TzEntry>,
+    name: &str,
+    display: &str,
+    posix_tz: &str,
+    region: &str,
+    lat: f32,
+    lon: f32,
+) {
+    if Tz::parse(posix_tz.as_bytes()).is_none() {
+        return;
+    }
     db.push(TzEntry {
         name: String::from(name),
         display_name: String::from(display),
@@ -514,27 +542,163 @@ pub fn init_defaults() {
     // POSIX `TZ` rules. Note the inverted sign convention: `EST5` is UTC-5 and
     // `JST-9` is UTC+9. Angle brackets are needed for abbreviations that are
     // not purely alphabetic (`<-03>`, `<+04>`), which is also what tzdata does.
-    add_tz(db, "America/New_York", "Eastern Time (US)", "EST5EDT,M3.2.0,M11.1.0", "Americas", 40.7, -74.0);
-    add_tz(db, "America/Chicago", "Central Time (US)", "CST6CDT,M3.2.0,M11.1.0", "Americas", 41.9, -87.6);
-    add_tz(db, "America/Denver", "Mountain Time (US)", "MST7MDT,M3.2.0,M11.1.0", "Americas", 39.7, -105.0);
-    add_tz(db, "America/Los_Angeles", "Pacific Time (US)", "PST8PDT,M3.2.0,M11.1.0", "Americas", 34.1, -118.2);
-    add_tz(db, "America/Anchorage", "Alaska Time", "AKST9AKDT,M3.2.0,M11.1.0", "Americas", 61.2, -149.9);
-    add_tz(db, "Pacific/Honolulu", "Hawaii Time", "HST10", "Pacific", 21.3, -157.8);
+    add_tz(
+        db,
+        "America/New_York",
+        "Eastern Time (US)",
+        "EST5EDT,M3.2.0,M11.1.0",
+        "Americas",
+        40.7,
+        -74.0,
+    );
+    add_tz(
+        db,
+        "America/Chicago",
+        "Central Time (US)",
+        "CST6CDT,M3.2.0,M11.1.0",
+        "Americas",
+        41.9,
+        -87.6,
+    );
+    add_tz(
+        db,
+        "America/Denver",
+        "Mountain Time (US)",
+        "MST7MDT,M3.2.0,M11.1.0",
+        "Americas",
+        39.7,
+        -105.0,
+    );
+    add_tz(
+        db,
+        "America/Los_Angeles",
+        "Pacific Time (US)",
+        "PST8PDT,M3.2.0,M11.1.0",
+        "Americas",
+        34.1,
+        -118.2,
+    );
+    add_tz(
+        db,
+        "America/Anchorage",
+        "Alaska Time",
+        "AKST9AKDT,M3.2.0,M11.1.0",
+        "Americas",
+        61.2,
+        -149.9,
+    );
+    add_tz(
+        db,
+        "Pacific/Honolulu",
+        "Hawaii Time",
+        "HST10",
+        "Pacific",
+        21.3,
+        -157.8,
+    );
     // Brazil abolished DST in 2019, and tzdata now prints `-03` rather than
     // `BRT`. The old row's `dst_offset_min == std_offset_min` said as much,
     // but nothing could act on it.
-    add_tz(db, "America/Sao_Paulo", "Brasilia Time", "<-03>3", "Americas", -23.5, -46.6);
-    add_tz(db, "Europe/London", "Greenwich Mean Time", "GMT0BST,M3.5.0/1,M10.5.0", "Europe", 51.5, -0.1);
-    add_tz(db, "Europe/Berlin", "Central European Time", "CET-1CEST,M3.5.0,M10.5.0/3", "Europe", 52.5, 13.4);
+    add_tz(
+        db,
+        "America/Sao_Paulo",
+        "Brasilia Time",
+        "<-03>3",
+        "Americas",
+        -23.5,
+        -46.6,
+    );
+    add_tz(
+        db,
+        "Europe/London",
+        "Greenwich Mean Time",
+        "GMT0BST,M3.5.0/1,M10.5.0",
+        "Europe",
+        51.5,
+        -0.1,
+    );
+    add_tz(
+        db,
+        "Europe/Berlin",
+        "Central European Time",
+        "CET-1CEST,M3.5.0,M10.5.0/3",
+        "Europe",
+        52.5,
+        13.4,
+    );
     // Russia abolished DST in 2011 and settled on permanent UTC+3 in 2014.
-    add_tz(db, "Europe/Moscow", "Moscow Time", "MSK-3", "Europe", 55.8, 37.6);
-    add_tz(db, "Asia/Tokyo", "Japan Standard Time", "JST-9", "Asia", 35.7, 139.7);
-    add_tz(db, "Asia/Shanghai", "China Standard Time", "CST-8", "Asia", 31.2, 121.5);
-    add_tz(db, "Asia/Kolkata", "India Standard Time", "IST-5:30", "Asia", 28.6, 77.2);
-    add_tz(db, "Asia/Dubai", "Gulf Standard Time", "<+04>-4", "Asia", 25.3, 55.3);
-    add_tz(db, "Australia/Sydney", "Australian Eastern Time", "AEST-10AEDT,M10.1.0,M4.1.0/3", "Australia", -33.9, 151.2);
-    add_tz(db, "Pacific/Auckland", "New Zealand Time", "NZST-12NZDT,M9.5.0,M4.1.0/3", "Pacific", -36.8, 174.8);
-    add_tz(db, "UTC", "Coordinated Universal Time", "UTC0", "UTC", 0.0, 0.0);
+    add_tz(
+        db,
+        "Europe/Moscow",
+        "Moscow Time",
+        "MSK-3",
+        "Europe",
+        55.8,
+        37.6,
+    );
+    add_tz(
+        db,
+        "Asia/Tokyo",
+        "Japan Standard Time",
+        "JST-9",
+        "Asia",
+        35.7,
+        139.7,
+    );
+    add_tz(
+        db,
+        "Asia/Shanghai",
+        "China Standard Time",
+        "CST-8",
+        "Asia",
+        31.2,
+        121.5,
+    );
+    add_tz(
+        db,
+        "Asia/Kolkata",
+        "India Standard Time",
+        "IST-5:30",
+        "Asia",
+        28.6,
+        77.2,
+    );
+    add_tz(
+        db,
+        "Asia/Dubai",
+        "Gulf Standard Time",
+        "<+04>-4",
+        "Asia",
+        25.3,
+        55.3,
+    );
+    add_tz(
+        db,
+        "Australia/Sydney",
+        "Australian Eastern Time",
+        "AEST-10AEDT,M10.1.0,M4.1.0/3",
+        "Australia",
+        -33.9,
+        151.2,
+    );
+    add_tz(
+        db,
+        "Pacific/Auckland",
+        "New Zealand Time",
+        "NZST-12NZDT,M9.5.0,M4.1.0/3",
+        "Pacific",
+        -36.8,
+        174.8,
+    );
+    add_tz(
+        db,
+        "UTC",
+        "Coordinated Universal Time",
+        "UTC0",
+        "UTC",
+        0.0,
+        0.0,
+    );
 
     // Default timezone.
     state.current_tz = String::from("UTC");
@@ -648,10 +812,16 @@ pub fn self_test() -> KernelResult<()> {
         assert!(tz.rule().is_some());
     }
     let all1 = list_timezones("");
-    let kolkata = all1.iter().find(|t| t.name == "Asia/Kolkata").ok_or(KernelError::NotFound)?;
+    let kolkata = all1
+        .iter()
+        .find(|t| t.name == "Asia/Kolkata")
+        .ok_or(KernelError::NotFound)?;
     assert_eq!(kolkata.std_offset_min(), 330); // the half-hour zone
     assert!(!kolkata.observes_dst());
-    let ny = all1.iter().find(|t| t.name == "America/New_York").ok_or(KernelError::NotFound)?;
+    let ny = all1
+        .iter()
+        .find(|t| t.name == "America/New_York")
+        .ok_or(KernelError::NotFound)?;
     assert_eq!(ny.std_offset_min(), -300);
     assert_eq!(ny.dst_offset_min(), -240);
     assert_eq!(ny.std_abbrev(), "EST");

@@ -26,11 +26,11 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -237,7 +237,10 @@ pub fn register_component(
 /// Remove a component.
 pub fn remove_component(id: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let idx = state.components.iter().position(|c| c.id == id)
+    let idx = state
+        .components
+        .iter()
+        .position(|c| c.id == id)
         .ok_or(KernelError::NotFound)?;
     if state.components[idx].system_critical {
         return Err(KernelError::PermissionDenied);
@@ -251,7 +254,10 @@ pub fn remove_component(id: &str) -> KernelResult<()> {
 /// Get a component.
 pub fn get_component(id: &str) -> KernelResult<Component> {
     let state = STATE.lock();
-    state.components.iter().find(|c| c.id == id)
+    state
+        .components
+        .iter()
+        .find(|c| c.id == id)
         .cloned()
         .ok_or(KernelError::NotFound)
 }
@@ -275,7 +281,10 @@ pub fn add_param(
     requires_full_rebuild: bool,
 ) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let comp = state.components.iter_mut().find(|c| c.id == component_id)
+    let comp = state
+        .components
+        .iter_mut()
+        .find(|c| c.id == component_id)
         .ok_or(KernelError::NotFound)?;
     if comp.params.len() >= MAX_PARAMS_PER_COMPONENT {
         return Err(KernelError::ResourceExhausted);
@@ -298,9 +307,15 @@ pub fn add_param(
 /// Set a build parameter value.
 pub fn set_param(component_id: &str, key: &str, value: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let comp = state.components.iter_mut().find(|c| c.id == component_id)
+    let comp = state
+        .components
+        .iter_mut()
+        .find(|c| c.id == component_id)
         .ok_or(KernelError::NotFound)?;
-    let param = comp.params.iter_mut().find(|p| p.key == key)
+    let param = comp
+        .params
+        .iter_mut()
+        .find(|p| p.key == key)
         .ok_or(KernelError::NotFound)?;
     // Validate against allowed values if restricted.
     if !param.allowed.is_empty() && !param.allowed.iter().any(|a| a == value) {
@@ -315,9 +330,15 @@ pub fn set_param(component_id: &str, key: &str, value: &str) -> KernelResult<()>
 /// Reset a parameter to its default.
 pub fn reset_param(component_id: &str, key: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let comp = state.components.iter_mut().find(|c| c.id == component_id)
+    let comp = state
+        .components
+        .iter_mut()
+        .find(|c| c.id == component_id)
         .ok_or(KernelError::NotFound)?;
-    let param = comp.params.iter_mut().find(|p| p.key == key)
+    let param = comp
+        .params
+        .iter_mut()
+        .find(|p| p.key == key)
         .ok_or(KernelError::NotFound)?;
     let default = param.default_value.clone();
     param.value = default;
@@ -328,7 +349,10 @@ pub fn reset_param(component_id: &str, key: &str) -> KernelResult<()> {
 /// Reset all parameters to defaults.
 pub fn reset_all_params(component_id: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let comp = state.components.iter_mut().find(|c| c.id == component_id)
+    let comp = state
+        .components
+        .iter_mut()
+        .find(|c| c.id == component_id)
         .ok_or(KernelError::NotFound)?;
     for param in &mut comp.params {
         let default = param.default_value.clone();
@@ -345,7 +369,10 @@ pub fn reset_all_params(component_id: &str) -> KernelResult<()> {
 /// Set optimisation level.
 pub fn set_opt_level(component_id: &str, level: OptLevel) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let comp = state.components.iter_mut().find(|c| c.id == component_id)
+    let comp = state
+        .components
+        .iter_mut()
+        .find(|c| c.id == component_id)
         .ok_or(KernelError::NotFound)?;
     comp.opt_level = level;
     state.changes += 1;
@@ -355,7 +382,10 @@ pub fn set_opt_level(component_id: &str, level: OptLevel) -> KernelResult<()> {
 /// Set auto-rebuild flag.
 pub fn set_auto_rebuild(component_id: &str, auto_rebuild: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let comp = state.components.iter_mut().find(|c| c.id == component_id)
+    let comp = state
+        .components
+        .iter_mut()
+        .find(|c| c.id == component_id)
         .ok_or(KernelError::NotFound)?;
     comp.auto_rebuild = auto_rebuild;
     state.changes += 1;
@@ -369,7 +399,10 @@ pub fn add_dependency(component_id: &str, dep_id: &str) -> KernelResult<()> {
     if !state.components.iter().any(|c| c.id == dep_id) {
         return Err(KernelError::NotFound);
     }
-    let comp = state.components.iter_mut().find(|c| c.id == component_id)
+    let comp = state
+        .components
+        .iter_mut()
+        .find(|c| c.id == component_id)
         .ok_or(KernelError::NotFound)?;
     if comp.dependencies.iter().any(|d| d == dep_id) {
         return Err(KernelError::AlreadyExists);
@@ -382,11 +415,14 @@ pub fn add_dependency(component_id: &str, dep_id: &str) -> KernelResult<()> {
 /// Simulate source change detection.
 pub fn detect_source_change(component_id: &str, new_hash: u64) -> KernelResult<bool> {
     let mut state = STATE.lock();
-    let comp = state.components.iter_mut().find(|c| c.id == component_id)
+    let comp = state
+        .components
+        .iter_mut()
+        .find(|c| c.id == component_id)
         .ok_or(KernelError::NotFound)?;
     comp.current_source_hash = new_hash;
-    let changed = comp.current_source_hash != comp.last_source_hash
-        && comp.status != BuildStatus::NeverBuilt;
+    let changed =
+        comp.current_source_hash != comp.last_source_hash && comp.status != BuildStatus::NeverBuilt;
     if changed {
         comp.status = BuildStatus::SourceChanged;
     }
@@ -396,7 +432,10 @@ pub fn detect_source_change(component_id: &str, new_hash: u64) -> KernelResult<b
 /// Check if source has changed since last build.
 pub fn source_changed(component_id: &str) -> KernelResult<bool> {
     let state = STATE.lock();
-    let comp = state.components.iter().find(|c| c.id == component_id)
+    let comp = state
+        .components
+        .iter()
+        .find(|c| c.id == component_id)
         .ok_or(KernelError::NotFound)?;
     Ok(comp.status == BuildStatus::SourceChanged
         || (comp.status != BuildStatus::NeverBuilt
@@ -406,10 +445,14 @@ pub fn source_changed(component_id: &str) -> KernelResult<bool> {
 /// Scan all components for source changes.
 pub fn scan_changed() -> Vec<String> {
     let state = STATE.lock();
-    state.components.iter()
-        .filter(|c| c.status == BuildStatus::SourceChanged
-            || (c.status != BuildStatus::NeverBuilt
-                && c.current_source_hash != c.last_source_hash))
+    state
+        .components
+        .iter()
+        .filter(|c| {
+            c.status == BuildStatus::SourceChanged
+                || (c.status != BuildStatus::NeverBuilt
+                    && c.current_source_hash != c.last_source_hash)
+        })
         .map(|c| c.id.clone())
         .collect()
 }
@@ -418,11 +461,16 @@ pub fn scan_changed() -> Vec<String> {
 pub fn build(component_id: &str) -> KernelResult<()> {
     let timestamp = crate::hpet::elapsed_ns();
     let mut state = STATE.lock();
-    let comp = state.components.iter_mut().find(|c| c.id == component_id)
+    let comp = state
+        .components
+        .iter_mut()
+        .find(|c| c.id == component_id)
         .ok_or(KernelError::NotFound)?;
 
     // Capture params snapshot.
-    let params_snapshot: Vec<(String, String)> = comp.params.iter()
+    let params_snapshot: Vec<(String, String)> = comp
+        .params
+        .iter()
         .map(|p| (p.key.clone(), p.value.clone()))
         .collect();
     let cid = comp.id.clone();
@@ -458,10 +506,15 @@ pub fn build(component_id: &str) -> KernelResult<()> {
 pub fn record_build_failure(component_id: &str, error_msg: &str) -> KernelResult<()> {
     let timestamp = crate::hpet::elapsed_ns();
     let mut state = STATE.lock();
-    let comp = state.components.iter_mut().find(|c| c.id == component_id)
+    let comp = state
+        .components
+        .iter_mut()
+        .find(|c| c.id == component_id)
         .ok_or(KernelError::NotFound)?;
 
-    let params_snapshot: Vec<(String, String)> = comp.params.iter()
+    let params_snapshot: Vec<(String, String)> = comp
+        .params
+        .iter()
         .map(|p| (p.key.clone(), p.value.clone()))
         .collect();
     let cid = comp.id.clone();
@@ -487,7 +540,10 @@ pub fn record_build_failure(component_id: &str, error_msg: &str) -> KernelResult
 
 /// Get build logs for a component.
 pub fn build_logs(component_id: &str) -> Vec<BuildLog> {
-    STATE.lock().build_logs.iter()
+    STATE
+        .lock()
+        .build_logs
+        .iter()
         .filter(|l| l.component_id == component_id)
         .cloned()
         .collect()
@@ -584,16 +640,14 @@ pub fn init_defaults() {
             comp_type: ComponentType::KernelModule,
             source_dir: String::from("/src/drivers"),
             output_path: String::from("/lib/drivers/"),
-            params: vec![
-                BuildParam {
-                    key: String::from("virtio"),
-                    description: String::from("Enable virtio drivers"),
-                    value: String::from("true"),
-                    default_value: String::from("true"),
-                    allowed: vec![String::from("true"), String::from("false")],
-                    requires_full_rebuild: false,
-                },
-            ],
+            params: vec![BuildParam {
+                key: String::from("virtio"),
+                description: String::from("Enable virtio drivers"),
+                value: String::from("true"),
+                default_value: String::from("true"),
+                allowed: vec![String::from("true"), String::from("false")],
+                requires_full_rebuild: false,
+            }],
             status: BuildStatus::UpToDate,
             last_source_hash: hash_drivers,
             current_source_hash: hash_drivers,
@@ -611,20 +665,18 @@ pub fn init_defaults() {
             comp_type: ComponentType::SystemService,
             source_dir: String::from("/src/compositor"),
             output_path: String::from("/usr/lib/compositor"),
-            params: vec![
-                BuildParam {
-                    key: String::from("gpu_backend"),
-                    description: String::from("GPU rendering backend"),
-                    value: String::from("vulkan"),
-                    default_value: String::from("vulkan"),
-                    allowed: vec![
-                        String::from("vulkan"),
-                        String::from("opengl"),
-                        String::from("software"),
-                    ],
-                    requires_full_rebuild: true,
-                },
-            ],
+            params: vec![BuildParam {
+                key: String::from("gpu_backend"),
+                description: String::from("GPU rendering backend"),
+                value: String::from("vulkan"),
+                default_value: String::from("vulkan"),
+                allowed: vec![
+                    String::from("vulkan"),
+                    String::from("opengl"),
+                    String::from("software"),
+                ],
+                requires_full_rebuild: true,
+            }],
             status: BuildStatus::UpToDate,
             last_source_hash: hash_compositor,
             current_source_hash: hash_compositor,
@@ -678,16 +730,14 @@ pub fn init_defaults() {
             comp_type: ComponentType::Bootloader,
             source_dir: String::from("/src/boot"),
             output_path: String::from("/boot/efi/boot.efi"),
-            params: vec![
-                BuildParam {
-                    key: String::from("secure_boot"),
-                    description: String::from("Sign for Secure Boot"),
-                    value: String::from("false"),
-                    default_value: String::from("false"),
-                    allowed: vec![String::from("true"), String::from("false")],
-                    requires_full_rebuild: true,
-                },
-            ],
+            params: vec![BuildParam {
+                key: String::from("secure_boot"),
+                description: String::from("Sign for Secure Boot"),
+                value: String::from("false"),
+                default_value: String::from("false"),
+                allowed: vec![String::from("true"), String::from("false")],
+                requires_full_rebuild: true,
+            }],
             status: BuildStatus::UpToDate,
             last_source_hash: hash_boot,
             current_source_hash: hash_boot,
@@ -709,13 +759,22 @@ pub fn init_defaults() {
 /// Return (component_count, built_count, changed_count, ops).
 pub fn stats() -> (usize, usize, usize, u64) {
     let state = STATE.lock();
-    let built = state.components.iter()
+    let built = state
+        .components
+        .iter()
         .filter(|c| c.status == BuildStatus::UpToDate)
         .count();
-    let changed = state.components.iter()
+    let changed = state
+        .components
+        .iter()
         .filter(|c| c.status == BuildStatus::SourceChanged)
         .count();
-    (state.components.len(), built, changed, OP_COUNT.load(Ordering::Relaxed))
+    (
+        state.components.len(),
+        built,
+        changed,
+        OP_COUNT.load(Ordering::Relaxed),
+    )
 }
 
 pub fn reset_stats() {
@@ -741,8 +800,13 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: register component.
     serial_println!("kernelbuild::self_test 1: register");
-    register_component("test-kern", "Test Kernel", ComponentType::Kernel,
-        "/src/test", "/boot/test")?;
+    register_component(
+        "test-kern",
+        "Test Kernel",
+        ComponentType::Kernel,
+        "/src/test",
+        "/boot/test",
+    )?;
     let comp = get_component("test-kern")?;
     assert_eq!(comp.name, "Test Kernel");
     assert_eq!(comp.status, BuildStatus::NeverBuilt);
@@ -750,13 +814,27 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 2: duplicate registration.
     serial_println!("kernelbuild::self_test 2: duplicate");
-    assert!(register_component("test-kern", "Dup", ComponentType::Kernel,
-        "/src/dup", "/boot/dup").is_err());
+    assert!(
+        register_component(
+            "test-kern",
+            "Dup",
+            ComponentType::Kernel,
+            "/src/dup",
+            "/boot/dup"
+        )
+        .is_err()
+    );
 
     // Test 3: add parameter.
     serial_println!("kernelbuild::self_test 3: parameters");
-    add_param("test-kern", "page_size", "Page size", "16384",
-        &["4096", "16384", "65536"], true)?;
+    add_param(
+        "test-kern",
+        "page_size",
+        "Page size",
+        "16384",
+        &["4096", "16384", "65536"],
+        true,
+    )?;
     let comp = get_component("test-kern")?;
     assert_eq!(comp.params.len(), 1);
     assert_eq!(comp.params[0].value, "16384");
@@ -814,8 +892,13 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("kernelbuild::self_test 10: remove");
     assert!(remove_component("test-kern").is_err());
     // Register and remove non-critical.
-    register_component("test-util", "Util", ComponentType::CoreUtility,
-        "/src/util", "/bin/util")?;
+    register_component(
+        "test-util",
+        "Util",
+        ComponentType::CoreUtility,
+        "/src/util",
+        "/bin/util",
+    )?;
     remove_component("test-util")?;
     assert!(get_component("test-util").is_err());
 

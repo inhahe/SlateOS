@@ -37,9 +37,9 @@
 //! - Yu Zhao, "Multi-Gen LRU" (Linux 6.1+)
 //! - Intel SDM Vol. 3A §4.8 "Accessed and Dirty Flags"
 
-use core::sync::atomic::{AtomicU64, AtomicU32, Ordering};
-use crate::serial_println;
 use crate::mm::page_table;
+use crate::serial_println;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -239,9 +239,7 @@ pub fn scan_cycle() -> (u32, u32) {
         }
 
         // Walk the page table to find the leaf PTE for this mapping.
-        let pte_result = read_and_clear_accessed(
-            entry.pml4_phys, entry.virt_addr, hhdm
-        );
+        let pte_result = read_and_clear_accessed(entry.pml4_phys, entry.virt_addr, hhdm);
 
         match pte_result {
             Some((accessed, is_dirty)) => {
@@ -436,7 +434,9 @@ fn read_and_clear_accessed(pml4_phys: u64, virt_addr: u64, hhdm: u64) -> Option<
     if accessed {
         let new_pte = pte & !(1u64 << 5);
         // SAFETY: Writing a valid PTE value (only clearing Accessed bit).
-        unsafe { pt_ptr.add(pt_idx).write_volatile(new_pte); }
+        unsafe {
+            pt_ptr.add(pt_idx).write_volatile(new_pte);
+        }
         // Note: TLB flush for this address is deferred to the caller.
         // The slight staleness is acceptable for aging — a few extra cycles
         // of "hot" detection is not harmful.
@@ -497,7 +497,11 @@ pub fn self_test() {
     let (hot, cold) = scan_cycle();
     // All pages should be removed (zeroed PML4 → bit 0 = 0 → None).
     assert_eq!(ACTIVE_COUNT.load(Ordering::Relaxed), 0);
-    serial_println!("[page_age]   Scan with empty PTEs: OK (hot={}, cold={}, removed 10)", hot, cold);
+    serial_println!(
+        "[page_age]   Scan with empty PTEs: OK (hot={}, cold={}, removed 10)",
+        hot,
+        cold
+    );
 
     // Test 6: Age histogram on empty table.
     let hist = age_histogram();
@@ -520,8 +524,13 @@ pub fn self_test() {
     let s = stats();
     assert_eq!(s.tracked_pages, 0);
     assert!(s.scan_cycles >= 1);
-    serial_println!("[page_age]   Stats: cycles={}, hot={}, cold={}, dirty={}",
-        s.scan_cycles, s.hot_pages_found, s.cold_pages_found, s.dirty_pages_found);
+    serial_println!(
+        "[page_age]   Stats: cycles={}, hot={}, cold={}, dirty={}",
+        s.scan_cycles,
+        s.hot_pages_found,
+        s.cold_pages_found,
+        s.dirty_pages_found
+    );
 
     // Cleanup: free the test PML4 frame.
     // SAFETY: We allocated this frame above, it's not mapped anywhere.

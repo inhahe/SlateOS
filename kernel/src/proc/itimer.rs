@@ -76,8 +76,7 @@ struct RealTimer {
 /// All armed `ITIMER_REAL` timers, keyed by owning process.
 ///
 /// Absent key ⇒ the process has no real timer armed.
-static REAL_TIMERS: Mutex<BTreeMap<ProcessId, RealTimer>> =
-    Mutex::new(BTreeMap::new());
+static REAL_TIMERS: Mutex<BTreeMap<ProcessId, RealTimer>> = Mutex::new(BTreeMap::new());
 
 /// Run `f` with the [`REAL_TIMERS`] lock held and interrupts disabled.
 ///
@@ -106,8 +105,7 @@ fn real_fire(arg: u64) {
             if entry.interval_ns > 0 {
                 // Periodic: the hrtimer layer has already re-armed itself
                 // (same handle id). Track the next expiry for get_real.
-                entry.expiry_ns =
-                    hrtimer::now_ns().saturating_add(entry.interval_ns);
+                entry.expiry_ns = hrtimer::now_ns().saturating_add(entry.interval_ns);
             } else {
                 // One-shot: the hrtimer entry is gone; drop ours too.
                 map.remove(&pid);
@@ -133,11 +131,7 @@ fn real_fire(arg: u64) {
 /// `value_ns` is the time until first expiry; `interval_ns` is the re-arm
 /// period (0 = one-shot). Arming always cancels and replaces any existing
 /// timer for `pid` (POSIX: a process has exactly one ITIMER_REAL).
-pub fn set_real(
-    pid: ProcessId,
-    value_ns: u64,
-    interval_ns: u64,
-) -> (u64, u64) {
+pub fn set_real(pid: ProcessId, value_ns: u64, interval_ns: u64) -> (u64, u64) {
     let now = hrtimer::now_ns();
     with_real(|map| {
         // Read + remove the old timer, cancelling its hrtimer.
@@ -155,9 +149,7 @@ pub fn set_real(
             // Arm a fresh timer. schedule_repeating with interval 0 is a
             // plain one-shot; the hrtimer layer re-arms periodic timers
             // itself, so real_fire never re-schedules.
-            let handle = hrtimer::schedule_repeating(
-                value_ns, interval_ns, real_fire, pid,
-            );
+            let handle = hrtimer::schedule_repeating(value_ns, interval_ns, real_fire, pid);
             map.insert(
                 pid,
                 RealTimer {
@@ -268,10 +260,7 @@ pub fn self_test() -> KernelResult<()> {
     check(ns_to_secs_ceil(0) == 0, "ceil(0)==0")?;
     check(ns_to_secs_ceil(1) == 1, "ceil(1ns)==1")?;
     check(ns_to_secs_ceil(NS_PER_SEC) == 1, "ceil(1s)==1")?;
-    check(
-        ns_to_secs_ceil(NS_PER_SEC + 1) == 2,
-        "ceil(1s+1ns)==2",
-    )?;
+    check(ns_to_secs_ceil(NS_PER_SEC + 1) == 2, "ceil(1s+1ns)==2")?;
     serial_println!("[itimer]   timeval conversions: OK");
 
     // --- arm + get + replace + cancel (one-shot) ---
@@ -296,7 +285,10 @@ pub fn self_test() -> KernelResult<()> {
     )?;
     let (rem3, iv3) = get_real(p);
     check(iv3 == 2 * NS_PER_SEC, "new interval 2s")?;
-    check(rem3 > 4 * NS_PER_SEC && rem3 <= 5 * NS_PER_SEC, "new remaining ~5s")?;
+    check(
+        rem3 > 4 * NS_PER_SEC && rem3 <= 5 * NS_PER_SEC,
+        "new remaining ~5s",
+    )?;
     // Cancel and confirm disarmed.
     cancel_real(p);
     check(get_real(p) == (0, 0), "cancelled -> disarmed")?;
@@ -313,7 +305,10 @@ pub fn self_test() -> KernelResult<()> {
     // into the hrtimer pending list (the hrtimer self-test would later flag
     // the stray timer).
     let pf_handle = with_real(|m| m.get(&pf).map(|t| t.handle));
-    check(signal::pending(pf) & (1 << (SIGALRM - 1)) == 0, "no SIGALRM yet")?;
+    check(
+        signal::pending(pf) & (1 << (SIGALRM - 1)) == 0,
+        "no SIGALRM yet",
+    )?;
     real_fire(pf);
     check(
         signal::pending(pf) & (1 << (SIGALRM - 1)) != 0,
@@ -341,7 +336,10 @@ pub fn self_test() -> KernelResult<()> {
     let (rem_p, iv_p) = get_real(pp);
     check(iv_p == 10 * NS_PER_SEC, "periodic interval preserved")?;
     // After firing, a periodic timer's remaining resets to ~interval.
-    check(rem_p > 9 * NS_PER_SEC && rem_p <= 10 * NS_PER_SEC, "periodic re-armed ~10s")?;
+    check(
+        rem_p > 9 * NS_PER_SEC && rem_p <= 10 * NS_PER_SEC,
+        "periodic re-armed ~10s",
+    )?;
     cancel_real(pp);
     signal::remove(pp);
     check(get_real(pp) == (0, 0), "periodic cancelled")?;

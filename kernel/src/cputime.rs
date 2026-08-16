@@ -157,7 +157,9 @@ pub fn init() {
 #[inline]
 pub fn enter_irq() {
     let cpu = smp::current_cpu_index();
-    let Some(data) = CPU_TIME.get(cpu) else { return };
+    let Some(data) = CPU_TIME.get(cpu) else {
+        return;
+    };
 
     let now = bench::rdtsc();
 
@@ -185,7 +187,9 @@ pub fn enter_irq() {
 #[inline]
 pub fn exit_irq() {
     let cpu = smp::current_cpu_index();
-    let Some(data) = CPU_TIME.get(cpu) else { return };
+    let Some(data) = CPU_TIME.get(cpu) else {
+        return;
+    };
 
     let depth = data.irq_depth.load(Ordering::Relaxed);
     if depth == 0 {
@@ -247,9 +251,12 @@ pub fn irq_depth() -> u64 {
 #[inline]
 pub fn enter_softirq() {
     let cpu = smp::current_cpu_index();
-    let Some(data) = CPU_TIME.get(cpu) else { return };
+    let Some(data) = CPU_TIME.get(cpu) else {
+        return;
+    };
 
-    data.softirq_enter_tsc.store(bench::rdtsc(), Ordering::Relaxed);
+    data.softirq_enter_tsc
+        .store(bench::rdtsc(), Ordering::Relaxed);
     data.softirq_count.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -259,7 +266,9 @@ pub fn enter_softirq() {
 #[inline]
 pub fn exit_softirq() {
     let cpu = smp::current_cpu_index();
-    let Some(data) = CPU_TIME.get(cpu) else { return };
+    let Some(data) = CPU_TIME.get(cpu) else {
+        return;
+    };
 
     let enter = data.softirq_enter_tsc.swap(0, Ordering::Relaxed);
     if enter != 0 {
@@ -279,7 +288,9 @@ pub fn exit_softirq() {
 #[inline]
 pub fn enter_idle() {
     let cpu = smp::current_cpu_index();
-    let Some(data) = CPU_TIME.get(cpu) else { return };
+    let Some(data) = CPU_TIME.get(cpu) else {
+        return;
+    };
 
     data.idle_enter_tsc.store(bench::rdtsc(), Ordering::Relaxed);
     data.idle_count.fetch_add(1, Ordering::Relaxed);
@@ -291,7 +302,9 @@ pub fn enter_idle() {
 #[inline]
 pub fn exit_idle() {
     let cpu = smp::current_cpu_index();
-    let Some(data) = CPU_TIME.get(cpu) else { return };
+    let Some(data) = CPU_TIME.get(cpu) else {
+        return;
+    };
 
     let enter = data.idle_enter_tsc.swap(0, Ordering::Relaxed);
     if enter != 0 {

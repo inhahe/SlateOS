@@ -46,8 +46,8 @@
 //! - Windows Object Manager — handle/object tracking
 //! - seL4 object creation bookkeeping
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Object types
@@ -96,10 +96,18 @@ impl ObjType {
     /// Iterate all types.
     pub fn all() -> &'static [ObjType; Self::COUNT] {
         &[
-            Self::Task, Self::Process, Self::Channel, Self::Pipe,
-            Self::SharedMemory, Self::Eventfd, Self::CompletionPort,
-            Self::Capability, Self::Timer, Self::DmaBuffer,
-            Self::Futex, Self::IoRing,
+            Self::Task,
+            Self::Process,
+            Self::Channel,
+            Self::Pipe,
+            Self::SharedMemory,
+            Self::Eventfd,
+            Self::CompletionPort,
+            Self::Capability,
+            Self::Timer,
+            Self::DmaBuffer,
+            Self::Futex,
+            Self::IoRing,
         ]
     }
 }
@@ -129,10 +137,18 @@ impl TypeCounters {
 }
 
 static COUNTERS: [TypeCounters; ObjType::COUNT] = [
-    TypeCounters::new(), TypeCounters::new(), TypeCounters::new(),
-    TypeCounters::new(), TypeCounters::new(), TypeCounters::new(),
-    TypeCounters::new(), TypeCounters::new(), TypeCounters::new(),
-    TypeCounters::new(), TypeCounters::new(), TypeCounters::new(),
+    TypeCounters::new(),
+    TypeCounters::new(),
+    TypeCounters::new(),
+    TypeCounters::new(),
+    TypeCounters::new(),
+    TypeCounters::new(),
+    TypeCounters::new(),
+    TypeCounters::new(),
+    TypeCounters::new(),
+    TypeCounters::new(),
+    TypeCounters::new(),
+    TypeCounters::new(),
 ];
 
 // ---------------------------------------------------------------------------
@@ -155,9 +171,10 @@ pub fn created(typ: ObjType) {
                 break;
             }
             // Try to update (CAS loop for correctness).
-            if c.high_water.compare_exchange_weak(
-                current_hw, active, Ordering::Relaxed, Ordering::Relaxed
-            ).is_ok() {
+            if c.high_water
+                .compare_exchange_weak(current_hw, active, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
                 break;
             }
         }
@@ -313,7 +330,10 @@ pub fn self_test() {
     // Test 5: Potential leaks.
     let leaks = potential_leaks();
     assert_eq!(leaks.len(), 3); // Task, Channel, Pipe all have active > 0
-    serial_println!("[kobject]   Leak detection: OK ({} types with active objects)", leaks.len());
+    serial_println!(
+        "[kobject]   Leak detection: OK ({} types with active objects)",
+        leaks.len()
+    );
 
     // Test 6: High water mark tracks peak.
     created(ObjType::Timer);

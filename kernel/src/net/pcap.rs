@@ -51,12 +51,12 @@
 //! - No BPF bytecode filter — only simple protocol/port matching.
 //! - Single capture session at a time.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::error::KernelResult;
 
@@ -182,8 +182,7 @@ impl CaptureFilter {
             return self.ethertype == 0 && self.ip_proto == 0 && self.port == 0;
         }
 
-        let etype = (*data.get(12).unwrap_or(&0) as u16) << 8
-            | *data.get(13).unwrap_or(&0) as u16;
+        let etype = (*data.get(12).unwrap_or(&0) as u16) << 8 | *data.get(13).unwrap_or(&0) as u16;
 
         // EtherType filter.
         if self.ethertype != 0 && etype != self.ethertype {
@@ -228,7 +227,8 @@ impl CaptureFilter {
             }
             let src_port = (*data.get(transport_offset).unwrap_or(&0) as u16) << 8
                 | *data.get(transport_offset.saturating_add(1)).unwrap_or(&0) as u16;
-            let dst_port = (*data.get(transport_offset.saturating_add(2)).unwrap_or(&0) as u16) << 8
+            let dst_port = (*data.get(transport_offset.saturating_add(2)).unwrap_or(&0) as u16)
+                << 8
                 | *data.get(transport_offset.saturating_add(3)).unwrap_or(&0) as u16;
             if src_port != self.port && dst_port != self.port {
                 return false;
@@ -264,7 +264,8 @@ impl CaptureFilter {
             }
             let src_port = (*data.get(transport_offset).unwrap_or(&0) as u16) << 8
                 | *data.get(transport_offset.saturating_add(1)).unwrap_or(&0) as u16;
-            let dst_port = (*data.get(transport_offset.saturating_add(2)).unwrap_or(&0) as u16) << 8
+            let dst_port = (*data.get(transport_offset.saturating_add(2)).unwrap_or(&0) as u16)
+                << 8
                 | *data.get(transport_offset.saturating_add(3)).unwrap_or(&0) as u16;
             if src_port != self.port && dst_port != self.port {
                 return false;
@@ -364,8 +365,11 @@ pub fn start(filter: CaptureFilter) {
     TX_CAPTURED.store(0, Ordering::Relaxed);
 
     CAPTURING.store(true, Ordering::Relaxed);
-    crate::serial_println!("[pcap] Capture started (snaplen={}, ring={})",
-        SNAPLEN.load(Ordering::Relaxed), state.capacity);
+    crate::serial_println!(
+        "[pcap] Capture started (snaplen={}, ring={})",
+        SNAPLEN.load(Ordering::Relaxed),
+        state.capacity
+    );
 }
 
 /// Stop capturing packets.
@@ -527,7 +531,7 @@ fn write_packet_record(buf: &mut Vec<u8>, pkt: &CapturedPacket) {
     write_u32_le(buf, pkt.ts_sec);
     write_u32_le(buf, pkt.ts_usec);
     write_u32_le(buf, pkt.data.len() as u32); // incl_len
-    write_u32_le(buf, pkt.orig_len);          // orig_len
+    write_u32_le(buf, pkt.orig_len); // orig_len
     buf.extend_from_slice(&pkt.data);
 }
 
@@ -583,12 +587,19 @@ pub fn procfs_content() -> String {
     out.push_str("Packet Capture\n");
     out.push_str("==============\n\n");
 
-    out.push_str(&format!("Status:    {}\n",
-        if s.capturing { "CAPTURING" } else { "idle" }));
+    out.push_str(&format!(
+        "Status:    {}\n",
+        if s.capturing { "CAPTURING" } else { "idle" }
+    ));
     out.push_str(&format!("Snaplen:   {} bytes\n", s.snaplen));
-    out.push_str(&format!("Ring:      {}/{} packets\n", s.ring_used, s.ring_capacity));
-    out.push_str(&format!("Captured:  {} ({} RX, {} TX)\n",
-        s.total_captured, s.rx_captured, s.tx_captured));
+    out.push_str(&format!(
+        "Ring:      {}/{} packets\n",
+        s.ring_used, s.ring_capacity
+    ));
+    out.push_str(&format!(
+        "Captured:  {} ({} RX, {} TX)\n",
+        s.total_captured, s.rx_captured, s.tx_captured
+    ));
     out.push_str(&format!("Filtered:  {}\n", s.total_filtered));
     out.push_str(&format!("Dropped:   {}\n", s.total_dropped));
 
@@ -614,7 +625,10 @@ pub fn self_test() -> KernelResult<()> {
         assert!(buf.len() == PCAP_FILE_HEADER_SIZE, "file header size");
 
         // Check magic number (little-endian).
-        assert!(buf.get(0..4) == Some(&[0xd4, 0xc3, 0xb2, 0xa1][..]), "magic number");
+        assert!(
+            buf.get(0..4) == Some(&[0xd4, 0xc3, 0xb2, 0xa1][..]),
+            "magic number"
+        );
 
         // Version 2.4.
         assert!(buf.get(4..6) == Some(&[2, 0][..]), "version major");
@@ -648,7 +662,10 @@ pub fn self_test() -> KernelResult<()> {
         // incl_len = 3.
         assert!(buf.get(8..12) == Some(&3u32.to_le_bytes()[..]), "incl_len");
         // orig_len = 10.
-        assert!(buf.get(12..16) == Some(&10u32.to_le_bytes()[..]), "orig_len");
+        assert!(
+            buf.get(12..16) == Some(&10u32.to_le_bytes()[..]),
+            "orig_len"
+        );
         // Data.
         assert!(buf.get(16..19) == Some(&[0xAA, 0xBB, 0xCC][..]), "data");
 
@@ -733,7 +750,10 @@ pub fn self_test() -> KernelResult<()> {
         drop(state);
 
         let data = export();
-        assert!(data.len() == PCAP_FILE_HEADER_SIZE, "empty export = header only");
+        assert!(
+            data.len() == PCAP_FILE_HEADER_SIZE,
+            "empty export = header only"
+        );
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[pcap]   test 6 (empty export) PASSED");
@@ -798,7 +818,10 @@ pub fn self_test() -> KernelResult<()> {
         https_frame[37] = 0xBB; // port 443
         https_frame[34] = 0x01;
         https_frame[35] = 0xBC; // src port 444
-        assert!(!f.matches(&https_frame), "port 443 doesn't match port 80 filter");
+        assert!(
+            !f.matches(&https_frame),
+            "port 443 doesn't match port 80 filter"
+        );
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[pcap]   test 9 (port filter) PASSED");

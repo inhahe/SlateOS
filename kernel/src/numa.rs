@@ -42,9 +42,9 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicBool, Ordering};
 use crate::serial_println;
 use crate::smp;
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -66,7 +66,7 @@ const MAX_CPUS: usize = smp::MAX_CPUS;
 /// SRAT table header (standard ACPI header).
 #[repr(C, packed)]
 struct SratHeader {
-    signature: [u8; 4],     // "SRAT"
+    signature: [u8; 4], // "SRAT"
     length: u32,
     revision: u8,
     checksum: u8,
@@ -76,7 +76,7 @@ struct SratHeader {
     creator_id: u32,
     creator_revision: u32,
     // SRAT-specific fields after standard header
-    table_revision: u32,    // must be 1
+    table_revision: u32, // must be 1
     reserved: u32,
 }
 
@@ -90,39 +90,39 @@ struct SratSubHeader {
 /// Processor Local APIC Affinity (SRAT type 0).
 #[repr(C, packed)]
 struct ProcessorLocalApicAffinity {
-    header: SratSubHeader,          // type=0, length=16
-    proximity_domain_lo: u8,        // Low byte of proximity domain
-    apic_id: u8,                    // Local APIC ID
-    flags: u32,                     // Bit 0: enabled
-    local_sapic_eid: u8,            // Local SAPIC EID (ignore on x86)
-    proximity_domain_hi: [u8; 3],   // High 3 bytes of proximity domain
-    clock_domain: u32,              // Clock domain
+    header: SratSubHeader,        // type=0, length=16
+    proximity_domain_lo: u8,      // Low byte of proximity domain
+    apic_id: u8,                  // Local APIC ID
+    flags: u32,                   // Bit 0: enabled
+    local_sapic_eid: u8,          // Local SAPIC EID (ignore on x86)
+    proximity_domain_hi: [u8; 3], // High 3 bytes of proximity domain
+    clock_domain: u32,            // Clock domain
 }
 
 /// Memory Affinity (SRAT type 1).
 #[repr(C, packed)]
 struct MemoryAffinity {
-    header: SratSubHeader,          // type=1, length=40
-    proximity_domain: u32,          // Proximity domain
+    header: SratSubHeader, // type=1, length=40
+    proximity_domain: u32, // Proximity domain
     _reserved1: u16,
-    base_address_lo: u32,           // Base address low 32 bits
-    base_address_hi: u32,           // Base address high 32 bits
-    length_lo: u32,                 // Length low 32 bits
-    length_hi: u32,                 // Length high 32 bits
+    base_address_lo: u32, // Base address low 32 bits
+    base_address_hi: u32, // Base address high 32 bits
+    length_lo: u32,       // Length low 32 bits
+    length_hi: u32,       // Length high 32 bits
     _reserved2: u32,
-    flags: u32,                     // Bit 0: enabled, bit 1: hot-pluggable, bit 2: non-volatile
+    flags: u32, // Bit 0: enabled, bit 1: hot-pluggable, bit 2: non-volatile
     _reserved3: u64,
 }
 
 /// Processor Local x2APIC Affinity (SRAT type 2).
 #[repr(C, packed)]
 struct ProcessorX2ApicAffinity {
-    header: SratSubHeader,          // type=2, length=24
+    header: SratSubHeader, // type=2, length=24
     _reserved1: u16,
-    proximity_domain: u32,          // Full 32-bit proximity domain
-    x2apic_id: u32,                 // x2APIC ID
-    flags: u32,                     // Bit 0: enabled
-    clock_domain: u32,              // Clock domain
+    proximity_domain: u32, // Full 32-bit proximity domain
+    x2apic_id: u32,        // x2APIC ID
+    flags: u32,            // Bit 0: enabled
+    clock_domain: u32,     // Clock domain
     _reserved2: u32,
 }
 
@@ -161,7 +161,11 @@ impl NumaNode {
     const fn new() -> Self {
         Self {
             present: AtomicBool::new(false),
-            regions: [NumaMemRegion { base: 0, length: 0, hotplug: false }; MAX_REGIONS_PER_NODE],
+            regions: [NumaMemRegion {
+                base: 0,
+                length: 0,
+                hotplug: false,
+            }; MAX_REGIONS_PER_NODE],
             region_count: AtomicU8::new(0),
             cpu_count: AtomicU8::new(0),
             total_memory: AtomicU64::new(0),
@@ -210,7 +214,8 @@ pub fn init() {
             let count = NODE_COUNT.load(Ordering::Relaxed);
             serial_println!(
                 "[numa] SRAT parsed: {} NUMA node{} detected",
-                count, if count == 1 { "" } else { "s" }
+                count,
+                if count == 1 { "" } else { "s" }
             );
             log_topology();
             return;
@@ -225,7 +230,8 @@ pub fn init() {
 #[inline]
 #[must_use]
 pub fn cpu_node(cpu: usize) -> usize {
-    CPU_TO_NODE.get(cpu)
+    CPU_TO_NODE
+        .get(cpu)
         .map_or(0, |n| n.load(Ordering::Relaxed) as usize)
 }
 
@@ -263,9 +269,7 @@ pub fn phys_to_node(phys_addr: u64) -> Option<usize> {
         let count = node.region_count.load(Ordering::Relaxed) as usize;
         for i in 0..count.min(MAX_REGIONS_PER_NODE) {
             let region = &node.regions[i];
-            if phys_addr >= region.base
-                && phys_addr < region.base.saturating_add(region.length)
-            {
+            if phys_addr >= region.base && phys_addr < region.base.saturating_add(region.length) {
                 return Some(node_id);
             }
         }
@@ -395,9 +399,7 @@ fn parse_srat(phys: u64) -> bool {
 
     while offset + 2 <= table_length {
         // SAFETY: offset is within the validated table_length.
-        let sub_header = unsafe {
-            &*((virt as usize + offset) as *const SratSubHeader)
-        };
+        let sub_header = unsafe { &*((virt as usize + offset) as *const SratSubHeader) };
 
         let sub_type = sub_header.structure_type;
         let sub_len = sub_header.length as usize;
@@ -434,17 +436,15 @@ fn parse_srat(phys: u64) -> bool {
             1 => {
                 // Memory Affinity.
                 if sub_len >= core::mem::size_of::<MemoryAffinity>() {
-                    let entry = unsafe {
-                        &*((virt as usize + offset) as *const MemoryAffinity)
-                    };
+                    let entry = unsafe { &*((virt as usize + offset) as *const MemoryAffinity) };
                     let flags = entry.flags;
                     if flags & 1 != 0 {
                         // Enabled.
                         let domain = entry.proximity_domain;
                         let base = u64::from(entry.base_address_lo)
                             | (u64::from(entry.base_address_hi) << 32);
-                        let length = u64::from(entry.length_lo)
-                            | (u64::from(entry.length_hi) << 32);
+                        let length =
+                            u64::from(entry.length_lo) | (u64::from(entry.length_hi) << 32);
                         let hotplug = flags & 2 != 0;
                         add_memory_to_node(domain, base, length, hotplug);
                         if domain > max_node {
@@ -456,9 +456,8 @@ fn parse_srat(phys: u64) -> bool {
             2 => {
                 // Processor Local x2APIC Affinity.
                 if sub_len >= core::mem::size_of::<ProcessorX2ApicAffinity>() {
-                    let entry = unsafe {
-                        &*((virt as usize + offset) as *const ProcessorX2ApicAffinity)
-                    };
+                    let entry =
+                        unsafe { &*((virt as usize + offset) as *const ProcessorX2ApicAffinity) };
                     let flags = entry.flags;
                     if flags & 1 != 0 {
                         let domain = entry.proximity_domain;
@@ -612,8 +611,12 @@ fn log_topology() {
         let regions = node.region_count.load(Ordering::Relaxed);
         serial_println!(
             "[numa]   Node {}: {} CPUs (mask={:#06x}), {} MiB ({} region{})",
-            i, cpus, node.cpu_mask.load(Ordering::Relaxed),
-            mem_mb, regions, if regions == 1 { "" } else { "s" }
+            i,
+            cpus,
+            node.cpu_mask.load(Ordering::Relaxed),
+            mem_mb,
+            regions,
+            if regions == 1 { "" } else { "s" }
         );
     }
 }
@@ -637,7 +640,10 @@ pub fn self_test() {
         let node = cpu_node(i);
         assert!(node < count, "CPU {} maps to invalid node {}", i, node);
     }
-    serial_println!("[numa]   CPU-to-node mapping valid: OK ({} CPUs)", cpu_count);
+    serial_println!(
+        "[numa]   CPU-to-node mapping valid: OK ({} CPUs)",
+        cpu_count
+    );
 
     // Test 3: Current node is valid.
     let cur = current_node();

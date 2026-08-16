@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -196,7 +196,12 @@ fn simple_hash(s: &str) -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Create a new user account.
-pub fn create_user(username: &str, display_name: &str, password: &str, account_type: AccountType) -> KernelResult<u64> {
+pub fn create_user(
+    username: &str,
+    display_name: &str,
+    password: &str,
+    account_type: AccountType,
+) -> KernelResult<u64> {
     let mut state = STATE.lock();
     if state.users.len() >= MAX_USERS {
         return Err(KernelError::ResourceExhausted);
@@ -207,7 +212,11 @@ pub fn create_user(username: &str, display_name: &str, password: &str, account_t
     let uid = NEXT_UID.fetch_add(1, Ordering::Relaxed);
     let ts = crate::hpet::elapsed_ns();
     let home = alloc::format!("/home/{}", username);
-    let login_method = if password.is_empty() { LoginMethod::NoPassword } else { LoginMethod::Password };
+    let login_method = if password.is_empty() {
+        LoginMethod::NoPassword
+    } else {
+        LoginMethod::Password
+    };
     state.users.push(UserAccount {
         uid,
         username: String::from(username),
@@ -239,7 +248,9 @@ pub fn remove_user(uid: u64) -> KernelResult<()> {
     }
     let len = state.users.len();
     state.users.retain(|u| u.uid != uid);
-    if state.users.len() == len { return Err(KernelError::NotFound); }
+    if state.users.len() == len {
+        return Err(KernelError::NotFound);
+    }
     // Remove sessions for this user.
     state.sessions.retain(|s| s.uid != uid);
     Ok(())
@@ -247,12 +258,24 @@ pub fn remove_user(uid: u64) -> KernelResult<()> {
 
 /// Get user by UID.
 pub fn get_user(uid: u64) -> KernelResult<UserAccount> {
-    STATE.lock().users.iter().find(|u| u.uid == uid).cloned().ok_or(KernelError::NotFound)
+    STATE
+        .lock()
+        .users
+        .iter()
+        .find(|u| u.uid == uid)
+        .cloned()
+        .ok_or(KernelError::NotFound)
 }
 
 /// Get user by username.
 pub fn get_user_by_name(username: &str) -> KernelResult<UserAccount> {
-    STATE.lock().users.iter().find(|u| u.username == username).cloned().ok_or(KernelError::NotFound)
+    STATE
+        .lock()
+        .users
+        .iter()
+        .find(|u| u.username == username)
+        .cloned()
+        .ok_or(KernelError::NotFound)
 }
 
 /// List all users.
@@ -263,7 +286,11 @@ pub fn list_users() -> Vec<UserAccount> {
 /// Set display name.
 pub fn set_display_name(uid: u64, name: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let u = state.users.iter_mut().find(|u| u.uid == uid).ok_or(KernelError::NotFound)?;
+    let u = state
+        .users
+        .iter_mut()
+        .find(|u| u.uid == uid)
+        .ok_or(KernelError::NotFound)?;
     u.display_name = String::from(name);
     Ok(())
 }
@@ -271,7 +298,11 @@ pub fn set_display_name(uid: u64, name: &str) -> KernelResult<()> {
 /// Set avatar path.
 pub fn set_avatar(uid: u64, path: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let u = state.users.iter_mut().find(|u| u.uid == uid).ok_or(KernelError::NotFound)?;
+    let u = state
+        .users
+        .iter_mut()
+        .find(|u| u.uid == uid)
+        .ok_or(KernelError::NotFound)?;
     u.avatar = String::from(path);
     Ok(())
 }
@@ -279,7 +310,11 @@ pub fn set_avatar(uid: u64, path: &str) -> KernelResult<()> {
 /// Set account type.
 pub fn set_account_type(uid: u64, acct_type: AccountType) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let u = state.users.iter_mut().find(|u| u.uid == uid).ok_or(KernelError::NotFound)?;
+    let u = state
+        .users
+        .iter_mut()
+        .find(|u| u.uid == uid)
+        .ok_or(KernelError::NotFound)?;
     u.account_type = acct_type;
     Ok(())
 }
@@ -287,7 +322,11 @@ pub fn set_account_type(uid: u64, acct_type: AccountType) -> KernelResult<()> {
 /// Enable/disable account.
 pub fn set_enabled(uid: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let u = state.users.iter_mut().find(|u| u.uid == uid).ok_or(KernelError::NotFound)?;
+    let u = state
+        .users
+        .iter_mut()
+        .find(|u| u.uid == uid)
+        .ok_or(KernelError::NotFound)?;
     u.enabled = enabled;
     Ok(())
 }
@@ -295,7 +334,11 @@ pub fn set_enabled(uid: u64, enabled: bool) -> KernelResult<()> {
 /// Unlock a locked account.
 pub fn unlock(uid: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let u = state.users.iter_mut().find(|u| u.uid == uid).ok_or(KernelError::NotFound)?;
+    let u = state
+        .users
+        .iter_mut()
+        .find(|u| u.uid == uid)
+        .ok_or(KernelError::NotFound)?;
     u.locked = false;
     Ok(())
 }
@@ -303,9 +346,17 @@ pub fn unlock(uid: u64) -> KernelResult<()> {
 /// Change password.
 pub fn change_password(uid: u64, new_password: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let u = state.users.iter_mut().find(|u| u.uid == uid).ok_or(KernelError::NotFound)?;
+    let u = state
+        .users
+        .iter_mut()
+        .find(|u| u.uid == uid)
+        .ok_or(KernelError::NotFound)?;
     u.password_hash = simple_hash(new_password);
-    u.login_method = if new_password.is_empty() { LoginMethod::NoPassword } else { LoginMethod::Password };
+    u.login_method = if new_password.is_empty() {
+        LoginMethod::NoPassword
+    } else {
+        LoginMethod::Password
+    };
     Ok(())
 }
 
@@ -313,8 +364,16 @@ pub fn change_password(uid: u64, new_password: &str) -> KernelResult<()> {
 pub fn set_auto_login(uid: u64, auto: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
     // Clear all auto-login first (only one user can have it).
-    if auto { for u in &mut state.users { u.auto_login = false; } }
-    let u = state.users.iter_mut().find(|u| u.uid == uid).ok_or(KernelError::NotFound)?;
+    if auto {
+        for u in &mut state.users {
+            u.auto_login = false;
+        }
+    }
+    let u = state
+        .users
+        .iter_mut()
+        .find(|u| u.uid == uid)
+        .ok_or(KernelError::NotFound)?;
     u.auto_login = auto;
     Ok(())
 }
@@ -326,11 +385,18 @@ pub fn set_auto_login(uid: u64, auto: bool) -> KernelResult<()> {
 /// Authenticate a user and create a session.
 pub fn authenticate(username: &str, password: &str) -> KernelResult<u64> {
     let mut state = STATE.lock();
-    let user = state.users.iter_mut().find(|u| u.username == username)
+    let user = state
+        .users
+        .iter_mut()
+        .find(|u| u.username == username)
         .ok_or(KernelError::NotFound)?;
 
-    if !user.enabled { return Err(KernelError::PermissionDenied); }
-    if user.locked { return Err(KernelError::PermissionDenied); }
+    if !user.enabled {
+        return Err(KernelError::PermissionDenied);
+    }
+    if user.locked {
+        return Err(KernelError::PermissionDenied);
+    }
 
     let hash = simple_hash(password);
     if user.login_method == LoginMethod::Password && user.password_hash != hash {
@@ -347,7 +413,9 @@ pub fn authenticate(username: &str, password: &str) -> KernelResult<u64> {
     }
     let sid = NEXT_SID.fetch_add(1, Ordering::Relaxed);
     // Deactivate all other sessions.
-    for s in &mut state.sessions { s.active = false; }
+    for s in &mut state.sessions {
+        s.active = false;
+    }
     state.sessions.push(Session {
         session_id: sid,
         uid,
@@ -365,7 +433,9 @@ pub fn logout(session_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
     let len = state.sessions.len();
     state.sessions.retain(|s| s.session_id != session_id);
-    if state.sessions.len() == len { return Err(KernelError::NotFound); }
+    if state.sessions.len() == len {
+        return Err(KernelError::NotFound);
+    }
     // Activate the next session if any.
     if let Some(last) = state.sessions.last_mut() {
         last.active = true;
@@ -379,7 +449,8 @@ pub fn logout(session_id: u64) -> KernelResult<()> {
 /// Get the currently active user.
 pub fn current_user() -> Option<UserAccount> {
     let state = STATE.lock();
-    state.current_uid
+    state
+        .current_uid
         .and_then(|uid| state.users.iter().find(|u| u.uid == uid).cloned())
 }
 
@@ -394,44 +465,75 @@ pub fn list_sessions() -> Vec<Session> {
 
 pub fn create_group(name: &str, desc: &str, system_group: bool) -> KernelResult<u64> {
     let mut state = STATE.lock();
-    if state.groups.len() >= MAX_GROUPS { return Err(KernelError::ResourceExhausted); }
-    if state.groups.iter().any(|g| g.name == name) { return Err(KernelError::AlreadyExists); }
+    if state.groups.len() >= MAX_GROUPS {
+        return Err(KernelError::ResourceExhausted);
+    }
+    if state.groups.iter().any(|g| g.name == name) {
+        return Err(KernelError::AlreadyExists);
+    }
     let gid = NEXT_GID.fetch_add(1, Ordering::Relaxed);
-    state.groups.push(Group { gid, name: String::from(name), description: String::from(desc), system_group });
+    state.groups.push(Group {
+        gid,
+        name: String::from(name),
+        description: String::from(desc),
+        system_group,
+    });
     Ok(gid)
 }
 
 pub fn remove_group(gid: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
     if let Some(g) = state.groups.iter().find(|g| g.gid == gid) {
-        if g.system_group { return Err(KernelError::PermissionDenied); }
+        if g.system_group {
+            return Err(KernelError::PermissionDenied);
+        }
     }
     let len = state.groups.len();
     state.groups.retain(|g| g.gid != gid);
-    if state.groups.len() == len { return Err(KernelError::NotFound); }
+    if state.groups.len() == len {
+        return Err(KernelError::NotFound);
+    }
     // Remove from all users.
-    for u in &mut state.users { u.groups.retain(|g| *g != gid); }
+    for u in &mut state.users {
+        u.groups.retain(|g| *g != gid);
+    }
     Ok(())
 }
 
 pub fn add_to_group(uid: u64, gid: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    if !state.groups.iter().any(|g| g.gid == gid) { return Err(KernelError::NotFound); }
-    let u = state.users.iter_mut().find(|u| u.uid == uid).ok_or(KernelError::NotFound)?;
-    if !u.groups.contains(&gid) { u.groups.push(gid); }
+    if !state.groups.iter().any(|g| g.gid == gid) {
+        return Err(KernelError::NotFound);
+    }
+    let u = state
+        .users
+        .iter_mut()
+        .find(|u| u.uid == uid)
+        .ok_or(KernelError::NotFound)?;
+    if !u.groups.contains(&gid) {
+        u.groups.push(gid);
+    }
     Ok(())
 }
 
 pub fn remove_from_group(uid: u64, gid: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let u = state.users.iter_mut().find(|u| u.uid == uid).ok_or(KernelError::NotFound)?;
+    let u = state
+        .users
+        .iter_mut()
+        .find(|u| u.uid == uid)
+        .ok_or(KernelError::NotFound)?;
     let len = u.groups.len();
     u.groups.retain(|g| *g != gid);
-    if u.groups.len() == len { return Err(KernelError::NotFound); }
+    if u.groups.len() == len {
+        return Err(KernelError::NotFound);
+    }
     Ok(())
 }
 
-pub fn list_groups() -> Vec<Group> { STATE.lock().groups.clone() }
+pub fn list_groups() -> Vec<Group> {
+    STATE.lock().groups.clone()
+}
 
 // ---------------------------------------------------------------------------
 // Defaults
@@ -439,7 +541,9 @@ pub fn list_groups() -> Vec<Group> { STATE.lock().groups.clone() }
 
 pub fn init_defaults() {
     let mut state = STATE.lock();
-    if !state.users.is_empty() { return; }
+    if !state.users.is_empty() {
+        return;
+    }
 
     let ts = crate::hpet::elapsed_ns();
 
@@ -491,7 +595,12 @@ pub fn init_defaults() {
         (5, "storage", "Disk/USB access", true),
     ];
     for &(gid, name, desc, sys) in &grps {
-        state.groups.push(Group { gid, name: String::from(name), description: String::from(desc), system_group: sys });
+        state.groups.push(Group {
+            gid,
+            name: String::from(name),
+            description: String::from(desc),
+            system_group: sys,
+        });
     }
 }
 
@@ -501,10 +610,17 @@ pub fn init_defaults() {
 
 pub fn stats() -> (usize, usize, usize, u64) {
     let state = STATE.lock();
-    (state.users.len(), state.groups.len(), state.sessions.len(), LOGIN_COUNT.load(Ordering::Relaxed))
+    (
+        state.users.len(),
+        state.groups.len(),
+        state.sessions.len(),
+        LOGIN_COUNT.load(Ordering::Relaxed),
+    )
 }
 
-pub fn reset_stats() { LOGIN_COUNT.store(0, Ordering::Relaxed); }
+pub fn reset_stats() {
+    LOGIN_COUNT.store(0, Ordering::Relaxed);
+}
 
 pub fn clear_all() {
     let mut state = STATE.lock();

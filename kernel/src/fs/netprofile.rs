@@ -19,10 +19,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -129,11 +129,14 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let profiles = alloc::vec![
         NetProfile {
-            id: 1, name: String::from("Home"),
+            id: 1,
+            name: String::from("Home"),
             ssid: String::from("HomeWiFi"),
             network_type: NetworkType::Private,
             connection_type: ConnectionType::WiFi,
@@ -142,11 +145,14 @@ pub fn init_defaults() {
             dns_servers: Vec::new(),
             firewall_profile: String::from("private"),
             proxy_pac: String::new(),
-            auto_connect: true, priority: 100,
-            last_connected_ns: 0, total_connections: 0,
+            auto_connect: true,
+            priority: 100,
+            last_connected_ns: 0,
+            total_connections: 0,
         },
         NetProfile {
-            id: 2, name: String::from("Public WiFi"),
+            id: 2,
+            name: String::from("Public WiFi"),
             ssid: String::new(),
             network_type: NetworkType::Public,
             connection_type: ConnectionType::WiFi,
@@ -155,8 +161,10 @@ pub fn init_defaults() {
             dns_servers: alloc::vec![String::from("1.1.1.1"), String::from("8.8.8.8")],
             firewall_profile: String::from("public"),
             proxy_pac: String::new(),
-            auto_connect: false, priority: 50,
-            last_connected_ns: 0, total_connections: 0,
+            auto_connect: false,
+            priority: 50,
+            last_connected_ns: 0,
+            total_connections: 0,
         },
     ];
 
@@ -170,7 +178,12 @@ pub fn init_defaults() {
 }
 
 /// Create a network profile.
-pub fn create_profile(name: &str, ssid: &str, network_type: NetworkType, conn_type: ConnectionType) -> KernelResult<u32> {
+pub fn create_profile(
+    name: &str,
+    ssid: &str,
+    network_type: NetworkType,
+    conn_type: ConnectionType,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.profiles.len() >= MAX_PROFILES {
             return Err(KernelError::ResourceExhausted);
@@ -178,16 +191,20 @@ pub fn create_profile(name: &str, ssid: &str, network_type: NetworkType, conn_ty
         let id = state.next_id;
         state.next_id += 1;
         state.profiles.push(NetProfile {
-            id, name: String::from(name),
+            id,
+            name: String::from(name),
             ssid: String::from(ssid),
-            network_type, connection_type: conn_type,
+            network_type,
+            connection_type: conn_type,
             metered: false,
             auto_vpn: String::new(),
             dns_servers: Vec::new(),
             firewall_profile: String::from(network_type.label()),
             proxy_pac: String::new(),
-            auto_connect: true, priority: 50,
-            last_connected_ns: 0, total_connections: 0,
+            auto_connect: true,
+            priority: 50,
+            last_connected_ns: 0,
+            total_connections: 0,
         });
         Ok(id)
     })
@@ -196,7 +213,10 @@ pub fn create_profile(name: &str, ssid: &str, network_type: NetworkType, conn_ty
 /// Apply (activate) a network profile.
 pub fn apply_profile(profile_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let p = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         p.last_connected_ns = crate::hpet::elapsed_ns();
         p.total_connections += 1;
@@ -209,7 +229,10 @@ pub fn apply_profile(profile_id: u32) -> KernelResult<()> {
 /// Set network type.
 pub fn set_network_type(profile_id: u32, net_type: NetworkType) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let p = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         p.network_type = net_type;
         Ok(())
@@ -219,7 +242,10 @@ pub fn set_network_type(profile_id: u32, net_type: NetworkType) -> KernelResult<
 /// Set metered status.
 pub fn set_metered(profile_id: u32, metered: bool) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let p = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         p.metered = metered;
         Ok(())
@@ -229,7 +255,10 @@ pub fn set_metered(profile_id: u32, metered: bool) -> KernelResult<()> {
 /// Set auto-connect VPN.
 pub fn set_auto_vpn(profile_id: u32, vpn_name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let p = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         p.auto_vpn = String::from(vpn_name);
         Ok(())
@@ -239,7 +268,10 @@ pub fn set_auto_vpn(profile_id: u32, vpn_name: &str) -> KernelResult<()> {
 /// Set custom DNS servers.
 pub fn set_dns(profile_id: u32, servers: Vec<String>) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let p = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         p.dns_servers = servers;
         Ok(())
@@ -249,7 +281,10 @@ pub fn set_dns(profile_id: u32, servers: Vec<String>) -> KernelResult<()> {
 /// Remove a profile.
 pub fn remove_profile(profile_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.profiles.iter().position(|p| p.id == profile_id)
+        let pos = state
+            .profiles
+            .iter()
+            .position(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         state.profiles.remove(pos);
         if state.active_profile_id == profile_id {
@@ -261,20 +296,29 @@ pub fn remove_profile(profile_id: u32) -> KernelResult<()> {
 
 /// Find profile by SSID.
 pub fn find_by_ssid(ssid: &str) -> Option<u32> {
-    STATE.lock().as_ref().and_then(|s| {
-        s.profiles.iter().find(|p| p.ssid == ssid).map(|p| p.id)
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.profiles.iter().find(|p| p.ssid == ssid).map(|p| p.id))
 }
 
 /// List all profiles.
 pub fn list_profiles() -> Vec<NetProfile> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.profiles.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.profiles.clone())
 }
 
 /// Get profile.
 pub fn get_profile(id: u32) -> KernelResult<NetProfile> {
     with_state(|state| {
-        state.profiles.iter().find(|p| p.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -287,7 +331,12 @@ pub fn active_id() -> u32 {
 pub fn stats() -> (usize, u32, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.profiles.len(), s.active_profile_id, s.total_switches, s.ops),
+        Some(s) => (
+            s.profiles.len(),
+            s.active_profile_id,
+            s.total_switches,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }
@@ -314,7 +363,13 @@ pub fn self_test() {
     crate::serial_println!("  [2/8] apply profile: OK");
 
     // 3: Create profile.
-    let id = create_profile("Office", "CorpWiFi", NetworkType::Domain, ConnectionType::WiFi).expect("create");
+    let id = create_profile(
+        "Office",
+        "CorpWiFi",
+        NetworkType::Domain,
+        ConnectionType::WiFi,
+    )
+    .expect("create");
     assert_eq!(list_profiles().len(), 3);
     crate::serial_println!("  [3/8] create profile: OK");
 
@@ -325,7 +380,11 @@ pub fn self_test() {
     crate::serial_println!("  [4/8] set metered: OK");
 
     // 5: Set DNS.
-    set_dns(id, alloc::vec![String::from("10.0.0.1"), String::from("10.0.0.2")]).expect("dns");
+    set_dns(
+        id,
+        alloc::vec![String::from("10.0.0.1"), String::from("10.0.0.2")],
+    )
+    .expect("dns");
     let p = get_profile(id).expect("get3");
     assert_eq!(p.dns_servers.len(), 2);
     crate::serial_println!("  [5/8] set DNS: OK");

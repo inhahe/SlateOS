@@ -40,10 +40,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -308,7 +308,10 @@ pub fn add_favorite(app_id: &str) -> KernelResult<()> {
 /// Remove an app from start menu favorites.
 pub fn remove_favorite(app_id: &str) -> KernelResult<()> {
     let mut menu = MENU.lock();
-    let idx = menu.favorites.iter().position(|id| id == app_id)
+    let idx = menu
+        .favorites
+        .iter()
+        .position(|id| id == app_id)
         .ok_or(KernelError::NotFound)?;
     menu.favorites.remove(idx);
     Ok(())
@@ -317,7 +320,10 @@ pub fn remove_favorite(app_id: &str) -> KernelResult<()> {
 /// Reorder a favorite to a new position.
 pub fn reorder_favorite(app_id: &str, new_pos: usize) -> KernelResult<()> {
     let mut menu = MENU.lock();
-    let idx = menu.favorites.iter().position(|id| id == app_id)
+    let idx = menu
+        .favorites
+        .iter()
+        .position(|id| id == app_id)
         .ok_or(KernelError::NotFound)?;
     let item = menu.favorites.remove(idx);
     let target = new_pos.min(menu.favorites.len());
@@ -328,14 +334,18 @@ pub fn reorder_favorite(app_id: &str, new_pos: usize) -> KernelResult<()> {
 /// Get favorites with appregistry info.
 pub fn favorites() -> Vec<FavoriteEntry> {
     let menu = MENU.lock();
-    menu.favorites.iter().enumerate().filter_map(|(i, app_id)| {
-        super::appregistry::get(app_id).map(|app| FavoriteEntry {
-            app_id: app.id,
-            name: app.name,
-            icon: app.icon,
-            position: i as u32,
+    menu.favorites
+        .iter()
+        .enumerate()
+        .filter_map(|(i, app_id)| {
+            super::appregistry::get(app_id).map(|app| FavoriteEntry {
+                app_id: app.id,
+                name: app.name,
+                icon: app.icon,
+                position: i as u32,
+            })
         })
-    }).collect()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -368,7 +378,10 @@ pub fn add_quick_link(app_id: &str, label: &str, icon: &str) -> KernelResult<()>
 /// Remove a quick link.
 pub fn remove_quick_link(app_id: &str) -> KernelResult<()> {
     let mut menu = MENU.lock();
-    let idx = menu.quick_links.iter().position(|ql| ql.app_id == app_id)
+    let idx = menu
+        .quick_links
+        .iter()
+        .position(|ql| ql.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
     menu.quick_links.remove(idx);
     Ok(())
@@ -399,11 +412,14 @@ pub fn record_launch(app_id: &str) -> KernelResult<()> {
         entry.launch_count = entry.launch_count.saturating_add(1);
         entry.last_launched_ns = now;
     } else {
-        let name = super::appregistry::get(app_id)
-            .map_or_else(|| String::from(app_id), |app| app.name);
+        let name =
+            super::appregistry::get(app_id).map_or_else(|| String::from(app_id), |app| app.name);
         if menu.recent.len() >= MAX_RECENT {
             // Remove oldest.
-            if let Some(oldest_idx) = menu.recent.iter().enumerate()
+            if let Some(oldest_idx) = menu
+                .recent
+                .iter()
+                .enumerate()
                 .min_by_key(|(_, r)| r.last_launched_ns)
                 .map(|(i, _)| i)
             {
@@ -419,7 +435,8 @@ pub fn record_launch(app_id: &str) -> KernelResult<()> {
     }
 
     // Sort by last launched (most recent first).
-    menu.recent.sort_by_key(|e| core::cmp::Reverse(e.last_launched_ns));
+    menu.recent
+        .sort_by_key(|e| core::cmp::Reverse(e.last_launched_ns));
     Ok(())
 }
 
@@ -456,23 +473,26 @@ pub fn search(query: &str) -> Vec<SearchResult> {
     let results = super::appregistry::search(query);
     let q = to_lower(query);
 
-    results.iter().map(|app| {
-        let match_desc = if to_lower(&app.name).contains(&q) {
-            String::from("name")
-        } else if app.keywords.iter().any(|k| to_lower(k).contains(&q)) {
-            String::from("keyword")
-        } else if to_lower(&app.description).contains(&q) {
-            String::from("description")
-        } else {
-            String::from("id")
-        };
-        SearchResult {
-            app_id: app.id.clone(),
-            name: app.name.clone(),
-            icon: app.icon.clone(),
-            match_desc,
-        }
-    }).collect()
+    results
+        .iter()
+        .map(|app| {
+            let match_desc = if to_lower(&app.name).contains(&q) {
+                String::from("name")
+            } else if app.keywords.iter().any(|k| to_lower(k).contains(&q)) {
+                String::from("keyword")
+            } else if to_lower(&app.description).contains(&q) {
+                String::from("description")
+            } else {
+                String::from("id")
+            };
+            SearchResult {
+                app_id: app.id.clone(),
+                name: app.name.clone(),
+                icon: app.icon.clone(),
+                match_desc,
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -493,17 +513,21 @@ pub fn build_menu() -> Vec<MenuSection> {
     // All apps (from appregistry).
     let tree = super::appregistry::menu_tree();
     if !tree.is_empty() {
-        let groups: Vec<CategoryGroup> = tree.into_iter().map(|(cat, entries)| {
-            CategoryGroup {
+        let groups: Vec<CategoryGroup> = tree
+            .into_iter()
+            .map(|(cat, entries)| CategoryGroup {
                 label: String::from(cat.label()),
-                apps: entries.into_iter().map(|e| AppEntry {
-                    app_id: e.id,
-                    name: e.name,
-                    icon: e.icon,
-                    exec_path: e.exec_path,
-                }).collect(),
-            }
-        }).collect();
+                apps: entries
+                    .into_iter()
+                    .map(|e| AppEntry {
+                        app_id: e.id,
+                        name: e.name,
+                        icon: e.icon,
+                        exec_path: e.exec_path,
+                    })
+                    .collect(),
+            })
+            .collect();
         sections.push(MenuSection::AllApps(groups));
     }
 

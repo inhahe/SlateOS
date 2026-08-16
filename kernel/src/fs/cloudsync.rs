@@ -26,10 +26,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -193,7 +193,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let excluded = alloc::vec![
         String::from("*.tmp"),
@@ -217,13 +219,20 @@ pub fn init_defaults() {
 
 /// Add a cloud sync account.
 pub fn add_account(
-    provider: CloudProvider, account_name: &str, local_path: &str, remote_path: &str,
+    provider: CloudProvider,
+    account_name: &str,
+    local_path: &str,
+    remote_path: &str,
 ) -> KernelResult<u32> {
     with_state(|state| {
         if state.accounts.len() >= MAX_ACCOUNTS {
             return Err(KernelError::ResourceExhausted);
         }
-        if state.accounts.iter().any(|a| a.account_name == account_name && a.provider == provider) {
+        if state
+            .accounts
+            .iter()
+            .any(|a| a.account_name == account_name && a.provider == provider)
+        {
             return Err(KernelError::AlreadyExists);
         }
         let id = state.next_id;
@@ -250,7 +259,10 @@ pub fn add_account(
 /// Remove a sync account.
 pub fn remove_account(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.accounts.iter().position(|a| a.id == id)
+        let pos = state
+            .accounts
+            .iter()
+            .position(|a| a.id == id)
             .ok_or(KernelError::NotFound)?;
         state.accounts.remove(pos);
         state.conflicts.retain(|c| c.account_id != id);
@@ -261,7 +273,10 @@ pub fn remove_account(id: u32) -> KernelResult<()> {
 /// Enable/disable sync for an account.
 pub fn set_account_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let acct = state.accounts.iter_mut().find(|a| a.id == id)
+        let acct = state
+            .accounts
+            .iter_mut()
+            .find(|a| a.id == id)
             .ok_or(KernelError::NotFound)?;
         acct.enabled = enabled;
         Ok(())
@@ -271,7 +286,10 @@ pub fn set_account_enabled(id: u32, enabled: bool) -> KernelResult<()> {
 /// Set conflict resolution strategy.
 pub fn set_conflict_strategy(id: u32, strategy: ConflictStrategy) -> KernelResult<()> {
     with_state(|state| {
-        let acct = state.accounts.iter_mut().find(|a| a.id == id)
+        let acct = state
+            .accounts
+            .iter_mut()
+            .find(|a| a.id == id)
             .ok_or(KernelError::NotFound)?;
         acct.conflict_strategy = strategy;
         Ok(())
@@ -281,7 +299,10 @@ pub fn set_conflict_strategy(id: u32, strategy: ConflictStrategy) -> KernelResul
 /// Set bandwidth limit.
 pub fn set_bandwidth_limit(id: u32, kbps: u32) -> KernelResult<()> {
     with_state(|state| {
-        let acct = state.accounts.iter_mut().find(|a| a.id == id)
+        let acct = state
+            .accounts
+            .iter_mut()
+            .find(|a| a.id == id)
             .ok_or(KernelError::NotFound)?;
         acct.bandwidth_limit_kbps = kbps;
         Ok(())
@@ -291,7 +312,10 @@ pub fn set_bandwidth_limit(id: u32, kbps: u32) -> KernelResult<()> {
 /// Record a sync event (for simulation/tracking).
 pub fn record_sync(id: u32, uploaded: u64, downloaded: u64, files: u64) -> KernelResult<()> {
     with_state(|state| {
-        let acct = state.accounts.iter_mut().find(|a| a.id == id)
+        let acct = state
+            .accounts
+            .iter_mut()
+            .find(|a| a.id == id)
             .ok_or(KernelError::NotFound)?;
         acct.bytes_uploaded += uploaded;
         acct.bytes_downloaded += downloaded;
@@ -303,7 +327,12 @@ pub fn record_sync(id: u32, uploaded: u64, downloaded: u64, files: u64) -> Kerne
 }
 
 /// Report a sync conflict.
-pub fn report_conflict(account_id: u32, path: &str, local_size: u64, remote_size: u64) -> KernelResult<()> {
+pub fn report_conflict(
+    account_id: u32,
+    path: &str,
+    local_size: u64,
+    remote_size: u64,
+) -> KernelResult<()> {
     with_state(|state| {
         if state.conflicts.len() >= MAX_CONFLICTS {
             state.conflicts.remove(0);
@@ -341,7 +370,10 @@ pub fn add_exclude(pattern: &str) -> KernelResult<()> {
 /// Remove an exclude pattern.
 pub fn remove_exclude(pattern: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.excluded_patterns.iter().position(|p| p == pattern)
+        let pos = state
+            .excluded_patterns
+            .iter()
+            .position(|p| p == pattern)
             .ok_or(KernelError::NotFound)?;
         state.excluded_patterns.remove(pos);
         Ok(())
@@ -350,23 +382,36 @@ pub fn remove_exclude(pattern: &str) -> KernelResult<()> {
 
 /// List accounts.
 pub fn list_accounts() -> Vec<SyncAccount> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.accounts.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.accounts.clone())
 }
 
 /// List conflicts.
 pub fn list_conflicts() -> Vec<SyncConflict> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.conflicts.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.conflicts.clone())
 }
 
 /// List exclude patterns.
 pub fn list_excludes() -> Vec<String> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.excluded_patterns.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.excluded_patterns.clone())
 }
 
 /// Get account info.
 pub fn get_account(id: u32) -> KernelResult<SyncAccount> {
     with_state(|state| {
-        state.accounts.iter().find(|a| a.id == id).cloned()
+        state
+            .accounts
+            .iter()
+            .find(|a| a.id == id)
+            .cloned()
             .ok_or(KernelError::NotFound)
     })
 }
@@ -377,7 +422,13 @@ pub fn stats() -> (usize, u64, u64, usize, u64) {
     match guard.as_ref() {
         Some(s) => {
             let active = s.accounts.iter().filter(|a| a.enabled).count();
-            (s.accounts.len(), s.total_syncs, s.total_conflicts, active, s.ops)
+            (
+                s.accounts.len(),
+                s.total_syncs,
+                s.total_conflicts,
+                active,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }
@@ -396,17 +447,34 @@ pub fn self_test() {
     crate::serial_println!("  [1/11] empty initial: OK");
 
     // 2: Add account.
-    let id1 = add_account(CloudProvider::NextCloud, "user@cloud.example", "/home/user/sync", "/").expect("add nc");
+    let id1 = add_account(
+        CloudProvider::NextCloud,
+        "user@cloud.example",
+        "/home/user/sync",
+        "/",
+    )
+    .expect("add nc");
     assert!(id1 > 0);
     crate::serial_println!("  [2/11] add account: OK");
 
     // 3: Add second account.
-    let id2 = add_account(CloudProvider::Dropbox, "user@dropbox.com", "/home/user/dropbox", "/").expect("add dbx");
+    let id2 = add_account(
+        CloudProvider::Dropbox,
+        "user@dropbox.com",
+        "/home/user/dropbox",
+        "/",
+    )
+    .expect("add dbx");
     assert_eq!(list_accounts().len(), 2);
     crate::serial_println!("  [3/11] multiple accounts: OK");
 
     // 4: Duplicate rejected.
-    let r = add_account(CloudProvider::NextCloud, "user@cloud.example", "/dup", "/dup");
+    let r = add_account(
+        CloudProvider::NextCloud,
+        "user@cloud.example",
+        "/dup",
+        "/dup",
+    );
     assert!(r.is_err());
     crate::serial_println!("  [4/11] duplicate rejected: OK");
 

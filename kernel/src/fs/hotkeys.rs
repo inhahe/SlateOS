@@ -31,11 +31,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -300,7 +300,12 @@ static HIT_COUNT: AtomicU64 = AtomicU64::new(0);
 // ---------------------------------------------------------------------------
 
 /// Register a hotkey binding.
-pub fn bind(combo: KeyCombo, action: HotkeyAction, desc: &str, is_default: bool) -> KernelResult<()> {
+pub fn bind(
+    combo: KeyCombo,
+    action: HotkeyAction,
+    desc: &str,
+    is_default: bool,
+) -> KernelResult<()> {
     let key = combo.display();
     let mut state = HOTKEYS.lock();
 
@@ -319,13 +324,16 @@ pub fn bind(combo: KeyCombo, action: HotkeyAction, desc: &str, is_default: bool)
         return Err(KernelError::ResourceExhausted);
     }
 
-    state.bindings.insert(key, Hotkey {
-        combo,
-        actions: alloc::vec![action],
-        is_default,
-        enabled: true,
-        description: String::from(desc),
-    });
+    state.bindings.insert(
+        key,
+        Hotkey {
+            combo,
+            actions: alloc::vec![action],
+            is_default,
+            enabled: true,
+            description: String::from(desc),
+        },
+    );
     Ok(())
 }
 
@@ -387,7 +395,9 @@ pub fn list_all() -> Vec<Hotkey> {
 /// List only enabled bindings.
 pub fn list_enabled() -> Vec<Hotkey> {
     let state = HOTKEYS.lock();
-    state.bindings.values()
+    state
+        .bindings
+        .values()
         .filter(|h| h.enabled)
         .cloned()
         .collect()
@@ -400,11 +410,13 @@ pub fn search(query: &str) -> Vec<Hotkey> {
     }
     let q = to_lower(query);
     let state = HOTKEYS.lock();
-    state.bindings.values()
+    state
+        .bindings
+        .values()
         .filter(|h| {
-            to_lower(&h.combo.display()).contains(&q) ||
-            to_lower(&h.description).contains(&q) ||
-            h.actions.iter().any(|a| to_lower(&a.label()).contains(&q))
+            to_lower(&h.combo.display()).contains(&q)
+                || to_lower(&h.description).contains(&q)
+                || h.actions.iter().any(|a| to_lower(&a.label()).contains(&q))
         })
         .cloned()
         .collect()
@@ -418,7 +430,11 @@ pub fn search(query: &str) -> Vec<Hotkey> {
 pub fn register_defaults() -> KernelResult<()> {
     let defaults = [
         ("Alt+F4", HotkeyAction::CloseWindow, "Close active window"),
-        ("Alt+Tab", HotkeyAction::SwitchWindow, "Switch between windows"),
+        (
+            "Alt+Tab",
+            HotkeyAction::SwitchWindow,
+            "Switch between windows",
+        ),
         ("Ctrl+C", HotkeyAction::Copy, "Copy to clipboard"),
         ("Ctrl+X", HotkeyAction::Cut, "Cut to clipboard"),
         ("Ctrl+V", HotkeyAction::Paste, "Paste from clipboard"),
@@ -489,7 +505,12 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(combo.key, "S");
         assert_eq!(combo.display(), "Ctrl+S");
 
-        bind(combo, HotkeyAction::Custom(String::from("save")), "Save", false)?;
+        bind(
+            combo,
+            HotkeyAction::Custom(String::from("save")),
+            "Save",
+            false,
+        )?;
         serial_println!("[hotkeys] test 1 passed: parse/bind");
     }
 

@@ -201,46 +201,267 @@ pub fn init() {
 
     let defaults: Vec<BuiltinColumn> = vec![
         // Universal columns (apply to all file types).
-        ("name",        "Name",          ColumnType::Text,      200, &[],                    0,  "name"),
-        ("size",        "Size",          ColumnType::Size,       80, &[],                    1,  "size"),
-        ("modified",    "Date Modified", ColumnType::DateTime,  140, &[],                    2,  "modified"),
-        ("type",        "Type",          ColumnType::Text,      100, &[],                    3,  "mime_type"),
-        ("created",     "Date Created",  ColumnType::DateTime,  140, &[],                   10,  "created"),
-        ("accessed",    "Date Accessed", ColumnType::DateTime,  140, &[],                   11,  "accessed"),
-        ("permissions", "Permissions",   ColumnType::Text,       80, &[],                   12,  "permissions"),
-        ("owner",       "Owner",         ColumnType::Text,       80, &[],                   13,  "owner"),
-
+        ("name", "Name", ColumnType::Text, 200, &[], 0, "name"),
+        ("size", "Size", ColumnType::Size, 80, &[], 1, "size"),
+        (
+            "modified",
+            "Date Modified",
+            ColumnType::DateTime,
+            140,
+            &[],
+            2,
+            "modified",
+        ),
+        ("type", "Type", ColumnType::Text, 100, &[], 3, "mime_type"),
+        (
+            "created",
+            "Date Created",
+            ColumnType::DateTime,
+            140,
+            &[],
+            10,
+            "created",
+        ),
+        (
+            "accessed",
+            "Date Accessed",
+            ColumnType::DateTime,
+            140,
+            &[],
+            11,
+            "accessed",
+        ),
+        (
+            "permissions",
+            "Permissions",
+            ColumnType::Text,
+            80,
+            &[],
+            12,
+            "permissions",
+        ),
+        ("owner", "Owner", ColumnType::Text, 80, &[], 13, "owner"),
         // Audio columns.
-        ("audio.title",     "Title",      ColumnType::Text,     160, &["audio/mpeg", "audio/flac", "audio/ogg", "audio/wav"],  20, "title"),
-        ("audio.artist",    "Artist",     ColumnType::Text,     120, &["audio/mpeg", "audio/flac", "audio/ogg"],               21, "artist"),
-        ("audio.album",     "Album",      ColumnType::Text,     120, &["audio/mpeg", "audio/flac", "audio/ogg"],               22, "album"),
-        ("audio.duration",  "Duration",   ColumnType::Duration,  70, &["audio/mpeg", "audio/flac", "audio/ogg", "audio/wav"],  23, "duration"),
-        ("audio.bitrate",   "Bitrate",    ColumnType::Integer,   70, &["audio/mpeg", "audio/flac", "audio/ogg"],               24, "bitrate"),
-        ("audio.samplerate","Sample Rate",ColumnType::Integer,   80, &["audio/mpeg", "audio/flac", "audio/ogg", "audio/wav"],  25, "sample_rate"),
-        ("audio.channels",  "Channels",   ColumnType::Text,      70, &["audio/mpeg", "audio/flac", "audio/ogg", "audio/wav"],  26, "channels"),
-        ("audio.year",      "Year",       ColumnType::Integer,   50, &["audio/mpeg", "audio/flac", "audio/ogg"],               27, "year"),
-        ("audio.genre",     "Genre",      ColumnType::Text,      80, &["audio/mpeg", "audio/flac", "audio/ogg"],               28, "genre"),
-        ("audio.track",     "Track",      ColumnType::Integer,   50, &["audio/mpeg", "audio/flac", "audio/ogg"],               29, "track"),
-
+        (
+            "audio.title",
+            "Title",
+            ColumnType::Text,
+            160,
+            &["audio/mpeg", "audio/flac", "audio/ogg", "audio/wav"],
+            20,
+            "title",
+        ),
+        (
+            "audio.artist",
+            "Artist",
+            ColumnType::Text,
+            120,
+            &["audio/mpeg", "audio/flac", "audio/ogg"],
+            21,
+            "artist",
+        ),
+        (
+            "audio.album",
+            "Album",
+            ColumnType::Text,
+            120,
+            &["audio/mpeg", "audio/flac", "audio/ogg"],
+            22,
+            "album",
+        ),
+        (
+            "audio.duration",
+            "Duration",
+            ColumnType::Duration,
+            70,
+            &["audio/mpeg", "audio/flac", "audio/ogg", "audio/wav"],
+            23,
+            "duration",
+        ),
+        (
+            "audio.bitrate",
+            "Bitrate",
+            ColumnType::Integer,
+            70,
+            &["audio/mpeg", "audio/flac", "audio/ogg"],
+            24,
+            "bitrate",
+        ),
+        (
+            "audio.samplerate",
+            "Sample Rate",
+            ColumnType::Integer,
+            80,
+            &["audio/mpeg", "audio/flac", "audio/ogg", "audio/wav"],
+            25,
+            "sample_rate",
+        ),
+        (
+            "audio.channels",
+            "Channels",
+            ColumnType::Text,
+            70,
+            &["audio/mpeg", "audio/flac", "audio/ogg", "audio/wav"],
+            26,
+            "channels",
+        ),
+        (
+            "audio.year",
+            "Year",
+            ColumnType::Integer,
+            50,
+            &["audio/mpeg", "audio/flac", "audio/ogg"],
+            27,
+            "year",
+        ),
+        (
+            "audio.genre",
+            "Genre",
+            ColumnType::Text,
+            80,
+            &["audio/mpeg", "audio/flac", "audio/ogg"],
+            28,
+            "genre",
+        ),
+        (
+            "audio.track",
+            "Track",
+            ColumnType::Integer,
+            50,
+            &["audio/mpeg", "audio/flac", "audio/ogg"],
+            29,
+            "track",
+        ),
         // Image columns.
-        ("image.width",      "Width",       ColumnType::Integer,    60, &["image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp"],  30, "width"),
-        ("image.height",     "Height",      ColumnType::Integer,    60, &["image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp"],  31, "height"),
-        ("image.dimensions", "Dimensions",  ColumnType::Dimensions, 90, &["image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp"],  32, "dimensions"),
-        ("image.colordepth", "Color Depth", ColumnType::Integer,    80, &["image/png", "image/jpeg", "image/gif", "image/bmp"],                33, "color_depth"),
-
+        (
+            "image.width",
+            "Width",
+            ColumnType::Integer,
+            60,
+            &[
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/bmp",
+                "image/webp",
+            ],
+            30,
+            "width",
+        ),
+        (
+            "image.height",
+            "Height",
+            ColumnType::Integer,
+            60,
+            &[
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/bmp",
+                "image/webp",
+            ],
+            31,
+            "height",
+        ),
+        (
+            "image.dimensions",
+            "Dimensions",
+            ColumnType::Dimensions,
+            90,
+            &[
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/bmp",
+                "image/webp",
+            ],
+            32,
+            "dimensions",
+        ),
+        (
+            "image.colordepth",
+            "Color Depth",
+            ColumnType::Integer,
+            80,
+            &["image/png", "image/jpeg", "image/gif", "image/bmp"],
+            33,
+            "color_depth",
+        ),
         // Video columns.
-        ("video.duration",   "Duration",    ColumnType::Duration,   70, &["video/mp4", "video/webm", "video/x-matroska", "video/avi"],    40, "duration"),
-        ("video.resolution", "Resolution",  ColumnType::Dimensions, 90, &["video/mp4", "video/webm", "video/x-matroska", "video/avi"],    41, "resolution"),
-        ("video.codec",      "Video Codec", ColumnType::Text,       80, &["video/mp4", "video/webm", "video/x-matroska"],                 42, "video_codec"),
-
+        (
+            "video.duration",
+            "Duration",
+            ColumnType::Duration,
+            70,
+            &["video/mp4", "video/webm", "video/x-matroska", "video/avi"],
+            40,
+            "duration",
+        ),
+        (
+            "video.resolution",
+            "Resolution",
+            ColumnType::Dimensions,
+            90,
+            &["video/mp4", "video/webm", "video/x-matroska", "video/avi"],
+            41,
+            "resolution",
+        ),
+        (
+            "video.codec",
+            "Video Codec",
+            ColumnType::Text,
+            80,
+            &["video/mp4", "video/webm", "video/x-matroska"],
+            42,
+            "video_codec",
+        ),
         // Document columns.
-        ("doc.pages",   "Pages",   ColumnType::Integer, 50, &["application/pdf"],                                               50, "pages"),
-        ("doc.words",   "Words",   ColumnType::Integer, 60, &["text/plain", "text/markdown", "application/rtf"],                 51, "words"),
-        ("doc.lines",   "Lines",   ColumnType::Integer, 60, &["text/plain", "text/x-python", "text/x-c", "text/x-rust"],        52, "lines"),
-
+        (
+            "doc.pages",
+            "Pages",
+            ColumnType::Integer,
+            50,
+            &["application/pdf"],
+            50,
+            "pages",
+        ),
+        (
+            "doc.words",
+            "Words",
+            ColumnType::Integer,
+            60,
+            &["text/plain", "text/markdown", "application/rtf"],
+            51,
+            "words",
+        ),
+        (
+            "doc.lines",
+            "Lines",
+            ColumnType::Integer,
+            60,
+            &["text/plain", "text/x-python", "text/x-c", "text/x-rust"],
+            52,
+            "lines",
+        ),
         // Executable/binary columns.
-        ("elf.arch",    "Architecture", ColumnType::Text, 80, &["application/x-executable", "application/x-sharedlib"],          60, "arch"),
-        ("elf.type",    "Binary Type",  ColumnType::Text, 80, &["application/x-executable", "application/x-sharedlib"],          61, "binary_type"),
+        (
+            "elf.arch",
+            "Architecture",
+            ColumnType::Text,
+            80,
+            &["application/x-executable", "application/x-sharedlib"],
+            60,
+            "arch",
+        ),
+        (
+            "elf.type",
+            "Binary Type",
+            ColumnType::Text,
+            80,
+            &["application/x-executable", "application/x-sharedlib"],
+            61,
+            "binary_type",
+        ),
     ];
 
     let mut defs = COLUMN_DEFS.lock();
@@ -305,7 +526,9 @@ pub fn compute_columns(directory: impl AsRef<Path>) -> KernelResult<Vec<DisplayC
             applicable.push(def.clone());
         } else {
             // Type-specific — include only if a matching MIME type is present.
-            let matches = def.applies_to.iter()
+            let matches = def
+                .applies_to
+                .iter()
                 .any(|dt| mime_types.iter().any(|mt| mt == dt));
             if matches {
                 applicable.push(def.clone());
@@ -320,18 +543,17 @@ pub fn compute_columns(directory: impl AsRef<Path>) -> KernelResult<Vec<DisplayC
 
     for def in &applicable {
         // Check for directory-specific or global preference.
-        let pref = prefs.iter()
-            .find(|p| {
-                p.column_id == def.id
-                    && p.directory.as_deref().is_none_or(|d| d == directory)
-            });
+        let pref = prefs.iter().find(|p| {
+            p.column_id == def.id && p.directory.as_deref().is_none_or(|d| d == directory)
+        });
 
         let visible = pref.map(|p| p.visible).unwrap_or(true);
         if !visible {
             continue;
         }
 
-        let width = pref.and_then(|p| if p.width > 0 { Some(p.width) } else { None })
+        let width = pref
+            .and_then(|p| if p.width > 0 { Some(p.width) } else { None })
             .unwrap_or(def.default_width);
         let position = pref.map(|p| p.position).unwrap_or(def.priority);
 
@@ -529,8 +751,13 @@ pub fn self_test() -> KernelResult<()> {
     // Test 4: register custom column.
     {
         register_column(
-            "test.custom", "Test Col", ColumnType::Text, 100,
-            &["application/x-test"], "test_field", "test-app",
+            "test.custom",
+            "Test Col",
+            ColumnType::Text,
+            100,
+            &["application/x-test"],
+            "test_field",
+            "test-app",
         )?;
         let cols = list_columns();
         assert!(cols.iter().any(|c| c.id == "test.custom"));

@@ -36,8 +36,8 @@
 // commands; many helpers may not have call sites in production paths yet.
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -49,7 +49,18 @@ const NUM_BUCKETS: usize = 12;
 /// Bucket upper bounds (exclusive).  Bucket i covers sizes in
 /// (BUCKET_BOUNDS[i-1], BUCKET_BOUNDS[i]].  Bucket 0 covers (0, 8].
 const BUCKET_BOUNDS: [usize; NUM_BUCKETS] = [
-    8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, usize::MAX,
+    8,
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048,
+    4096,
+    8192,
+    usize::MAX,
 ];
 
 // ---------------------------------------------------------------------------
@@ -58,34 +69,66 @@ const BUCKET_BOUNDS: [usize; NUM_BUCKETS] = [
 
 /// Allocation counts per bucket.
 static ALLOC_COUNTS: [AtomicU64; NUM_BUCKETS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 /// Free counts per bucket.
 static FREE_COUNTS: [AtomicU64; NUM_BUCKETS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 /// Total bytes allocated per bucket (cumulative).
 static ALLOC_BYTES: [AtomicU64; NUM_BUCKETS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 /// Peak active count per bucket (high water mark).
 static PEAK_ACTIVE: [AtomicU64; NUM_BUCKETS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 // ---------------------------------------------------------------------------
@@ -133,7 +176,10 @@ pub fn record_alloc(size: usize) {
     let mut current_peak = PEAK_ACTIVE[bucket].load(Ordering::Relaxed);
     while active > current_peak {
         match PEAK_ACTIVE[bucket].compare_exchange_weak(
-            current_peak, active, Ordering::Relaxed, Ordering::Relaxed
+            current_peak,
+            active,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
         ) {
             Ok(_) => break,
             Err(actual) => current_peak = actual,
@@ -145,7 +191,10 @@ pub fn record_alloc(size: usize) {
     let mut current_max = MAX_ALLOC_SIZE.load(Ordering::Relaxed);
     while size64 > current_max {
         match MAX_ALLOC_SIZE.compare_exchange_weak(
-            current_max, size64, Ordering::Relaxed, Ordering::Relaxed
+            current_max,
+            size64,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
         ) {
             Ok(_) => break,
             Err(actual) => current_max = actual,
@@ -245,8 +294,13 @@ pub struct HeapProfile {
 #[must_use]
 pub fn profile() -> HeapProfile {
     let mut buckets = [BucketStats {
-        size_class: 0, allocs: 0, frees: 0,
-        active: 0, peak: 0, total_bytes: 0, avg_size: 0,
+        size_class: 0,
+        allocs: 0,
+        frees: 0,
+        active: 0,
+        peak: 0,
+        total_bytes: 0,
+        avg_size: 0,
     }; NUM_BUCKETS];
 
     for i in 0..NUM_BUCKETS {
@@ -319,7 +373,10 @@ pub fn fragmentation_estimate() -> u8 {
     }
 
     let wasted = consumed.saturating_sub(requested);
-    let pct = wasted.saturating_mul(100).checked_div(consumed).unwrap_or(0);
+    let pct = wasted
+        .saturating_mul(100)
+        .checked_div(consumed)
+        .unwrap_or(0);
     (pct as u8).min(100)
 }
 
@@ -331,17 +388,39 @@ pub fn fragmentation_estimate() -> u8 {
 #[inline]
 fn size_to_bucket(size: usize) -> usize {
     // Fast path for common small sizes.
-    if size <= 8 { return 0; }
-    if size <= 16 { return 1; }
-    if size <= 32 { return 2; }
-    if size <= 64 { return 3; }
-    if size <= 128 { return 4; }
-    if size <= 256 { return 5; }
-    if size <= 512 { return 6; }
-    if size <= 1024 { return 7; }
-    if size <= 2048 { return 8; }
-    if size <= 4096 { return 9; }
-    if size <= 8192 { return 10; }
+    if size <= 8 {
+        return 0;
+    }
+    if size <= 16 {
+        return 1;
+    }
+    if size <= 32 {
+        return 2;
+    }
+    if size <= 64 {
+        return 3;
+    }
+    if size <= 128 {
+        return 4;
+    }
+    if size <= 256 {
+        return 5;
+    }
+    if size <= 512 {
+        return 6;
+    }
+    if size <= 1024 {
+        return 7;
+    }
+    if size <= 2048 {
+        return 8;
+    }
+    if size <= 4096 {
+        return 9;
+    }
+    if size <= 8192 {
+        return 10;
+    }
     NUM_BUCKETS - 1 // >8192 → overflow bucket
 }
 
@@ -413,11 +492,14 @@ pub fn self_test() {
 
     // Test 4: Peak tracking.
     assert!(p.buckets[2].peak >= 3, "peak should be >= 3");
-    serial_println!("[heap_profile]   Peak tracking: OK (peak={})", p.buckets[2].peak);
+    serial_println!(
+        "[heap_profile]   Peak tracking: OK (peak={})",
+        p.buckets[2].peak
+    );
 
     // Test 5: Total bytes and avg size.
     assert_eq!(p.buckets[2].total_bytes, 96); // 3 × 32
-    assert_eq!(p.buckets[2].avg_size, 32);    // 96 / 3
+    assert_eq!(p.buckets[2].avg_size, 32); // 96 / 3
     serial_println!("[heap_profile]   Bytes tracking: OK");
 
     // Test 6: Max allocation size.
@@ -430,7 +512,11 @@ pub fn self_test() {
     let (hot_size, hot_count) = hottest_bucket();
     assert_eq!(hot_size, 32); // Bucket ≤32 has 3 allocs.
     assert_eq!(hot_count, 3);
-    serial_println!("[heap_profile]   Hottest bucket: ≤{} ({} allocs)", hot_size, hot_count);
+    serial_println!(
+        "[heap_profile]   Hottest bucket: ≤{} ({} allocs)",
+        hot_size,
+        hot_count
+    );
 
     // Test 8: Disable/enable.
     disable();

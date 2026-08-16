@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -168,7 +168,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         analyses: Vec::new(),
         next_id: 1,
@@ -181,9 +183,14 @@ pub fn init_defaults() {
 
 /// Analyze a crash dump.
 pub fn analyze_dump(
-    dump_path: &str, severity: CrashSeverity, fault_type: FaultType,
-    faulting_module: &str, fault_address: u64, pid: u32,
-    stack_frames: Vec<StackFrame>, summary: &str,
+    dump_path: &str,
+    severity: CrashSeverity,
+    fault_type: FaultType,
+    faulting_module: &str,
+    fault_address: u64,
+    pid: u32,
+    stack_frames: Vec<StackFrame>,
+    summary: &str,
 ) -> KernelResult<u32> {
     with_state(|state| {
         if state.analyses.len() >= MAX_ANALYSES {
@@ -200,10 +207,13 @@ pub fn analyze_dump(
         }
 
         state.analyses.push(CrashAnalysis {
-            id, dump_path: String::from(dump_path),
-            severity, fault_type,
+            id,
+            dump_path: String::from(dump_path),
+            severity,
+            fault_type,
             faulting_module: String::from(faulting_module),
-            fault_address, stack_frames,
+            fault_address,
+            stack_frames,
             summary: String::from(summary),
             analyzed_ns: crate::hpet::elapsed_ns(),
             pid,
@@ -215,26 +225,41 @@ pub fn analyze_dump(
 /// Get analysis by ID.
 pub fn get_analysis(id: u32) -> KernelResult<CrashAnalysis> {
     with_state(|state| {
-        state.analyses.iter().find(|a| a.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .analyses
+            .iter()
+            .find(|a| a.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// List all analyses.
 pub fn list_analyses() -> Vec<CrashAnalysis> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.analyses.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.analyses.clone())
 }
 
 /// List analyses by fault type.
 pub fn list_by_fault(fault_type: FaultType) -> Vec<CrashAnalysis> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.analyses.iter().filter(|a| a.fault_type == fault_type).cloned().collect()
+        s.analyses
+            .iter()
+            .filter(|a| a.fault_type == fault_type)
+            .cloned()
+            .collect()
     })
 }
 
 /// Delete an analysis.
 pub fn delete_analysis(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.analyses.iter().position(|a| a.id == id)
+        let pos = state
+            .analyses
+            .iter()
+            .position(|a| a.id == id)
             .ok_or(KernelError::NotFound)?;
         state.analyses.remove(pos);
         Ok(())
@@ -248,14 +273,22 @@ pub fn clear_all() -> usize {
         let count = state.analyses.len();
         state.analyses.clear();
         count
-    } else { 0 }
+    } else {
+        0
+    }
 }
 
 /// Statistics: (analysis_count, total_analyzed, kernel_crashes, app_crashes, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.analyses.len(), s.total_analyzed, s.total_kernel_crashes, s.total_app_crashes, s.ops),
+        Some(s) => (
+            s.analyses.len(),
+            s.total_analyzed,
+            s.total_kernel_crashes,
+            s.total_app_crashes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -274,24 +307,54 @@ pub fn self_test() {
 
     // 2: Analyze kernel crash.
     let frames = alloc::vec![
-        StackFrame { index: 0, address: 0xFFFF_8000_0010_0000, module: String::from("kernel"), function: String::from("page_fault_handler"), offset: 0x42 },
-        StackFrame { index: 1, address: 0xFFFF_8000_0020_0000, module: String::from("kernel"), function: String::from("interrupt_dispatch"), offset: 0x100 },
+        StackFrame {
+            index: 0,
+            address: 0xFFFF_8000_0010_0000,
+            module: String::from("kernel"),
+            function: String::from("page_fault_handler"),
+            offset: 0x42
+        },
+        StackFrame {
+            index: 1,
+            address: 0xFFFF_8000_0020_0000,
+            module: String::from("kernel"),
+            function: String::from("interrupt_dispatch"),
+            offset: 0x100
+        },
     ];
     let id1 = analyze_dump(
-        "/var/crash/dump-001.bin", CrashSeverity::Fatal, FaultType::PageFault,
-        "kernel", 0xDEAD_BEEF, 0, frames, "Null pointer dereference in page table walk",
-    ).expect("analyze");
+        "/var/crash/dump-001.bin",
+        CrashSeverity::Fatal,
+        FaultType::PageFault,
+        "kernel",
+        0xDEAD_BEEF,
+        0,
+        frames,
+        "Null pointer dereference in page table walk",
+    )
+    .expect("analyze");
     assert!(id1 > 0);
     crate::serial_println!("  [2/11] kernel crash: OK");
 
     // 3: Analyze app crash.
-    let frames2 = alloc::vec![
-        StackFrame { index: 0, address: 0x0040_1000, module: String::from("app.exe"), function: String::from("main"), offset: 0x10 },
-    ];
+    let frames2 = alloc::vec![StackFrame {
+        index: 0,
+        address: 0x0040_1000,
+        module: String::from("app.exe"),
+        function: String::from("main"),
+        offset: 0x10
+    },];
     let id2 = analyze_dump(
-        "/var/crash/dump-002.bin", CrashSeverity::Error, FaultType::StackOverflow,
-        "app.exe", 0x0040_1000, 42, frames2, "Infinite recursion detected",
-    ).expect("analyze2");
+        "/var/crash/dump-002.bin",
+        CrashSeverity::Error,
+        FaultType::StackOverflow,
+        "app.exe",
+        0x0040_1000,
+        42,
+        frames2,
+        "Infinite recursion detected",
+    )
+    .expect("analyze2");
     assert_eq!(list_analyses().len(), 2);
     crate::serial_println!("  [3/11] app crash: OK");
 

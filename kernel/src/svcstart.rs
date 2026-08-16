@@ -43,10 +43,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::servicemgr;
@@ -296,9 +296,10 @@ pub fn resolve_dependencies() -> KernelResult<()> {
     }
 
     // Build the list of nodes, initially with level = u32::MAX (unresolved).
-    let mut nodes: Vec<(u32, String, Vec<String>, u32)> = services.iter().map(|s| {
-        (s.id, s.name.clone(), s.depends_on.clone(), u32::MAX)
-    }).collect();
+    let mut nodes: Vec<(u32, String, Vec<String>, u32)> = services
+        .iter()
+        .map(|s| (s.id, s.name.clone(), s.depends_on.clone(), u32::MAX))
+        .collect();
 
     // Iteratively assign levels:
     // - Services with no deps → level 0.
@@ -322,7 +323,9 @@ pub fn resolve_dependencies() -> KernelResult<()> {
             if deps.is_empty() {
                 nodes[i].3 = 0;
                 #[allow(clippy::arithmetic_side_effects)]
-                { resolved_count += 1; }
+                {
+                    resolved_count += 1;
+                }
                 progress = true;
                 continue;
             }
@@ -349,7 +352,9 @@ pub fn resolve_dependencies() -> KernelResult<()> {
             if all_resolved {
                 nodes[i].3 = max_dep_level.saturating_add(1);
                 #[allow(clippy::arithmetic_side_effects)]
-                { resolved_count += 1; }
+                {
+                    resolved_count += 1;
+                }
                 progress = true;
             }
         }
@@ -362,13 +367,17 @@ pub fn resolve_dependencies() -> KernelResult<()> {
             // No progress means a dependency cycle exists.
             state.phase = BootPhase::Failed;
             // Collect unresolved service names for the error message.
-            let _unresolved: Vec<&str> = nodes.iter()
+            let _unresolved: Vec<&str> = nodes
+                .iter()
                 .filter(|n| n.3 == u32::MAX)
                 .map(|n| n.1.as_str())
                 .collect();
 
-            crate::syslog!("service.startup", Error,
-                "Dependency cycle detected in service graph");
+            crate::syslog!(
+                "service.startup",
+                Error,
+                "Dependency cycle detected in service graph"
+            );
             return Err(KernelError::InvalidArgument);
         }
     }
@@ -400,7 +409,9 @@ pub fn start_levels() -> Vec<Vec<(u32, String)>> {
     let mut levels: Vec<Vec<(u32, String)>> = Vec::new();
 
     for level_idx in 0..=state.max_level {
-        let services: Vec<(u32, String)> = state.start_graph.iter()
+        let services: Vec<(u32, String)> = state
+            .start_graph
+            .iter()
             .filter(|n| n.level == level_idx)
             .map(|n| (n.service_id, n.name.clone()))
             .collect();
@@ -442,8 +453,13 @@ pub fn boot_services() -> KernelResult<u32> {
     }
 
     for (level_idx, level) in levels.iter().enumerate() {
-        crate::syslog!("service.startup", Info,
-            "Starting service level {} ({} services)", level_idx, level.len());
+        crate::syslog!(
+            "service.startup",
+            Info,
+            "Starting service level {} ({} services)",
+            level_idx,
+            level.len()
+        );
 
         for (svc_id, svc_name) in level {
             // Skip disabled services.
@@ -454,8 +470,11 @@ pub fn boot_services() -> KernelResult<u32> {
                 if info.state == servicemgr::ServiceState::Running {
                     // Already running (e.g., started during init_defaults).
                     let mut state = STATE.lock();
-                    if let Some(node) = state.start_graph.iter_mut()
-                        .find(|n| n.service_id == *svc_id) {
+                    if let Some(node) = state
+                        .start_graph
+                        .iter_mut()
+                        .find(|n| n.service_id == *svc_id)
+                    {
                         node.ready = true;
                         node.started_at_ns = info.last_start_ns;
                         node.ready_at_ns = info.last_start_ns;
@@ -470,18 +489,31 @@ pub fn boot_services() -> KernelResult<u32> {
                 Ok(()) => {
                     let now = crate::hpet::elapsed_ns();
                     let mut state = STATE.lock();
-                    if let Some(node) = state.start_graph.iter_mut()
-                        .find(|n| n.service_id == *svc_id) {
+                    if let Some(node) = state
+                        .start_graph
+                        .iter_mut()
+                        .find(|n| n.service_id == *svc_id)
+                    {
                         node.started_at_ns = now;
                     }
                     total_started = total_started.saturating_add(1);
 
-                    crate::syslog!("service.startup", Info,
-                        "Service '{}' started (level {})", svc_name, level_idx);
+                    crate::syslog!(
+                        "service.startup",
+                        Info,
+                        "Service '{}' started (level {})",
+                        svc_name,
+                        level_idx
+                    );
                 }
                 Err(e) => {
-                    crate::syslog!("service.startup", Error,
-                        "Failed to start service '{}': {:?}", svc_name, e);
+                    crate::syslog!(
+                        "service.startup",
+                        Error,
+                        "Failed to start service '{}': {:?}",
+                        svc_name,
+                        e
+                    );
                 }
             }
         }
@@ -503,8 +535,13 @@ pub fn boot_services() -> KernelResult<u32> {
         state.phase = BootPhase::Complete;
     }
 
-    crate::syslog!("service.startup", Info,
-        "Boot sequence complete: {} services, {} apps", total_started, apps_launched);
+    crate::syslog!(
+        "service.startup",
+        Info,
+        "Boot sequence complete: {} services, {} apps",
+        total_started,
+        apps_launched
+    );
 
     Ok(total_started)
 }
@@ -512,14 +549,21 @@ pub fn boot_services() -> KernelResult<u32> {
 /// Notify that a service has signaled readiness.
 pub fn signal_ready(service_id: u32) {
     let mut state = STATE.lock();
-    if let Some(node) = state.start_graph.iter_mut()
-        .find(|n| n.service_id == service_id) {
+    if let Some(node) = state
+        .start_graph
+        .iter_mut()
+        .find(|n| n.service_id == service_id)
+    {
         node.ready = true;
         node.ready_at_ns = crate::hpet::elapsed_ns();
     }
 
-    crate::syslog!("service.startup", Info,
-        "Service id={} signaled ready", service_id);
+    crate::syslog!(
+        "service.startup",
+        Info,
+        "Service id={} signaled ready",
+        service_id
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -543,8 +587,11 @@ pub fn report_crash(service_id: u32) -> KernelResult<u64> {
     let config = state.config.clone();
 
     // Find or create crash record.
-    let record = if let Some(r) = state.crash_records.iter_mut()
-        .find(|r| r.service_id == service_id) {
+    let record = if let Some(r) = state
+        .crash_records
+        .iter_mut()
+        .find(|r| r.service_id == service_id)
+    {
         r
     } else {
         state.crash_records.push(CrashRecord {
@@ -558,7 +605,10 @@ pub fn report_crash(service_id: u32) -> KernelResult<u64> {
             crash_history: Vec::new(),
         });
         // Safe: we just pushed, so last() is Some.
-        state.crash_records.last_mut().ok_or(KernelError::InternalError)?
+        state
+            .crash_records
+            .last_mut()
+            .ok_or(KernelError::InternalError)?
     };
 
     if record.permanently_failed {
@@ -569,7 +619,9 @@ pub fn report_crash(service_id: u32) -> KernelResult<u64> {
     record.consecutive_failures = record.consecutive_failures.saturating_add(1);
     record.last_crash_ns = now;
     #[allow(clippy::arithmetic_side_effects)]
-    { record.total_crashes += 1; }
+    {
+        record.total_crashes += 1;
+    }
 
     // Keep last 10 crash timestamps.
     if record.crash_history.len() >= 10 {
@@ -580,9 +632,13 @@ pub fn report_crash(service_id: u32) -> KernelResult<u64> {
     // Check if we've exceeded max retries.
     if record.consecutive_failures > config.max_retries {
         record.permanently_failed = true;
-        crate::syslog!("service.crash", Critical,
+        crate::syslog!(
+            "service.crash",
+            Critical,
             "Service '{}' permanently failed after {} crashes",
-            info.name, record.total_crashes);
+            info.name,
+            record.total_crashes
+        );
         return Err(KernelError::ResourceExhausted);
     }
 
@@ -603,12 +659,20 @@ pub fn report_crash(service_id: u32) -> KernelResult<u64> {
     let consec = record.consecutive_failures;
 
     #[allow(clippy::arithmetic_side_effects)]
-    { state.total_restarts += 1; }
+    {
+        state.total_restarts += 1;
+    }
 
     let delay_ms = delay / 1_000_000;
-    crate::syslog!("service.crash", Warning,
+    crate::syslog!(
+        "service.crash",
+        Warning,
         "Service '{}' crashed (attempt {}/{}), restart in {} ms",
-        info.name, consec, config.max_retries, delay_ms);
+        info.name,
+        consec,
+        config.max_retries,
+        delay_ms
+    );
 
     // In a real system, we'd schedule a timer callback here.
     // For now, we attempt the restart immediately (the backoff delay
@@ -625,8 +689,11 @@ pub fn report_crash(service_id: u32) -> KernelResult<u64> {
 pub fn reset_crash_count(service_id: u32) {
     let mut state = STATE.lock();
     let initial_backoff = state.config.initial_backoff_ns;
-    if let Some(record) = state.crash_records.iter_mut()
-        .find(|r| r.service_id == service_id) {
+    if let Some(record) = state
+        .crash_records
+        .iter_mut()
+        .find(|r| r.service_id == service_id)
+    {
         record.consecutive_failures = 0;
         record.current_backoff_ns = initial_backoff;
         record.permanently_failed = false;
@@ -638,12 +705,7 @@ pub fn reset_crash_count(service_id: u32) {
 // ---------------------------------------------------------------------------
 
 /// Add an app to the startup list.
-pub fn add_startup_app(
-    path: &str,
-    args: &str,
-    display_name: &str,
-    wait_for_ready: bool,
-) -> u32 {
+pub fn add_startup_app(path: &str, args: &str, display_name: &str, wait_for_ready: bool) -> u32 {
     let mut state = STATE.lock();
     let id = state.next_app_id;
     state.next_app_id = state.next_app_id.saturating_add(1);
@@ -666,7 +728,10 @@ pub fn add_startup_app(
 /// Remove a startup app by ID.
 pub fn remove_startup_app(id: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let idx = state.startup_apps.iter().position(|a| a.id == id)
+    let idx = state
+        .startup_apps
+        .iter()
+        .position(|a| a.id == id)
         .ok_or(KernelError::NotFound)?;
     state.startup_apps.remove(idx);
     Ok(())
@@ -675,7 +740,10 @@ pub fn remove_startup_app(id: u32) -> KernelResult<()> {
 /// Toggle a startup app's enabled state.
 pub fn toggle_startup_app(id: u32) -> KernelResult<bool> {
     let mut state = STATE.lock();
-    let app = state.startup_apps.iter_mut().find(|a| a.id == id)
+    let app = state
+        .startup_apps
+        .iter_mut()
+        .find(|a| a.id == id)
         .ok_or(KernelError::NotFound)?;
     app.enabled = !app.enabled;
     Ok(app.enabled)
@@ -684,7 +752,10 @@ pub fn toggle_startup_app(id: u32) -> KernelResult<bool> {
 /// Reorder a startup app (set its order value).
 pub fn reorder_startup_app(id: u32, new_order: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let app = state.startup_apps.iter_mut().find(|a| a.id == id)
+    let app = state
+        .startup_apps
+        .iter_mut()
+        .find(|a| a.id == id)
         .ok_or(KernelError::NotFound)?;
     app.order = new_order;
     Ok(())
@@ -710,8 +781,13 @@ fn run_startup_apps() -> u32 {
             continue;
         }
 
-        crate::syslog!("service.startup", Info,
-            "Launching startup app: {} ({})", app.display_name, app.path);
+        crate::syslog!(
+            "service.startup",
+            Info,
+            "Launching startup app: {} ({})",
+            app.display_name,
+            app.path
+        );
 
         // In a real implementation, this would spawn a process via the
         // process manager. For now, we just log the launch.
@@ -770,10 +846,19 @@ pub fn stats() -> StartupStats {
 /// Get crash records for display.
 pub fn crash_records() -> Vec<(String, u32, u64, u64, bool)> {
     let state = STATE.lock();
-    state.crash_records.iter().map(|r| {
-        (r.name.clone(), r.consecutive_failures, r.total_crashes,
-         r.current_backoff_ns / 1_000_000, r.permanently_failed)
-    }).collect()
+    state
+        .crash_records
+        .iter()
+        .map(|r| {
+            (
+                r.name.clone(),
+                r.consecutive_failures,
+                r.total_crashes,
+                r.current_backoff_ns / 1_000_000,
+                r.permanently_failed,
+            )
+        })
+        .collect()
 }
 
 /// Generate content for /proc/svcstart.
@@ -812,12 +897,16 @@ pub fn procfs_content() -> String {
     let crashes = crash_records();
     if !crashes.is_empty() {
         out.push_str(&format!("\nCrash Records ({}):\n", crashes.len()));
-        out.push_str(&format!("  {:16} {:>6} {:>8} {:>8} {:>8}\n",
-            "Service", "Consec", "Total", "Backoff", "Status"));
+        out.push_str(&format!(
+            "  {:16} {:>6} {:>8} {:>8} {:>8}\n",
+            "Service", "Consec", "Total", "Backoff", "Status"
+        ));
         for (name, consec, total, backoff_ms, perm) in &crashes {
             let status = if *perm { "FAILED" } else { "active" };
-            out.push_str(&format!("  {:16} {:>6} {:>8} {:>5} ms {:>8}\n",
-                name, consec, total, backoff_ms, status));
+            out.push_str(&format!(
+                "  {:16} {:>6} {:>8} {:>5} ms {:>8}\n",
+                name, consec, total, backoff_ms, status
+            ));
         }
     }
 
@@ -825,13 +914,19 @@ pub fn procfs_content() -> String {
     let apps = list_startup_apps();
     if !apps.is_empty() {
         out.push_str(&format!("\nStartup Apps ({}):\n", apps.len()));
-        out.push_str(&format!("  {:>3} {:20} {:30} {:>5} {:>7}\n",
-            "Ord", "Name", "Path", "Wait", "Enabled"));
+        out.push_str(&format!(
+            "  {:>3} {:20} {:30} {:>5} {:>7}\n",
+            "Ord", "Name", "Path", "Wait", "Enabled"
+        ));
         for app in &apps {
-            out.push_str(&format!("  {:>3} {:20} {:30} {:>5} {:>7}\n",
-                app.order, app.display_name, app.path,
+            out.push_str(&format!(
+                "  {:>3} {:20} {:30} {:>5} {:>7}\n",
+                app.order,
+                app.display_name,
+                app.path,
                 if app.wait_for_ready { "yes" } else { "no" },
-                if app.enabled { "yes" } else { "no" }));
+                if app.enabled { "yes" } else { "no" }
+            ));
         }
     }
 
@@ -862,8 +957,11 @@ pub fn self_test() -> KernelResult<()> {
         // All default services have no deps, so all should be level 0.
         for node in &state.start_graph {
             if node.level != 0 {
-                crate::serial_println!("[svcstart]   FAIL: expected level 0 for '{}', got {}",
-                    node.name, node.level);
+                crate::serial_println!(
+                    "[svcstart]   FAIL: expected level 0 for '{}', got {}",
+                    node.name,
+                    node.level
+                );
                 return Err(KernelError::InternalError);
             }
         }
@@ -883,8 +981,11 @@ pub fn self_test() -> KernelResult<()> {
         let audio_node = state.start_graph.iter().find(|n| n.name == "audio");
         if let (Some(net), Some(audio)) = (net_node, audio_node) {
             if net.level != 0 || audio.level != 1 {
-                crate::serial_println!("[svcstart]   FAIL: expected net=0 audio=1, got net={} audio={}",
-                    net.level, audio.level);
+                crate::serial_println!(
+                    "[svcstart]   FAIL: expected net=0 audio=1, got net={} audio={}",
+                    net.level,
+                    audio.level
+                );
                 return Err(KernelError::InternalError);
             }
         } else {
@@ -897,7 +998,10 @@ pub fn self_test() -> KernelResult<()> {
     // Test 3: Start levels grouping.
     let levels = start_levels();
     if levels.len() < 2 {
-        crate::serial_println!("[svcstart]   FAIL: expected at least 2 levels, got {}", levels.len());
+        crate::serial_println!(
+            "[svcstart]   FAIL: expected at least 2 levels, got {}",
+            levels.len()
+        );
         return Err(KernelError::InternalError);
     }
     crate::serial_println!("[svcstart]   3. Start levels ({}): OK", levels.len());
@@ -908,8 +1012,11 @@ pub fn self_test() -> KernelResult<()> {
         let delay1 = report_crash(net.id)?;
         // First crash → initial backoff (1s = 1_000_000_000 ns).
         if delay1 != DEFAULT_INITIAL_BACKOFF_NS {
-            crate::serial_println!("[svcstart]   FAIL: expected initial backoff {} ns, got {}",
-                DEFAULT_INITIAL_BACKOFF_NS, delay1);
+            crate::serial_println!(
+                "[svcstart]   FAIL: expected initial backoff {} ns, got {}",
+                DEFAULT_INITIAL_BACKOFF_NS,
+                delay1
+            );
             return Err(KernelError::InternalError);
         }
 
@@ -917,8 +1024,11 @@ pub fn self_test() -> KernelResult<()> {
         let delay2 = report_crash(net.id)?;
         let expected2 = DEFAULT_INITIAL_BACKOFF_NS.saturating_mul(2);
         if delay2 != expected2 {
-            crate::serial_println!("[svcstart]   FAIL: expected 2x backoff {} ns, got {}",
-                expected2, delay2);
+            crate::serial_println!(
+                "[svcstart]   FAIL: expected 2x backoff {} ns, got {}",
+                expected2,
+                delay2
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -934,7 +1044,9 @@ pub fn self_test() -> KernelResult<()> {
         // Next one should exceed max_retries.
         let result = report_crash(net.id);
         if result.is_ok() {
-            crate::serial_println!("[svcstart]   FAIL: expected permanent failure after max retries");
+            crate::serial_println!(
+                "[svcstart]   FAIL: expected permanent failure after max retries"
+            );
             return Err(KernelError::InternalError);
         }
         // Verify it's marked permanently failed.
@@ -992,7 +1104,10 @@ pub fn self_test() -> KernelResult<()> {
     {
         let apps = list_startup_apps();
         if apps.len() != 1 {
-            crate::serial_println!("[svcstart]   FAIL: expected 1 app after remove, got {}", apps.len());
+            crate::serial_println!(
+                "[svcstart]   FAIL: expected 1 app after remove, got {}",
+                apps.len()
+            );
             return Err(KernelError::InternalError);
         }
     }

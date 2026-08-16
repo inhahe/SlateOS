@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -91,7 +91,13 @@ impl AppRestrictionMode {
 /// Day of week for schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DayOfWeek {
-    Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday,
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
 }
 
 impl DayOfWeek {
@@ -215,13 +221,48 @@ pub fn create_profile(uid: u32, name: &str) -> KernelResult<()> {
         }
 
         let default_schedule = alloc::vec![
-            DaySchedule { day: DayOfWeek::Monday, start_hour: 7, end_hour: 21, max_minutes: 120 },
-            DaySchedule { day: DayOfWeek::Tuesday, start_hour: 7, end_hour: 21, max_minutes: 120 },
-            DaySchedule { day: DayOfWeek::Wednesday, start_hour: 7, end_hour: 21, max_minutes: 120 },
-            DaySchedule { day: DayOfWeek::Thursday, start_hour: 7, end_hour: 21, max_minutes: 120 },
-            DaySchedule { day: DayOfWeek::Friday, start_hour: 7, end_hour: 22, max_minutes: 180 },
-            DaySchedule { day: DayOfWeek::Saturday, start_hour: 8, end_hour: 22, max_minutes: 240 },
-            DaySchedule { day: DayOfWeek::Sunday, start_hour: 8, end_hour: 21, max_minutes: 180 },
+            DaySchedule {
+                day: DayOfWeek::Monday,
+                start_hour: 7,
+                end_hour: 21,
+                max_minutes: 120
+            },
+            DaySchedule {
+                day: DayOfWeek::Tuesday,
+                start_hour: 7,
+                end_hour: 21,
+                max_minutes: 120
+            },
+            DaySchedule {
+                day: DayOfWeek::Wednesday,
+                start_hour: 7,
+                end_hour: 21,
+                max_minutes: 120
+            },
+            DaySchedule {
+                day: DayOfWeek::Thursday,
+                start_hour: 7,
+                end_hour: 21,
+                max_minutes: 120
+            },
+            DaySchedule {
+                day: DayOfWeek::Friday,
+                start_hour: 7,
+                end_hour: 22,
+                max_minutes: 180
+            },
+            DaySchedule {
+                day: DayOfWeek::Saturday,
+                start_hour: 8,
+                end_hour: 22,
+                max_minutes: 240
+            },
+            DaySchedule {
+                day: DayOfWeek::Sunday,
+                start_hour: 8,
+                end_hour: 21,
+                max_minutes: 180
+            },
         ];
 
         state.profiles.push(ChildProfile {
@@ -262,7 +303,9 @@ pub fn remove_profile(uid: u32) -> KernelResult<()> {
 pub fn get_profile(uid: u32) -> KernelResult<ChildProfile> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.profiles.iter()
+    state
+        .profiles
+        .iter()
         .find(|p| p.uid == uid)
         .cloned()
         .ok_or(KernelError::NotFound)
@@ -277,7 +320,11 @@ pub fn list_profiles() -> Vec<ChildProfile> {
 /// Enable or disable controls.
 pub fn set_enabled(uid: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.uid == uid).ok_or(KernelError::NotFound)?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.uid == uid)
+            .ok_or(KernelError::NotFound)?;
         profile.enabled = enabled;
         Ok(())
     })
@@ -290,7 +337,11 @@ pub fn set_enabled(uid: u32, enabled: bool) -> KernelResult<()> {
 /// Set content filter level.
 pub fn set_filter_level(uid: u32, level: FilterLevel) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.uid == uid).ok_or(KernelError::NotFound)?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.uid == uid)
+            .ok_or(KernelError::NotFound)?;
         profile.filter_level = level;
         Ok(())
     })
@@ -299,7 +350,11 @@ pub fn set_filter_level(uid: u32, level: FilterLevel) -> KernelResult<()> {
 /// Set safe search enforcement.
 pub fn set_safe_search(uid: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.uid == uid).ok_or(KernelError::NotFound)?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.uid == uid)
+            .ok_or(KernelError::NotFound)?;
         profile.safe_search = enabled;
         Ok(())
     })
@@ -308,7 +363,11 @@ pub fn set_safe_search(uid: u32, enabled: bool) -> KernelResult<()> {
 /// Add a blocked website pattern.
 pub fn add_blocked_site(uid: u32, pattern: &str) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.uid == uid).ok_or(KernelError::NotFound)?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.uid == uid)
+            .ok_or(KernelError::NotFound)?;
         if profile.blocked_sites.len() >= MAX_BLOCKED_SITES {
             return Err(KernelError::ResourceExhausted);
         }
@@ -320,7 +379,11 @@ pub fn add_blocked_site(uid: u32, pattern: &str) -> KernelResult<()> {
 /// Remove a blocked site.
 pub fn remove_blocked_site(uid: u32, pattern: &str) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.uid == uid).ok_or(KernelError::NotFound)?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.uid == uid)
+            .ok_or(KernelError::NotFound)?;
         if let Some(pos) = profile.blocked_sites.iter().position(|s| s == pattern) {
             profile.blocked_sites.remove(pos);
             Ok(())
@@ -337,7 +400,11 @@ pub fn remove_blocked_site(uid: u32, pattern: &str) -> KernelResult<()> {
 /// Set app restriction mode.
 pub fn set_app_mode(uid: u32, mode: AppRestrictionMode) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.uid == uid).ok_or(KernelError::NotFound)?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.uid == uid)
+            .ok_or(KernelError::NotFound)?;
         profile.app_mode = mode;
         Ok(())
     })
@@ -346,7 +413,11 @@ pub fn set_app_mode(uid: u32, mode: AppRestrictionMode) -> KernelResult<()> {
 /// Add a blocked app.
 pub fn add_blocked_app(uid: u32, app_id: &str) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.uid == uid).ok_or(KernelError::NotFound)?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.uid == uid)
+            .ok_or(KernelError::NotFound)?;
         if profile.blocked_apps.len() >= MAX_BLOCKED_APPS {
             return Err(KernelError::ResourceExhausted);
         }
@@ -360,7 +431,11 @@ pub fn add_blocked_app(uid: u32, app_id: &str) -> KernelResult<()> {
 /// Remove a blocked app.
 pub fn remove_blocked_app(uid: u32, app_id: &str) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.uid == uid).ok_or(KernelError::NotFound)?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.uid == uid)
+            .ok_or(KernelError::NotFound)?;
         if let Some(pos) = profile.blocked_apps.iter().position(|a| a == app_id) {
             profile.blocked_apps.remove(pos);
             Ok(())
@@ -373,7 +448,11 @@ pub fn remove_blocked_app(uid: u32, app_id: &str) -> KernelResult<()> {
 /// Add an allowed app (for AllowList mode).
 pub fn add_allowed_app(uid: u32, app_id: &str) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.uid == uid).ok_or(KernelError::NotFound)?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.uid == uid)
+            .ok_or(KernelError::NotFound)?;
         if profile.allowed_apps.len() >= MAX_ALLOWED_APPS {
             return Err(KernelError::ResourceExhausted);
         }
@@ -391,7 +470,11 @@ pub fn add_allowed_app(uid: u32, app_id: &str) -> KernelResult<()> {
 /// Set daily screen time limit.
 pub fn set_daily_limit(uid: u32, minutes: u32) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.uid == uid).ok_or(KernelError::NotFound)?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.uid == uid)
+            .ok_or(KernelError::NotFound)?;
         profile.daily_limit_minutes = minutes;
         Ok(())
     })
@@ -400,7 +483,11 @@ pub fn set_daily_limit(uid: u32, minutes: u32) -> KernelResult<()> {
 /// Record screen time usage.
 pub fn add_time_used(uid: u32, minutes: u32) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.uid == uid).ok_or(KernelError::NotFound)?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.uid == uid)
+            .ok_or(KernelError::NotFound)?;
         profile.time_used_today = profile.time_used_today.saturating_add(minutes);
         Ok(())
     })
@@ -409,19 +496,33 @@ pub fn add_time_used(uid: u32, minutes: u32) -> KernelResult<()> {
 /// Reset daily time counter.
 pub fn reset_daily_time(uid: u32) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.uid == uid).ok_or(KernelError::NotFound)?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.uid == uid)
+            .ok_or(KernelError::NotFound)?;
         profile.time_used_today = 0;
         Ok(())
     })
 }
 
 /// Set schedule for a day.
-pub fn set_schedule(uid: u32, day_index: usize, start: u8, end: u8, max_min: u32) -> KernelResult<()> {
+pub fn set_schedule(
+    uid: u32,
+    day_index: usize,
+    start: u8,
+    end: u8,
+    max_min: u32,
+) -> KernelResult<()> {
     if start > 23 || end > 23 || day_index >= 7 {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.uid == uid).ok_or(KernelError::NotFound)?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.uid == uid)
+            .ok_or(KernelError::NotFound)?;
         if day_index < profile.schedule.len() {
             profile.schedule[day_index].start_hour = start;
             profile.schedule[day_index].end_hour = end;

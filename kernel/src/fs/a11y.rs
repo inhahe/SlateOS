@@ -27,11 +27,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -353,14 +353,17 @@ pub fn register_tool(kind: ToolKind, name: &str, inject: bool, read: bool) -> Ke
     }
     let id = state.next_tool_id;
     state.next_tool_id = state.next_tool_id.wrapping_add(1);
-    state.tools.insert(id, AccessibilityTool {
+    state.tools.insert(
         id,
-        kind,
-        name: String::from(name),
-        active: true,
-        can_inject_input: inject,
-        can_read_screen: read,
-    });
+        AccessibilityTool {
+            id,
+            kind,
+            name: String::from(name),
+            active: true,
+            can_inject_input: inject,
+            can_read_screen: read,
+        },
+    );
     Ok(id)
 }
 
@@ -401,17 +404,20 @@ pub fn register_element(
     }
     let id = state.next_element_id;
     state.next_element_id = state.next_element_id.wrapping_add(1);
-    state.elements.insert(id, AccessibleElement {
+    state.elements.insert(
         id,
-        window_id,
-        role,
-        name: String::from(name),
-        description: String::new(),
-        focused: false,
-        enabled: true,
-        value: String::new(),
-        bounds,
-    });
+        AccessibleElement {
+            id,
+            window_id,
+            role,
+            name: String::from(name),
+            description: String::new(),
+            focused: false,
+            enabled: true,
+            value: String::new(),
+            bounds,
+        },
+    );
     Ok(id)
 }
 
@@ -423,12 +429,23 @@ pub fn remove_element(id: u64) -> KernelResult<()> {
 }
 
 /// Update element properties.
-pub fn update_element(id: u64, name: Option<&str>, value: Option<&str>, enabled: Option<bool>) -> KernelResult<()> {
+pub fn update_element(
+    id: u64,
+    name: Option<&str>,
+    value: Option<&str>,
+    enabled: Option<bool>,
+) -> KernelResult<()> {
     let mut state = STATE.lock();
     let elem = state.elements.get_mut(&id).ok_or(KernelError::NotFound)?;
-    if let Some(n) = name { elem.name = String::from(n); }
-    if let Some(v) = value { elem.value = String::from(v); }
-    if let Some(e) = enabled { elem.enabled = e; }
+    if let Some(n) = name {
+        elem.name = String::from(n);
+    }
+    if let Some(v) = value {
+        elem.value = String::from(v);
+    }
+    if let Some(e) = enabled {
+        elem.enabled = e;
+    }
     Ok(())
 }
 
@@ -442,7 +459,10 @@ pub fn set_focus(element_id: u64) -> KernelResult<()> {
     }
     // Focus new — collect announcement text before releasing borrow.
     let announce_text = {
-        let elem = state.elements.get_mut(&element_id).ok_or(KernelError::NotFound)?;
+        let elem = state
+            .elements
+            .get_mut(&element_id)
+            .ok_or(KernelError::NotFound)?;
         elem.focused = true;
         // Collect data we need for announcement while we hold the borrow.
         let text = alloc::format!("{}: {}", elem.role.label(), elem.name);
@@ -478,7 +498,9 @@ pub fn focused_element() -> Option<AccessibleElement> {
 /// Query elements in a window.
 pub fn elements_in_window(window_id: u64) -> Vec<AccessibleElement> {
     let state = STATE.lock();
-    state.elements.values()
+    state
+        .elements
+        .values()
         .filter(|e| e.window_id == window_id)
         .cloned()
         .collect()
@@ -492,7 +514,11 @@ pub fn element_at(x: i32, y: i32) -> Option<AccessibleElement> {
     let mut best_area = u64::MAX;
     for e in state.elements.values() {
         let (ex, ey, ew, eh) = e.bounds;
-        if x >= ex && y >= ey && x < ex.saturating_add(ew as i32) && y < ey.saturating_add(eh as i32) {
+        if x >= ex
+            && y >= ey
+            && x < ex.saturating_add(ew as i32)
+            && y < ey.saturating_add(eh as i32)
+        {
             let area = (ew as u64).saturating_mul(eh as u64);
             if area < best_area {
                 best = Some(e);
@@ -571,17 +597,39 @@ pub fn config() -> A11yConfig {
     STATE.lock().config.clone()
 }
 
-pub fn set_high_contrast(v: bool) { STATE.lock().config.high_contrast = v; }
-pub fn set_reduce_motion(v: bool) { STATE.lock().config.reduce_motion = v; }
-pub fn set_screen_reader(v: bool) { STATE.lock().config.screen_reader_active = v; }
-pub fn set_font_scale(v: u32) { STATE.lock().config.font_scale = v.clamp(50, 500); }
-pub fn set_sticky_keys(v: bool) { STATE.lock().config.sticky_keys = v; }
-pub fn set_filter_keys(v: bool) { STATE.lock().config.filter_keys = v; }
-pub fn set_filter_delay(ms: u32) { STATE.lock().config.filter_delay_ms = ms; }
-pub fn set_mouse_keys(v: bool) { STATE.lock().config.mouse_keys = v; }
-pub fn set_cursor_scale(v: u32) { STATE.lock().config.cursor_scale = v.clamp(50, 500); }
-pub fn set_visual_alerts(v: bool) { STATE.lock().config.visual_alerts = v; }
-pub fn set_captions(v: bool) { STATE.lock().config.captions = v; }
+pub fn set_high_contrast(v: bool) {
+    STATE.lock().config.high_contrast = v;
+}
+pub fn set_reduce_motion(v: bool) {
+    STATE.lock().config.reduce_motion = v;
+}
+pub fn set_screen_reader(v: bool) {
+    STATE.lock().config.screen_reader_active = v;
+}
+pub fn set_font_scale(v: u32) {
+    STATE.lock().config.font_scale = v.clamp(50, 500);
+}
+pub fn set_sticky_keys(v: bool) {
+    STATE.lock().config.sticky_keys = v;
+}
+pub fn set_filter_keys(v: bool) {
+    STATE.lock().config.filter_keys = v;
+}
+pub fn set_filter_delay(ms: u32) {
+    STATE.lock().config.filter_delay_ms = ms;
+}
+pub fn set_mouse_keys(v: bool) {
+    STATE.lock().config.mouse_keys = v;
+}
+pub fn set_cursor_scale(v: u32) {
+    STATE.lock().config.cursor_scale = v.clamp(50, 500);
+}
+pub fn set_visual_alerts(v: bool) {
+    STATE.lock().config.visual_alerts = v;
+}
+pub fn set_captions(v: bool) {
+    STATE.lock().config.captions = v;
+}
 
 // ---------------------------------------------------------------------------
 // Stats
@@ -638,7 +686,12 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("  a11y::self_test 2: UI elements");
     let btn = register_element(1, ElementRole::Button, "OK", (100, 200, 80, 30))?;
     let txt = register_element(1, ElementRole::TextInput, "Name", (100, 250, 200, 30))?;
-    let lbl = register_element(1, ElementRole::Label, "Enter your name:", (100, 230, 200, 20))?;
+    let lbl = register_element(
+        1,
+        ElementRole::Label,
+        "Enter your name:",
+        (100, 230, 200, 20),
+    )?;
     assert_eq!(elements_in_window(1).len(), 3);
 
     // Test 3: Focus and hit-test.

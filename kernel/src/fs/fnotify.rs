@@ -22,8 +22,8 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -164,22 +164,39 @@ fn event_index(k: EventKind) -> usize {
 /// subsystem.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         types: [
             TypeStats {
-                notify_type: NotifyType::Inotify, watches: 0, max_watches: 8192,
-                events: 0, overflows: 0, queue_depth: 0, max_queue_depth: 4096,
+                notify_type: NotifyType::Inotify,
+                watches: 0,
+                max_watches: 8192,
+                events: 0,
+                overflows: 0,
+                queue_depth: 0,
+                max_queue_depth: 4096,
                 event_counts: [0; 9],
             },
             TypeStats {
-                notify_type: NotifyType::Fanotify, watches: 0, max_watches: 1024,
-                events: 0, overflows: 0, queue_depth: 0, max_queue_depth: 2048,
+                notify_type: NotifyType::Fanotify,
+                watches: 0,
+                max_watches: 1024,
+                events: 0,
+                overflows: 0,
+                queue_depth: 0,
+                max_queue_depth: 2048,
                 event_counts: [0; 9],
             },
             TypeStats {
-                notify_type: NotifyType::Dnotify, watches: 0, max_watches: 256,
-                events: 0, overflows: 0, queue_depth: 0, max_queue_depth: 512,
+                notify_type: NotifyType::Dnotify,
+                watches: 0,
+                max_watches: 256,
+                events: 0,
+                overflows: 0,
+                queue_depth: 0,
+                max_queue_depth: 512,
                 event_counts: [0; 9],
             },
         ],
@@ -193,7 +210,9 @@ pub fn init_defaults() {
 pub fn add_watch(notify_type: NotifyType) -> KernelResult<()> {
     with_state(|state| {
         let t = &mut state.types[type_index(notify_type)];
-        if t.watches >= t.max_watches { return Err(KernelError::ResourceExhausted); }
+        if t.watches >= t.max_watches {
+            return Err(KernelError::ResourceExhausted);
+        }
         t.watches += 1;
         Ok(())
     })
@@ -203,7 +222,9 @@ pub fn add_watch(notify_type: NotifyType) -> KernelResult<()> {
 pub fn remove_watch(notify_type: NotifyType) -> KernelResult<()> {
     with_state(|state| {
         let t = &mut state.types[type_index(notify_type)];
-        if t.watches == 0 { return Err(KernelError::NotFound); }
+        if t.watches == 0 {
+            return Err(KernelError::NotFound);
+        }
         t.watches -= 1;
         Ok(())
     })
@@ -241,9 +262,36 @@ pub fn per_type() -> [TypeStats; 3] {
     match guard.as_ref() {
         Some(s) => s.types.clone(),
         None => [
-            TypeStats { notify_type: NotifyType::Inotify, watches: 0, max_watches: 0, events: 0, overflows: 0, queue_depth: 0, max_queue_depth: 0, event_counts: [0; 9] },
-            TypeStats { notify_type: NotifyType::Fanotify, watches: 0, max_watches: 0, events: 0, overflows: 0, queue_depth: 0, max_queue_depth: 0, event_counts: [0; 9] },
-            TypeStats { notify_type: NotifyType::Dnotify, watches: 0, max_watches: 0, events: 0, overflows: 0, queue_depth: 0, max_queue_depth: 0, event_counts: [0; 9] },
+            TypeStats {
+                notify_type: NotifyType::Inotify,
+                watches: 0,
+                max_watches: 0,
+                events: 0,
+                overflows: 0,
+                queue_depth: 0,
+                max_queue_depth: 0,
+                event_counts: [0; 9],
+            },
+            TypeStats {
+                notify_type: NotifyType::Fanotify,
+                watches: 0,
+                max_watches: 0,
+                events: 0,
+                overflows: 0,
+                queue_depth: 0,
+                max_queue_depth: 0,
+                event_counts: [0; 9],
+            },
+            TypeStats {
+                notify_type: NotifyType::Dnotify,
+                watches: 0,
+                max_watches: 0,
+                events: 0,
+                overflows: 0,
+                queue_depth: 0,
+                max_queue_depth: 0,
+                event_counts: [0; 9],
+            },
         ],
     }
 }
@@ -277,7 +325,10 @@ pub fn self_test() {
     // 1: Defaults — the three-type taxonomy with CAPACITY limits kept but ALL
     //    activity ZEROED (no fabricated watches/events/overflows).
     let types = per_type();
-    assert_eq!((types[0].watches, types[0].events, types[0].max_watches), (0, 0, 8192));
+    assert_eq!(
+        (types[0].watches, types[0].events, types[0].max_watches),
+        (0, 0, 8192)
+    );
     assert_eq!((types[1].watches, types[1].max_watches), (0, 1024));
     assert_eq!((types[2].watches, types[2].max_watches), (0, 256));
     let (w0, e0, o0, _) = stats();
@@ -285,7 +336,9 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] zeroed defaults: OK");
 
     // 2: Add watches — three inotify watches.
-    for _ in 0..3 { add_watch(NotifyType::Inotify).expect("add"); }
+    for _ in 0..3 {
+        add_watch(NotifyType::Inotify).expect("add");
+    }
     assert_eq!(per_type()[0].watches, 3);
     crate::serial_println!("  [2/8] add watch: OK");
 

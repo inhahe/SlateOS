@@ -52,24 +52,34 @@ pub struct BenchResult {
 impl BenchResult {
     /// Average nanoseconds per operation.
     pub fn avg_ns(&self) -> u64 {
-        if self.iterations == 0 { 0 } else { self.total_ns / self.iterations }
+        if self.iterations == 0 {
+            0
+        } else {
+            self.total_ns / self.iterations
+        }
     }
 
     /// Operations per second.
     pub fn ops_per_sec(&self) -> u64 {
-        if self.total_ns == 0 { return 0; }
+        if self.total_ns == 0 {
+            return 0;
+        }
         self.iterations.saturating_mul(1_000_000_000) / self.total_ns
     }
 
     /// Throughput in bytes per second.
     pub fn throughput_bps(&self) -> u64 {
-        if self.total_ns == 0 { return 0; }
+        if self.total_ns == 0 {
+            return 0;
+        }
         self.bytes.saturating_mul(1_000_000_000) / self.total_ns
     }
 
     /// Whether the result meets the target (if one is set).
     pub fn meets_target(&self) -> Option<bool> {
-        if self.target_ns == 0 { return None; }
+        if self.target_ns == 0 {
+            return None;
+        }
         Some(self.avg_ns() <= self.target_ns)
     }
 }
@@ -156,16 +166,24 @@ pub fn bench_sequential_read(path: &str, iterations: u64) -> KernelResult<BenchR
         iterations,
         total_ns: elapsed,
         bytes: total_bytes,
-        target_ns: if file_size <= 4096 { TARGET_SMALL_READ_NS } else { 0 },
+        target_ns: if file_size <= 4096 {
+            TARGET_SMALL_READ_NS
+        } else {
+            0
+        },
     })
 }
 
 /// Benchmark sequential write throughput.
 ///
 /// Writes data of the specified size repeatedly to measure write bandwidth.
-pub fn bench_sequential_write(dir: &str, size: usize, iterations: u64) -> KernelResult<BenchResult> {
-    use alloc::format;
+pub fn bench_sequential_write(
+    dir: &str,
+    size: usize,
+    iterations: u64,
+) -> KernelResult<BenchResult> {
     use crate::fs::Vfs;
+    use alloc::format;
 
     // Generate test data.
     let data: Vec<u8> = (0..size).map(|i| (i & 0xFF) as u8).collect();
@@ -196,8 +214,8 @@ pub fn bench_sequential_write(dir: &str, size: usize, iterations: u64) -> Kernel
 /// Measures the overhead of filesystem metadata operations without
 /// data transfer.
 pub fn bench_metadata(dir: &str, iterations: u64) -> KernelResult<BenchResult> {
-    use alloc::format;
     use crate::fs::Vfs;
+    use alloc::format;
 
     let start = now_ns();
     for i in 0..iterations {
@@ -351,8 +369,8 @@ pub fn bench_readdir(dir: &str, iterations: u64) -> KernelResult<BenchResult> {
 ///
 /// Creates temporary files in `dir` for testing, then cleans up.
 pub fn run_all(dir: &str) -> KernelResult<BenchReport> {
-    use alloc::format;
     use crate::fs::Vfs;
+    use alloc::format;
 
     serial_println!("[fsbench] Starting full benchmark suite in {}", dir);
     let suite_start = now_ns();
@@ -432,15 +450,21 @@ pub fn run_all(dir: &str) -> KernelResult<BenchReport> {
     for r in &results {
         if let Some(passed) = r.meets_target() {
             total_targets += 1;
-            if passed { met += 1; }
+            if passed {
+                met += 1;
+            }
         }
     }
 
     BENCHMARKS_RUN.fetch_add(1, Ordering::Relaxed);
     LAST_SCORE_NS.store(suite_elapsed, Ordering::Relaxed);
 
-    serial_println!("[fsbench] Suite complete: {} benchmarks, {}/{} targets met",
-        results.len(), met, total_targets);
+    serial_println!(
+        "[fsbench] Suite complete: {} benchmarks, {}/{} targets met",
+        results.len(),
+        met,
+        total_targets
+    );
 
     Ok(BenchReport {
         results,

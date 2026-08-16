@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -121,15 +121,19 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let profile = TempProfile {
-        id: 1, name: String::from("Default"),
+        id: 1,
+        name: String::from("Default"),
         mode: TempMode::Off,
         current_kelvin: 6500,
-        day_kelvin: 6500, night_kelvin: 3400,
+        day_kelvin: 6500,
+        night_kelvin: 3400,
         sunset_min: 1200, // 20:00
-        sunrise_min: 420,  // 07:00
+        sunrise_min: 420, // 07:00
         transition_min: 30,
         schedule: Vec::new(),
         enabled: false,
@@ -153,11 +157,14 @@ pub fn create_profile(name: &str) -> KernelResult<u32> {
         let id = state.next_id;
         state.next_id += 1;
         state.profiles.push(TempProfile {
-            id, name: String::from(name),
+            id,
+            name: String::from(name),
             mode: TempMode::Off,
             current_kelvin: 6500,
-            day_kelvin: 6500, night_kelvin: 3400,
-            sunset_min: 1200, sunrise_min: 420,
+            day_kelvin: 6500,
+            night_kelvin: 3400,
+            sunset_min: 1200,
+            sunrise_min: 420,
             transition_min: 30,
             schedule: Vec::new(),
             enabled: false,
@@ -169,7 +176,10 @@ pub fn create_profile(name: &str) -> KernelResult<u32> {
 /// Set the mode for a profile.
 pub fn set_mode(profile_id: u32, mode: TempMode) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let p = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         p.mode = mode;
         p.enabled = mode != TempMode::Off;
@@ -180,7 +190,10 @@ pub fn set_mode(profile_id: u32, mode: TempMode) -> KernelResult<()> {
 /// Set manual temperature.
 pub fn set_temperature(profile_id: u32, kelvin: u32) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let p = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         p.current_kelvin = kelvin.clamp(1000, 10000);
         p.mode = TempMode::Manual;
@@ -193,7 +206,10 @@ pub fn set_temperature(profile_id: u32, kelvin: u32) -> KernelResult<()> {
 /// Set day/night temperatures for scheduled mode.
 pub fn set_day_night(profile_id: u32, day_kelvin: u32, night_kelvin: u32) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let p = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         p.day_kelvin = day_kelvin.clamp(1000, 10000);
         p.night_kelvin = night_kelvin.clamp(1000, 10000);
@@ -202,9 +218,17 @@ pub fn set_day_night(profile_id: u32, day_kelvin: u32, night_kelvin: u32) -> Ker
 }
 
 /// Set schedule times (minutes from midnight).
-pub fn set_schedule_times(profile_id: u32, sunset_min: u16, sunrise_min: u16, transition_min: u16) -> KernelResult<()> {
+pub fn set_schedule_times(
+    profile_id: u32,
+    sunset_min: u16,
+    sunrise_min: u16,
+    transition_min: u16,
+) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let p = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         p.sunset_min = sunset_min.min(1439);
         p.sunrise_min = sunrise_min.min(1439);
@@ -216,7 +240,10 @@ pub fn set_schedule_times(profile_id: u32, sunset_min: u16, sunrise_min: u16, tr
 /// Update color temperature based on current time (minutes from midnight).
 pub fn update_for_time(profile_id: u32, current_min: u16) -> KernelResult<u32> {
     with_state(|state| {
-        let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let p = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         if !p.enabled || p.mode == TempMode::Off {
             return Ok(p.current_kelvin);
@@ -282,7 +309,10 @@ pub fn set_active(profile_id: u32) -> KernelResult<()> {
 /// Remove a profile.
 pub fn remove_profile(profile_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.profiles.iter().position(|p| p.id == profile_id)
+        let pos = state
+            .profiles
+            .iter()
+            .position(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         state.profiles.remove(pos);
         if state.active_profile_id == profile_id {
@@ -294,13 +324,21 @@ pub fn remove_profile(profile_id: u32) -> KernelResult<()> {
 
 /// List all profiles.
 pub fn list_profiles() -> Vec<TempProfile> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.profiles.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.profiles.clone())
 }
 
 /// Get a profile.
 pub fn get_profile(id: u32) -> KernelResult<TempProfile> {
     with_state(|state| {
-        state.profiles.iter().find(|p| p.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -313,7 +351,12 @@ pub fn active_profile_id() -> u32 {
 pub fn stats() -> (usize, u32, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.profiles.len(), s.active_profile_id, s.total_adjustments, s.ops),
+        Some(s) => (
+            s.profiles.len(),
+            s.active_profile_id,
+            s.total_adjustments,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }

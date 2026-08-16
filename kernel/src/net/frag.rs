@@ -48,8 +48,8 @@
 //!   evade firewalls by splitting the transport header.  We accept them
 //!   for reassembly but the firewall runs on the reassembled datagram.
 
-use alloc::vec::Vec;
 use crate::sync::Mutex;
+use alloc::vec::Vec;
 
 use super::interface::Ipv4Addr;
 use super::ipv6::Ipv6Addr;
@@ -152,12 +152,7 @@ impl FragEntry {
     /// `byte_offset` is the fragment offset in bytes (not 8-byte units).
     /// Returns `true` if the datagram is now complete (all blocks received).
     #[allow(clippy::arithmetic_side_effects)]
-    fn add_fragment(
-        &mut self,
-        byte_offset: usize,
-        data: &[u8],
-        more_fragments: bool,
-    ) -> bool {
+    fn add_fragment(&mut self, byte_offset: usize, data: &[u8], more_fragments: bool) -> bool {
         if data.is_empty() {
             return false;
         }
@@ -376,7 +371,11 @@ pub fn add_fragment(
 
         crate::serial_println!(
             "[frag] Reassembled datagram: {}→{} proto={} id={} len={}",
-            src, dst, protocol, identification, total
+            src,
+            dst,
+            protocol,
+            identification,
+            total
         );
 
         Some(ReassembledPacket {
@@ -499,12 +498,7 @@ impl FragEntryV6 {
     ///
     /// Returns `true` if the datagram is now complete.
     #[allow(clippy::arithmetic_side_effects)]
-    fn add_fragment(
-        &mut self,
-        byte_offset: usize,
-        data: &[u8],
-        more_fragments: bool,
-    ) -> bool {
+    fn add_fragment(&mut self, byte_offset: usize, data: &[u8], more_fragments: bool) -> bool {
         if data.is_empty() {
             return false;
         }
@@ -719,7 +713,11 @@ pub fn add_fragment_v6(
 
         crate::serial_println!(
             "[frag] Reassembled IPv6 datagram: {}→{} proto={} id={} len={}",
-            src, dst, proto, identification, total
+            src,
+            dst,
+            proto,
+            identification,
+            total
         );
 
         Some(ReassembledPacketV6 {
@@ -800,9 +798,7 @@ fn test_single_fragment() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if entry.total_len != Some(100) {
-        crate::serial_println!(
-            "[frag]   FAIL: total_len = {:?}", entry.total_len
-        );
+        crate::serial_println!("[frag]   FAIL: total_len = {:?}", entry.total_len);
         return Err(KernelError::InternalError);
     }
     // Verify buffer content.
@@ -837,9 +833,7 @@ fn test_two_fragments_ordered() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if entry.total_len != Some(24) {
-        crate::serial_println!(
-            "[frag]   FAIL: total_len = {:?}", entry.total_len
-        );
+        crate::serial_println!("[frag]   FAIL: total_len = {:?}", entry.total_len);
         return Err(KernelError::InternalError);
     }
     // Verify buffer: first 16 bytes = 0x11, next 8 = 0x22.
@@ -929,9 +923,7 @@ fn test_v6_single_fragment() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if entry.total_len != Some(100) {
-        crate::serial_println!(
-            "[frag]   FAIL: v6 total_len = {:?}", entry.total_len
-        );
+        crate::serial_println!("[frag]   FAIL: v6 total_len = {:?}", entry.total_len);
         return Err(KernelError::InternalError);
     }
     if !entry.has_first {
@@ -968,9 +960,7 @@ fn test_v6_two_fragments_ordered() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if entry.total_len != Some(24) {
-        crate::serial_println!(
-            "[frag]   FAIL: v6 total_len = {:?}", entry.total_len
-        );
+        crate::serial_println!("[frag]   FAIL: v6 total_len = {:?}", entry.total_len);
         return Err(KernelError::InternalError);
     }
     if entry.buffer.first() != Some(&0x11) || entry.buffer.get(16) != Some(&0x22) {
@@ -1131,7 +1121,8 @@ fn test_v6_parse_fragment_header() -> crate::error::KernelResult<()> {
             }
             if offset != 100 {
                 crate::serial_println!(
-                    "[frag]   FAIL: v6 frag hdr: offset={} expected 100", offset
+                    "[frag]   FAIL: v6 frag hdr: offset={} expected 100",
+                    offset
                 );
                 return Err(KernelError::InternalError);
             }
@@ -1141,7 +1132,8 @@ fn test_v6_parse_fragment_header() -> crate::error::KernelResult<()> {
             }
             if id != 0xDEADBEEF {
                 crate::serial_println!(
-                    "[frag]   FAIL: v6 frag hdr: id=0x{:08X} expected 0xDEADBEEF", id
+                    "[frag]   FAIL: v6 frag hdr: id=0x{:08X} expected 0xDEADBEEF",
+                    id
                 );
                 return Err(KernelError::InternalError);
             }
@@ -1154,9 +1146,8 @@ fn test_v6_parse_fragment_header() -> crate::error::KernelResult<()> {
 
     // Test with M=0.
     let hdr_last: [u8; 8] = [
-        58,   // Next Header (ICMPv6)
-        0,
-        0x00, 0x28, // offset = 5 (0x28 >> 3 = 5), M=0 (bit 0 = 0)
+        58, // Next Header (ICMPv6)
+        0, 0x00, 0x28, // offset = 5 (0x28 >> 3 = 5), M=0 (bit 0 = 0)
         0x00, 0x00, 0x00, 0x42, // id = 66
     ];
     match parse_fragment_header(&hdr_last) {
@@ -1164,7 +1155,10 @@ fn test_v6_parse_fragment_header() -> crate::error::KernelResult<()> {
             if nh != 58 || offset != 5 || mf || id != 66 {
                 crate::serial_println!(
                     "[frag]   FAIL: v6 frag hdr last: nh={} off={} mf={} id={}",
-                    nh, offset, mf, id
+                    nh,
+                    offset,
+                    mf,
+                    id
                 );
                 return Err(KernelError::InternalError);
             }
@@ -1207,9 +1201,7 @@ mod tests {
         // A single fragment with MF=0 and offset=0 should complete
         // immediately.
         let data = vec![1u8; 100];
-        let result = add_fragment(
-            make_src(), make_dst(), 42, 17, 0, false, &data,
-        );
+        let result = add_fragment(make_src(), make_dst(), 42, 17, 0, false, &data);
         assert!(result.is_some());
         let pkt = result.unwrap();
         assert_eq!(pkt.payload.len(), 100);
@@ -1220,16 +1212,12 @@ mod tests {
     fn test_two_fragments() {
         // Fragment 1: offset=0, MF=1, 16 bytes
         let frag1 = vec![0xAAu8; 16];
-        let result = add_fragment(
-            make_src(), make_dst(), 100, 6, 0, true, &frag1,
-        );
+        let result = add_fragment(make_src(), make_dst(), 100, 6, 0, true, &frag1);
         assert!(result.is_none());
 
         // Fragment 2: offset=2 (16 bytes / 8), MF=0, 8 bytes
         let frag2 = vec![0xBBu8; 8];
-        let result = add_fragment(
-            make_src(), make_dst(), 100, 6, 2, false, &frag2,
-        );
+        let result = add_fragment(make_src(), make_dst(), 100, 6, 2, false, &frag2);
         assert!(result.is_some());
         let pkt = result.unwrap();
         assert_eq!(pkt.payload.len(), 24);
@@ -1241,16 +1229,12 @@ mod tests {
     fn test_out_of_order_fragments() {
         // Receive last fragment first.
         let frag2 = vec![0xCCu8; 8];
-        let result = add_fragment(
-            make_src(), make_dst(), 200, 17, 2, false, &frag2,
-        );
+        let result = add_fragment(make_src(), make_dst(), 200, 17, 2, false, &frag2);
         assert!(result.is_none());
 
         // Now receive first fragment.
         let frag1 = vec![0xDDu8; 16];
-        let result = add_fragment(
-            make_src(), make_dst(), 200, 17, 0, true, &frag1,
-        );
+        let result = add_fragment(make_src(), make_dst(), 200, 17, 0, true, &frag1);
         assert!(result.is_some());
         let pkt = result.unwrap();
         assert_eq!(pkt.payload.len(), 24);
@@ -1307,18 +1291,14 @@ mod tests {
         // Fragment that would put data past MAX_PAYLOAD.
         let data = vec![0u8; 100];
         // offset = 8190 blocks * 8 = 65520 bytes, + 100 = 65620 > MAX_PAYLOAD
-        let result = add_fragment(
-            make_src(), make_dst(), 500, 17, 8190, false, &data,
-        );
+        let result = add_fragment(make_src(), make_dst(), 500, 17, 8190, false, &data);
         // Should not complete (fragment rejected).
         assert!(result.is_none());
     }
 
     #[test]
     fn test_empty_fragment_ignored() {
-        let result = add_fragment(
-            make_src(), make_dst(), 600, 17, 0, true, &[],
-        );
+        let result = add_fragment(make_src(), make_dst(), 600, 17, 0, true, &[]);
         assert!(result.is_none());
     }
 }

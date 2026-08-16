@@ -268,7 +268,9 @@ impl BlockReader {
 
             // If we're writing a partial sector, read the existing content first.
             let write_start = pos_in_sector;
-            let write_len = remaining.len().min(SECTOR_SIZE.saturating_sub(pos_in_sector));
+            let write_len = remaining
+                .len()
+                .min(SECTOR_SIZE.saturating_sub(pos_in_sector));
 
             if write_start > 0 || write_len < SECTOR_SIZE {
                 // Partial sector — read-modify-write.
@@ -342,7 +344,8 @@ fn test_new_valid_block_sizes() -> KernelResult<()> {
                 if reader.block_size() != bs {
                     crate::serial_println!(
                         "[ext4-io]   FAIL: block_size() = {} for input {}",
-                        reader.block_size(), bs
+                        reader.block_size(),
+                        bs
                     );
                     return Err(KernelError::InternalError);
                 }
@@ -352,9 +355,7 @@ fn test_new_valid_block_sizes() -> KernelResult<()> {
                 }
             }
             Err(e) => {
-                crate::serial_println!(
-                    "[ext4-io]   FAIL: BlockReader::new({}) = {:?}", bs, e
-                );
+                crate::serial_println!("[ext4-io]   FAIL: BlockReader::new({}) = {:?}", bs, e);
                 return Err(KernelError::InternalError);
             }
         }

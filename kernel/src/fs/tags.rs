@@ -38,12 +38,12 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
@@ -697,10 +697,7 @@ fn index_walk(
                 let mut path_tags = BTreeSet::new();
                 for tag in &tags {
                     let norm = normalize_tag(tag);
-                    by_tag
-                        .entry(norm.clone())
-                        .or_default()
-                        .insert(full.clone());
+                    by_tag.entry(norm.clone()).or_default().insert(full.clone());
                     path_tags.insert(norm);
                 }
                 by_path.insert(full.clone(), path_tags);
@@ -870,11 +867,19 @@ fn test_search() {
 
     // Search for "red" — should find a and b.
     let results = search("red", "/tmp/tag_search").expect("search");
-    assert!(results.len() >= 2, "should find 2 red files, got {}", results.len());
+    assert!(
+        results.len() >= 2,
+        "should find 2 red files, got {}",
+        results.len()
+    );
 
     // Search for "blue" — should find b and c.
     let results = search("blue", "/tmp/tag_search").expect("search");
-    assert!(results.len() >= 2, "should find 2 blue files, got {}", results.len());
+    assert!(
+        results.len() >= 2,
+        "should find 2 blue files, got {}",
+        results.len()
+    );
 
     // Search for "green" — should find nothing.
     let results = search("green", "/tmp/tag_search").expect("search");

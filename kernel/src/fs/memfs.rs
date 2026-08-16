@@ -29,8 +29,8 @@ use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::{
-    metadata_now_ns, normalize_path, DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo,
-    Timestamp,
+    DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo, Timestamp, metadata_now_ns,
+    normalize_path,
 };
 
 /// Maximum number of symlinks followed during a single path resolution.
@@ -430,8 +430,7 @@ impl MemFs {
         loop {
             // `resolved` is owned and mutated below, so the components must be
             // copied out before the loop body can reassign it.
-            let components: Vec<PathBuf> =
-                resolved.components().map(Path::to_path_buf).collect();
+            let components: Vec<PathBuf> = resolved.components().map(Path::to_path_buf).collect();
 
             let Some(last_index) = components.len().checked_sub(1) else {
                 return Ok(PathBuf::from("/"));
@@ -443,7 +442,9 @@ impl MemFs {
             for (i, component) in components.iter().enumerate() {
                 let is_last = i == last_index;
                 let children = current.children().ok_or(KernelError::NotADirectory)?;
-                let node = children.get(component.as_path()).ok_or(KernelError::NotFound)?;
+                let node = children
+                    .get(component.as_path())
+                    .ok_or(KernelError::NotFound)?;
 
                 if let MemFsNodeKind::Symlink(ref target) = node.kind {
                     if is_last && !follow_last {
@@ -694,9 +695,7 @@ impl FileSystem for MemFs {
                 if existing.attributes.contains(FileAttr::APPEND_ONLY) {
                     return Err(KernelError::PermissionDenied);
                 }
-                let file_data = existing
-                    .file_data_mut()
-                    .ok_or(KernelError::IsADirectory)?;
+                let file_data = existing.file_data_mut().ok_or(KernelError::IsADirectory)?;
                 file_data.clear();
                 file_data.extend_from_slice(data);
                 // NLL: file_data borrow ends here (last use above).
@@ -884,14 +883,14 @@ impl FileSystem for MemFs {
             let children = from_parent
                 .children_mut()
                 .ok_or(KernelError::NotADirectory)?;
-            children.remove(from_name.as_path()).ok_or(KernelError::NotFound)?
+            children
+                .remove(from_name.as_path())
+                .ok_or(KernelError::NotFound)?
         };
 
         // Insert at destination.
         let to_parent = self.walk_mut(&resolved_to_parent)?;
-        let children = to_parent
-            .children_mut()
-            .ok_or(KernelError::NotADirectory)?;
+        let children = to_parent.children_mut().ok_or(KernelError::NotADirectory)?;
         children.insert(to_name, removed_node);
         Ok(())
     }
@@ -930,14 +929,18 @@ impl FileSystem for MemFs {
         let node_a = {
             let parent = self.walk_mut(&resolved_a_parent)?;
             let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
-            children.remove(a_name.as_path()).ok_or(KernelError::NotFound)?
+            children
+                .remove(a_name.as_path())
+                .ok_or(KernelError::NotFound)?
         };
 
         // Detach b's node; if it does not exist, restore a and fail so the
         // exchange is all-or-nothing.
         let node_b_result = match self.walk_mut(&resolved_b_parent) {
             Ok(parent) => match parent.children_mut() {
-                Some(children) => children.remove(b_name.as_path()).ok_or(KernelError::NotFound),
+                Some(children) => children
+                    .remove(b_name.as_path())
+                    .ok_or(KernelError::NotFound),
                 None => Err(KernelError::NotADirectory),
             },
             Err(e) => Err(e),
@@ -1215,7 +1218,7 @@ impl FileSystem for MemFs {
         Ok(FsInfo {
             fs_type: String::from("memfs"),
             volume_label: String::new(),
-            block_size: 1, // Byte-granular allocation.
+            block_size: 1,   // Byte-granular allocation.
             total_blocks: 0, // Unlimited (bounded by heap).
             free_blocks: 0,
             total_inodes: node_count,
@@ -1235,9 +1238,7 @@ impl FileSystem for MemFs {
 /// # Errors
 /// Any error from [`crate::fs::Vfs::mount`] (e.g. the mountpoint is already
 /// occupied or its parent does not exist).
-pub fn mount<P: AsRef<crate::fs::path::Path> + ?Sized>(
-    mount_path: &P,
-) -> KernelResult<()> {
+pub fn mount<P: AsRef<crate::fs::path::Path> + ?Sized>(mount_path: &P) -> KernelResult<()> {
     let fs = MemFs::new();
     crate::fs::Vfs::mount(mount_path, Box::new(fs))?;
     Ok(())
@@ -1323,7 +1324,10 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[memfs]   truncate: OK");
 
     // Test rename.
-    fs.rename(Path::new("/testdir/hello.txt"), Path::new("/testdir/renamed.txt"))?;
+    fs.rename(
+        Path::new("/testdir/hello.txt"),
+        Path::new("/testdir/renamed.txt"),
+    )?;
     match fs.read_file(Path::new("/testdir/hello.txt")) {
         Err(KernelError::NotFound) => {}
         _ => {
@@ -1540,9 +1544,7 @@ fn test_non_utf8_names(fs: &mut MemFs) -> KernelResult<()> {
         );
         return Err(KernelError::IoError);
     }
-    let listed_a = entries
-        .iter()
-        .any(|e| e.name.as_bytes() == b"na\xffme.txt");
+    let listed_a = entries.iter().any(|e| e.name.as_bytes() == b"na\xffme.txt");
     if !listed_a {
         crate::serial_println!("[memfs]   FAILED: non-UTF-8 name missing from readdir");
         return Err(KernelError::IoError);
@@ -1662,7 +1664,9 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     fs.write_file(Path::new("/realdir/file.txt"), b"in realdir")?;
     fs.symlink(Path::new("/dirlink"), Path::new("realdir"))?;
     let entries = fs.readdir(Path::new("/dirlink"))?;
-    let has_file = entries.iter().any(|e| e.name.as_path() == Path::new("file.txt"));
+    let has_file = entries
+        .iter()
+        .any(|e| e.name.as_path() == Path::new("file.txt"));
     if !has_file {
         crate::serial_println!("[memfs]   FAILED: readdir through dir symlink");
         return Err(KernelError::IoError);
@@ -1735,7 +1739,9 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
 
     // Symlinks appear as Symlink type in readdir.
     let root_entries = fs.readdir(Path::new("/"))?;
-    let link_entry = root_entries.iter().find(|e| e.name.as_path() == Path::new("abs_link"));
+    let link_entry = root_entries
+        .iter()
+        .find(|e| e.name.as_path() == Path::new("abs_link"));
     match link_entry {
         Some(e) if e.entry_type == EntryType::Symlink => {
             crate::serial_println!("[memfs]   symlink in readdir: OK");

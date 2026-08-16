@@ -33,8 +33,8 @@
 //! - DTrace syscall provider — lightweight syscall event capture
 //! - Windows ETW SystemCall events — per-event syscall logging
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -98,7 +98,7 @@ struct TraceRing(core::cell::UnsafeCell<[TraceEvent; RING_SIZE]>);
 unsafe impl Sync for TraceRing {}
 
 static RING: TraceRing = TraceRing(core::cell::UnsafeCell::new(
-    [TraceEvent::empty(); RING_SIZE]
+    [TraceEvent::empty(); RING_SIZE],
 ));
 
 /// Write position.
@@ -298,7 +298,11 @@ pub fn recent(buf: &mut [TraceEvent]) -> usize {
 pub fn events_for_pid(pid: u32, buf: &mut [TraceEvent]) -> usize {
     let write_pos = WRITE_POS.load(Ordering::Acquire) as usize;
     let count = write_pos.min(RING_SIZE);
-    let start = if write_pos <= RING_SIZE { 0 } else { write_pos & RING_MASK };
+    let start = if write_pos <= RING_SIZE {
+        0
+    } else {
+        write_pos & RING_MASK
+    };
 
     let mut found = 0;
     for i in 0..count {
@@ -329,9 +333,7 @@ pub fn events_for_pid(pid: u32, buf: &mut [TraceEvent]) -> usize {
 #[inline]
 fn rdtsc() -> u64 {
     // SAFETY: _rdtsc is always available on x86_64.
-    unsafe {
-        core::arch::x86_64::_rdtsc() as u64
-    }
+    unsafe { core::arch::x86_64::_rdtsc() as u64 }
 }
 
 // ---------------------------------------------------------------------------
@@ -399,7 +401,10 @@ pub fn self_test() {
     let n = events_for_pid(1, &mut pid_buf);
     // PID 1 events: syscall 42, 43, 50.
     assert_eq!(n, 3);
-    serial_println!("[syscall_trace]   Per-PID query: OK ({} events for PID 1)", n);
+    serial_println!(
+        "[syscall_trace]   Per-PID query: OK ({} events for PID 1)",
+        n
+    );
 
     // Test 7: Arguments captured correctly.
     let test_args = [0xDEAD_u64, 0xBEEF, 0xCAFE, 0xF00D, 0x1234, 0x5678];

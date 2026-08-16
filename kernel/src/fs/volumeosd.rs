@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -153,7 +153,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         active: None,
         history: Vec::new(),
@@ -201,7 +203,11 @@ pub fn show(osd_type: OsdType, value: u32, label: &str, subtitle: &str) -> Kerne
 
 /// Show volume OSD (convenience).
 pub fn show_volume(level: u32, muted: bool) -> KernelResult<u32> {
-    let osd_type = if muted { OsdType::Mute } else { OsdType::Volume };
+    let osd_type = if muted {
+        OsdType::Mute
+    } else {
+        OsdType::Volume
+    };
     let label = if muted { "Muted" } else { "" };
     show(osd_type, level, label, "")
 }
@@ -239,7 +245,10 @@ pub fn set_position(position: OsdPosition) -> KernelResult<()> {
 
 /// Get OSD position.
 pub fn get_position() -> OsdPosition {
-    STATE.lock().as_ref().map_or(OsdPosition::TopCenter, |s| s.position)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(OsdPosition::TopCenter, |s| s.position)
 }
 
 /// Set default display duration.

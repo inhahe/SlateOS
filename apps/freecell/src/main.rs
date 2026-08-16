@@ -140,11 +140,7 @@ impl Suit {
 
     /// Display color for this suit.
     fn color(self) -> Color {
-        if self.is_red() {
-            CARD_RED
-        } else {
-            CARD_BLACK
-        }
+        if self.is_red() { CARD_RED } else { CARD_BLACK }
     }
 
     /// Index 0..3 for foundation ordering.
@@ -708,10 +704,11 @@ impl GameState {
                 if matches!(action, UndoAction::AutoMove { .. }) {
                     // Keep undoing auto-moves.
                     if let Some(next) = self.undo_stack.last()
-                        && matches!(next, UndoAction::AutoMove { .. }) {
-                            self.undo();
-                            return;
-                        }
+                        && matches!(next, UndoAction::AutoMove { .. })
+                    {
+                        self.undo();
+                        return;
+                    }
                 }
                 if self.move_count > 0 {
                     self.move_count -= 1;
@@ -771,7 +768,9 @@ impl GameState {
     /// Handle a key event.
     fn handle_key(&mut self, key: Key, _modifiers: Modifiers) {
         if self.won {
-            if key == Key::N { self.new_game() }
+            if key == Key::N {
+                self.new_game()
+            }
             return;
         }
 
@@ -1059,13 +1058,7 @@ impl GameState {
     }
 
     /// Render a free cell.
-    fn render_free_cell(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        idx: usize,
-        x: f32,
-        y: f32,
-    ) {
+    fn render_free_cell(&self, cmds: &mut Vec<RenderCommand>, idx: usize, x: f32, y: f32) {
         let is_focused = self.focus == FocusArea::FreeCell(idx);
         let is_selected = self.selection == Some(Selection::FreeCell(idx));
 
@@ -1080,13 +1073,7 @@ impl GameState {
     }
 
     /// Render a foundation pile.
-    fn render_foundation(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        idx: usize,
-        x: f32,
-        y: f32,
-    ) {
+    fn render_foundation(&self, cmds: &mut Vec<RenderCommand>, idx: usize, x: f32, y: f32) {
         let is_focused = self.focus == FocusArea::Foundation(idx);
 
         match self.foundation_top(idx) {
@@ -1144,13 +1131,7 @@ impl GameState {
     }
 
     /// Render an empty pile placeholder.
-    fn render_empty_pile(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        focused: bool,
-    ) {
+    fn render_empty_pile(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, focused: bool) {
         let border_color = if focused { CURSOR_HIGHLIGHT } else { OVERLAY0 };
         cmds.push(RenderCommand::StrokeRect {
             x,
@@ -1340,11 +1321,12 @@ impl FreeCell {
 
     fn handle_event(&mut self, event: Event) {
         if let Event::Key(KeyEvent {
-                key,
-                modifiers,
-                pressed: true,
-                ..
-            }) = event {
+            key,
+            modifiers,
+            pressed: true,
+            ..
+        }) = event
+        {
             self.state.handle_key(key, modifiers);
         }
     }
@@ -1375,7 +1357,15 @@ mod tests {
     }
 
     fn press(state: &mut GameState, key: Key) {
-        state.handle_key(key, Modifiers { shift: false, ctrl: false, alt: false, super_key: false });
+        state.handle_key(
+            key,
+            Modifiers {
+                shift: false,
+                ctrl: false,
+                alt: false,
+                super_key: false,
+            },
+        );
     }
 
     /// Build a game with a specific tableau setup for testing.
@@ -2668,7 +2658,12 @@ mod tests {
         let mut app = FreeCell::new();
         app.handle_event(Event::Key(KeyEvent {
             key: Key::Right,
-            modifiers: Modifiers { shift: false, ctrl: false, alt: false, super_key: false },
+            modifiers: Modifiers {
+                shift: false,
+                ctrl: false,
+                alt: false,
+                super_key: false,
+            },
             pressed: true,
             text: None,
         }));
@@ -2681,7 +2676,12 @@ mod tests {
         // Key release events should be ignored.
         app.handle_event(Event::Key(KeyEvent {
             key: Key::Right,
-            modifiers: Modifiers { shift: false, ctrl: false, alt: false, super_key: false },
+            modifiers: Modifiers {
+                shift: false,
+                ctrl: false,
+                alt: false,
+                super_key: false,
+            },
             pressed: false,
             text: None,
         }));

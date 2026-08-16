@@ -596,10 +596,16 @@ exists to stop — prefer any other Lane B roadmap item. Also open:
 `BUG-DASH-CMDSUB-INTERMITTENT-HANG`,
 `B-DASH-STDIN-FLAKE`, `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`,
 `TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP`,
-`TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` (§312 step 3 — **blocked**, on lane A
-acting on `requests/b-a-cap-grants-for-312-step3-fixtures.md` and on the
-operator answering `open-questions.md` Q48; do not flip the gates until both
-land). `TD-POSIX-SLOT-POOLS` was listed here until 2026-08-16 and is stale —
+`TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` (§312 step 3 — **still blocked, but only
+on the operator now**: lane A landed both fixture grants on 2026-08-16
+(`requests/b-a-cap-grants-for-312-step3-fixtures.md`, answered by
+`requests/a-b-set-credentials-right.md`) and lane B landed the matching
+`SET_CREDENTIALS` projection the same day, so the *prerequisites* are done.
+What remains is `open-questions.md` **Q48** — whether "set the system clock",
+"listen on port 80" and "raise your own rlimit" get real kernel objects or stay
+permanently denied. Do not flip the gates until it is answered: the flip is what
+makes those three denials real).
+`TD-POSIX-SLOT-POOLS` was listed here until 2026-08-16 and is stale —
 it was fixed and archived to `known-issues-resolved.md` on 2026-08-13.
 
 This is by far the deepest backlog; lane B should never be idle. But depth here

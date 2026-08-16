@@ -23420,3 +23420,70 @@ as `slate_ensure_bash_src` in `scripts/lib/worktree.sh`, verified against
 Chet Ramey's signature via GNU's own keyring before the hash was written down.
 `run.sh` extracts on demand from the same pinned tarball rather than assuming
 `build/spike/bash-5.2/` exists.
+
+## B-POSIX-CAP-KILL-IS-PROJECTED-FROM-A-PER-CHILD-GRANT, SO EVERY PROCESS THAT HAS FORKED REPORTS IT (lane B, 2026-08-16)
+
+**Status: open, deliberately.** The fix depends on a convention only lane A can
+state; asked as
+`requests/b-a-does-resource-id-zero-mean-the-class-or-just-an-unknown-pid.md`.
+Found by lane A while landing the §312 step 3 grants and handed over as an
+observation rather than a claim ("it is your file and your call") — this entry
+is lane B agreeing with it and writing down why it is worth closing.
+
+### What is wrong
+
+`posix/src/sys_capability.rs::kernel_view::project` maps
+`(ResourceType::Process, Rights::SIGNAL)` to `CAP_KILL`. Both automatic grant
+sites — `kernel/src/proc/spawn.rs` step 5b and `kernel/src/proc/fork.rs` step 8
+— give the parent `READ|WRITE|DELETE|WAIT|SIGNAL|DUPLICATE` on **each child**.
+So the preimage is granted to every process that has ever forked or spawned,
+and `CAP_KILL` is projected for all of them.
+
+The capability actually held is "may signal pid 4271". `CAP_KILL` means "may
+signal *any* process, overriding the uid check". Projecting the second from the
+first is not a widening of degree; they are different authorities, and the
+narrow one is granted automatically to nearly everything.
+
+### Why it matters more than the blast radius suggests
+
+Nothing is *gated* on it today: §314 removed libc's pre-emptive `CAP_KILL` test
+from `kill()`/`killpg`, on the grounds that libc cannot evaluate Linux's rule
+honestly (it cannot read the target's credentials), so the check belongs in
+`SYS_SIGNAL_SEND` where the facts are. The false positive therefore reaches
+`capget`/`cap_get_proc` reporting and stops.
+
+What makes it worth closing anyway is that it contradicts the projection's
+stated contract, in the one direction that a later change cannot make safe.
+`posix/src/signal.rs` says of this very capability: "after §312 its `CAP_KILL`
+is a deliberately conservative projection that reads false for authority the
+kernel would grant." Every other rule in `project()` honours that. This one
+reads **true** for authority the kernel would refuse, and §312 step 3 — which
+points `has_capability` at the projection — is the moment an over-reporting rule
+stops being cosmetic.
+
+### The fix, and what blocks it
+
+`CapEntryInfo` already carries `resource_id`, and libc already receives it; no
+predicate reads it. The automatic grants name a real child pid, while deliberate
+class-wide grants pass `0` (lane A's own `(Process, 0, SET_CREDENTIALS)` does).
+So the rule wants to be "a Process capability naming a specific pid is not
+`CAP_KILL`; one naming no instance is."
+
+That is correct **only if `resource_id = 0` is a sentinel meaning "the class"**
+rather than a placeholder meaning "no pid was available at the call site" —
+`SpawnOptions.capabilities` is consumed before the child has a pid the caller
+knows, so both readings fit the evidence, and they are indistinguishable until a
+second predicate leans on the field. Guessing would rebuild the exact hazard
+§207 was written to avoid: a security-relevant invariant spanning two crates
+owned by two lanes, with nothing in either file stating it.
+
+### Not the same shape as the `SET_CREDENTIALS` predicate beside it
+
+`(Process, SET_CREDENTIALS)` → `CAP_SETUID`/`CAP_SETGID` is id-agnostic on
+purpose and is *not* affected: no spawn or fork path confers `SET_CREDENTIALS`,
+so holding it is always deliberate and there is no auto-grant for an id check to
+exclude. That predicate is also the one that genuinely gates —
+`SYS_PROCESS_SET_CREDENTIALS` performs no kernel-side capability check at all
+(`kernel/src/syscall/handlers.rs`: "the cap/identity permission check is
+performed by the userspace posix wrappers") — which is why it carries a test
+asserting no other Process right, `METADATA` above all, can reach it.

@@ -539,7 +539,11 @@ exists to stop — prefer any other Lane B roadmap item. Also open:
 `BUG-DASH-CMDSUB-INTERMITTENT-HANG`,
 `B-DASH-STDIN-FLAKE`, `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`,
 `TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP`,
-`TD-POSIX-SLOT-POOLS`.
+`TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` (§312 step 3 — **blocked**, on lane A
+acting on `requests/b-a-cap-grants-for-312-step3-fixtures.md` and on the
+operator answering `open-questions.md` Q48; do not flip the gates until both
+land). `TD-POSIX-SLOT-POOLS` was listed here until 2026-08-16 and is stale —
+it was fixed and archived to `known-issues-resolved.md` on 2026-08-13.
 
 This is by far the deepest backlog; lane B should never be idle. But depth here
 is mostly the `TD-OILS-*` family, which §305 has now capped — so "never idle"

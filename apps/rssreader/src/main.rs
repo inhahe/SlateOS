@@ -149,10 +149,29 @@ impl XmlElement {
     }
 }
 
+/// How deeply elements may nest before the document is rejected.
+///
+/// `parse_element` recurses once per level, so without a cap the feed decides
+/// how much of our stack to use. That is not a theoretical concern: measured in
+/// a debug build on a 2 MiB thread, nesting overflowed the stack somewhere
+/// between 512 and 1024 levels — and a stack overflow is not a `Result`. It
+/// aborts the process with no unwinding and nothing to catch, so no amount of
+/// error handling at the call site helps. A feed is remote data, so roughly
+/// seven kilobytes of `<a><a><a>…` served from any URL the user has subscribed
+/// to was enough to kill the reader outright.
+///
+/// 100 is chosen to be unreachable by accident and far below the cliff: RSS and
+/// Atom nest four or five deep, and the deepest structure this program parses
+/// is an OPML folder tree, which is a hand-made hierarchy nobody builds a
+/// hundred levels of.
+const MAX_XML_DEPTH: usize = 100;
+
 /// XML parser state.
 struct XmlParser<'a> {
     input: &'a [u8],
     pos: usize,
+    /// Elements currently open above the cursor. See [`MAX_XML_DEPTH`].
+    depth: usize,
 }
 
 /// Errors that can occur during XML parsing.
@@ -163,6 +182,8 @@ pub enum XmlError {
     MismatchedClose { expected: String, found: String },
     InvalidEntity(String),
     InvalidAttribute(String),
+    /// Elements nested deeper than [`MAX_XML_DEPTH`].
+    TooDeep { limit: usize },
 }
 
 impl core::fmt::Display for XmlError {
@@ -178,6 +199,9 @@ impl core::fmt::Display for XmlError {
             }
             Self::InvalidEntity(s) => write!(f, "invalid entity: {s}"),
             Self::InvalidAttribute(s) => write!(f, "invalid attribute: {s}"),
+            Self::TooDeep { limit } => {
+                write!(f, "elements nested more than {limit} deep")
+            }
         }
     }
 }
@@ -187,28 +211,117 @@ impl<'a> XmlParser<'a> {
         Self {
             input: input.as_bytes(),
             pos: 0,
+            depth: 0,
         }
+    }
+
+    // -- Cursor primitives ---------------------------------------------------
+    //
+    // Every read of `input` in this parser goes through one of the six methods
+    // below, and each states its bound at the point of the read. The methods
+    // that follow used to restate it themselves — `if self.pos + 3 <
+    // self.input.len() && self.input[self.pos] == b'<' && …` — which is the
+    // same bound written out twice, once as a guard and once as an index,
+    // several statements apart. Two of those pairs guarded a nine-byte slice
+    // with `self.pos + 8 < len`: correct, since it implies `pos + 9 <= len`,
+    // but not in a form a reader can check against the slice beside it.
+
+    /// The remaining input, from the cursor to the end. Empty past the end.
+    fn rest(&self) -> &'a [u8] {
+        self.input.get(self.pos..).unwrap_or_default()
     }
 
     /// Peek at the current byte without consuming it.
     fn peek(&self) -> Option<u8> {
-        self.input.get(self.pos).copied()
+        self.peek_at(0)
+    }
+
+    /// Peek at the byte `offset` positions ahead of the cursor.
+    fn peek_at(&self, offset: usize) -> Option<u8> {
+        self.rest().get(offset).copied()
+    }
+
+    /// Does the input at the cursor begin with `needle`?
+    fn looking_at(&self, needle: &[u8]) -> bool {
+        self.rest().starts_with(needle)
+    }
+
+    /// [`Self::looking_at`], ignoring ASCII case — for the constructs XML
+    /// spells in capitals but real documents spell however they like.
+    fn looking_at_ignore_case(&self, needle: &[u8]) -> bool {
+        self.rest()
+            .get(..needle.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(needle))
+    }
+
+    /// Advance the cursor by `n` bytes, stopping at the end of the input.
+    fn skip(&mut self, n: usize) {
+        self.pos = self.pos.saturating_add(n).min(self.input.len());
+    }
+
+    /// If the input at the cursor begins with `needle`, consume it.
+    fn eat(&mut self, needle: &[u8]) -> bool {
+        let found = self.looking_at(needle);
+        if found {
+            self.skip(needle.len());
+        }
+        found
     }
 
     /// Advance position by one byte and return it.
     fn advance(&mut self) -> Option<u8> {
-        let b = self.input.get(self.pos).copied();
+        let b = self.peek();
         if b.is_some() {
-            self.pos += 1;
+            self.skip(1);
         }
         b
+    }
+
+    /// Advance the cursor to just past the next occurrence of `needle`,
+    /// returning the bytes skipped over, `needle` itself excluded.
+    ///
+    /// If `needle` never occurs the cursor lands on the end of the input and
+    /// the rest is returned — an unterminated comment or CDATA section is the
+    /// normal way a truncated download presents itself, and consuming it is
+    /// what keeps the caller's loop moving.
+    fn take_past(&mut self, needle: &[u8]) -> String {
+        let start = self.pos;
+        // `windows` panics on a zero width, and "the next occurrence of
+        // nothing" has no useful answer anyway.
+        debug_assert!(!needle.is_empty(), "take_past needs a non-empty needle");
+        let found = if needle.is_empty() {
+            None
+        } else {
+            self.rest().windows(needle.len()).position(|w| w == needle)
+        };
+        match found {
+            Some(offset) => {
+                self.skip(offset);
+                let text = self.text_since(start);
+                self.skip(needle.len());
+                text
+            }
+            None => {
+                self.pos = self.input.len();
+                self.text_since(start)
+            }
+        }
+    }
+
+    /// The input between `start` and the cursor, decoded as text.
+    ///
+    /// The lossy decode is exact rather than lossy in practice: `input` came
+    /// from a `&str`, and every position this parser stops at is either a byte
+    /// it matched (all ASCII) or the end, so no slice can split a character.
+    fn text_since(&self, start: usize) -> String {
+        String::from_utf8_lossy(self.input.get(start..self.pos).unwrap_or_default()).into_owned()
     }
 
     /// Skip whitespace characters.
     fn skip_whitespace(&mut self) {
         while let Some(b) = self.peek() {
             if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
-                self.pos += 1;
+                self.skip(1);
             } else {
                 break;
             }
@@ -220,29 +333,26 @@ impl<'a> XmlParser<'a> {
         self.pos >= self.input.len()
     }
 
+    /// Read bytes while `keep` accepts them, stopping before the first that it
+    /// does not. Returns the bytes read.
+    fn read_while(&mut self, keep: impl Fn(u8) -> bool) -> String {
+        let start = self.pos;
+        while self.peek().is_some_and(&keep) {
+            self.skip(1);
+        }
+        self.text_since(start)
+    }
+
     /// Read bytes until a specific byte is encountered (not consumed).
     fn read_until(&mut self, stop: u8) -> String {
-        let start = self.pos;
-        while let Some(b) = self.peek() {
-            if b == stop {
-                break;
-            }
-            self.pos += 1;
-        }
-        String::from_utf8_lossy(&self.input[start..self.pos]).to_string()
+        self.read_while(|b| b != stop)
     }
 
     /// Read a name (tag name or attribute name): [a-zA-Z0-9_:.-]+
     fn read_name(&mut self) -> String {
-        let start = self.pos;
-        while let Some(b) = self.peek() {
-            if b.is_ascii_alphanumeric() || b == b'_' || b == b':' || b == b'.' || b == b'-' {
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
-        String::from_utf8_lossy(&self.input[start..self.pos]).to_string()
+        self.read_while(|b| {
+            b.is_ascii_alphanumeric() || b == b'_' || b == b':' || b == b'.' || b == b'-'
+        })
     }
 
     /// Decode an XML entity reference.
@@ -282,8 +392,12 @@ impl<'a> XmlParser<'a> {
             "auml" => Ok('ä'),
             "szlig" => Ok('ß'),
             "ntilde" => Ok('ñ'),
-            s if s.starts_with('#') => {
-                let numeric = &s[1..];
+            _ => {
+                // A numeric character reference, `&#233;` or `&#xE9;`. Anything
+                // that is not one is an entity this parser does not know.
+                let Some(numeric) = entity.strip_prefix('#') else {
+                    return Err(XmlError::InvalidEntity(entity.to_string()));
+                };
                 let codepoint = if let Some(hex) = numeric.strip_prefix('x') {
                     u32::from_str_radix(hex, 16)
                         .map_err(|_| XmlError::InvalidEntity(entity.to_string()))?
@@ -294,7 +408,6 @@ impl<'a> XmlParser<'a> {
                 };
                 char::from_u32(codepoint).ok_or_else(|| XmlError::InvalidEntity(entity.to_string()))
             }
-            _ => Err(XmlError::InvalidEntity(entity.to_string())),
         }
     }
 
@@ -349,110 +462,76 @@ impl<'a> XmlParser<'a> {
                 "expected quote for attribute value".to_string(),
             ));
         }
-        let start = self.pos;
-        while let Some(b) = self.peek() {
-            if b == quote {
-                // Both delimiters are ASCII, so `start` and `self.pos` are
-                // character boundaries; and the input came from a `&str`, so
-                // the lossy decode is exact.
-                let raw =
-                    String::from_utf8_lossy(self.input.get(start..self.pos).unwrap_or_default())
-                        .into_owned();
-                self.pos = self.pos.saturating_add(1);
-                return Ok(Self::decode_entities(&raw));
-            }
-            self.pos = self.pos.saturating_add(1);
+        let raw = self.read_until(quote);
+        if self.advance() != Some(quote) {
+            return Err(XmlError::UnexpectedEof);
         }
-        Err(XmlError::UnexpectedEof)
+        Ok(Self::decode_entities(&raw))
     }
 
     /// Skip the XML declaration (<?xml ... ?>).
     fn skip_xml_declaration(&mut self) {
-        if self.pos + 1 < self.input.len()
-            && self.input[self.pos] == b'<'
-            && self.input[self.pos + 1] == b'?'
-        {
-            while self.pos + 1 < self.input.len() {
-                if self.input[self.pos] == b'?' && self.input[self.pos + 1] == b'>' {
-                    self.pos += 2;
-                    return;
-                }
-                self.pos += 1;
-            }
+        if self.eat(b"<?") {
+            self.take_past(b"?>");
         }
     }
 
     /// Skip a comment (<!-- ... -->).
     fn skip_comment(&mut self) -> bool {
-        if self.pos + 3 < self.input.len()
-            && self.input[self.pos] == b'<'
-            && self.input[self.pos + 1] == b'!'
-            && self.input[self.pos + 2] == b'-'
-            && self.input[self.pos + 3] == b'-'
-        {
-            self.pos += 4;
-            while self.pos + 2 < self.input.len() {
-                if self.input[self.pos] == b'-'
-                    && self.input[self.pos + 1] == b'-'
-                    && self.input[self.pos + 2] == b'>'
-                {
-                    self.pos += 3;
-                    return true;
-                }
-                self.pos += 1;
-            }
-            // Unterminated comment: skip to end
-            self.pos = self.input.len();
-            return true;
+        if !self.eat(b"<!--") {
+            return false;
         }
-        false
+        // An unterminated comment consumes the rest, which `take_past` already
+        // does — a truncated feed must not leave the caller's loop looking at
+        // the same `<` forever.
+        self.take_past(b"-->");
+        true
     }
 
     /// Skip a CDATA section and return its content.
     fn try_read_cdata(&mut self) -> Option<String> {
-        if self.pos + 8 < self.input.len() && &self.input[self.pos..self.pos + 9] == b"<![CDATA[" {
-            self.pos += 9;
-            let start = self.pos;
-            while self.pos + 2 < self.input.len() {
-                if self.input[self.pos] == b']'
-                    && self.input[self.pos + 1] == b']'
-                    && self.input[self.pos + 2] == b'>'
-                {
-                    let content = String::from_utf8_lossy(&self.input[start..self.pos]).to_string();
-                    self.pos += 3;
-                    return Some(content);
-                }
-                self.pos += 1;
-            }
-            let content = String::from_utf8_lossy(&self.input[start..self.input.len()]).to_string();
-            self.pos = self.input.len();
-            return Some(content);
-        }
-        None
+        self.eat(b"<![CDATA[").then(|| self.take_past(b"]]>"))
     }
 
     /// Skip a DOCTYPE declaration.
     fn skip_doctype(&mut self) -> bool {
-        if self.pos + 8 < self.input.len() {
-            let slice = &self.input[self.pos..self.pos + 9];
-            if slice.eq_ignore_ascii_case(b"<!DOCTYPE") || slice.eq_ignore_ascii_case(b"<!doctype")
-            {
-                let mut depth: u32 = 1;
-                self.pos += 9;
-                while let Some(b) = self.advance() {
-                    if b == b'<' {
-                        depth = depth.saturating_add(1);
-                    } else if b == b'>' {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            return true;
-                        }
-                    }
+        if !self.looking_at_ignore_case(b"<!DOCTYPE") {
+            return false;
+        }
+        self.skip(b"<!DOCTYPE".len());
+        // A DOCTYPE may carry an internal subset in brackets whose entity
+        // declarations contain further `<`, so the `>` that ends it is the one
+        // that balances, not the first one seen.
+        let mut depth: u32 = 1;
+        while let Some(b) = self.advance() {
+            if b == b'<' {
+                depth = depth.saturating_add(1);
+            } else if b == b'>' {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
                 }
-                return true;
             }
         }
-        false
+        true
+    }
+
+    /// Parse a nested element, refusing to recurse past [`MAX_XML_DEPTH`].
+    ///
+    /// The counter is kept here rather than inside `parse_element` so that the
+    /// increment and the decrement are the first and last statements of one
+    /// short function and cannot drift apart behind an early return —
+    /// `parse_element` has six of those.
+    fn parse_child(&mut self) -> Result<XmlElement, XmlError> {
+        if self.depth >= MAX_XML_DEPTH {
+            return Err(XmlError::TooDeep {
+                limit: MAX_XML_DEPTH,
+            });
+        }
+        self.depth = self.depth.saturating_add(1);
+        let parsed = self.parse_element();
+        self.depth = self.depth.saturating_sub(1);
+        parsed
     }
 
     /// Parse a single element (and its children recursively).
@@ -477,11 +556,11 @@ impl<'a> XmlParser<'a> {
             self.skip_whitespace();
             match self.peek() {
                 Some(b'>') => {
-                    self.pos += 1;
+                    self.skip(1);
                     break;
                 }
                 Some(b'/') => {
-                    self.pos += 1;
+                    self.skip(1);
                     if self.advance() != Some(b'>') {
                         return Err(XmlError::MalformedTag("expected '>' after '/'".to_string()));
                     }
@@ -492,12 +571,12 @@ impl<'a> XmlParser<'a> {
                     let attr_name = self.read_name();
                     if attr_name.is_empty() {
                         // Skip unknown byte
-                        self.pos += 1;
+                        self.skip(1);
                         continue;
                     }
                     self.skip_whitespace();
                     if self.peek() == Some(b'=') {
-                        self.pos += 1; // skip '='
+                        self.skip(1); // skip '='
                         let value = self.read_attribute_value()?;
                         elem.attributes.insert(attr_name, value);
                     } else {
@@ -525,11 +604,7 @@ impl<'a> XmlParser<'a> {
             }
 
             // Check for closing tag
-            if self.pos + 1 < self.input.len()
-                && self.input[self.pos] == b'<'
-                && self.input[self.pos + 1] == b'/'
-            {
-                self.pos += 2;
+            if self.eat(b"</") {
                 let close_tag = self.read_name();
                 // Skip to '>'
                 while let Some(b) = self.advance() {
@@ -549,11 +624,11 @@ impl<'a> XmlParser<'a> {
             // Check for child element
             if self.peek() == Some(b'<') {
                 // Could be a child element, a processing instruction, or a comment
-                if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == b'?' {
+                if self.looking_at(b"<?") {
                     self.skip_xml_declaration();
                     continue;
                 }
-                if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == b'!' {
+                if self.looking_at(b"<!") {
                     if self.skip_comment() {
                         continue;
                     }
@@ -567,10 +642,10 @@ impl<'a> XmlParser<'a> {
                         continue;
                     }
                     // Unknown <! construct, skip it
-                    self.pos += 1;
+                    self.skip(1);
                     continue;
                 }
-                let child = self.parse_element()?;
+                let child = self.parse_child()?;
                 elem.children.push(XmlNode::Element(child));
                 continue;
             }
@@ -581,14 +656,7 @@ impl<'a> XmlParser<'a> {
             }
 
             // Text content
-            let text_start = self.pos;
-            while let Some(b) = self.peek() {
-                if b == b'<' {
-                    break;
-                }
-                self.pos += 1;
-            }
-            let raw = String::from_utf8_lossy(&self.input[text_start..self.pos]).to_string();
+            let raw = self.read_until(b'<');
             let decoded = Self::decode_entities(&raw);
             if !decoded.trim().is_empty() {
                 elem.children.push(XmlNode::Text(decoded));
@@ -4246,7 +4314,79 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
+
+    /// A feed is remote data, and `parse_element` recurses once per nesting
+    /// level. Before [`MAX_XML_DEPTH`] existed, roughly seven kilobytes of
+    /// `<a><a><a>…` aborted the process with `STATUS_STACK_OVERFLOW` — not a
+    /// panic, not a `Result`, nothing an error path could catch. Measured
+    /// overflow was between 512 and 1024 levels in a debug build, so 2000 here
+    /// is comfortably over the cliff: if the limit is ever removed, this test
+    /// takes the whole test binary down rather than reporting a failure, which
+    /// is exactly as visible.
+    #[test]
+    fn deeply_nested_elements_are_refused_rather_than_overflowing_the_stack() {
+        let depth = 2000usize;
+        let mut xml = String::new();
+        for _ in 0..depth {
+            xml.push_str("<a>");
+        }
+        xml.push('x');
+        for _ in 0..depth {
+            xml.push_str("</a>");
+        }
+        assert_eq!(
+            parse_xml(&xml),
+            Err(XmlError::TooDeep {
+                limit: MAX_XML_DEPTH
+            }),
+        );
+    }
+
+    /// The limit must not be so tight that it rejects documents this program
+    /// actually reads. Real RSS and Atom nest four or five deep; an OPML
+    /// folder tree is the deepest thing here and is hand-made.
+    #[test]
+    fn nesting_within_the_limit_still_parses() {
+        for depth in [1usize, 5, 20, MAX_XML_DEPTH] {
+            let mut xml = String::new();
+            for _ in 0..depth {
+                xml.push_str("<a>");
+            }
+            xml.push('x');
+            for _ in 0..depth {
+                xml.push_str("</a>");
+            }
+            let parsed = parse_xml(&xml)
+                .unwrap_or_else(|e| panic!("depth {depth} is within the limit but failed: {e}"));
+            assert_eq!(parsed.tag, "a");
+        }
+    }
+
+    /// Sibling elements are not nesting. The counter is decremented when a
+    /// child closes, so a feed with thousands of `<item>`s under one
+    /// `<channel>` — which is completely ordinary — must not trip the limit.
+    #[test]
+    fn many_siblings_do_not_count_as_depth() {
+        let mut xml = String::from("<channel>");
+        for i in 0..5000 {
+            xml.push_str(&format!("<item><title>{i}</title></item>"));
+        }
+        xml.push_str("</channel>");
+        let parsed = parse_xml(&xml).expect("siblings are not depth");
+        assert_eq!(parsed.find_all("item").len(), 5000);
+    }
 
     // -----------------------------------------------------------------------
     // XML Parser tests

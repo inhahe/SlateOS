@@ -11,7 +11,16 @@
 //!
 //! # Input
 //!
-//! One UTF-8 file, named on the command line:
+//! One UTF-8 file, named on the command line, and an optional pixel size after
+//! it. Without the size the face is opened at its own em, which is the only
+//! size at which nothing is scaled; with one it is opened at that many pixels
+//! and the positions are divided back into font units before printing, so the
+//! two runs are directly comparable. The size is not decoration: a `GPOS`
+//! device table names a range of pixel sizes and corrects the value only
+//! inside it, so a sweep run at the em size exercises none of them — every
+//! real table on this host tops out below 30 ppem.
+//!
+//! The file is:
 //!
 //! ```text
 //! <n>
@@ -55,9 +64,8 @@
 //! glyph ids beside it. Glyph ids alone cannot tell a correctly placed mark
 //! from one stacked on the wrong base, and cannot see kerning at all — and
 //! kerning and mark placement are exactly what reordering a run disturbs,
-//! because the pair a kern belongs to swaps ends. The face is built at its
-//! own em size so the scale factor is one and these come out in font units,
-//! which is what HarfBuzz reports by default.
+//! because the pair a kern belongs to swaps ends. Positions are always in font
+//! units, which is what HarfBuzz reports by default.
 //!
 //! A font that fails to open is reported on stderr and skipped, since the
 //! point of the sweep is the faces that *do* open.
@@ -82,9 +90,13 @@ use osfont::shape::ShapedGlyph;
 
 fn main() {
     let Some(input) = env::args().nth(1) else {
-        eprintln!("usage: shape_dump <input-file>");
+        eprintln!("usage: shape_dump <input-file> [ppem]");
         process::exit(2);
     };
+    let ppem: Option<f32> = env::args().nth(2).map(|size| {
+        size.parse()
+            .unwrap_or_else(|_| panic!("not a pixel size: {size:?}"))
+    });
     let text = match fs::read_to_string(&input) {
         Ok(text) => text,
         Err(err) => {
@@ -111,23 +123,29 @@ fn main() {
         // Any size shapes to the same glyph ids — `cmap`, `GSUB` and `GPOS`
         // are read unscaled — but not to the same *positions*, so the face is
         // opened twice: once at an arbitrary size to ask what its design grid
-        // is, then again at exactly that many pixels, where the scale factor
-        // is one and every advance is the integer the font actually stores.
-        // Anything else would compare rounding, not shaping.
+        // is, then again at the size being swept. With no size given that is
+        // the em itself, where the scale factor is one and every advance is
+        // the integer the font actually stores; with one it is that many
+        // pixels, and `back` divides the positions into the same font units,
+        // which is exact to floating-point noise because nothing between here
+        // and the shaper rounds — every position is a font unit times one
+        // scale factor.
         let Ok(probe) = ScaledFont::from_bytes(data.clone(), 16.0) else {
             eprintln!("{path}: will not open");
             continue;
         };
         let upem = f32::from(probe.units_per_em());
         drop(probe);
-        let Ok(font) = ScaledFont::from_bytes(data, upem) else {
-            eprintln!("{path}: will not open at {upem}px");
+        let size = ppem.unwrap_or(upem);
+        let Ok(font) = ScaledFont::from_bytes(data, size) else {
+            eprintln!("{path}: will not open at {size}px");
             continue;
         };
+        let back = upem / size;
         for (i, (lang, string)) in corpus.iter().enumerate() {
             let run = font.shape_lang(string, *lang);
-            let (logical, logical_pos) = dump(run.glyphs().iter());
-            let (visual, visual_pos) = dump(run.draw_order());
+            let (logical, logical_pos) = dump(run.glyphs().iter(), back);
+            let (visual, visual_pos) = dump(run.draw_order(), back);
             writeln!(
                 out,
                 "{path}\t{i}\t{logical}\t{visual}\t{logical_pos}\t{visual_pos}"
@@ -145,10 +163,13 @@ fn main() {
 /// from the other would report a difference on every right-to-left string and
 /// be believed, since the numbers would look plausible.
 ///
-/// Positions are rounded to whole font units. The face is built at its own em
-/// size, so they are already integers up to floating-point noise, and printing
-/// the noise would only invite a comparison to argue about it.
-fn dump<'a>(glyphs: impl Iterator<Item = &'a ShapedGlyph>) -> (String, String) {
+/// Positions are multiplied by `back` — the em over the size the face was
+/// opened at — and rounded to whole font units. At the em size that factor is
+/// one and they are already integers up to floating-point noise; at a pixel
+/// size it undoes the scaling, leaving the same integers plus whatever the
+/// device tables corrected them by, which is the point of asking at a size at
+/// all. Printing the noise would only invite a comparison to argue about it.
+fn dump<'a>(glyphs: impl Iterator<Item = &'a ShapedGlyph>, back: f32) -> (String, String) {
     let mut ids = String::new();
     let mut pos = String::new();
     for (n, glyph) in glyphs.enumerate() {
@@ -158,7 +179,14 @@ fn dump<'a>(glyphs: impl Iterator<Item = &'a ShapedGlyph>) -> (String, String) {
         }
         write!(ids, "{}", glyph.key.raw()).unwrap();
         let (dx, dy) = glyph.offset;
-        write!(pos, "{:.0};{:.0};{:.0}", glyph.advance, dx, dy).unwrap();
+        write!(
+            pos,
+            "{:.0};{:.0};{:.0}",
+            glyph.advance * back,
+            dx * back,
+            dy * back
+        )
+        .unwrap();
     }
     (ids, pos)
 }

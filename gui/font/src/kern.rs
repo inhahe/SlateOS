@@ -33,16 +33,17 @@
 //! # What is deliberately not implemented
 //!
 //! * **Script and language selection.** Every feature tagged `kern` is used,
-//!   whichever script system lists it. Per-script kerning differences are rare
-//!   in practice (the feature is nearly always shared), and honouring them
-//!   requires knowing the script of the run — which is a shaper's job, and
-//!   there is no shaper yet.
+//!   whichever script system lists it. That is a limitation of the *interface*
+//!   rather than of the reader: a pair of glyph ids carries no run, so there is
+//!   nothing to select with. Shaped text does not go through here — it goes
+//!   through [`gpos`](crate::gpos), whose `ByScript` selects properly, and
+//!   reaches this module only for the legacy `kern` table, which has no script
+//!   systems in it to select among. Per-script `GPOS` kerning differences are
+//!   in any case rare; the feature is nearly always shared.
 //! * **Contextual and cross-stream kerning**, `GPOS` lookup types other than
 //!   `PairPos`, and the legacy table's format 2 (class-based) subtables. Each
 //!   is a small fraction of the corrections in a font and none can be applied
 //!   correctly by a pair-at-a-time interface.
-//! * **Device tables.** They tune a value for one specific ppem; the value
-//!   without them is the designer's intent at any size.
 //!
 //! # Reading across a mark
 //!

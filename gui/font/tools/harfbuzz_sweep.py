@@ -322,26 +322,43 @@ CORPUS = [
 
 
 def read_corpus(path):
-    """A corpus from a file of `[language<TAB>]string` lines.
+    """A corpus from a file of `[!][language<TAB>]string` lines.
 
     Blank lines and `#` comments are skipped; the escapes are the built-in
     corpus's, expanded later by `unescape` on both halves. A targeted corpus is
     how a synthetic face is swept — the built-in one is 40 strings about the
     host's fonts, and running it against two generated faces would report
     thirty-eight agreements that mean nothing.
+
+    A leading `!` marks the line as mixed-script, which is the file's way of
+    saying what `MIXED` says about the built-in corpus: the two halves are not
+    being asked the same question, because HarfBuzz guesses one script for the
+    whole buffer where this crate itemizes. The marker lives in the corpus
+    rather than in a list here because the string it describes does too — a
+    second list, in another file, is a list that goes stale the first time a
+    corpus line is edited.
+
+    Returns the corpus and the set of its entries that carried the marker.
     """
     out = []
+    mixed = set()
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.rstrip("\n")
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
+            marked = line.startswith("!")
+            if marked:
+                line = line[1:]
             if "\t" in line:
                 lang, text = line.split("\t", 1)
-                out.append((lang, text) if lang else text)
+                entry = (lang, text) if lang else text
             else:
-                out.append(line)
-    return out
+                entry = line
+            out.append(entry)
+            if marked:
+                mixed.add(entry)
+    return out, frozenset(mixed)
 
 
 def lang_of(entry):
@@ -372,6 +389,9 @@ def string_of(entry):
 # Both are counted and reported, but apart: a difference here says nothing
 # about whether the shaper is right, and burying it with the ones that do is
 # how a real regression hides behind forty-nine lines of noise.
+#
+# This list covers the *built-in* corpus only. A corpus read from a file says
+# the same thing about its own lines with a leading `!` — see `read_corpus`.
 MIXED = frozenset(
     [
         "hello \\u05e9\\u05dc\\u05d5\\u05dd world",
@@ -382,7 +402,11 @@ assert MIXED <= set(CORPUS), "MIXED names a string that is not in the corpus"
 
 
 def unescape(line):
-    """Expand `\\uXXXX`, matching `shape_dump.rs`'s reader exactly."""
+    """Expand `\\uXXXX` and `\\UXXXXXXXX`, matching `shape_dump.rs` exactly.
+
+    The eight-digit form exists because half of the Universal Shaping Engine's
+    scripts are above the BMP and the four-digit form cannot spell them.
+    """
     out = []
     i = 0
     while i < len(line):
@@ -392,6 +416,9 @@ def unescape(line):
         elif line[i : i + 2] == "\\u":
             out.append(chr(int(line[i + 2 : i + 6], 16)))
             i += 6
+        elif line[i : i + 2] == "\\U":
+            out.append(chr(int(line[i + 2 : i + 10], 16)))
+            i += 10
         elif line[i : i + 2] == "\\\\":
             out.append("\\")
             i += 2
@@ -614,9 +641,9 @@ def main():
     )
     args = ap.parse_args()
 
-    corpus = CORPUS
+    corpus, mixed_entries = CORPUS, MIXED
     if args.corpus:
-        corpus = read_corpus(args.corpus)
+        corpus, mixed_entries = read_corpus(args.corpus)
         if not corpus:
             sys.exit(f"{args.corpus} has no strings in it")
 
@@ -654,7 +681,7 @@ def main():
             # the buffer was right-to-left, logical when it did not.
             logical, visual = got
             ours_here, ours_pos = visual if rtl else logical
-            if corpus[i] in MIXED:
+            if corpus[i] in mixed_entries:
                 # Not a verdict on the shaper — see `MIXED`. Counted as
                 # agreement only when the itemizer happened not to matter for
                 # this face, which is the interesting half of the answer.

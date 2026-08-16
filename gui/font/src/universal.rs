@@ -1275,6 +1275,18 @@ mod tests {
             cut("\u{1A20}\u{1A60}"),
             vec![(0, 2, Cluster::SakotTerminated)]
         );
+        // A reordering killer ends a cluster the way an invisible stacker does,
+        // which is the other half of the same grammar rule. U+1BF2 is BATAK
+        // PANGOLAT — the only script with a reordering killer in it — so the
+        // letters either side of it are Batak too. `run` is handed one script's
+        // worth of text, which is what the itemizer would have produced.
+        assert_eq!(
+            cut("\u{1BC0}\u{1BF2}\u{1BC0}"),
+            vec![
+                (0, 2, Cluster::ViramaTerminated),
+                (2, 3, Cluster::Standard)
+            ]
+        );
     }
 
     /// A vowel sign with no base is broken text, which is what earns a dotted

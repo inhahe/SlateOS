@@ -169,7 +169,16 @@ fn select(
         // the script's default. A script table may have neither: the run has
         // been placed under this script all the same, and gets the no features
         // that answers.
-        let lang_sys = match lang.and_then(|l| find_lang_sys(data, script_table, &l.tag())) {
+        // A language resolves to an ordered list of candidate tags, not one:
+        // Moldavian is `MOL ` and then `ROM `, and a face that files the
+        // comma-below `locl` under `ROM ` alone reaches it only through the
+        // second. The first the face registers wins, so a face registering
+        // both gets the better spelling.
+        let named = lang
+            .iter()
+            .flat_map(|l| l.tags())
+            .find_map(|want| find_lang_sys(data, script_table, want));
+        let lang_sys = match named {
             found @ Some(_) => found,
             None => {
                 let off = u16_at(data, script_table)?;
@@ -435,6 +444,18 @@ pub(crate) struct ByScript {
     /// unconditional `liga` bit switch on a lookup that, for the Arabic run,
     /// must only reach final-form glyphs.
     scripts: Vec<Selection>,
+    /// Every (script, language) the face *registers*, sorted — including the
+    /// two thirds whose selection is identical to their script's default and
+    /// so have no entry in `scripts`.
+    ///
+    /// This exists because a [`Lang`] is a list of candidate tags tried in
+    /// order, and "which candidate wins" is decided by what the face
+    /// registers, not by what happens to be stored here. `ro-MD` asks for
+    /// `MOL ` and then `ROM `; a face that registers both must answer with
+    /// `MOL ` even when its `MOL ` selects exactly what the default does —
+    /// reading on to `ROM ` there would apply Romanian's overrides to
+    /// Moldavian on the strength of an optimisation.
+    langs: Vec<Key>,
 }
 
 impl ByScript {
@@ -463,6 +484,7 @@ impl ByScript {
         // of them.
         let script_list = script_list(data, base)?;
         let mut selected: Vec<Selection> = Vec::new();
+        let mut langs: Vec<Key> = Vec::new();
         let mut union: Vec<u16> = Vec::new();
         for tag in script_tags(data, base)? {
             // A script is asked for under its own tag exactly: the fallback
@@ -484,6 +506,10 @@ impl ByScript {
                 if lang == DEFAULT_LANG {
                     continue;
                 }
+                // Recorded whether or not it selects anything different: this
+                // is the list `selection` consults to decide which of a
+                // language's candidate tags the face answers to.
+                langs.push((tag, lang));
                 let Some((_, indices)) =
                     lookup_indices(data, base, tags, exactly, Some(Lang::from_tag(lang)))
                 else {
@@ -555,7 +581,15 @@ impl ByScript {
             return None;
         }
         scripts.sort_unstable_by_key(|&(key, _)| key);
-        Some(Self { lookups, scripts })
+        // A font may name the same language twice in one script table; the
+        // duplicate would only ever match the same entry, so it is dropped.
+        langs.sort_unstable();
+        langs.dedup();
+        Some(Self {
+            lookups,
+            scripts,
+            langs,
+        })
     }
 
     /// Every lookup any script reaches, in the order they must be applied.
@@ -584,9 +618,8 @@ impl ByScript {
         script: Option<ScriptTags>,
         lang: Option<Lang>,
     ) -> impl Iterator<Item = (&Lookup, u64)> {
-        let want_lang = lang.map_or(DEFAULT_LANG, Lang::tag);
         let positions = fallback_chain(script)
-            .find_map(|want| self.selection(want, want_lang))
+            .find_map(|want| self.selection(want, lang))
             .unwrap_or(&[]);
         positions
             .iter()
@@ -602,15 +635,24 @@ impl ByScript {
     /// to say about the language. A face registering `latn` but no `TRK ` under
     /// it stops the chain and answers with `latn`'s default — it has said its
     /// Latin text does not vary by language.
-    fn selection(&self, tag: [u8; 4], lang: [u8; 4]) -> Option<&[Masked]> {
+    ///
+    /// A language is a list of candidate tags, and the one that answers is the
+    /// first this script *registers* — read from [`langs`](Self::langs) rather
+    /// than from `scripts`, because a registered language whose features match
+    /// its script's default has no `scripts` entry and would otherwise let a
+    /// later candidate answer in its place.
+    fn selection(&self, tag: [u8; 4], lang: Option<Lang>) -> Option<&[Masked]> {
         let default = self
             .scripts
             .binary_search_by_key(&(tag, DEFAULT_LANG), |&(key, _)| key)
             .ok()?;
-        if lang != DEFAULT_LANG
+        if let Some(&want) = lang
+            .iter()
+            .flat_map(|l| l.tags())
+            .find(|&&want| self.langs.binary_search(&(tag, want)).is_ok())
             && let Ok(i) = self
                 .scripts
-                .binary_search_by_key(&(tag, lang), |&(key, _)| key)
+                .binary_search_by_key(&(tag, want), |&(key, _)| key)
         {
             return self.scripts.get(i).map(|(_, p)| p.as_slice());
         }
@@ -1205,5 +1247,59 @@ mod tests {
         // The closed interval first probes (0 + 63) / 2 = 31, so the only
         // records reachable are the ones a descent from there can name.
         assert_eq!(found, vec![31]);
+    }
+
+    /// The feature tags `tools/langsys_survey.py` measures faces against.
+    ///
+    /// The tool keeps them as a literal rather than parsing them out of the
+    /// source, because a survey that silently measured a *different* set from
+    /// the shaper would report a number that means nothing — "230 of 581
+    /// faces move a feature this crate asks for" is only true if the two
+    /// lists agree. So the literal is read back here instead.
+    fn survey_features() -> Vec<[u8; 4]> {
+        let tool = include_str!("../tools/langsys_survey.py");
+        let (_, after) = tool
+            .split_once("WANTED = frozenset(")
+            .expect("the tool declares WANTED");
+        let (_, block) = after.split_once("\"\"\"").expect("WANTED opens a block string");
+        let (block, _) = block.split_once("\"\"\"").expect("WANTED closes it");
+        block
+            .split_whitespace()
+            .map(|tag| <[u8; 4]>::try_from(tag.as_bytes()).expect("a tag is four bytes"))
+            .collect()
+    }
+
+    #[test]
+    fn the_survey_matches_the_shapers_feature_list() {
+        let mut surveyed = survey_features();
+        let mut asked: Vec<[u8; 4]> = crate::gsub::FEATURES.iter().map(|&&t| t).collect();
+        surveyed.sort_unstable();
+        asked.sort_unstable();
+        assert_eq!(surveyed, asked);
+    }
+
+    /// `gsub::FEATURES`'s unconditional run and `gpos::FEATURES` are the same
+    /// set, which both modules' docs assert and neither pinned until now.
+    ///
+    /// They must be: HarfBuzz builds one feature map and compiles it against
+    /// both tables, so a face may file a substitution under `mark` or a
+    /// `PairPos` under `calt` — and `Monoid-Italic.ttf` really does the
+    /// latter. A tag in one list and not the other is a lookup one table
+    /// would reach and the other would silently skip.
+    #[test]
+    fn the_two_tables_ask_for_the_same_features() {
+        let mut positioning: Vec<[u8; 4]> = crate::gpos::FEATURES.iter().map(|&&t| t).collect();
+        // The unconditional run is the head of the substitution list; its tail
+        // is gated per glyph by a shaper, which positioning has no equivalent
+        // of — a positioning feature is gated by its own glyph coverage.
+        let mut unconditional: Vec<[u8; 4]> = crate::gsub::FEATURES
+            .get(..positioning.len())
+            .expect("the substitution list is the longer of the two")
+            .iter()
+            .map(|&&t| t)
+            .collect();
+        positioning.sort_unstable();
+        unconditional.sort_unstable();
+        assert_eq!(positioning, unconditional);
     }
 }

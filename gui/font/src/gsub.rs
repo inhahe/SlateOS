@@ -107,9 +107,6 @@
 //! * **`dlig`, `hlig`, `swsh`** and the other opt-in features, which are off
 //!   by default by design and have no way to be turned on yet — there is no
 //!   per-run feature list to turn them on *with*.
-//! * **Language selection.** Only each script's DefaultLangSys is read, so a
-//!   `locl` override registered under `SRB ` or `TRK ` is not reached. See
-//!   [`otl`](crate::otl) and `TD-FONT-IGNORES-LANGSYS-OVERRIDES`.
 //! * **The reordering features** — `rphf`, `half`, `pref`, `abvs` and the rest
 //!   of the Indic and Universal Shaping Engine sets. Unlike the Arabic four,
 //!   these need the cluster *rearranged* before the features are chosen, which
@@ -144,7 +141,10 @@ use crate::would::would_apply;
 /// it against both tables, so nothing stops a face filing a substitution under
 /// `mark` or a `PairPos` under `calt`. The two lists are the same set,
 /// deliberately.
-const FEATURES: &[&[u8; 4]] = &[
+/// Visible to the crate so that `the_survey_matches_the_shapers_feature_list`
+/// in [`otl`](crate::otl) can pin it against the tool that measures faces
+/// against it.
+pub(crate) const FEATURES: &[&[u8; 4]] = &[
     // Unconditional: every glyph is eligible for all of these.
     b"ccmp", b"locl", b"liga", b"rlig", b"clig", b"calt", b"rclt", b"abvm", b"blwm", b"curs",
     b"dist", b"kern", b"mark", b"mkmk",
@@ -3044,6 +3044,81 @@ mod tests {
         // A run with no script of its own starts at `DFLT`, where it is.
         assert_eq!(one(&data, &subs, None, "tr"), 15);
         assert_eq!(one(&data, &subs, None, ""), 10);
+    }
+
+    /// A BCP 47 tag names *several* OpenType tags, tried in order, and a face
+    /// that registers only a later one still answers.
+    ///
+    /// This is the bug the HarfBuzz sweep caught: `ro-MD` is `MOL ` and then
+    /// `ROM `, and 66 of the development host's 556 faces file Romanian's
+    /// comma-below `locl` under `ROM ` and register no `MOL ` at all. Stopping
+    /// at the first candidate lost the feature on every one of them.
+    #[test]
+    fn a_language_reaches_a_face_that_registers_only_its_second_candidate() {
+        let scripts = languages(&[(
+            b"latn",
+            Some((NO_REQUIRED, &[])),
+            &[(b"ROM ", (NO_REQUIRED, &[0]))],
+        )]);
+        let sub = single_delta(&[10], 5);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+
+        assert_eq!(one(&data, &subs, LATIN, "ro"), 15);
+        assert_eq!(one(&data, &subs, LATIN, "ro-MD"), 15);
+        assert_eq!(one(&data, &subs, LATIN, ""), 10);
+    }
+
+    /// When a face registers more than one of a language's candidates, the
+    /// *first* answers — even when what it selects is exactly the script's
+    /// default.
+    ///
+    /// That last clause is the whole test. A named language whose features
+    /// match its script's default is stored nowhere, because the default entry
+    /// already holds the answer; if "which candidate wins" were decided by
+    /// which one is stored, a `MOL ` that says nothing would silently hand
+    /// Moldavian over to `ROM `'s overrides. The face registered `MOL ` and
+    /// said it has no rules of its own, and that is an answer.
+    #[test]
+    fn the_first_candidate_a_face_registers_wins_even_when_it_selects_nothing() {
+        let scripts = languages(&[(
+            b"latn",
+            Some((NO_REQUIRED, &[])),
+            &[
+                (b"MOL ", (NO_REQUIRED, &[])),
+                (b"ROM ", (NO_REQUIRED, &[0])),
+            ],
+        )]);
+        let sub = single_delta(&[10], 5);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+
+        // Romanian is `ROM ` alone, and reaches the rule.
+        assert_eq!(one(&data, &subs, LATIN, "ro"), 15);
+        // Moldavian stops at `MOL `, which this face registers and leaves bare.
+        assert_eq!(one(&data, &subs, LATIN, "ro-MD"), 10);
+        assert_eq!(one(&data, &subs, LATIN, ""), 10);
+    }
+
+    /// And the other way round, so the test above cannot pass by ignoring the
+    /// language list altogether.
+    #[test]
+    fn the_first_candidate_a_face_registers_wins_when_it_selects_something() {
+        let scripts = languages(&[(
+            b"latn",
+            Some((NO_REQUIRED, &[])),
+            &[
+                (b"MOL ", (NO_REQUIRED, &[0])),
+                (b"ROM ", (NO_REQUIRED, &[])),
+            ],
+        )]);
+        let sub = single_delta(&[10], 5);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+
+        assert_eq!(one(&data, &subs, LATIN, "ro-MD"), 15);
+        assert_eq!(one(&data, &subs, LATIN, "ro"), 10);
+        assert_eq!(one(&data, &subs, LATIN, ""), 10);
     }
 
     #[test]

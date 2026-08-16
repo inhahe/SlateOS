@@ -46,15 +46,38 @@
 
 use crate::lang_tables::{BLOCKED_3, COMPLEX, LANGUAGES_2, LANGUAGES_3, Rule};
 
-/// An OpenType language system tag: four bytes, space-padded, as a font spells
-/// it in a LangSysRecord.
+/// How many OpenType tags one BCP 47 tag may resolve to.
+///
+/// HarfBuzz's `HB_OT_MAX_TAGS_PER_LANGUAGE`, and the same value for the same
+/// reason: it is the widest run in the registry, and truncating where HarfBuzz
+/// truncates is what keeps the two engines answering alike.
+const MAX_TAGS: usize = 3;
+
+/// The OpenType language system tags a language may be filed under, best first.
+///
+/// A tag is four bytes, space-padded, as a font spells it in a LangSysRecord.
+/// There is more than one because the registry gives more than one: `ro-MD` is
+/// `MOL ` and then `ROM `, `ml` is Malayalam Traditional and then Malayalam
+/// Reformed, `ga` is `IRI ` and then `IRT `. They are **candidates, not
+/// synonyms** — a face is asked for each in turn and the first it registers
+/// wins — so keeping only the first is a wrong answer on any face that
+/// registers a later one and not the first. That is not rare: 66 of this
+/// host's 556 faces file Romanian's comma-below under `ROM ` and no `MOL `,
+/// and Moldovan reaches it only through the second candidate.
 ///
 /// Constructed from a BCP 47 language tag with [`Lang::new`], which is the only
-/// way in from outside this crate — the point of the type is that a
-/// `[u8; 4]` that reached [`otl`](crate::otl) came through the registry rather
-/// than from a caller inventing one.
+/// way in from outside this crate — the point of the type is that a tag that
+/// reached [`otl`](crate::otl) came through the registry rather than from a
+/// caller inventing one.
+///
+/// Unused slots hold the same filler in every value, so the derived equality is
+/// equality of the candidate lists and nothing else.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Lang([u8; 4]);
+pub struct Lang {
+    tags: [[u8; 4]; MAX_TAGS],
+    /// How many of `tags` are real; always at least one.
+    count: u8,
+}
 
 impl Lang {
     /// The OpenType language system a BCP 47 tag selects, or `None` for a tag
@@ -96,31 +119,38 @@ impl Lang {
         if s.is_empty() {
             return None;
         }
-        if let Some(tag) = complex(s) {
-            return Some(Self(tag));
+        if let Some(tags) = complex(s) {
+            return Self::from_candidates(tags);
         }
         let (at, len) = primary(s);
         let sub = s.get(at..at.checked_add(len)?)?;
         match len {
-            2 => search(LANGUAGES_2, sub).map(Self),
+            2 => search(LANGUAGES_2, sub).and_then(Self::from_candidates),
             3 => match search(LANGUAGES_3, sub) {
-                Some(tag) => Some(Self(tag)),
+                Some(tags) => Self::from_candidates(tags),
                 // Not registered under this spelling. Assume ISO 639-3 and
                 // uppercase it, unless that would name a different language.
-                None if find(BLOCKED_3, &padded(sub)).is_none() => uppercase(sub).map(Self),
+                None if find(BLOCKED_3, &padded(sub)).is_none() => {
+                    uppercase(sub).map(Self::from_tag)
+                }
                 None => None,
             },
             _ => None,
         }
     }
 
-    /// The tag as a font spells it.
+    /// The tags as a font spells them, best first.
+    ///
+    /// Never empty. A caller asks a face for each in turn and stops at the
+    /// first it registers; asking for all of them, or for any but the first
+    /// that matched, would let a face's second-choice spelling override the
+    /// first-choice one it also registers.
     #[must_use]
-    pub fn tag(self) -> [u8; 4] {
-        self.0
+    pub fn tags(&self) -> &[[u8; 4]] {
+        self.tags.get(..usize::from(self.count)).unwrap_or(&self.tags)
     }
 
-    /// A tag read out of a font's LangSysRecord.
+    /// A single tag read out of a font's LangSysRecord.
     ///
     /// Not public, and deliberately: outside this crate a `Lang` means "the
     /// registry says this", and a font is allowed to register a tag the
@@ -128,7 +158,35 @@ impl Lang {
     /// needs to key its selections by whatever the face actually wrote, which
     /// is why it may build one this way.
     pub(crate) fn from_tag(tag: [u8; 4]) -> Self {
-        Self(tag)
+        Self { tags: [tag; MAX_TAGS], count: 1 }
+    }
+
+    /// A registry entry's candidate list, copied into the fixed array.
+    ///
+    /// `None` for an empty list, which the generator refuses to emit — a rule
+    /// that matched but names no tag would silently mean "no language" and be
+    /// indistinguishable from the caller not having said one.
+    ///
+    /// The unused slots repeat the last real tag rather than holding zeroes so
+    /// that two values with equal candidate lists compare equal whatever built
+    /// them: [`from_tag`](Self::from_tag) makes one from a single tag, and it
+    /// must equal what the registry produces for a language that resolves to
+    /// that tag alone.
+    fn from_candidates(tags: &[[u8; 4]]) -> Option<Self> {
+        let &first = tags.first()?;
+        let mut out = [first; MAX_TAGS];
+        let mut count = 0_u8;
+        for (dst, &src) in out.iter_mut().zip(tags.iter().take(MAX_TAGS)) {
+            *dst = src;
+            count = count.saturating_add(1);
+        }
+        // Anything past `count` repeats the last real tag, so equality is
+        // equality of the list and nothing else.
+        let last = out.get(usize::from(count).saturating_sub(1)).copied().unwrap_or(first);
+        for slot in out.iter_mut().skip(usize::from(count)) {
+            *slot = last;
+        }
+        Some(Self { tags: out, count })
     }
 }
 
@@ -136,14 +194,14 @@ impl Lang {
 ///
 /// First match wins, so the order in [`COMPLEX`] is part of the data and not a
 /// detail of how it was generated.
-fn complex(s: &[u8]) -> Option<[u8; 4]> {
+fn complex(s: &[u8]) -> Option<&'static [[u8; 4]]> {
     // HarfBuzz's own guards: nothing here can match a tag with no `-`, and the
     // variant rules are skipped outright for tags too short to hold one. They
     // are reproduced rather than dropped because they are observable — `x-geok`
     // is six bytes and HarfBuzz does *not* read `-geok` out of it.
     let dash = s.iter().position(|&b| norm(b) == b'-')?;
     let long_enough = s.len() >= 7 && s.len().checked_sub(dash).is_some_and(|n| n >= 5);
-    for &(rule, tag) in COMPLEX {
+    for &(rule, tags) in COMPLEX {
         let matched = match rule {
             Rule::Variant(sub) => long_enough && has_subtag(s, sub),
             Rule::Exact(key) => equals(s, key),
@@ -151,7 +209,7 @@ fn complex(s: &[u8]) -> Option<[u8; 4]> {
             Rule::PrefixVariant(key, sub) => prefix_of(s, key).is_some() && has_subtag(s, sub),
         };
         if matched {
-            return Some(tag);
+            return Some(tags);
         }
     }
     None
@@ -197,14 +255,14 @@ fn padded(sub: &[u8]) -> [u8; 4] {
     out
 }
 
-/// The tag `sub` selects in a sorted subtag-to-tag table.
-fn search(table: &[([u8; 4], [u8; 4])], sub: &[u8]) -> Option<[u8; 4]> {
+/// The tags `sub` selects in a sorted subtag-to-tags table.
+fn search(table: &'static [([u8; 4], &'static [[u8; 4]])], sub: &[u8]) -> Option<&'static [[u8; 4]]> {
     let key = padded(sub);
     table
         .binary_search_by_key(&key, |&(k, _)| k)
         .ok()
         .and_then(|i| table.get(i))
-        .map(|&(_, tag)| tag)
+        .map(|&(_, tags)| tags)
 }
 
 /// Where `key` sits in a sorted list of tags, if it is there.
@@ -297,8 +355,15 @@ fn has_subtag(s: &[u8], sub: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The first candidate, which is what a face registering the usual
+    /// spelling selects — the shape most of these tests are about.
     fn tag(s: &str) -> Option<[u8; 4]> {
-        Lang::new(s).map(Lang::tag)
+        Lang::new(s).map(|l| l.tags()[0])
+    }
+
+    /// The whole candidate list, for the tests that are about there being one.
+    fn tags(s: &str) -> Option<Vec<[u8; 4]>> {
+        Lang::new(s).map(|l| l.tags().to_vec())
     }
 
     #[test]
@@ -394,12 +459,51 @@ mod tests {
             .chain(LANGUAGES_3.iter())
             .map(|&(_, t)| t)
             .chain(COMPLEX.iter().map(|&(_, t)| t));
-        for tag in all {
-            assert!(
-                tag.iter().all(|&b| (0x20..0x7F).contains(&b)),
-                "tag {tag:?} is not printable ASCII"
-            );
+        for tags in all {
+            for tag in tags {
+                assert!(
+                    tag.iter().all(|&b| (0x20..0x7F).contains(&b)),
+                    "tag {tag:?} is not printable ASCII"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn every_generated_entry_names_at_least_one_tag_and_no_more_than_the_cap() {
+        // An empty list would make a rule that matched indistinguishable from
+        // one that did not, and a list longer than the cap would be a list
+        // HarfBuzz truncates and we do not — a difference in the one place the
+        // two engines are supposed to agree exactly.
+        let all = LANGUAGES_2
+            .iter()
+            .chain(LANGUAGES_3.iter())
+            .map(|&(_, t)| t)
+            .chain(COMPLEX.iter().map(|&(_, t)| t));
+        for tags in all {
+            assert!(!tags.is_empty(), "an entry names no tag");
+            assert!(tags.len() <= MAX_TAGS, "entry {tags:?} is longer than {MAX_TAGS}");
+        }
+    }
+
+    #[test]
+    fn a_language_can_name_more_than_one_candidate() {
+        // Moldavian is the case that drove this: HarfBuzz asks a face for
+        // `MOL ` and then for `ROM `, and 66 of this host's 556 faces file
+        // Romanian's comma-below under `ROM ` and register no `MOL ` at all.
+        // Keeping only the first candidate loses the feature on every one of
+        // them, which is exactly what the HarfBuzz sweep caught.
+        assert_eq!(tags("ro-MD"), Some(vec![*b"MOL ", *b"ROM "]));
+        assert_eq!(tags("ro"), Some(vec![*b"ROM "]));
+    }
+
+    #[test]
+    fn a_single_candidate_equals_the_same_tag_read_from_a_font() {
+        // `from_tag` builds the value `ByScript` keys its selections by, and a
+        // language that resolves to one tag must find them. The padding in the
+        // unused slots is why this holds.
+        assert_eq!(Lang::new("tr"), Some(Lang::from_tag(*b"TRK ")));
+        assert_ne!(Lang::new("ro-MD"), Some(Lang::from_tag(*b"MOL ")));
     }
 
     #[test]

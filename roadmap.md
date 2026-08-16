@@ -690,10 +690,23 @@ Roadmap:
   times, filed as `open-questions.md` **C-Q1**: whether normalization may
   consult font coverage, which would invert the layering §423 just
   defended. Operator's call, not a bug.
+  Language selection is now done too (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`
+  closed, design-decisions §430). `shape_lang(text, Option<Lang>)` takes a
+  BCP 47 tag beside `shape`, which is `shape_lang(text, None)`, so the
+  change cannot regress text that names no language; `lang.rs` maps the tag
+  the way HarfBuzz does, from tables generated out of HarfBuzz's own source;
+  and `ByScript` selects per (script, language) rather than per script, and
+  finally reads `requiredFeatureIndex`. It matters on 996 (script, language)
+  records across 230 of the host's 581 faces. The oracle earned its keep
+  again: a first version that kept only the first OpenType tag per language
+  passed 521 unit tests and was wrong on the 66 faces that register `ROM `
+  and no `MOL `, because HarfBuzz tries up to three candidate tags in order
+  and takes the first the *font* registers. Sweep after the fix: 556 faces ×
+  35 strings, `agree` **18235**, `reordered` 0, `misplaced` 0, `differ` 1176
+  — every one of them the same composed-diacritics question as C-Q1.
   Next unblocked step is the rest of shaping: no Khmer/Myanmar/Thai/USE
-  shapers (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`), no language
-  selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in
-  `ValueRecord`. Vello itself waits on `[A]`'s GPU driver.
+  shapers (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`) and no device tables
+  in `ValueRecord`. Vello itself waits on `[A]`'s GPU driver.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
   (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it

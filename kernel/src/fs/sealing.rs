@@ -94,11 +94,21 @@ impl SealFlags {
             return String::from("none");
         }
         let mut parts = Vec::new();
-        if self.contains(Self::SHRINK) { parts.push("shrink"); }
-        if self.contains(Self::GROW) { parts.push("grow"); }
-        if self.contains(Self::WRITE) { parts.push("write"); }
-        if self.contains(Self::SEAL) { parts.push("seal"); }
-        if self.contains(Self::EXEC) { parts.push("exec"); }
+        if self.contains(Self::SHRINK) {
+            parts.push("shrink");
+        }
+        if self.contains(Self::GROW) {
+            parts.push("grow");
+        }
+        if self.contains(Self::WRITE) {
+            parts.push("write");
+        }
+        if self.contains(Self::SEAL) {
+            parts.push("seal");
+        }
+        if self.contains(Self::EXEC) {
+            parts.push("exec");
+        }
         let joined = parts.join("+");
         String::from(joined.as_str())
     }
@@ -203,7 +213,8 @@ pub fn add_seals(path: &str, new_seals: SealFlags) -> KernelResult<SealFlags> {
 /// Get current seals for a file.
 pub fn get_seals(path: &str) -> SealFlags {
     let table = SEAL_TABLE.lock();
-    table.iter()
+    table
+        .iter()
         .find(|e| e.path == path)
         .map_or(SealFlags::NONE, |e| e.flags)
 }

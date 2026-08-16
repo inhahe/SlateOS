@@ -40,10 +40,10 @@
 //! design.txt: capability-based security, multi-user operation.
 //! Linux: `man quota`, `man edquota`, `man repquota`.
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -181,7 +181,10 @@ static QUOTAS: Mutex<QuotaInner> = Mutex::new(QuotaInner {
 /// usage tracking occurs.  Existing limits and usage data are preserved.
 pub fn set_enabled(enabled: bool) {
     QUOTAS.lock().enabled = enabled;
-    serial_println!("[quota] Enforcement {}", if enabled { "enabled" } else { "disabled" });
+    serial_println!(
+        "[quota] Enforcement {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
 }
 
 /// Check whether quotas are globally enabled.
@@ -211,9 +214,10 @@ pub fn remove(subject: QuotaSubject) -> bool {
 /// Get the current quota info for a subject.
 pub fn get_info(subject: QuotaSubject) -> Option<QuotaInfo> {
     let inner = QUOTAS.lock();
-    inner.entries.get(&subject).map(|entry| {
-        build_info(subject, entry, current_time_secs())
-    })
+    inner
+        .entries
+        .get(&subject)
+        .map(|entry| build_info(subject, entry, current_time_secs()))
 }
 
 /// List all configured quotas.
@@ -335,7 +339,9 @@ pub fn check_create(uid: u32, gid: u32) -> QuotaCheckResult {
 
     // Check user inode quota.
     if let Some(entry) = inner.entries.get(&QuotaSubject::User(uid)) {
-        if check_inodes(entry, now) == QuotaCheckResult::Denied { return QuotaCheckResult::Denied }
+        if check_inodes(entry, now) == QuotaCheckResult::Denied {
+            return QuotaCheckResult::Denied;
+        }
     }
 
     // Check group inode quota.
@@ -530,14 +536,14 @@ fn update_soft_timestamp_inodes(entry: &mut QuotaEntry, now: u64) {
 
 /// Build a QuotaInfo from an entry.
 fn build_info(subject: QuotaSubject, entry: &QuotaEntry, now: u64) -> QuotaInfo {
-    let over_soft_bytes = entry.limits.soft_bytes > 0
-        && entry.usage.bytes_used > entry.limits.soft_bytes;
-    let over_hard_bytes = entry.limits.hard_bytes > 0
-        && entry.usage.bytes_used > entry.limits.hard_bytes;
-    let over_soft_inodes = entry.limits.soft_inodes > 0
-        && entry.usage.inodes_used > entry.limits.soft_inodes;
-    let over_hard_inodes = entry.limits.hard_inodes > 0
-        && entry.usage.inodes_used > entry.limits.hard_inodes;
+    let over_soft_bytes =
+        entry.limits.soft_bytes > 0 && entry.usage.bytes_used > entry.limits.soft_bytes;
+    let over_hard_bytes =
+        entry.limits.hard_bytes > 0 && entry.usage.bytes_used > entry.limits.hard_bytes;
+    let over_soft_inodes =
+        entry.limits.soft_inodes > 0 && entry.usage.inodes_used > entry.limits.soft_inodes;
+    let over_hard_inodes =
+        entry.limits.hard_inodes > 0 && entry.usage.inodes_used > entry.limits.hard_inodes;
 
     let _ = now; // Reserved for grace period calculations in future.
 
@@ -611,13 +617,16 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 2: set limits and check within limits ---
     {
-        set_limits(test_user, QuotaLimits {
-            soft_bytes: 10_000,
-            hard_bytes: 20_000,
-            soft_inodes: 100,
-            hard_inodes: 200,
-            grace_seconds: 3600,
-        });
+        set_limits(
+            test_user,
+            QuotaLimits {
+                soft_bytes: 10_000,
+                hard_bytes: 20_000,
+                soft_inodes: 100,
+                hard_inodes: 200,
+                grace_seconds: 3600,
+            },
+        );
 
         // Manually set usage below limits.
         set_usage(test_user, 5_000, 50);
@@ -670,7 +679,10 @@ pub fn self_test() -> KernelResult<()> {
         set_usage(test_user, 1_000, 50);
         let result = check_create(test_uid, test_gid);
         if result != QuotaCheckResult::Allowed {
-            serial_println!("[quota]   ERROR: expected Allowed under soft inode limit, got {:?}", result);
+            serial_println!(
+                "[quota]   ERROR: expected Allowed under soft inode limit, got {:?}",
+                result
+            );
             cleanup_test(test_user, test_group, was_enabled);
             return Err(KernelError::InternalError);
         }
@@ -680,7 +692,10 @@ pub fn self_test() -> KernelResult<()> {
         set_usage(test_user, 1_000, 150);
         let result = check_create(test_uid, test_gid);
         if result != QuotaCheckResult::SoftWarning {
-            serial_println!("[quota]   ERROR: expected SoftWarning over soft inode limit, got {:?}", result);
+            serial_println!(
+                "[quota]   ERROR: expected SoftWarning over soft inode limit, got {:?}",
+                result
+            );
             cleanup_test(test_user, test_group, was_enabled);
             return Err(KernelError::InternalError);
         }
@@ -689,7 +704,10 @@ pub fn self_test() -> KernelResult<()> {
         set_usage(test_user, 1_000, 200);
         let result = check_create(test_uid, test_gid);
         if result != QuotaCheckResult::Denied {
-            serial_println!("[quota]   ERROR: expected Denied at hard inode limit, got {:?}", result);
+            serial_println!(
+                "[quota]   ERROR: expected Denied at hard inode limit, got {:?}",
+                result
+            );
             cleanup_test(test_user, test_group, was_enabled);
             return Err(KernelError::InternalError);
         }
@@ -706,12 +724,18 @@ pub fn self_test() -> KernelResult<()> {
         let info = get_info(test_user);
         if let Some(info) = info {
             if info.usage.bytes_used != 5_000 {
-                serial_println!("[quota]   ERROR: expected 5000 bytes, got {}", info.usage.bytes_used);
+                serial_println!(
+                    "[quota]   ERROR: expected 5000 bytes, got {}",
+                    info.usage.bytes_used
+                );
                 cleanup_test(test_user, test_group, was_enabled);
                 return Err(KernelError::InternalError);
             }
             if info.usage.inodes_used != 1 {
-                serial_println!("[quota]   ERROR: expected 1 inode, got {}", info.usage.inodes_used);
+                serial_println!(
+                    "[quota]   ERROR: expected 1 inode, got {}",
+                    info.usage.inodes_used
+                );
                 cleanup_test(test_user, test_group, was_enabled);
                 return Err(KernelError::InternalError);
             }
@@ -726,7 +750,11 @@ pub fn self_test() -> KernelResult<()> {
 
         let info = get_info(test_user).unwrap_or_else(|| panic!("missing entry"));
         if info.usage.bytes_used != 2_000 || info.usage.inodes_used != 0 {
-            serial_println!("[quota]   ERROR: release incorrect ({}, {})", info.usage.bytes_used, info.usage.inodes_used);
+            serial_println!(
+                "[quota]   ERROR: release incorrect ({}, {})",
+                info.usage.bytes_used,
+                info.usage.inodes_used
+            );
             cleanup_test(test_user, test_group, was_enabled);
             return Err(KernelError::InternalError);
         }
@@ -735,13 +763,16 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 7: group quota enforcement ---
     {
-        set_limits(test_group, QuotaLimits {
-            soft_bytes: 0,
-            hard_bytes: 5_000,
-            soft_inodes: 0,
-            hard_inodes: 0,
-            grace_seconds: 3600,
-        });
+        set_limits(
+            test_group,
+            QuotaLimits {
+                soft_bytes: 0,
+                hard_bytes: 5_000,
+                soft_inodes: 0,
+                hard_inodes: 0,
+                grace_seconds: 3600,
+            },
+        );
         set_usage(test_group, 4_000, 0);
 
         // User is under their limit but group would exceed.
@@ -783,13 +814,21 @@ pub fn self_test() -> KernelResult<()> {
             cleanup_test(test_user, test_group, was_enabled);
             return Err(KernelError::InternalError);
         }
-        serial_println!("[quota]   stats OK (entries={}, users={}, groups={})", st.entries, st.user_quotas, st.group_quotas);
+        serial_println!(
+            "[quota]   stats OK (entries={}, users={}, groups={})",
+            st.entries,
+            st.user_quotas,
+            st.group_quotas
+        );
     }
 
     // --- Test 10: format_bytes ---
     {
         if format_bytes(512) != "512 B" {
-            serial_println!("[quota]   ERROR: format_bytes(512) = '{}'", format_bytes(512));
+            serial_println!(
+                "[quota]   ERROR: format_bytes(512) = '{}'",
+                format_bytes(512)
+            );
             cleanup_test(test_user, test_group, was_enabled);
             return Err(KernelError::InternalError);
         }

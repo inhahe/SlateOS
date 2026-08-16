@@ -23,9 +23,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -170,7 +170,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         config: InputA11yConfig::default(),
         sticky_states: [
@@ -201,38 +203,58 @@ pub fn set_sticky_keys(enabled: bool) -> KernelResult<()> {
 
 /// Set filter keys enabled.
 pub fn set_filter_keys(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.filter_keys = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.filter_keys = enabled;
+        Ok(())
+    })
 }
 
 /// Set toggle keys enabled.
 pub fn set_toggle_keys(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.toggle_keys = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.toggle_keys = enabled;
+        Ok(())
+    })
 }
 
 /// Set mouse keys enabled.
 pub fn set_mouse_keys(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.mouse_keys = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.mouse_keys = enabled;
+        Ok(())
+    })
 }
 
 /// Set bounce keys enabled.
 pub fn set_bounce_keys(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.bounce_keys = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.bounce_keys = enabled;
+        Ok(())
+    })
 }
 
 /// Set filter key delay.
 pub fn set_filter_delay(ms: u32) -> KernelResult<()> {
-    with_state(|state| { state.config.filter_delay_ms = ms; Ok(()) })
+    with_state(|state| {
+        state.config.filter_delay_ms = ms;
+        Ok(())
+    })
 }
 
 /// Set mouse speed.
 pub fn set_mouse_speed(speed: u32) -> KernelResult<()> {
-    with_state(|state| { state.config.mouse_speed = speed.clamp(1, 100); Ok(()) })
+    with_state(|state| {
+        state.config.mouse_speed = speed.clamp(1, 100);
+        Ok(())
+    })
 }
 
 /// Press a modifier (for sticky keys).
 pub fn modifier_pressed(modifier: Modifier) -> KernelResult<StickyState> {
     with_state(|state| {
-        if !state.config.sticky_keys { return Ok(StickyState::Off); }
+        if !state.config.sticky_keys {
+            return Ok(StickyState::Off);
+        }
         state.total_keys += 1;
 
         let entry = state.sticky_states.iter_mut().find(|(m, _)| *m == modifier);
@@ -269,19 +291,26 @@ pub fn key_pressed() -> KernelResult<()> {
 
 /// Record a filtered (ignored) key.
 pub fn record_filtered() -> KernelResult<()> {
-    with_state(|state| { state.total_filtered += 1; Ok(()) })
+    with_state(|state| {
+        state.total_filtered += 1;
+        Ok(())
+    })
 }
 
 /// Record a mouse key movement.
 pub fn record_mouse_move() -> KernelResult<()> {
-    with_state(|state| { state.total_mouse_moves += 1; Ok(()) })
+    with_state(|state| {
+        state.total_mouse_moves += 1;
+        Ok(())
+    })
 }
 
 /// Get sticky key states.
 pub fn get_sticky_states() -> Vec<(Modifier, StickyState)> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.sticky_states.to_vec()
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.sticky_states.to_vec())
 }
 
 /// Get config.
@@ -294,9 +323,13 @@ pub fn stats() -> (bool, bool, bool, bool, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => (
-            s.config.sticky_keys, s.config.filter_keys,
-            s.config.toggle_keys, s.config.mouse_keys,
-            s.total_keys, s.total_filtered, s.ops,
+            s.config.sticky_keys,
+            s.config.filter_keys,
+            s.config.toggle_keys,
+            s.config.mouse_keys,
+            s.total_keys,
+            s.total_filtered,
+            s.ops,
         ),
         None => (false, false, false, false, 0, 0, 0),
     }
@@ -343,7 +376,10 @@ pub fn self_test() {
     modifier_pressed(Modifier::Ctrl).expect("ctrl latch");
     key_pressed().expect("key");
     let states = get_sticky_states();
-    let ctrl = states.iter().find(|(m, _)| *m == Modifier::Ctrl).expect("find ctrl");
+    let ctrl = states
+        .iter()
+        .find(|(m, _)| *m == Modifier::Ctrl)
+        .expect("find ctrl");
     assert_eq!(ctrl.1, StickyState::Off);
     crate::serial_println!("  [6/11] latch cleared on key: OK");
 

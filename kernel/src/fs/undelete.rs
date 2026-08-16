@@ -212,10 +212,7 @@ pub fn scan(filter: &ScanFilter) -> KernelResult<Vec<RecoverableFile>> {
 
     // Collect and sort: recoverable content first, then metadata-only.
     let mut results: Vec<RecoverableFile> = found.into_values().collect();
-    results.sort_by(|a, b| {
-        a.best_source.cmp(&b.best_source)
-            .then(a.path.cmp(&b.path))
-    });
+    results.sort_by(|a, b| a.best_source.cmp(&b.best_source).then(a.path.cmp(&b.path)));
 
     // Apply limit.
     if filter.limit > 0 && results.len() > filter.limit {
@@ -305,18 +302,19 @@ fn scan_trash(filter: &ScanFilter, found: &mut BTreeMap<PathBuf, RecoverableFile
             if !matches_filter(original_path, filter) {
                 continue;
             }
-            let entry = found.entry(original_path.to_path_buf()).or_insert_with(|| {
-                RecoverableFile {
-                    path: original_path.to_path_buf(),
-                    sources: Vec::new(),
-                    best_source: RecoverySource::Trash,
-                    size: Some(item.size),
-                    deleted_ns: None,
-                    hash: None,
-                    trash_name: None,
-                    cas_hash: None,
-                }
-            });
+            let entry =
+                found
+                    .entry(original_path.to_path_buf())
+                    .or_insert_with(|| RecoverableFile {
+                        path: original_path.to_path_buf(),
+                        sources: Vec::new(),
+                        best_source: RecoverySource::Trash,
+                        size: Some(item.size),
+                        deleted_ns: None,
+                        hash: None,
+                        trash_name: None,
+                        cas_hash: None,
+                    });
             if !entry.sources.contains(&RecoverySource::Trash) {
                 entry.sources.push(RecoverySource::Trash);
             }
@@ -345,8 +343,9 @@ fn scan_journal(filter: &ScanFilter, found: &mut BTreeMap<PathBuf, RecoverableFi
             }
         }
 
-        let rec = found.entry(entry.path.clone()).or_insert_with(|| {
-            RecoverableFile {
+        let rec = found
+            .entry(entry.path.clone())
+            .or_insert_with(|| RecoverableFile {
                 path: entry.path.clone(),
                 sources: Vec::new(),
                 best_source: RecoverySource::JournalOnly,
@@ -355,8 +354,7 @@ fn scan_journal(filter: &ScanFilter, found: &mut BTreeMap<PathBuf, RecoverableFi
                 hash: None,
                 trash_name: None,
                 cas_hash: None,
-            }
-        });
+            });
         if !rec.sources.contains(&RecoverySource::JournalOnly) {
             rec.sources.push(RecoverySource::JournalOnly);
         }
@@ -386,8 +384,9 @@ fn scan_history(filter: &ScanFilter, found: &mut BTreeMap<PathBuf, RecoverableFi
         let Some(latest) = versions.first() else {
             continue;
         };
-        let rec = found.entry(path.clone()).or_insert_with(|| {
-            RecoverableFile {
+        let rec = found
+            .entry(path.clone())
+            .or_insert_with(|| RecoverableFile {
                 path: path.clone(),
                 sources: Vec::new(),
                 best_source: RecoverySource::History,
@@ -396,8 +395,7 @@ fn scan_history(filter: &ScanFilter, found: &mut BTreeMap<PathBuf, RecoverableFi
                 hash: None,
                 trash_name: None,
                 cas_hash: Some(latest.hash),
-            }
-        });
+            });
         if !rec.sources.contains(&RecoverySource::History) {
             rec.sources.push(RecoverySource::History);
         }
@@ -416,10 +414,8 @@ fn scan_integrity(filter: &ScanFilter, found: &mut BTreeMap<PathBuf, Recoverable
     use crate::fs::integrity;
 
     // List all baselined entries.
-    let (entries, _) = integrity::list_entries(
-        filter.path_prefix.as_deref(),
-        filter.limit.max(10000),
-    );
+    let (entries, _) =
+        integrity::list_entries(filter.path_prefix.as_deref(), filter.limit.max(10000));
 
     for (path, hash, size) in &entries {
         if !matches_filter(path, filter) {
@@ -431,8 +427,9 @@ fn scan_integrity(filter: &ScanFilter, found: &mut BTreeMap<PathBuf, Recoverable
         }
 
         let hex = hash_to_hex(hash);
-        let rec = found.entry(path.clone()).or_insert_with(|| {
-            RecoverableFile {
+        let rec = found
+            .entry(path.clone())
+            .or_insert_with(|| RecoverableFile {
                 path: path.clone(),
                 sources: Vec::new(),
                 best_source: RecoverySource::IntegrityBaseline,
@@ -441,8 +438,7 @@ fn scan_integrity(filter: &ScanFilter, found: &mut BTreeMap<PathBuf, Recoverable
                 hash: Some(hex.clone()),
                 trash_name: None,
                 cas_hash: None,
-            }
-        });
+            });
         if !rec.sources.contains(&RecoverySource::IntegrityBaseline) {
             rec.sources.push(RecoverySource::IntegrityBaseline);
         }
@@ -644,9 +640,15 @@ fn test_filter() {
     // The name filter matches bytes, so an ASCII needle finds a name that is
     // not valid UTF-8, and a needle spanning the raw byte matches too.
     let f = ScanFilter::new().with_name("port");
-    assert!(matches_filter(Path::new(b"/tmp/re\xffport.txt".as_slice()), &f));
+    assert!(matches_filter(
+        Path::new(b"/tmp/re\xffport.txt".as_slice()),
+        &f
+    ));
     let f = ScanFilter::new().with_name(b"\xffpo".as_slice());
-    assert!(matches_filter(Path::new(b"/tmp/re\xffport.txt".as_slice()), &f));
+    assert!(matches_filter(
+        Path::new(b"/tmp/re\xffport.txt".as_slice()),
+        &f
+    ));
     // The name filter applies to the final component only.
     let f = ScanFilter::new().with_name("tmp");
     assert!(!matches_filter(Path::new("/tmp/a.txt"), &f));

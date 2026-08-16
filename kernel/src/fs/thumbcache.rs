@@ -177,7 +177,9 @@ pub fn get(path: impl AsRef<Path>, size: ThumbSize) -> Option<CachedThumb> {
     let mut cache = CACHE.lock();
 
     // Find matching entry.
-    let entry = cache.iter_mut().find(|e| e.path.as_path() == path && e.size == size)?;
+    let entry = cache
+        .iter_mut()
+        .find(|e| e.path.as_path() == path && e.size == size)?;
 
     // Validate: check if source file changed.
     if let Ok(meta) = crate::fs::Vfs::metadata(path) {
@@ -226,7 +228,10 @@ pub fn store(
     let mut cache = CACHE.lock();
 
     // Remove existing entry for same path+size.
-    if let Some(pos) = cache.iter().position(|e| e.path.as_path() == path && e.size == size) {
+    if let Some(pos) = cache
+        .iter()
+        .position(|e| e.path.as_path() == path && e.size == size)
+    {
         let old_len = cache[pos].thumb.data.len() as u64;
         cache.swap_remove(pos);
         MEMORY_USED.fetch_sub(old_len, Ordering::Relaxed);
@@ -308,14 +313,17 @@ pub fn is_thumbnailable(mime: &str) -> bool {
 /// Get a list of cached paths.
 pub fn list() -> Vec<(PathBuf, ThumbSize, u32, u32, usize)> {
     let cache = CACHE.lock();
-    cache.iter()
-        .map(|e| (
-            e.path.clone(),
-            e.size,
-            e.thumb.width,
-            e.thumb.height,
-            e.thumb.data.len(),
-        ))
+    cache
+        .iter()
+        .map(|e| {
+            (
+                e.path.clone(),
+                e.size,
+                e.thumb.width,
+                e.thumb.height,
+                e.thumb.data.len(),
+            )
+        })
         .collect()
 }
 
@@ -370,7 +378,8 @@ fn evict_lru(cache: &mut Vec<CacheEntry>) {
     if cache.is_empty() {
         return;
     }
-    let lru_idx = cache.iter()
+    let lru_idx = cache
+        .iter()
         .enumerate()
         .min_by_key(|(_, e)| e.thumb.last_access_ns)
         .map(|(i, _)| i)
@@ -447,7 +456,15 @@ fn test_invalidate() {
     assert_eq!(count(), 1);
 
     // Invalidate by directory prefix.
-    let _ = store("/a/img3.png", ThumbSize::Small, 10, 10, vec![0u8; 50], 300, 700);
+    let _ = store(
+        "/a/img3.png",
+        ThumbSize::Small,
+        10,
+        10,
+        vec![0u8; 50],
+        300,
+        700,
+    );
     assert_eq!(count(), 2);
     let removed = invalidate_dir("/a");
     assert_eq!(removed, 2);

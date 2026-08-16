@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -151,7 +151,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         issues: Vec::new(),
         next_id: 1,
@@ -169,21 +171,41 @@ pub fn scan() -> KernelResult<usize> {
         state.total_scans += 1;
         // Simulate finding common issues.
         let simulated = [
-            (IssueCategory::TempFileAccumulation, Severity::Info, "Temporary files older than 7 days"),
-            (IssueCategory::CorruptedCache, Severity::Warning, "Thumbnail cache inconsistency detected"),
-            (IssueCategory::BrokenShortcuts, Severity::Info, "2 shortcuts point to missing targets"),
+            (
+                IssueCategory::TempFileAccumulation,
+                Severity::Info,
+                "Temporary files older than 7 days",
+            ),
+            (
+                IssueCategory::CorruptedCache,
+                Severity::Warning,
+                "Thumbnail cache inconsistency detected",
+            ),
+            (
+                IssueCategory::BrokenShortcuts,
+                Severity::Info,
+                "2 shortcuts point to missing targets",
+            ),
         ];
         let mut found = 0;
         for (cat, sev, desc) in &simulated {
             // Don't re-add if same category already detected and not fixed.
-            if state.issues.iter().any(|i| i.category == *cat && i.status == FixStatus::Detected) {
+            if state
+                .issues
+                .iter()
+                .any(|i| i.category == *cat && i.status == FixStatus::Detected)
+            {
                 continue;
             }
-            if state.issues.len() >= MAX_ISSUES { break; }
+            if state.issues.len() >= MAX_ISSUES {
+                break;
+            }
             let id = state.next_id;
             state.next_id += 1;
             state.issues.push(Issue {
-                id, category: *cat, severity: *sev,
+                id,
+                category: *cat,
+                severity: *sev,
                 description: String::from(*desc),
                 status: FixStatus::FixAvailable,
                 detected_ns: now,
@@ -197,7 +219,10 @@ pub fn scan() -> KernelResult<usize> {
 /// Fix a specific issue.
 pub fn fix(issue_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let issue = state.issues.iter_mut().find(|i| i.id == issue_id)
+        let issue = state
+            .issues
+            .iter_mut()
+            .find(|i| i.id == issue_id)
             .ok_or(KernelError::NotFound)?;
         match issue.status {
             FixStatus::FixAvailable | FixStatus::Detected => {
@@ -234,7 +259,10 @@ pub fn fix_all() -> KernelResult<usize> {
 /// Ignore an issue.
 pub fn ignore(issue_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let issue = state.issues.iter_mut().find(|i| i.id == issue_id)
+        let issue = state
+            .issues
+            .iter_mut()
+            .find(|i| i.id == issue_id)
             .ok_or(KernelError::NotFound)?;
         issue.status = FixStatus::Ignored;
         state.total_ignored += 1;
@@ -246,26 +274,35 @@ pub fn ignore(issue_id: u32) -> KernelResult<()> {
 pub fn clear_resolved() -> KernelResult<usize> {
     with_state(|state| {
         let before = state.issues.len();
-        state.issues.retain(|i| i.status != FixStatus::Fixed && i.status != FixStatus::Ignored);
+        state
+            .issues
+            .retain(|i| i.status != FixStatus::Fixed && i.status != FixStatus::Ignored);
         Ok(before - state.issues.len())
     })
 }
 
 /// List issues, optionally filtered by status.
 pub fn list_issues(status_filter: Option<FixStatus>) -> Vec<Issue> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        match status_filter {
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| match status_filter {
             Some(f) => s.issues.iter().filter(|i| i.status == f).cloned().collect(),
             None => s.issues.clone(),
-        }
-    })
+        })
 }
 
 /// Statistics: (issue_count, total_scans, total_fixes, total_ignored, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.issues.len(), s.total_scans, s.total_fixes, s.total_ignored, s.ops),
+        Some(s) => (
+            s.issues.len(),
+            s.total_scans,
+            s.total_fixes,
+            s.total_ignored,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

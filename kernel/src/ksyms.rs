@@ -37,11 +37,11 @@
 
 #![allow(dead_code)]
 
+use crate::serial_println;
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
-use crate::serial_println;
 
 // ---------------------------------------------------------------------------
 // ELF definitions (minimal, just what we need for symbol parsing)

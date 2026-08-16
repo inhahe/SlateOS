@@ -34,10 +34,10 @@
 //! a later commit, so the whole `drm` subsystem allows `dead_code` until that
 //! wiring is in place.
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -164,7 +164,9 @@ fn cap_bit(cap: u64) -> Option<u32> {
 #[must_use]
 pub fn create(device: usize, render_node: bool) -> DrmCardHandle {
     let id = alloc_drm_card_id();
-    DRM_CARD_TABLE.lock().insert(id, DrmClient::new(device, render_node));
+    DRM_CARD_TABLE
+        .lock()
+        .insert(id, DrmClient::new(device, render_node));
     DrmCardHandle(id)
 }
 
@@ -180,7 +182,9 @@ pub fn create(device: usize, render_node: bool) -> DrmCardHandle {
 /// fully closed) or the reference count would overflow `u32::MAX`.
 pub fn dup(handle: DrmCardHandle) -> KernelResult<DrmCardHandle> {
     let mut table = DRM_CARD_TABLE.lock();
-    let client = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    let client = table
+        .get_mut(&handle.id())
+        .ok_or(KernelError::InvalidHandle)?;
     client.refcount = client
         .refcount
         .checked_add(1)
@@ -218,7 +222,10 @@ pub fn device(handle: DrmCardHandle) -> Option<usize> {
 /// Whether this fd is a render node (`renderD128`), or `None` if stale.
 #[must_use]
 pub fn is_render_node(handle: DrmCardHandle) -> Option<bool> {
-    DRM_CARD_TABLE.lock().get(&handle.id()).map(|c| c.render_node)
+    DRM_CARD_TABLE
+        .lock()
+        .get(&handle.id())
+        .map(|c| c.render_node)
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +255,9 @@ pub fn set_client_cap(handle: DrmCardHandle, cap: u64, value: u64) -> KernelResu
     }
     let bit = cap_bit(cap).ok_or(KernelError::InvalidArgument)?;
     let mut table = DRM_CARD_TABLE.lock();
-    let client = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    let client = table
+        .get_mut(&handle.id())
+        .ok_or(KernelError::InvalidHandle)?;
     if value == 1 {
         client.client_caps |= bit;
     } else {
@@ -386,7 +395,10 @@ pub fn self_test() -> KernelResult<()> {
     let h = create(0, false);
     check!(exists(h), "new instance must exist");
     check!(device(h) == Some(0), "device index recorded");
-    check!(is_render_node(h) == Some(false), "card node, not render node");
+    check!(
+        is_render_node(h) == Some(false),
+        "card node, not render node"
+    );
 
     // Client caps start clear; the supported ones set/clear, unsupported and
     // out-of-range values are rejected.
@@ -415,13 +427,11 @@ pub fn self_test() -> KernelResult<()> {
         "atomic cap cleared"
     );
     check!(
-        set_client_cap(h, uapi::DRM_CLIENT_CAP_STEREO_3D, 1)
-            == Err(KernelError::InvalidArgument),
+        set_client_cap(h, uapi::DRM_CLIENT_CAP_STEREO_3D, 1) == Err(KernelError::InvalidArgument),
         "unsupported cap rejected"
     );
     check!(
-        set_client_cap(h, uapi::DRM_CLIENT_CAP_ATOMIC, 2)
-            == Err(KernelError::InvalidArgument),
+        set_client_cap(h, uapi::DRM_CLIENT_CAP_ATOMIC, 2) == Err(KernelError::InvalidArgument),
         "out-of-range cap value rejected"
     );
 
@@ -448,16 +458,25 @@ pub fn self_test() -> KernelResult<()> {
     // pop drains; shared across dup; drops on final close.
     let e = create(0, false);
     check!(!has_events(e), "fresh fd has no events");
-    check!(next_event_len(e).is_none(), "empty queue has no next length");
+    check!(
+        next_event_len(e).is_none(),
+        "empty queue has no next length"
+    );
     check!(pop_event(e).is_none(), "popping an empty queue is None");
     queue_event(e, &[1, 2, 3]);
     queue_event(e, &[4, 5, 6, 7]);
     check!(has_events(e), "events pending after queue");
     check!(next_event_len(e) == Some(3), "FIFO: first event length");
     let e2 = dup(e)?;
-    check!(pop_event(e2) == Some(alloc::vec![1, 2, 3]), "shared queue across dup");
+    check!(
+        pop_event(e2) == Some(alloc::vec![1, 2, 3]),
+        "shared queue across dup"
+    );
     check!(next_event_len(e) == Some(4), "second event now at front");
-    check!(pop_event(e) == Some(alloc::vec![4, 5, 6, 7]), "FIFO: second event");
+    check!(
+        pop_event(e) == Some(alloc::vec![4, 5, 6, 7]),
+        "FIFO: second event"
+    );
     check!(!has_events(e), "queue drained");
     close(e);
     close(e2);
@@ -470,7 +489,10 @@ pub fn self_test() -> KernelResult<()> {
     // Stale-handle accessors are all None/err, never a panic.
     check!(device(h).is_none(), "stale device is None");
     check!(is_render_node(h).is_none(), "stale render-node is None");
-    check!(client_cap(h, uapi::DRM_CLIENT_CAP_ATOMIC).is_none(), "stale cap is None");
+    check!(
+        client_cap(h, uapi::DRM_CLIENT_CAP_ATOMIC).is_none(),
+        "stale cap is None"
+    );
     check!(dup(h).is_err(), "dup of a stale handle errors");
 
     serial_println!("[drm_card] DRM card client lifecycle self-test PASSED");

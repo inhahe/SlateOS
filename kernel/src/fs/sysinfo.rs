@@ -27,11 +27,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -394,7 +394,10 @@ pub fn update_memory(used: u64, available: u64, swap_used: u64) {
 /// Update storage free space.
 pub fn update_storage_free(device: &str, free_bytes: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let dev = state.storage.iter_mut().find(|s| s.device == device)
+    let dev = state
+        .storage
+        .iter_mut()
+        .find(|s| s.device == device)
         .ok_or(KernelError::NotFound)?;
     dev.free_bytes = free_bytes;
     Ok(())
@@ -454,9 +457,12 @@ fn detect_cpu() -> CpuInfo {
     for c in crate::cpu::cache_topology() {
         let kib = c.size / 1024;
         match (c.level, c.cache_type) {
-            (1, 1) => l1d = kib,            // L1 data.
-            (1, 2) => l1i = kib,            // L1 instruction.
-            (1, 3) => { l1d = kib; l1i = kib; } // Unified L1 (rare).
+            (1, 1) => l1d = kib, // L1 data.
+            (1, 2) => l1i = kib, // L1 instruction.
+            (1, 3) => {
+                l1d = kib;
+                l1i = kib;
+            } // Unified L1 (rare).
             (2, _) => l2 = kib,
             (3, _) => l3 = kib,
             _ => {}
@@ -467,23 +473,44 @@ fn detect_cpu() -> CpuInfo {
     let mut features = Vec::new();
     if let Some(f) = crate::cpu::features() {
         let flags: &[(bool, &str)] = &[
-            (f.sse3, "SSE3"), (f.ssse3, "SSSE3"), (f.sse4_1, "SSE4.1"),
-            (f.sse4_2, "SSE4.2"), (f.popcnt, "POPCNT"), (f.avx, "AVX"),
-            (f.avx2, "AVX2"), (f.avx512f, "AVX-512F"), (f.aes_ni, "AES-NI"),
-            (f.sha, "SHA"), (f.rdrand, "RDRAND"), (f.rdseed, "RDSEED"),
-            (f.rdtscp, "RDTSCP"), (f.smep, "SMEP"), (f.smap, "SMAP"),
+            (f.sse3, "SSE3"),
+            (f.ssse3, "SSSE3"),
+            (f.sse4_1, "SSE4.1"),
+            (f.sse4_2, "SSE4.2"),
+            (f.popcnt, "POPCNT"),
+            (f.avx, "AVX"),
+            (f.avx2, "AVX2"),
+            (f.avx512f, "AVX-512F"),
+            (f.aes_ni, "AES-NI"),
+            (f.sha, "SHA"),
+            (f.rdrand, "RDRAND"),
+            (f.rdseed, "RDSEED"),
+            (f.rdtscp, "RDTSCP"),
+            (f.smep, "SMEP"),
+            (f.smap, "SMAP"),
         ];
         for &(present, name) in flags {
-            if present { features.push(String::from(name)); }
+            if present {
+                features.push(String::from(name));
+            }
         }
     }
 
     CpuInfo {
-        model, vendor, cores, threads,
+        model,
+        vendor,
+        cores,
+        threads,
         base_freq_mhz: 0,
         max_freq_mhz: 0,
-        l1d_cache_kib: l1d, l1i_cache_kib: l1i, l2_cache_kib: l2, l3_cache_kib: l3,
-        features, family, model_num, stepping,
+        l1d_cache_kib: l1d,
+        l1i_cache_kib: l1i,
+        l2_cache_kib: l2,
+        l3_cache_kib: l3,
+        features,
+        family,
+        model_num,
+        stepping,
     }
 }
 
@@ -494,8 +521,7 @@ fn detect_cpu() -> CpuInfo {
 fn detect_memory() -> MemoryInfo {
     let (total, available) = match crate::mm::frame::stats() {
         Some(s) => {
-            let total = (s.total_frames as u64)
-                .saturating_mul(crate::mm::frame::FRAME_SIZE as u64);
+            let total = (s.total_frames as u64).saturating_mul(crate::mm::frame::FRAME_SIZE as u64);
             (total, s.free_bytes as u64)
         }
         None => (0, 0),
@@ -579,10 +605,12 @@ pub fn init_defaults() {
 /// Return (storage_count, gpu_count, net_count, ops).
 pub fn stats() -> (usize, usize, usize, u64) {
     let state = STATE.lock();
-    (state.storage.len(),
-     state.gpus.len(),
-     state.net_ifaces.len(),
-     OP_COUNT.load(Ordering::Relaxed))
+    (
+        state.storage.len(),
+        state.gpus.len(),
+        state.net_ifaces.len(),
+        OP_COUNT.load(Ordering::Relaxed),
+    )
 }
 
 pub fn reset_stats() {
@@ -592,21 +620,42 @@ pub fn reset_stats() {
 pub fn clear_all() {
     let mut state = STATE.lock();
     state.os = OsInfo {
-        name: String::new(), version: String::new(), build_number: 0,
-        build_date: String::new(), codename: String::new(), arch: String::new(),
-        kernel_version: String::new(), website: String::new(),
-        uptime_secs: 0, boot_ns: 0,
+        name: String::new(),
+        version: String::new(),
+        build_number: 0,
+        build_date: String::new(),
+        codename: String::new(),
+        arch: String::new(),
+        kernel_version: String::new(),
+        website: String::new(),
+        uptime_secs: 0,
+        boot_ns: 0,
     };
     state.cpu = CpuInfo {
-        model: String::new(), vendor: String::new(),
-        cores: 0, threads: 0, base_freq_mhz: 0, max_freq_mhz: 0,
-        l1d_cache_kib: 0, l1i_cache_kib: 0, l2_cache_kib: 0, l3_cache_kib: 0,
-        features: Vec::new(), family: 0, model_num: 0, stepping: 0,
+        model: String::new(),
+        vendor: String::new(),
+        cores: 0,
+        threads: 0,
+        base_freq_mhz: 0,
+        max_freq_mhz: 0,
+        l1d_cache_kib: 0,
+        l1i_cache_kib: 0,
+        l2_cache_kib: 0,
+        l3_cache_kib: 0,
+        features: Vec::new(),
+        family: 0,
+        model_num: 0,
+        stepping: 0,
     };
     state.memory = MemoryInfo {
-        total_bytes: 0, used_bytes: 0, available_bytes: 0,
-        swap_total: 0, swap_used: 0, dimm_count: 0,
-        mem_type: String::new(), speed_mts: 0,
+        total_bytes: 0,
+        used_bytes: 0,
+        available_bytes: 0,
+        swap_total: 0,
+        swap_used: 0,
+        dimm_count: 0,
+        mem_type: String::new(),
+        speed_mts: 0,
     };
     state.storage.clear();
     state.gpus.clear();

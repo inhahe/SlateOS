@@ -43,11 +43,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
@@ -326,7 +326,10 @@ pub fn deregister_notify_waiter(owner_token: u64, task: TaskId) {
 /// Remove and return every task waiting on `owner_token` (pure registry
 /// mutation, no scheduler interaction — split out so it is unit-testable).
 fn take_notify_waiters(owner_token: u64) -> Vec<TaskId> {
-    NOTIFY_WAITERS.lock().remove(&owner_token).unwrap_or_default()
+    NOTIFY_WAITERS
+        .lock()
+        .remove(&owner_token)
+        .unwrap_or_default()
 }
 
 /// Wake every task blocked on any of `owner_tokens`.
@@ -396,16 +399,19 @@ pub fn create_watch_owned(
 
     let id = NEXT_WATCH_ID.fetch_add(1, Ordering::Relaxed);
 
-    watches.insert(id, FsWatch {
+    watches.insert(
         id,
-        path: path.to_path_buf(),
-        mask,
-        recursive,
-        events: VecDeque::with_capacity(16),
-        max_events: DEFAULT_MAX_EVENTS,
-        overflowed: false,
-        owner_token,
-    });
+        FsWatch {
+            id,
+            path: path.to_path_buf(),
+            mask,
+            recursive,
+            events: VecDeque::with_capacity(16),
+            max_events: DEFAULT_MAX_EVENTS,
+            overflowed: false,
+            owner_token,
+        },
+    );
 
     // Track per-bit interest so the hot-path `interest_includes` gate stays
     // accurate (counted only once the watch is actually in the table).
@@ -413,7 +419,11 @@ pub fn create_watch_owned(
 
     crate::serial_println!(
         "[notify] Watch {} created for '{}' (mask={:#x}, recursive={}, owner={:#x})",
-        id, path.display(), mask.0, recursive, owner_token
+        id,
+        path.display(),
+        mask.0,
+        recursive,
+        owner_token
     );
 
     Ok(id)
@@ -428,7 +438,8 @@ pub fn create_watch_owned(
 /// Returns an empty vector if no events are pending.
 pub fn read_events(watch_id: u64, max: usize) -> KernelResult<Vec<FsEvent>> {
     let mut watches = WATCHES.lock();
-    let watch = watches.get_mut(&watch_id)
+    let watch = watches
+        .get_mut(&watch_id)
         .ok_or(KernelError::InvalidHandle)?;
 
     let mut result = Vec::with_capacity(max.min(watch.events.len().wrapping_add(1)));
@@ -459,8 +470,7 @@ pub fn read_events(watch_id: u64, max: usize) -> KernelResult<Vec<FsEvent>> {
 /// Return the number of pending events for a watch.
 pub fn pending_count(watch_id: u64) -> KernelResult<usize> {
     let watches = WATCHES.lock();
-    let watch = watches.get(&watch_id)
-        .ok_or(KernelError::InvalidHandle)?;
+    let watch = watches.get(&watch_id).ok_or(KernelError::InvalidHandle)?;
     Ok(watch.events.len())
 }
 
@@ -530,8 +540,7 @@ fn path_matches(watch_path: &Path, recursive: bool, candidate: &Path) -> bool {
     }
     // Non-recursive: the watched path itself, or one of its direct children —
     // i.e. at most one component deeper.
-    candidate.components().count()
-        <= watch_path.components().count().saturating_add(1)
+    candidate.components().count() <= watch_path.components().count().saturating_add(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -549,11 +558,7 @@ fn path_matches(watch_path: &Path, recursive: bool, candidate: &Path) -> bool {
 /// operating on directories use [`emit_dir`] (or the `*_dir` convenience
 /// wrappers) so the inotify adapter can OR in `IN_ISDIR`.
 #[inline]
-pub fn emit(
-    event_type: FsEventType,
-    path: impl AsRef<Path>,
-    new_path: Option<&Path>,
-) {
+pub fn emit(event_type: FsEventType, path: impl AsRef<Path>, new_path: Option<&Path>) {
     emit_inner(event_type, path.as_ref(), new_path, false);
 }
 
@@ -562,11 +567,7 @@ pub fn emit(
 /// Identical to [`emit`] but tags the queued [`FsEvent`] with `is_dir = true`
 /// so the Linux-ABI inotify adapter ORs `IN_ISDIR` into the reported mask.
 #[inline]
-pub fn emit_dir(
-    event_type: FsEventType,
-    path: impl AsRef<Path>,
-    new_path: Option<&Path>,
-) {
+pub fn emit_dir(event_type: FsEventType, path: impl AsRef<Path>, new_path: Option<&Path>) {
     emit_inner(event_type, path.as_ref(), new_path, true);
 }
 
@@ -574,12 +575,7 @@ pub fn emit_dir(
 ///
 /// This is on the hot path — must be fast when no watches exist.
 #[allow(clippy::arithmetic_side_effects)]
-fn emit_inner(
-    event_type: FsEventType,
-    path: &Path,
-    new_path: Option<&Path>,
-    is_dir: bool,
-) {
+fn emit_inner(event_type: FsEventType, path: &Path, new_path: Option<&Path>, is_dir: bool) {
     // Lock-free fast path: if no live watch is interested in this event type,
     // there is nothing to queue — skip without ever taking the `WATCHES` lock.
     // (Internal `Overflow` events have an empty mask and are never emitted this
@@ -611,8 +607,7 @@ fn emit_inner(
         // Does the affected path (or, for renames, the destination
         // path) fall under this watch?
         let matched = path_matches(&watch.path, watch.recursive, path)
-            || new_path
-                .is_some_and(|np| path_matches(&watch.path, watch.recursive, np));
+            || new_path.is_some_and(|np| path_matches(&watch.path, watch.recursive, np));
 
         if !matched {
             continue;
@@ -808,10 +803,7 @@ pub fn self_test() -> KernelResult<()> {
     // Read them back.
     let events = read_events(watch_id, 10)?;
     if events.len() != 3 {
-        crate::serial_println!(
-            "[notify]   FAIL: expected 3 events, got {}",
-            events.len()
-        );
+        crate::serial_println!("[notify]   FAIL: expected 3 events, got {}", events.len());
         close_watch(watch_id)?;
         return Err(KernelError::InternalError);
     }

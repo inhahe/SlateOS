@@ -28,10 +28,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -172,7 +172,9 @@ pub fn init_defaults() {
     // UVC webcam driver once one exists; until then this stays empty so
     // /proc/webcam reports "camera_count: 0" rather than inventing a device.
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     *guard = Some(State {
         cameras: Vec::new(),
@@ -202,14 +204,24 @@ pub fn register_camera(name: &str, connection: CameraConnection) -> KernelResult
             name: String::from(name),
             connection,
             resolutions: alloc::vec![
-                Resolution { width: 640, height: 480, max_fps: 30 },
-                Resolution { width: 1280, height: 720, max_fps: 30 },
+                Resolution {
+                    width: 640,
+                    height: 480,
+                    max_fps: 30
+                },
+                Resolution {
+                    width: 1280,
+                    height: 720,
+                    max_fps: 30
+                },
             ],
             privacy: PrivacySetting::PromptRequired,
             is_default: is_first,
             registered_ns: crate::hpet::elapsed_ns(),
         });
-        if is_first { state.default_camera_id = id; }
+        if is_first {
+            state.default_camera_id = id;
+        }
         Ok(id)
     })
 }
@@ -217,7 +229,10 @@ pub fn register_camera(name: &str, connection: CameraConnection) -> KernelResult
 /// Unregister a camera device (also closes all its streams).
 pub fn unregister_camera(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.cameras.iter().position(|c| c.id == id)
+        let pos = state
+            .cameras
+            .iter()
+            .position(|c| c.id == id)
             .ok_or(KernelError::NotFound)?;
         state.cameras.remove(pos);
         // Close all streams on this camera.
@@ -234,7 +249,14 @@ pub fn unregister_camera(id: u32) -> KernelResult<()> {
 }
 
 /// Open a camera stream for an app.
-pub fn open_stream(camera_id: u32, app_name: &str, app_pid: u32, width: u32, height: u32, fps: u32) -> KernelResult<u32> {
+pub fn open_stream(
+    camera_id: u32,
+    app_name: &str,
+    app_pid: u32,
+    width: u32,
+    height: u32,
+    fps: u32,
+) -> KernelResult<u32> {
     with_state(|state| {
         // Check blocked apps.
         if state.blocked_apps.iter().any(|b| b.app_name == app_name) {
@@ -242,7 +264,10 @@ pub fn open_stream(camera_id: u32, app_name: &str, app_pid: u32, width: u32, hei
             return Err(KernelError::PermissionDenied);
         }
 
-        let camera = state.cameras.iter().find(|c| c.id == camera_id)
+        let camera = state
+            .cameras
+            .iter()
+            .find(|c| c.id == camera_id)
             .ok_or(KernelError::NotFound)?;
 
         // Check privacy setting.
@@ -276,7 +301,10 @@ pub fn open_stream(camera_id: u32, app_name: &str, app_pid: u32, width: u32, hei
 /// Close a camera stream.
 pub fn close_stream(stream_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.streams.iter().position(|s| s.stream_id == stream_id)
+        let pos = state
+            .streams
+            .iter()
+            .position(|s| s.stream_id == stream_id)
             .ok_or(KernelError::NotFound)?;
         state.streams.remove(pos);
         Ok(())
@@ -286,7 +314,10 @@ pub fn close_stream(stream_id: u32) -> KernelResult<()> {
 /// Set camera privacy setting.
 pub fn set_privacy(camera_id: u32, privacy: PrivacySetting) -> KernelResult<()> {
     with_state(|state| {
-        let camera = state.cameras.iter_mut().find(|c| c.id == camera_id)
+        let camera = state
+            .cameras
+            .iter_mut()
+            .find(|c| c.id == camera_id)
             .ok_or(KernelError::NotFound)?;
         camera.privacy = privacy;
         // If disabling, close all streams.
@@ -319,7 +350,10 @@ pub fn block_app(app_name: &str) -> KernelResult<()> {
 /// Unblock an app.
 pub fn unblock_app(app_name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.blocked_apps.iter().position(|b| b.app_name == app_name)
+        let pos = state
+            .blocked_apps
+            .iter()
+            .position(|b| b.app_name == app_name)
             .ok_or(KernelError::NotFound)?;
         state.blocked_apps.remove(pos);
         Ok(())
@@ -342,17 +376,26 @@ pub fn set_default(camera_id: u32) -> KernelResult<()> {
 
 /// List all cameras.
 pub fn list_cameras() -> Vec<Camera> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.cameras.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.cameras.clone())
 }
 
 /// List all active streams.
 pub fn list_streams() -> Vec<CameraStream> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.streams.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.streams.clone())
 }
 
 /// List blocked apps.
 pub fn list_blocked() -> Vec<BlockedApp> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.blocked_apps.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.blocked_apps.clone())
 }
 
 /// Get cameras currently in use (have active streams).
@@ -369,7 +412,13 @@ pub fn cameras_in_use() -> Vec<u32> {
 pub fn stats() -> (usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.cameras.len(), s.streams.len(), s.total_streams, s.total_denied, s.ops),
+        Some(s) => (
+            s.cameras.len(),
+            s.streams.len(),
+            s.total_streams,
+            s.total_denied,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -394,7 +443,8 @@ pub fn self_test() {
 
     // Build a fixture camera the way a UVC driver would on hotplug; the first
     // registered camera becomes the default.
-    let cam_id = register_camera("Integrated Webcam", CameraConnection::Builtin).expect("register first");
+    let cam_id =
+        register_camera("Integrated Webcam", CameraConnection::Builtin).expect("register first");
     assert!(list_cameras()[0].is_default);
 
     // 2: Register another camera.

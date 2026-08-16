@@ -79,7 +79,9 @@ impl VirtioLegacyPci {
     /// Write a 32-bit register.
     pub fn write32(&self, offset: u16, value: u32) {
         // SAFETY: Same as read32 — valid virtio device I/O port.
-        unsafe { crate::port::outl(self.io_base.wrapping_add(offset), value); }
+        unsafe {
+            crate::port::outl(self.io_base.wrapping_add(offset), value);
+        }
     }
 
     /// Read a 16-bit register.
@@ -91,7 +93,9 @@ impl VirtioLegacyPci {
     /// Write a 16-bit register.
     pub fn write16(&self, offset: u16, value: u16) {
         // SAFETY: Same as read32 — valid virtio device I/O port.
-        unsafe { crate::port::outw(self.io_base.wrapping_add(offset), value); }
+        unsafe {
+            crate::port::outw(self.io_base.wrapping_add(offset), value);
+        }
     }
 
     /// Read an 8-bit register.
@@ -103,7 +107,9 @@ impl VirtioLegacyPci {
     /// Write an 8-bit register.
     pub fn write8(&self, offset: u16, value: u8) {
         // SAFETY: Same as read32 — valid virtio device I/O port.
-        unsafe { crate::port::outb(self.io_base.wrapping_add(offset), value); }
+        unsafe {
+            crate::port::outb(self.io_base.wrapping_add(offset), value);
+        }
     }
 
     // -- Convenience wrappers for virtio registers --

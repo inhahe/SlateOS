@@ -63,7 +63,7 @@ use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::FileId;
-use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::mm::page_table;
 
 // ---------------------------------------------------------------------------
@@ -435,8 +435,14 @@ pub fn try_evict(file: FileId, file_offset: u64) -> bool {
 /// them; unreferenced frames are freed.
 pub fn invalidate_file(file: FileId) -> usize {
     let mut cache = PAGE_CACHE.lock();
-    let lo = PageKey { file, page_index: 0 };
-    let hi = PageKey { file, page_index: u64::MAX };
+    let lo = PageKey {
+        file,
+        page_index: 0,
+    };
+    let hi = PageKey {
+        file,
+        page_index: u64::MAX,
+    };
     let mut victims = alloc::vec::Vec::new();
     for (k, _entry) in cache.range(lo..=hi) {
         victims.push(*k);
@@ -595,10 +601,22 @@ pub fn self_test() -> KernelResult<()> {
 
     // Two synthetic, never-colliding file identities (fs_id 0 is unused by real
     // mounts, which start at 1, so these can't clash with a live cache entry).
-    let file_a = FileId { fs_id: 0, ino: 0xC0DE_0001 };
-    let file_b = FileId { fs_id: 0, ino: 0xC0DE_0002 };
-    let file_c = FileId { fs_id: 0, ino: 0xC0DE_0003 };
-    let file_d = FileId { fs_id: 0, ino: 0xC0DE_0004 };
+    let file_a = FileId {
+        fs_id: 0,
+        ino: 0xC0DE_0001,
+    };
+    let file_b = FileId {
+        fs_id: 0,
+        ino: 0xC0DE_0002,
+    };
+    let file_c = FileId {
+        fs_id: 0,
+        ino: 0xC0DE_0003,
+    };
+    let file_d = FileId {
+        fs_id: 0,
+        ino: 0xC0DE_0004,
+    };
 
     let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
 

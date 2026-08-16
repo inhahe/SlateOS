@@ -20,9 +20,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -118,14 +118,40 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         history: Vec::new(),
         alerts: alloc::vec![
-            AlertThreshold { resource: ResourceType::Cpu, threshold_percent: 90, alert_enabled: true, triggered: false, trigger_count: 0 },
-            AlertThreshold { resource: ResourceType::Memory, threshold_percent: 85, alert_enabled: true, triggered: false, trigger_count: 0 },
-            AlertThreshold { resource: ResourceType::Swap, threshold_percent: 80, alert_enabled: false, triggered: false, trigger_count: 0 },
-            AlertThreshold { resource: ResourceType::Gpu, threshold_percent: 95, alert_enabled: false, triggered: false, trigger_count: 0 },
+            AlertThreshold {
+                resource: ResourceType::Cpu,
+                threshold_percent: 90,
+                alert_enabled: true,
+                triggered: false,
+                trigger_count: 0
+            },
+            AlertThreshold {
+                resource: ResourceType::Memory,
+                threshold_percent: 85,
+                alert_enabled: true,
+                triggered: false,
+                trigger_count: 0
+            },
+            AlertThreshold {
+                resource: ResourceType::Swap,
+                threshold_percent: 80,
+                alert_enabled: false,
+                triggered: false,
+                trigger_count: 0
+            },
+            AlertThreshold {
+                resource: ResourceType::Gpu,
+                threshold_percent: 95,
+                alert_enabled: false,
+                triggered: false,
+                trigger_count: 0
+            },
         ],
         sampling_interval_ms: 1000,
         total_samples: 0,
@@ -145,18 +171,24 @@ pub fn sample(snap: ResourceSnapshot) -> KernelResult<Vec<ResourceType>> {
         // Check alerts.
         let mut triggered = Vec::new();
         for alert in &mut state.alerts {
-            if !alert.alert_enabled { continue; }
+            if !alert.alert_enabled {
+                continue;
+            }
             let current = match alert.resource {
                 ResourceType::Cpu => snap.cpu_percent,
                 ResourceType::Memory => {
                     if snap.memory_total_kb > 0 {
                         ((snap.memory_used_kb * 100) / snap.memory_total_kb) as u32
-                    } else { 0 }
+                    } else {
+                        0
+                    }
                 }
                 ResourceType::Swap => {
                     if snap.swap_total_kb > 0 {
                         ((snap.swap_used_kb * 100) / snap.swap_total_kb) as u32
-                    } else { 0 }
+                    } else {
+                        0
+                    }
                 }
                 ResourceType::Gpu => snap.gpu_percent,
                 _ => 0,
@@ -180,7 +212,10 @@ pub fn sample(snap: ResourceSnapshot) -> KernelResult<Vec<ResourceType>> {
 
 /// Get the latest snapshot.
 pub fn get_current() -> Option<ResourceSnapshot> {
-    STATE.lock().as_ref().and_then(|s| s.history.last().cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.history.last().cloned())
 }
 
 /// Get history (most recent first).
@@ -222,7 +257,10 @@ pub fn set_interval(ms: u64) -> KernelResult<()> {
 
 /// Get alerts.
 pub fn get_alerts() -> Vec<AlertThreshold> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.alerts.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.alerts.clone())
 }
 
 /// Clear history.
@@ -237,9 +275,14 @@ pub fn clear_history() -> KernelResult<()> {
 pub fn avg_cpu(n: usize) -> u32 {
     STATE.lock().as_ref().map_or(0, |s| {
         let count = n.min(s.history.len());
-        if count == 0 { return 0; }
+        if count == 0 {
+            return 0;
+        }
         let start = s.history.len() - count;
-        let sum: u64 = s.history[start..].iter().map(|s| s.cpu_percent as u64).sum();
+        let sum: u64 = s.history[start..]
+            .iter()
+            .map(|s| s.cpu_percent as u64)
+            .sum();
         (sum / count as u64) as u32
     })
 }
@@ -248,7 +291,13 @@ pub fn avg_cpu(n: usize) -> u32 {
 pub fn stats() -> (u64, usize, usize, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.total_samples, s.history.len(), s.alerts.len(), s.total_alerts, s.ops),
+        Some(s) => (
+            s.total_samples,
+            s.history.len(),
+            s.alerts.len(),
+            s.total_alerts,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -274,12 +323,19 @@ pub fn self_test() {
     // 2: Sample.
     let snap = ResourceSnapshot {
         timestamp_ns: crate::hpet::elapsed_ns(),
-        cpu_percent: 45, memory_used_kb: 4000000, memory_total_kb: 8000000,
-        swap_used_kb: 0, swap_total_kb: 2000000,
-        disk_read_kb_s: 1000, disk_write_kb_s: 500,
-        net_rx_kb_s: 200, net_tx_kb_s: 100,
-        gpu_percent: 30, gpu_memory_used_kb: 500000,
-        process_count: 120, thread_count: 450,
+        cpu_percent: 45,
+        memory_used_kb: 4000000,
+        memory_total_kb: 8000000,
+        swap_used_kb: 0,
+        swap_total_kb: 2000000,
+        disk_read_kb_s: 1000,
+        disk_write_kb_s: 500,
+        net_rx_kb_s: 200,
+        net_tx_kb_s: 100,
+        gpu_percent: 30,
+        gpu_memory_used_kb: 500000,
+        process_count: 120,
+        thread_count: 450,
     };
     let alerts = sample(snap).expect("sample");
     assert!(alerts.is_empty()); // Below thresholds.
@@ -289,12 +345,19 @@ pub fn self_test() {
     // 3: High CPU triggers alert.
     let high_cpu = ResourceSnapshot {
         timestamp_ns: crate::hpet::elapsed_ns(),
-        cpu_percent: 95, memory_used_kb: 4000000, memory_total_kb: 8000000,
-        swap_used_kb: 0, swap_total_kb: 2000000,
-        disk_read_kb_s: 0, disk_write_kb_s: 0,
-        net_rx_kb_s: 0, net_tx_kb_s: 0,
-        gpu_percent: 0, gpu_memory_used_kb: 0,
-        process_count: 120, thread_count: 450,
+        cpu_percent: 95,
+        memory_used_kb: 4000000,
+        memory_total_kb: 8000000,
+        swap_used_kb: 0,
+        swap_total_kb: 2000000,
+        disk_read_kb_s: 0,
+        disk_write_kb_s: 0,
+        net_rx_kb_s: 0,
+        net_tx_kb_s: 0,
+        gpu_percent: 0,
+        gpu_memory_used_kb: 0,
+        process_count: 120,
+        thread_count: 450,
     };
     let alerts = sample(high_cpu).expect("sample2");
     assert!(alerts.contains(&ResourceType::Cpu));

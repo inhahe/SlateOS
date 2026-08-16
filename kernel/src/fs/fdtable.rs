@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -74,12 +74,24 @@ pub struct FdFlags {
 impl FdFlags {
     pub fn label(&self) -> String {
         let mut s = String::new();
-        if self.read { s.push('r'); }
-        if self.write { s.push('w'); }
-        if self.append { s.push('a'); }
-        if self.nonblock { s.push('n'); }
-        if self.cloexec { s.push('e'); }
-        if s.is_empty() { s.push('-'); }
+        if self.read {
+            s.push('r');
+        }
+        if self.write {
+            s.push('w');
+        }
+        if self.append {
+            s.push('a');
+        }
+        if self.nonblock {
+            s.push('n');
+        }
+        if self.cloexec {
+            s.push('e');
+        }
+        if s.is_empty() {
+            s.push('-');
+        }
         s
     }
 }
@@ -159,7 +171,9 @@ where
 /// its own fixtures via the real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         tables: Vec::new(),
         total_opens: 0,
@@ -176,19 +190,32 @@ pub fn open(pid: u32, path: &str, fd_type: FdType, flags: FdFlags) -> KernelResu
         let table = match table {
             Some(t) => t,
             None => {
-                if state.tables.len() >= MAX_PROCESSES { return Err(KernelError::ResourceExhausted); }
+                if state.tables.len() >= MAX_PROCESSES {
+                    return Err(KernelError::ResourceExhausted);
+                }
                 state.tables.push(ProcessFdTable {
-                    pid, entries: Vec::new(), next_fd: 0, max_fds: DEFAULT_MAX_FDS,
+                    pid,
+                    entries: Vec::new(),
+                    next_fd: 0,
+                    max_fds: DEFAULT_MAX_FDS,
                 });
                 state.tables.last_mut().ok_or(KernelError::InternalError)?
             }
         };
-        if table.entries.len() as u32 >= table.max_fds { return Err(KernelError::TooManyOpenFiles); }
+        if table.entries.len() as u32 >= table.max_fds {
+            return Err(KernelError::TooManyOpenFiles);
+        }
         let fd = table.next_fd;
         table.next_fd += 1;
         let now = crate::hpet::elapsed_ns();
         table.entries.push(FdEntry {
-            fd, fd_type, path: String::from(path), flags, offset: 0, ref_count: 1, opened_ns: now,
+            fd,
+            fd_type,
+            path: String::from(path),
+            flags,
+            offset: 0,
+            ref_count: 1,
+            opened_ns: now,
         });
         state.total_opens += 1;
         Ok(fd)
@@ -198,11 +225,16 @@ pub fn open(pid: u32, path: &str, fd_type: FdType, flags: FdFlags) -> KernelResu
 /// Close a file descriptor.
 pub fn close(pid: u32, fd: u32) -> KernelResult<()> {
     with_state(|state| {
-        let table = state.tables.iter_mut().find(|t| t.pid == pid)
+        let table = state
+            .tables
+            .iter_mut()
+            .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
         let before = table.entries.len();
         table.entries.retain(|e| e.fd != fd);
-        if table.entries.len() == before { return Err(KernelError::NotFound); }
+        if table.entries.len() == before {
+            return Err(KernelError::NotFound);
+        }
         state.total_closes += 1;
         Ok(())
     })
@@ -211,12 +243,20 @@ pub fn close(pid: u32, fd: u32) -> KernelResult<()> {
 /// Duplicate a file descriptor.
 pub fn dup(pid: u32, old_fd: u32) -> KernelResult<u32> {
     with_state(|state| {
-        let table = state.tables.iter_mut().find(|t| t.pid == pid)
+        let table = state
+            .tables
+            .iter_mut()
+            .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
-        let entry = table.entries.iter().find(|e| e.fd == old_fd)
+        let entry = table
+            .entries
+            .iter()
+            .find(|e| e.fd == old_fd)
             .ok_or(KernelError::NotFound)?
             .clone();
-        if table.entries.len() as u32 >= table.max_fds { return Err(KernelError::TooManyOpenFiles); }
+        if table.entries.len() as u32 >= table.max_fds {
+            return Err(KernelError::TooManyOpenFiles);
+        }
         let new_fd = table.next_fd;
         table.next_fd += 1;
         let mut new_entry = entry;
@@ -231,21 +271,30 @@ pub fn dup(pid: u32, old_fd: u32) -> KernelResult<u32> {
 /// List FDs for a process.
 pub fn list(pid: u32) -> Vec<FdEntry> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.tables.iter().find(|t| t.pid == pid).map_or(Vec::new(), |t| t.entries.clone())
+        s.tables
+            .iter()
+            .find(|t| t.pid == pid)
+            .map_or(Vec::new(), |t| t.entries.clone())
     })
 }
 
 /// Get a specific FD.
 pub fn get(pid: u32, fd: u32) -> Option<FdEntry> {
     STATE.lock().as_ref().and_then(|s| {
-        s.tables.iter().find(|t| t.pid == pid).and_then(|t| t.entries.iter().find(|e| e.fd == fd).cloned())
+        s.tables
+            .iter()
+            .find(|t| t.pid == pid)
+            .and_then(|t| t.entries.iter().find(|e| e.fd == fd).cloned())
     })
 }
 
 /// Set FD limit for a process.
 pub fn set_max_fds(pid: u32, max: u32) -> KernelResult<()> {
     with_state(|state| {
-        let table = state.tables.iter_mut().find(|t| t.pid == pid)
+        let table = state
+            .tables
+            .iter_mut()
+            .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
         table.max_fds = max;
         Ok(())
@@ -255,7 +304,10 @@ pub fn set_max_fds(pid: u32, max: u32) -> KernelResult<()> {
 /// List all process FD tables (summary).
 pub fn list_tables() -> Vec<(u32, usize, u32)> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.tables.iter().map(|t| (t.pid, t.entries.len(), t.max_fds)).collect()
+        s.tables
+            .iter()
+            .map(|t| (t.pid, t.entries.len(), t.max_fds))
+            .collect()
     })
 }
 
@@ -263,7 +315,13 @@ pub fn list_tables() -> Vec<(u32, usize, u32)> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.tables.len(), s.total_opens, s.total_closes, s.total_dups, s.ops),
+        Some(s) => (
+            s.tables.len(),
+            s.total_opens,
+            s.total_closes,
+            s.total_dups,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -287,7 +345,13 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] empty defaults: OK");
 
     // 2: Open — auto-creates the process table; first fd is 0.
-    let rdonly = FdFlags { read: true, write: false, append: false, nonblock: false, cloexec: false };
+    let rdonly = FdFlags {
+        read: true,
+        write: false,
+        append: false,
+        nonblock: false,
+        cloexec: false,
+    };
     let fd = open(1, "/tmp/test.txt", FdType::RegularFile, rdonly).expect("open");
     assert_eq!(fd, 0);
     assert_eq!(list(1).len(), 1);
@@ -303,7 +367,13 @@ pub fn self_test() {
     crate::serial_println!("  [3/8] close: OK");
 
     // 4: Dup — clears cloexec and copies the path.
-    let sock_flags = FdFlags { read: true, write: true, append: false, nonblock: true, cloexec: true };
+    let sock_flags = FdFlags {
+        read: true,
+        write: true,
+        append: false,
+        nonblock: true,
+        cloexec: true,
+    };
     let sock_fd = open(100, "socket:[5678]", FdType::Socket, sock_flags).expect("open_sock");
     let new_fd = dup(100, sock_fd).expect("dup");
     assert!(new_fd > sock_fd);
@@ -313,7 +383,13 @@ pub fn self_test() {
     crate::serial_println!("  [4/8] dup: OK");
 
     // 5: Auto-create another table.
-    let rw = FdFlags { read: true, write: true, append: false, nonblock: false, cloexec: false };
+    let rw = FdFlags {
+        read: true,
+        write: true,
+        append: false,
+        nonblock: false,
+        cloexec: false,
+    };
     let fd2 = open(999, "/tmp/new_proc.txt", FdType::RegularFile, rw).expect("open2");
     assert_eq!(fd2, 0);
     assert_eq!(list_tables().len(), 3); // pid 1, 100, 999.

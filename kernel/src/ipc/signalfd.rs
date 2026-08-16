@@ -52,9 +52,9 @@
 //! the scheduler or any other subsystem while holding it, so it never
 //! participates in a lock-ordering cycle.
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -265,7 +265,10 @@ pub fn self_test() -> KernelResult<()> {
     match mask(sfd) {
         Some(m) if m == expected => {}
         other => {
-            serial_println!("[signalfd]   FAIL: create did not sanitize mask: {:?}", other);
+            serial_println!(
+                "[signalfd]   FAIL: create did not sanitize mask: {:?}",
+                other
+            );
             close(sfd);
             return Err(KernelError::InternalError);
         }
@@ -279,7 +282,10 @@ pub fn self_test() -> KernelResult<()> {
     match mask(sfd) {
         Some(m) if m == want_clean => {}
         other => {
-            serial_println!("[signalfd]   FAIL: set_mask did not update/sanitize: {:?}", other);
+            serial_println!(
+                "[signalfd]   FAIL: set_mask did not update/sanitize: {:?}",
+                other
+            );
             close(sfd);
             return Err(KernelError::InternalError);
         }

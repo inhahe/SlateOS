@@ -59,9 +59,9 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use crate::sync::Mutex;
 use crate::serial_println;
+use crate::sync::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -116,7 +116,10 @@ pub enum Event {
     /// OOM event occurred.
     Oom { victim_pid: u32, freed_pages: u32 },
     /// Power state changing.
-    PowerStateChange { entering_sleep: bool, sleep_state: u8 },
+    PowerStateChange {
+        entering_sleep: bool,
+        sleep_state: u8,
+    },
     /// Filesystem mounted or unmounted.
     FsMount { mounted: bool, device_id: u16 },
     /// Panic is about to happen (best-effort notification).
@@ -353,7 +356,9 @@ pub fn stats() -> EventBusStats {
     let mut subscriber_counts = [0u8; EVENT_KIND_COUNT];
     for (i, list) in bus.lists.iter().enumerate() {
         #[allow(clippy::cast_possible_truncation)]
-        { subscriber_counts[i] = list.count as u8; }
+        {
+            subscriber_counts[i] = list.count as u8;
+        }
     }
     EventBusStats {
         events_published: EVENTS_PUBLISHED.load(Ordering::Relaxed),
@@ -427,7 +432,10 @@ pub fn self_test() {
     assert!(subscribe(EventKind::MemoryPressure, handler_high, 200));
 
     PRIORITY_IDX.store(0, Ordering::Relaxed);
-    let delivered = publish(Event::MemoryPressure { level: 1, score: 30 });
+    let delivered = publish(Event::MemoryPressure {
+        level: 1,
+        score: 30,
+    });
     assert_eq!(delivered, 2);
 
     let order = *PRIORITY_ORDER.lock();
@@ -445,8 +453,12 @@ pub fn self_test() {
     let st = stats();
     assert!(st.events_published >= 3);
     assert!(st.events_delivered >= 3);
-    serial_println!("[kevent]   Stats: OK (published={}, delivered={}, dropped={})",
-        st.events_published, st.events_delivered, st.events_dropped);
+    serial_println!(
+        "[kevent]   Stats: OK (published={}, delivered={}, dropped={})",
+        st.events_published,
+        st.events_delivered,
+        st.events_dropped
+    );
 
     // Cleanup.
     unsubscribe(EventKind::MemoryPressure, handler_low);

@@ -198,8 +198,7 @@ static mut NMI_STACKS: [[u8; INTERRUPT_STACK_SIZE]; MAX_CPUS] =
 /// early boot; each AP initializes its own during SMP bootstrap.  After
 /// init, only the scheduler writes to `rsp0` (under a critical section
 /// with interrupts disabled on the local CPU).
-static mut TSS_ARRAY: [TaskStateSegment; MAX_CPUS] =
-    [const { TaskStateSegment::new() }; MAX_CPUS];
+static mut TSS_ARRAY: [TaskStateSegment; MAX_CPUS] = [const { TaskStateSegment::new() }; MAX_CPUS];
 
 /// The GDT itself: 5 normal 8-byte entries + 1 TSS entry (16 bytes) = 7 u64s.
 #[repr(C, align(16))]

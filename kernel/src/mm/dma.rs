@@ -39,7 +39,7 @@
 #![allow(dead_code)]
 
 use crate::error::{KernelError, KernelResult};
-use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -177,8 +177,7 @@ pub fn alloc(size: usize, constraint: DmaConstraint) -> KernelResult<DmaBuffer> 
     };
 
     // Zero the buffer.
-    let hhdm = crate::mm::page_table::hhdm()
-        .ok_or(KernelError::NotSupported)?;
+    let hhdm = crate::mm::page_table::hhdm().ok_or(KernelError::NotSupported)?;
     let virt = (phys_frame.addr() + hhdm) as *mut u8;
     let alloc_size = FRAME_SIZE << order;
     // SAFETY: virt points to a valid HHDM mapping of the allocated
@@ -294,8 +293,7 @@ pub fn free_for_user(pml4_phys: u64, user_virt: u64) -> KernelResult<()> {
     use crate::mm::page_table::{self, VirtAddr};
 
     // Look up the DMA mapping.
-    let mapping = untrack_dma_mapping(pml4_phys, user_virt)
-        .ok_or(KernelError::InvalidArgument)?;
+    let mapping = untrack_dma_mapping(pml4_phys, user_virt).ok_or(KernelError::InvalidArgument)?;
 
     // Unmap from the process's address space.
     let hw_pages = mapping.size / 4096;
@@ -309,8 +307,7 @@ pub fn free_for_user(pml4_phys: u64, user_virt: u64) -> KernelResult<()> {
     crate::tlb::flush_range(user_virt, hw_pages as u32);
 
     // Free the physical frames.
-    let frame = PhysFrame::from_addr(mapping.phys)
-        .ok_or(KernelError::InternalError)?;
+    let frame = PhysFrame::from_addr(mapping.phys).ok_or(KernelError::InternalError)?;
     // SAFETY: We just unmapped all references, and the device should
     // have been stopped before calling free.
     unsafe { frame::free_order(frame, mapping.order) }
@@ -345,12 +342,20 @@ static DMA_MAPPINGS: crate::sync::Mutex<alloc::vec::Vec<DmaMappingInfo>> =
 
 fn track_dma_mapping(pml4_phys: u64, user_virt: u64, phys: u64, order: usize, size: usize) {
     let mut mappings = DMA_MAPPINGS.lock();
-    mappings.push(DmaMappingInfo { pml4_phys, user_virt, phys, order, size });
+    mappings.push(DmaMappingInfo {
+        pml4_phys,
+        user_virt,
+        phys,
+        order,
+        size,
+    });
 }
 
 fn untrack_dma_mapping(pml4_phys: u64, user_virt: u64) -> Option<DmaMappingInfo> {
     let mut mappings = DMA_MAPPINGS.lock();
-    let pos = mappings.iter().position(|m| m.pml4_phys == pml4_phys && m.user_virt == user_virt)?;
+    let pos = mappings
+        .iter()
+        .position(|m| m.pml4_phys == pml4_phys && m.user_virt == user_virt)?;
     Some(mappings.swap_remove(pos))
 }
 
@@ -434,13 +439,15 @@ pub fn self_test() {
     assert!(size_to_order(FRAME_SIZE) == 0, "1 frame → order 0");
     assert!(size_to_order(FRAME_SIZE + 1) == 1, "1 frame + 1 → order 1");
     assert!(size_to_order(FRAME_SIZE * 2) == 1, "2 frames → order 1");
-    assert!(size_to_order(FRAME_SIZE * 3) == 2, "3 frames → order 2 (round up)");
+    assert!(
+        size_to_order(FRAME_SIZE * 3) == 2,
+        "3 frames → order 2 (round up)"
+    );
     assert!(size_to_order(FRAME_SIZE * 4) == 2, "4 frames → order 2");
     serial_println!("[dma]   size_to_order: OK");
 
     // Test 2: Allocate and free a small DMA buffer.
-    let buf = alloc(4096, DmaConstraint::None)
-        .expect("DMA alloc 4K");
+    let buf = alloc(4096, DmaConstraint::None).expect("DMA alloc 4K");
     assert!(buf.phys_addr() != 0, "phys addr nonzero");
     assert!(buf.size() == 4096, "size matches request");
     assert!(buf.allocated_size() >= 4096, "alloc size >= request");
@@ -454,12 +461,14 @@ pub fn self_test() {
     serial_println!("[dma]   alloc/free 4K: OK");
 
     // Test 3: Allocate a larger buffer (64 KiB = 4 frames = order 2).
-    let buf = alloc(64 * 1024, DmaConstraint::None)
-        .expect("DMA alloc 64K");
+    let buf = alloc(64 * 1024, DmaConstraint::None).expect("DMA alloc 64K");
     assert!(buf.order() == 2, "64K → order 2");
     assert!(buf.allocated_size() == FRAME_SIZE * 4, "alloc 4 frames");
     // Verify alignment (order 2 = 64 KiB aligned).
-    assert!(buf.phys_addr().is_multiple_of(FRAME_SIZE as u64 * 4), "aligned");
+    assert!(
+        buf.phys_addr().is_multiple_of(FRAME_SIZE as u64 * 4),
+        "aligned"
+    );
     // SAFETY: We're the only user.
     unsafe { free(buf).expect("DMA free 64K") };
     serial_println!("[dma]   alloc/free 64K: OK");
@@ -467,12 +476,12 @@ pub fn self_test() {
     // Test 4: Constrained allocation — Below4G.
     // Our QEMU VM has 256 MiB of RAM (all below 4 GiB), so this should
     // always succeed.  Verify the result is actually below 4 GiB.
-    let buf = alloc(FRAME_SIZE, DmaConstraint::Below4G)
-        .expect("DMA alloc Below4G");
+    let buf = alloc(FRAME_SIZE, DmaConstraint::Below4G).expect("DMA alloc Below4G");
     let end = buf.phys_addr() + buf.allocated_size() as u64;
     assert!(
         end <= 0x1_0000_0000,
-        "Below4G: end {:#x} exceeds 4 GiB", end
+        "Below4G: end {:#x} exceeds 4 GiB",
+        end
     );
     // SAFETY: We're the only user.
     unsafe { free(buf).expect("DMA free Below4G") };
@@ -481,25 +490,21 @@ pub fn self_test() {
     // Test 5: Constrained allocation — Below16M.
     // ISA DMA zone.  With 256 MiB of RAM, the first 16 MiB should have
     // free frames.  Verify the result is below 16 MiB.
-    let buf = alloc(FRAME_SIZE, DmaConstraint::Below16M)
-        .expect("DMA alloc Below16M");
+    let buf = alloc(FRAME_SIZE, DmaConstraint::Below16M).expect("DMA alloc Below16M");
     let end = buf.phys_addr() + buf.allocated_size() as u64;
-    assert!(
-        end <= 0x100_0000,
-        "Below16M: end {:#x} exceeds 16 MiB", end
-    );
+    assert!(end <= 0x100_0000, "Below16M: end {:#x} exceeds 16 MiB", end);
     // SAFETY: We're the only user.
     unsafe { free(buf).expect("DMA free Below16M") };
     serial_println!("[dma]   constrained Below16M: OK");
 
     // Test 6: Constrained allocation — larger buffer below 16M.
     // 64 KiB (order 2) should still fit in the first 16 MiB.
-    let buf = alloc(64 * 1024, DmaConstraint::Below16M)
-        .expect("DMA alloc 64K Below16M");
+    let buf = alloc(64 * 1024, DmaConstraint::Below16M).expect("DMA alloc 64K Below16M");
     let end = buf.phys_addr() + buf.allocated_size() as u64;
     assert!(
         end <= 0x100_0000,
-        "Below16M 64K: end {:#x} exceeds 16 MiB", end
+        "Below16M 64K: end {:#x} exceeds 16 MiB",
+        end
     );
     assert!(buf.order() == 2, "64K → order 2");
     // SAFETY: We're the only user.

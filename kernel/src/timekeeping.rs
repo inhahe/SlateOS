@@ -74,8 +74,7 @@ static BOOT_EPOCH_NS: AtomicU64 = AtomicU64::new(0);
 static ADJUSTMENT_NS: AtomicI64 = AtomicI64::new(0);
 
 /// Whether timekeeping has been initialized.
-static INITIALIZED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static INITIALIZED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Monotonically-increasing counter bumped on every *discontinuous* step
 /// of the realtime clock — `clock_settime`/`settimeofday` (via
@@ -119,7 +118,8 @@ pub fn init() {
 
     crate::serial_println!(
         "[time] Timekeeping initialized: {} (epoch {}s)",
-        dt, epoch_secs
+        dt,
+        epoch_secs
     );
 }
 
@@ -277,10 +277,7 @@ fn datetime_to_epoch(dt: &rtc::DateTime) -> u64 {
     days += u64::from(dt.day.saturating_sub(1));
 
     // Convert to seconds and add time-of-day.
-    days * 86400
-        + u64::from(dt.hour) * 3600
-        + u64::from(dt.minute) * 60
-        + u64::from(dt.second)
+    days * 86400 + u64::from(dt.hour) * 3600 + u64::from(dt.minute) * 60 + u64::from(dt.second)
 }
 
 /// Convert Unix epoch nanoseconds back to a `DateTime`.
@@ -311,7 +308,11 @@ fn epoch_ns_to_datetime(epoch_ns: u64) -> rtc::DateTime {
     let mut month: u8 = 1;
     loop {
         let dim = u64::from(DAYS_IN_MONTH[(month - 1) as usize])
-            + if month == 2 && is_leap_year(year) { 1 } else { 0 };
+            + if month == 2 && is_leap_year(year) {
+                1
+            } else {
+                0
+            };
         if remaining < dim {
             break;
         }
@@ -321,7 +322,14 @@ fn epoch_ns_to_datetime(epoch_ns: u64) -> rtc::DateTime {
 
     let day = remaining as u8 + 1; // 1-based
 
-    rtc::DateTime { year, month, day, hour, minute, second }
+    rtc::DateTime {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+    }
 }
 
 /// Check if a year is a leap year.

@@ -25,9 +25,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -199,7 +199,9 @@ where
 /// (1024 MB)" regardless of the machine's actual RAM.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         tests: Vec::new(),
         ecc_errors: Vec::new(),
@@ -224,9 +226,14 @@ pub fn run_test(test_type: TestType, range_start_kb: u64, range_size_kb: u64) ->
         let now = crate::hpet::elapsed_ns();
         // Simulate: all tests pass.
         state.tests.push(MemTest {
-            id, test_type, result: TestResult::Pass,
-            range_start_kb, range_size_kb,
-            errors_found: 0, started_ns: now, duration_ns: 1_000_000,
+            id,
+            test_type,
+            result: TestResult::Pass,
+            range_start_kb,
+            range_size_kb,
+            errors_found: 0,
+            started_ns: now,
+            duration_ns: 1_000_000,
         });
         state.tested_memory_kb = state.tested_memory_kb.max(range_start_kb + range_size_kb);
 
@@ -238,14 +245,20 @@ pub fn run_test(test_type: TestType, range_start_kb: u64, range_size_kb: u64) ->
 }
 
 /// Record an ECC error.
-pub fn record_ecc_error(address: u64, error_type: EccErrorType, dimm_slot: u32) -> KernelResult<()> {
+pub fn record_ecc_error(
+    address: u64,
+    error_type: EccErrorType,
+    dimm_slot: u32,
+) -> KernelResult<()> {
     with_state(|state| {
         match error_type {
             EccErrorType::Correctable => state.correctable_count += 1,
             EccErrorType::Uncorrectable => state.uncorrectable_count += 1,
         }
         state.ecc_errors.push(EccError {
-            address, error_type, dimm_slot,
+            address,
+            error_type,
+            dimm_slot,
             timestamp_ns: crate::hpet::elapsed_ns(),
         });
         while state.ecc_errors.len() > MAX_ECC_ERRORS {
@@ -258,7 +271,10 @@ pub fn record_ecc_error(address: u64, error_type: EccErrorType, dimm_slot: u32) 
 /// Mark a test as failed (for testing/simulation).
 pub fn mark_test_failed(id: u32, errors: u32) -> KernelResult<()> {
     with_state(|state| {
-        let test = state.tests.iter_mut().find(|t| t.id == id)
+        let test = state
+            .tests
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         test.result = TestResult::Fail;
         test.errors_found = errors;
@@ -283,9 +299,20 @@ pub fn set_ecc_supported(supported: bool) {
 /// Get memory health summary.
 pub fn get_health() -> MemHealth {
     STATE.lock().as_ref().map_or(
-        MemHealth { total_memory_kb: 0, tested_memory_kb: 0, last_test_result: TestResult::NotRun, correctable_errors: 0, uncorrectable_errors: 0, ecc_supported: false },
+        MemHealth {
+            total_memory_kb: 0,
+            tested_memory_kb: 0,
+            last_test_result: TestResult::NotRun,
+            correctable_errors: 0,
+            uncorrectable_errors: 0,
+            ecc_supported: false,
+        },
         |s| {
-            let last = s.tests.last().map(|t| t.result).unwrap_or(TestResult::NotRun);
+            let last = s
+                .tests
+                .last()
+                .map(|t| t.result)
+                .unwrap_or(TestResult::NotRun);
             MemHealth {
                 total_memory_kb: s.total_memory_kb,
                 tested_memory_kb: s.tested_memory_kb,
@@ -300,13 +327,20 @@ pub fn get_health() -> MemHealth {
 
 /// List test results.
 pub fn list_tests() -> Vec<MemTest> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.tests.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.tests.clone())
 }
 
 /// List ECC errors.
 pub fn list_ecc_errors(limit: usize) -> Vec<EccError> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let start = if s.ecc_errors.len() > limit { s.ecc_errors.len() - limit } else { 0 };
+        let start = if s.ecc_errors.len() > limit {
+            s.ecc_errors.len() - limit
+        } else {
+            0
+        };
         s.ecc_errors[start..].to_vec()
     })
 }
@@ -315,7 +349,13 @@ pub fn list_ecc_errors(limit: usize) -> Vec<EccError> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.tests.len(), s.total_tests, s.correctable_count, s.uncorrectable_count, s.ops),
+        Some(s) => (
+            s.tests.len(),
+            s.total_tests,
+            s.correctable_count,
+            s.uncorrectable_count,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

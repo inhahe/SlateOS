@@ -22,8 +22,8 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -88,7 +88,9 @@ where
 /// page totals, 2 OOM events, and 10k free-page hints.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         status: BalloonStatus {
             current_pages: 0,
@@ -185,7 +187,14 @@ pub fn status() -> Option<BalloonStatus> {
 pub fn stats() -> (u64, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.status.current_pages, s.status.target_pages, s.status.inflates, s.status.deflates, s.status.oom_events, s.ops),
+        Some(s) => (
+            s.status.current_pages,
+            s.status.target_pages,
+            s.status.inflates,
+            s.status.deflates,
+            s.status.oom_events,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }

@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -119,14 +119,81 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         items: alloc::vec![
-            LaunchItem { id: 1, name: String::from("Files"), keywords: alloc::vec![String::from("file"), String::from("explorer"), String::from("browse")], result_type: ResultType::Application, action: String::from("launch:files"), icon: String::from("folder"), launch_count: 0, last_launched_ns: 0 },
-            LaunchItem { id: 2, name: String::from("Terminal"), keywords: alloc::vec![String::from("terminal"), String::from("console"), String::from("shell")], result_type: ResultType::Application, action: String::from("launch:terminal"), icon: String::from("terminal"), launch_count: 0, last_launched_ns: 0 },
-            LaunchItem { id: 3, name: String::from("Browser"), keywords: alloc::vec![String::from("browser"), String::from("web"), String::from("internet")], result_type: ResultType::Application, action: String::from("launch:browser"), icon: String::from("globe"), launch_count: 0, last_launched_ns: 0 },
-            LaunchItem { id: 4, name: String::from("Settings"), keywords: alloc::vec![String::from("settings"), String::from("preferences"), String::from("config")], result_type: ResultType::Setting, action: String::from("launch:settings"), icon: String::from("gear"), launch_count: 0, last_launched_ns: 0 },
-            LaunchItem { id: 5, name: String::from("Text Editor"), keywords: alloc::vec![String::from("editor"), String::from("text"), String::from("notepad")], result_type: ResultType::Application, action: String::from("launch:editor"), icon: String::from("edit"), launch_count: 0, last_launched_ns: 0 },
+            LaunchItem {
+                id: 1,
+                name: String::from("Files"),
+                keywords: alloc::vec![
+                    String::from("file"),
+                    String::from("explorer"),
+                    String::from("browse")
+                ],
+                result_type: ResultType::Application,
+                action: String::from("launch:files"),
+                icon: String::from("folder"),
+                launch_count: 0,
+                last_launched_ns: 0
+            },
+            LaunchItem {
+                id: 2,
+                name: String::from("Terminal"),
+                keywords: alloc::vec![
+                    String::from("terminal"),
+                    String::from("console"),
+                    String::from("shell")
+                ],
+                result_type: ResultType::Application,
+                action: String::from("launch:terminal"),
+                icon: String::from("terminal"),
+                launch_count: 0,
+                last_launched_ns: 0
+            },
+            LaunchItem {
+                id: 3,
+                name: String::from("Browser"),
+                keywords: alloc::vec![
+                    String::from("browser"),
+                    String::from("web"),
+                    String::from("internet")
+                ],
+                result_type: ResultType::Application,
+                action: String::from("launch:browser"),
+                icon: String::from("globe"),
+                launch_count: 0,
+                last_launched_ns: 0
+            },
+            LaunchItem {
+                id: 4,
+                name: String::from("Settings"),
+                keywords: alloc::vec![
+                    String::from("settings"),
+                    String::from("preferences"),
+                    String::from("config")
+                ],
+                result_type: ResultType::Setting,
+                action: String::from("launch:settings"),
+                icon: String::from("gear"),
+                launch_count: 0,
+                last_launched_ns: 0
+            },
+            LaunchItem {
+                id: 5,
+                name: String::from("Text Editor"),
+                keywords: alloc::vec![
+                    String::from("editor"),
+                    String::from("text"),
+                    String::from("notepad")
+                ],
+                result_type: ResultType::Application,
+                action: String::from("launch:editor"),
+                icon: String::from("edit"),
+                launch_count: 0,
+                last_launched_ns: 0
+            },
         ],
         next_id: 6,
         total_searches: 0,
@@ -136,7 +203,13 @@ pub fn init_defaults() {
 }
 
 /// Register a launchable item.
-pub fn register(name: &str, keywords: Vec<String>, rtype: ResultType, action: &str, icon: &str) -> KernelResult<u32> {
+pub fn register(
+    name: &str,
+    keywords: Vec<String>,
+    rtype: ResultType,
+    action: &str,
+    icon: &str,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.items.len() >= MAX_ITEMS {
             return Err(KernelError::ResourceExhausted);
@@ -144,9 +217,14 @@ pub fn register(name: &str, keywords: Vec<String>, rtype: ResultType, action: &s
         let id = state.next_id;
         state.next_id += 1;
         state.items.push(LaunchItem {
-            id, name: String::from(name), keywords, result_type: rtype,
-            action: String::from(action), icon: String::from(icon),
-            launch_count: 0, last_launched_ns: 0,
+            id,
+            name: String::from(name),
+            keywords,
+            result_type: rtype,
+            action: String::from(action),
+            icon: String::from(icon),
+            launch_count: 0,
+            last_launched_ns: 0,
         });
         Ok(id)
     })
@@ -157,7 +235,9 @@ pub fn unregister(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.items.len();
         state.items.retain(|i| i.id != id);
-        if state.items.len() == before { return Err(KernelError::NotFound); }
+        if state.items.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -173,7 +253,9 @@ pub fn search(query: &str, max: usize) -> Vec<LaunchResult> {
     state.total_searches += 1;
 
     let q = query.to_lowercase();
-    let mut results: Vec<LaunchResult> = state.items.iter()
+    let mut results: Vec<LaunchResult> = state
+        .items
+        .iter()
         .filter_map(|item| {
             let name_match = item.name.to_lowercase().contains(&q);
             let keyword_match = item.keywords.iter().any(|k| k.to_lowercase().contains(&q));
@@ -209,7 +291,10 @@ pub fn search(query: &str, max: usize) -> Vec<LaunchResult> {
 pub fn record_launch(id: u32) -> KernelResult<String> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let item = state.items.iter_mut().find(|i| i.id == id)
+        let item = state
+            .items
+            .iter_mut()
+            .find(|i| i.id == id)
             .ok_or(KernelError::NotFound)?;
         item.launch_count += 1;
         item.last_launched_ns = now;
@@ -220,7 +305,10 @@ pub fn record_launch(id: u32) -> KernelResult<String> {
 
 /// List all items.
 pub fn list_items() -> Vec<LaunchItem> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.items.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.items.clone())
 }
 
 /// Get top launched items.
@@ -276,8 +364,14 @@ pub fn self_test() {
     crate::serial_println!("  [4/8] ranking: OK");
 
     // 5: Register new item.
-    let id = register("Calculator", alloc::vec![String::from("calc"), String::from("math")],
-        ResultType::Application, "launch:calculator", "calc").expect("reg");
+    let id = register(
+        "Calculator",
+        alloc::vec![String::from("calc"), String::from("math")],
+        ResultType::Application,
+        "launch:calculator",
+        "calc",
+    )
+    .expect("reg");
     let results = search("calc", 10);
     assert_eq!(results[0].name, "Calculator");
     crate::serial_println!("  [5/8] register: OK");

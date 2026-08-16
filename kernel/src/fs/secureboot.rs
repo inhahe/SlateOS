@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -54,11 +54,11 @@ impl BootState {
 /// Key type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyType {
-    PlatformKey,       // PK.
-    KeyExchangeKey,    // KEK.
-    SignatureDatabase, // db.
+    PlatformKey,        // PK.
+    KeyExchangeKey,     // KEK.
+    SignatureDatabase,  // db.
     ForbiddenSignature, // dbx.
-    MachineOwnerKey,   // MOK.
+    MachineOwnerKey,    // MOK.
 }
 
 impl KeyType {
@@ -130,14 +130,34 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
         boot_state: BootState::Disabled,
         keys: alloc::vec![
-            EnrolledKey { id: 1, key_type: KeyType::PlatformKey, subject: String::from("OS Vendor PK"), fingerprint: String::from("SHA256:aabb..."), enrolled_ns: now },
-            EnrolledKey { id: 2, key_type: KeyType::KeyExchangeKey, subject: String::from("OS Vendor KEK"), fingerprint: String::from("SHA256:ccdd..."), enrolled_ns: now },
-            EnrolledKey { id: 3, key_type: KeyType::SignatureDatabase, subject: String::from("Kernel Signing Key"), fingerprint: String::from("SHA256:eeff..."), enrolled_ns: now },
+            EnrolledKey {
+                id: 1,
+                key_type: KeyType::PlatformKey,
+                subject: String::from("OS Vendor PK"),
+                fingerprint: String::from("SHA256:aabb..."),
+                enrolled_ns: now
+            },
+            EnrolledKey {
+                id: 2,
+                key_type: KeyType::KeyExchangeKey,
+                subject: String::from("OS Vendor KEK"),
+                fingerprint: String::from("SHA256:ccdd..."),
+                enrolled_ns: now
+            },
+            EnrolledKey {
+                id: 3,
+                key_type: KeyType::SignatureDatabase,
+                subject: String::from("Kernel Signing Key"),
+                fingerprint: String::from("SHA256:eeff..."),
+                enrolled_ns: now
+            },
         ],
         records: Vec::new(),
         next_key_id: 4,
@@ -157,7 +177,10 @@ pub fn set_state(state_val: BootState) -> KernelResult<()> {
 
 /// Get boot state.
 pub fn get_state() -> BootState {
-    STATE.lock().as_ref().map_or(BootState::Disabled, |s| s.boot_state)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(BootState::Disabled, |s| s.boot_state)
 }
 
 /// Enroll a key.
@@ -170,8 +193,11 @@ pub fn enroll_key(key_type: KeyType, subject: &str, fingerprint: &str) -> Kernel
         let id = state.next_key_id;
         state.next_key_id += 1;
         state.keys.push(EnrolledKey {
-            id, key_type, subject: String::from(subject),
-            fingerprint: String::from(fingerprint), enrolled_ns: now,
+            id,
+            key_type,
+            subject: String::from(subject),
+            fingerprint: String::from(fingerprint),
+            enrolled_ns: now,
         });
         Ok(id)
     })
@@ -182,7 +208,9 @@ pub fn remove_key(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.keys.len();
         state.keys.retain(|k| k.id != id);
-        if state.keys.len() == before { return Err(KernelError::NotFound); }
+        if state.keys.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -193,14 +221,21 @@ pub fn verify_image(image_name: &str, hash: &str) -> KernelResult<bool> {
         let now = crate::hpet::elapsed_ns();
         // Simulate: if boot state is disabled, everything passes.
         // If enabled, check if we have a matching db key (by convention, match if any db key exists).
-        let has_db_key = state.keys.iter().any(|k| k.key_type == KeyType::SignatureDatabase);
+        let has_db_key = state
+            .keys
+            .iter()
+            .any(|k| k.key_type == KeyType::SignatureDatabase);
         let verified = match state.boot_state {
             BootState::Disabled | BootState::SetupMode => true,
             BootState::Enabled | BootState::EnforcingStrict => has_db_key,
         };
 
         let key_id = if verified {
-            state.keys.iter().find(|k| k.key_type == KeyType::SignatureDatabase).map(|k| k.id)
+            state
+                .keys
+                .iter()
+                .find(|k| k.key_type == KeyType::SignatureDatabase)
+                .map(|k| k.id)
         } else {
             None
         };
@@ -211,10 +246,15 @@ pub fn verify_image(image_name: &str, hash: &str) -> KernelResult<bool> {
             state.total_rejected += 1;
         }
 
-        if state.records.len() >= MAX_RECORDS { state.records.remove(0); }
+        if state.records.len() >= MAX_RECORDS {
+            state.records.remove(0);
+        }
         state.records.push(VerifyRecord {
             image_name: String::from(image_name),
-            hash: String::from(hash), verified, key_id, timestamp_ns: now,
+            hash: String::from(hash),
+            verified,
+            key_id,
+            timestamp_ns: now,
         });
         Ok(verified)
     })
@@ -239,7 +279,13 @@ pub fn get_records(max: usize) -> Vec<VerifyRecord> {
 pub fn stats() -> (usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.keys.len(), s.records.len(), s.total_verified, s.total_rejected, s.ops),
+        Some(s) => (
+            s.keys.len(),
+            s.records.len(),
+            s.total_verified,
+            s.total_rejected,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

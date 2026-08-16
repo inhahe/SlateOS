@@ -142,7 +142,7 @@ pub struct SnapshotDiff {
     // Memory deltas
     pub free_frames_delta: i64,
     pub frag_delta: i8,
-    pub heap_net_delta: i64,  // (allocs - frees) delta
+    pub heap_net_delta: i64, // (allocs - frees) delta
     pub pressure_delta: i8,
 
     // Scheduler deltas
@@ -171,9 +171,10 @@ pub struct SnapshotDiff {
 struct SnapshotStore(core::cell::UnsafeCell<[Snapshot; 2]>);
 unsafe impl Sync for SnapshotStore {}
 
-static STORE: SnapshotStore = SnapshotStore(
-    core::cell::UnsafeCell::new([Snapshot::empty(), Snapshot::empty()])
-);
+static STORE: SnapshotStore = SnapshotStore(core::cell::UnsafeCell::new([
+    Snapshot::empty(),
+    Snapshot::empty(),
+]));
 
 static SLOT_A_VALID: AtomicBool = AtomicBool::new(false);
 static SLOT_B_VALID: AtomicBool = AtomicBool::new(false);
@@ -186,14 +187,13 @@ static SLOT_B_VALID: AtomicBool = AtomicBool::new(false);
 fn capture(label: u8) -> Snapshot {
     // Memory
     let frame_stats = crate::mm::frame::stats();
-    let (free_frames, total_frames) = frame_stats
-        .map_or((0, 0), |s| (s.free_frames as u32, s.total_frames as u32));
+    let (free_frames, total_frames) =
+        frame_stats.map_or((0, 0), |s| (s.free_frames as u32, s.total_frames as u32));
     let heap_stats = crate::mm::heap::stats();
     let pressure = crate::mm::memory_pressure();
 
     // Fragmentation
-    let frag_pct = crate::mm::frag_history::latest()
-        .map_or(0, |s| s.frag_pct);
+    let frag_pct = crate::mm::frag_history::latest().map_or(0, |s| s.frag_pct);
 
     // Scheduler
     let sched = crate::sched::sched_stats();
@@ -292,7 +292,9 @@ pub fn diff(from_label: u8, to_label: u8) -> Option<SnapshotDiff> {
         frag_delta: to.frag_pct as i8 - from.frag_pct as i8,
         heap_net_delta: to_heap_net - from_heap_net,
         pressure_delta: to.pressure_score as i8 - from.pressure_score as i8,
-        ctx_switches_delta: to.total_ctx_switches.saturating_sub(from.total_ctx_switches),
+        ctx_switches_delta: to
+            .total_ctx_switches
+            .saturating_sub(from.total_ctx_switches),
         tasks_spawned_delta: to.tasks_spawned.saturating_sub(from.tasks_spawned),
         tasks_exited_delta: to.tasks_exited.saturating_sub(from.tasks_exited),
         load_delta: to.load_avg_x100 as i64 - from.load_avg_x100 as i64,
@@ -338,8 +340,12 @@ pub fn self_test() {
     assert_eq!(a.label, b'A');
     assert!(a.total_frames > 0);
     assert!(a.free_frames > 0);
-    serial_println!("[ksnapshot]   Save A: OK (free={}/{}, pressure={})",
-        a.free_frames, a.total_frames, a.pressure_score);
+    serial_println!(
+        "[ksnapshot]   Save A: OK (free={}/{}, pressure={})",
+        a.free_frames,
+        a.total_frames,
+        a.pressure_score
+    );
 
     // Test 3: Save snapshot B.
     save(b'B');
@@ -354,8 +360,12 @@ pub fn self_test() {
     assert_eq!(d.to_label, b'B');
     // Context switches should be non-negative (monotonic counter).
     // tick_delta is fine at 0 (both captured very quickly).
-    serial_println!("[ksnapshot]   Diff: OK (ctx_sw_delta={}, ipc_ops_delta={}, obj_delta={:+})",
-        d.ctx_switches_delta, d.ipc_ops_delta, d.objects_delta);
+    serial_println!(
+        "[ksnapshot]   Diff: OK (ctx_sw_delta={}, ipc_ops_delta={}, obj_delta={:+})",
+        d.ctx_switches_delta,
+        d.ipc_ops_delta,
+        d.objects_delta
+    );
 
     // Test 5: Overwrite works.
     save(b'A');

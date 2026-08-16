@@ -43,10 +43,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::cas::{self, Hash256};
@@ -319,7 +319,10 @@ pub fn restore(id: SnapshotId, target_path: impl AsRef<Path>) -> KernelResult<Re
     }
 
     // Third pass: restore symlinks.
-    for entry in entries.iter().filter(|e| e.entry_type == EntryType::Symlink) {
+    for entry in entries
+        .iter()
+        .filter(|e| e.entry_type == EntryType::Symlink)
+    {
         let full_path = target_path.join(&entry.path);
         if let Some(ref target) = entry.symlink_target {
             match Vfs::symlink(&full_path, target) {
@@ -522,9 +525,8 @@ fn walk_directory(
         match entry.entry_type {
             EntryType::Directory => {
                 // Record the directory entry.
-                let meta = Vfs::metadata(&entry_full).unwrap_or_else(|_| {
-                    FileMeta::minimal(EntryType::Directory, 0)
-                });
+                let meta = Vfs::metadata(&entry_full)
+                    .unwrap_or_else(|_| FileMeta::minimal(EntryType::Directory, 0));
 
                 entries.push(SnapshotEntry {
                     path: entry_relative.clone(),
@@ -564,9 +566,8 @@ fn walk_directory(
 
                 let hash = cas::put(&data)?;
 
-                let meta = Vfs::metadata(&entry_full).unwrap_or_else(|_| {
-                    FileMeta::minimal(EntryType::File, data.len() as u64)
-                });
+                let meta = Vfs::metadata(&entry_full)
+                    .unwrap_or_else(|_| FileMeta::minimal(EntryType::File, data.len() as u64));
 
                 entries.push(SnapshotEntry {
                     path: entry_relative,
@@ -586,9 +587,8 @@ fn walk_directory(
             }
             EntryType::Symlink => {
                 let target = Vfs::readlink(&entry_full).unwrap_or_default();
-                let meta = Vfs::metadata(&entry_full).unwrap_or_else(|_| {
-                    FileMeta::minimal(EntryType::Symlink, 0)
-                });
+                let meta = Vfs::metadata(&entry_full)
+                    .unwrap_or_else(|_| FileMeta::minimal(EntryType::Symlink, 0));
 
                 entries.push(SnapshotEntry {
                     path: entry_relative,
@@ -624,7 +624,10 @@ fn should_exclude(relative: &Path, options: &SnapshotOptions) -> bool {
 
     // Inclusion filter: if any is specified, the path must match at least one.
     if !options.include_paths.is_empty()
-        && !options.include_paths.iter().any(|p| path_in_subtree(relative, p))
+        && !options
+            .include_paths
+            .iter()
+            .any(|p| path_in_subtree(relative, p))
     {
         return true;
     }
@@ -687,8 +690,13 @@ fn test_should_exclude() {
 
     // A non-UTF-8 component is filterable like any other.
     let mut opts3 = SnapshotOptions::default();
-    opts3.exclude_paths.push(Path::new(b"ca\xffche".as_slice()).to_path_buf());
-    assert!(should_exclude(Path::new(b"ca\xffche/blob".as_slice()), &opts3));
+    opts3
+        .exclude_paths
+        .push(Path::new(b"ca\xffche".as_slice()).to_path_buf());
+    assert!(should_exclude(
+        Path::new(b"ca\xffche/blob".as_slice()),
+        &opts3
+    ));
     assert!(!should_exclude(Path::new("cache/blob"), &opts3));
 
     serial_println!("[snapshot]   should_exclude: ok");
@@ -702,8 +710,7 @@ fn test_create_and_list() {
     let _ = Vfs::write_file("/tmp/snap_test/sub/data.bin", &[1, 2, 3, 4, 5]);
 
     let opts = SnapshotOptions::default();
-    let id = create("/tmp/snap_test", "test-snap", None, &opts)
-        .expect("snapshot create failed");
+    let id = create("/tmp/snap_test", "test-snap", None, &opts).expect("snapshot create failed");
 
     let snaps = list();
     assert!(!snaps.is_empty(), "should have at least one snapshot");
@@ -730,8 +737,7 @@ fn test_restore() {
     assert_eq!(result.errors, 0);
 
     // Verify restored content.
-    let data = Vfs::read_file("/tmp/snap_restore/hello.txt")
-        .expect("restored file should exist");
+    let data = Vfs::read_file("/tmp/snap_restore/hello.txt").expect("restored file should exist");
     assert_eq!(&data, b"Hello, world!");
 
     let data2 = Vfs::read_file("/tmp/snap_restore/sub/data.bin")
@@ -748,16 +754,21 @@ fn test_diff() {
     let _ = Vfs::remove("/tmp/snap_test/sub/data.bin");
 
     let opts = SnapshotOptions::default();
-    let id2 = create("/tmp/snap_test", "test-snap-2", None, &opts)
-        .expect("snapshot 2 create failed");
+    let id2 =
+        create("/tmp/snap_test", "test-snap-2", None, &opts).expect("snapshot 2 create failed");
 
     let id1 = find_by_name("test-snap").expect("should find test-snap");
     let (added, _removed, modified) = diff(id1, id2).expect("diff failed");
 
-    assert!(!added.is_empty() || !modified.is_empty(), "should detect changes");
+    assert!(
+        !added.is_empty() || !modified.is_empty(),
+        "should detect changes"
+    );
     // hello.txt was modified.
     assert!(
-        modified.iter().any(|p| p.as_path() == Path::new("hello.txt")),
+        modified
+            .iter()
+            .any(|p| p.as_path() == Path::new("hello.txt")),
         "hello.txt should be in modified"
     );
 
@@ -773,8 +784,7 @@ fn test_delete() {
     let _ = Vfs::mkdir("/tmp/snap_del");
     let _ = Vfs::write_file("/tmp/snap_del/f.txt", b"x");
 
-    let id = create("/tmp/snap_del", "to-delete", None, &opts)
-        .expect("create for delete failed");
+    let id = create("/tmp/snap_del", "to-delete", None, &opts).expect("create for delete failed");
     assert_eq!(count(), before + 1);
 
     delete(id).expect("delete failed");
@@ -792,8 +802,8 @@ fn test_branching() {
     // Create a child snapshot.
     let _ = Vfs::write_file("/tmp/snap_test/branch.txt", b"branch");
     let opts = SnapshotOptions::default();
-    let id2 = create("/tmp/snap_test", "child-snap", Some(id1), &opts)
-        .expect("child snapshot failed");
+    let id2 =
+        create("/tmp/snap_test", "child-snap", Some(id1), &opts).expect("child snapshot failed");
 
     let info2 = info(id2).expect("child info failed");
     assert_eq!(info2.parent, Some(id1));

@@ -33,11 +33,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -273,7 +273,10 @@ pub fn pin(app_id: &str, name: &str, icon: &str) -> KernelResult<()> {
 /// Unpin an app from the taskbar.
 pub fn unpin(app_id: &str) -> KernelResult<()> {
     let mut tb = TASKBAR.lock();
-    let idx = tb.pinned.iter().position(|p| p.app_id == app_id)
+    let idx = tb
+        .pinned
+        .iter()
+        .position(|p| p.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
     tb.pinned.remove(idx);
     // Recalculate positions.
@@ -286,7 +289,10 @@ pub fn unpin(app_id: &str) -> KernelResult<()> {
 /// Reorder a pinned app to a new position.
 pub fn reorder_pinned(app_id: &str, new_pos: u32) -> KernelResult<()> {
     let mut tb = TASKBAR.lock();
-    let idx = tb.pinned.iter().position(|p| p.app_id == app_id)
+    let idx = tb
+        .pinned
+        .iter()
+        .position(|p| p.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
 
     let new_idx = (new_pos as usize).min(tb.pinned.len().saturating_sub(1));
@@ -317,8 +323,13 @@ pub fn is_pinned(app_id: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Add a window to the taskbar. Creates a new running entry if needed.
-pub fn add_window(app_id: &str, name: &str, icon: &str,
-                  window_id: u64, title: &str) -> KernelResult<()> {
+pub fn add_window(
+    app_id: &str,
+    name: &str,
+    icon: &str,
+    window_id: u64,
+    title: &str,
+) -> KernelResult<()> {
     if app_id.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -344,21 +355,24 @@ pub fn add_window(app_id: &str, name: &str, icon: &str,
         }
         let pos = tb.next_run_pos;
         tb.next_run_pos = tb.next_run_pos.saturating_add(1);
-        tb.running.insert(String::from(app_id), RunningEntry {
-            app_id: String::from(app_id),
-            name: String::from(name),
-            icon: String::from(icon),
-            windows: alloc::vec![WindowEntry {
-                window_id,
-                title: String::from(title),
-                active: false,
-                minimized: false,
-            }],
-            state: EntryState::Normal,
-            progress: ProgressState::None,
-            badge: None,
-            position: pos,
-        });
+        tb.running.insert(
+            String::from(app_id),
+            RunningEntry {
+                app_id: String::from(app_id),
+                name: String::from(name),
+                icon: String::from(icon),
+                windows: alloc::vec![WindowEntry {
+                    window_id,
+                    title: String::from(title),
+                    active: false,
+                    minimized: false,
+                }],
+                state: EntryState::Normal,
+                progress: ProgressState::None,
+                badge: None,
+                position: pos,
+            },
+        );
     }
     Ok(())
 }
@@ -368,7 +382,10 @@ pub fn remove_window(app_id: &str, window_id: u64) -> KernelResult<()> {
     let mut tb = TASKBAR.lock();
     let entry = tb.running.get_mut(app_id).ok_or(KernelError::NotFound)?;
 
-    let idx = entry.windows.iter().position(|w| w.window_id == window_id)
+    let idx = entry
+        .windows
+        .iter()
+        .position(|w| w.window_id == window_id)
         .ok_or(KernelError::NotFound)?;
     entry.windows.remove(idx);
 
@@ -537,9 +554,7 @@ pub fn snapshot() -> TaskbarSnapshot {
 /// Returns (pinned_count, running_count, total_windows, pin_ops, window_ops).
 pub fn stats() -> (usize, usize, usize, u64, u64) {
     let tb = TASKBAR.lock();
-    let total_windows: usize = tb.running.values()
-        .map(|e| e.windows.len())
-        .sum();
+    let total_windows: usize = tb.running.values().map(|e| e.windows.len()).sum();
     (
         tb.pinned.len(),
         tb.running.len(),
@@ -598,9 +613,21 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 3: add running windows.
     {
-        add_window("org.os.editor", "Editor", "icon-editor", 100, "untitled.txt")?;
+        add_window(
+            "org.os.editor",
+            "Editor",
+            "icon-editor",
+            100,
+            "untitled.txt",
+        )?;
         add_window("org.os.editor", "Editor", "icon-editor", 101, "readme.md")?;
-        add_window("org.os.browser", "Browser", "icon-browser", 200, "Home Page")?;
+        add_window(
+            "org.os.browser",
+            "Browser",
+            "icon-browser",
+            200,
+            "Home Page",
+        )?;
 
         let running = running_apps();
         assert_eq!(running.len(), 2);

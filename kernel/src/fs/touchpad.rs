@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -272,16 +272,56 @@ pub fn init_defaults() {
     }
 
     let default_gestures = alloc::vec![
-        GestureBinding { gesture: GestureType::SwipeUp3, action: GestureAction::Overview, enabled: true },
-        GestureBinding { gesture: GestureType::SwipeDown3, action: GestureAction::ShowDesktop, enabled: true },
-        GestureBinding { gesture: GestureType::SwipeLeft3, action: GestureAction::WorkspaceRight, enabled: true },
-        GestureBinding { gesture: GestureType::SwipeRight3, action: GestureAction::WorkspaceLeft, enabled: true },
-        GestureBinding { gesture: GestureType::SwipeUp4, action: GestureAction::Overview, enabled: true },
-        GestureBinding { gesture: GestureType::SwipeDown4, action: GestureAction::ShowDesktop, enabled: true },
-        GestureBinding { gesture: GestureType::SwipeLeft4, action: GestureAction::WorkspaceRight, enabled: true },
-        GestureBinding { gesture: GestureType::SwipeRight4, action: GestureAction::WorkspaceLeft, enabled: true },
-        GestureBinding { gesture: GestureType::PinchIn, action: GestureAction::ZoomOut, enabled: true },
-        GestureBinding { gesture: GestureType::PinchOut, action: GestureAction::ZoomIn, enabled: true },
+        GestureBinding {
+            gesture: GestureType::SwipeUp3,
+            action: GestureAction::Overview,
+            enabled: true
+        },
+        GestureBinding {
+            gesture: GestureType::SwipeDown3,
+            action: GestureAction::ShowDesktop,
+            enabled: true
+        },
+        GestureBinding {
+            gesture: GestureType::SwipeLeft3,
+            action: GestureAction::WorkspaceRight,
+            enabled: true
+        },
+        GestureBinding {
+            gesture: GestureType::SwipeRight3,
+            action: GestureAction::WorkspaceLeft,
+            enabled: true
+        },
+        GestureBinding {
+            gesture: GestureType::SwipeUp4,
+            action: GestureAction::Overview,
+            enabled: true
+        },
+        GestureBinding {
+            gesture: GestureType::SwipeDown4,
+            action: GestureAction::ShowDesktop,
+            enabled: true
+        },
+        GestureBinding {
+            gesture: GestureType::SwipeLeft4,
+            action: GestureAction::WorkspaceRight,
+            enabled: true
+        },
+        GestureBinding {
+            gesture: GestureType::SwipeRight4,
+            action: GestureAction::WorkspaceLeft,
+            enabled: true
+        },
+        GestureBinding {
+            gesture: GestureType::PinchIn,
+            action: GestureAction::ZoomOut,
+            enabled: true
+        },
+        GestureBinding {
+            gesture: GestureType::PinchOut,
+            action: GestureAction::ZoomIn,
+            enabled: true
+        },
     ];
 
     *guard = Some(TouchpadState {
@@ -481,7 +521,9 @@ pub fn set_gesture(gesture: GestureType, action: GestureAction) -> KernelResult<
 /// Enable or disable a gesture.
 pub fn set_gesture_enabled(gesture: GestureType, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let binding = state.gestures.iter_mut()
+        let binding = state
+            .gestures
+            .iter_mut()
             .find(|g| g.gesture == gesture)
             .ok_or(KernelError::NotFound)?;
         binding.enabled = enabled;
@@ -493,7 +535,8 @@ pub fn set_gesture_enabled(gesture: GestureType, enabled: bool) -> KernelResult<
 pub fn gesture_action(gesture: GestureType) -> Option<GestureAction> {
     let guard = STATE.lock();
     guard.as_ref().and_then(|s| {
-        s.gestures.iter()
+        s.gestures
+            .iter()
             .find(|g| g.gesture == gesture && g.enabled)
             .map(|g| g.action)
     })
@@ -504,7 +547,13 @@ pub fn gesture_action(gesture: GestureType) -> Option<GestureAction> {
 // ---------------------------------------------------------------------------
 
 /// Register a touchpad device.
-pub fn add_device(name: &str, max_fingers: u8, width_mm: u32, height_mm: u32, pressure: bool) -> KernelResult<u32> {
+pub fn add_device(
+    name: &str,
+    max_fingers: u8,
+    width_mm: u32,
+    height_mm: u32,
+    pressure: bool,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.devices.len() >= MAX_TOUCHPADS {
             return Err(KernelError::ResourceExhausted);
@@ -669,7 +718,10 @@ pub fn self_test() {
     // Test 10: modify gesture.
     {
         set_gesture(GestureType::SwipeUp3, GestureAction::ShowDesktop).unwrap();
-        assert_eq!(gesture_action(GestureType::SwipeUp3), Some(GestureAction::ShowDesktop));
+        assert_eq!(
+            gesture_action(GestureType::SwipeUp3),
+            Some(GestureAction::ShowDesktop)
+        );
         set_gesture_enabled(GestureType::SwipeUp3, false).unwrap();
         assert_eq!(gesture_action(GestureType::SwipeUp3), None);
     }

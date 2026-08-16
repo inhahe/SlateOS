@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -136,13 +136,17 @@ where
 
 /// Calculate tile geometries for a workspace.
 fn calculate_tiles(ws: &Workspace, windows: &mut [TiledWindow]) {
-    let tiled: Vec<usize> = windows.iter().enumerate()
+    let tiled: Vec<usize> = windows
+        .iter()
+        .enumerate()
         .filter(|(_, w)| w.workspace_id == ws.id && !w.is_floating)
         .map(|(i, _)| i)
         .collect();
 
     let count = tiled.len();
-    if count == 0 { return; }
+    if count == 0 {
+        return;
+    }
 
     let gap = ws.gap_px;
     let mw = ws.monitor_width;
@@ -184,7 +188,8 @@ fn calculate_tiles(ws: &Workspace, windows: &mut [TiledWindow]) {
         TilingLayout::MasterStack => {
             if count == 1 {
                 windows[tiled[0]].geometry = WindowGeometry {
-                    x: gap as i32, y: gap as i32,
+                    x: gap as i32,
+                    y: gap as i32,
                     width: mw.saturating_sub(gap * 2),
                     height: mh.saturating_sub(gap * 2),
                 };
@@ -196,7 +201,8 @@ fn calculate_tiles(ws: &Workspace, windows: &mut [TiledWindow]) {
                 let stack_h = (mh.saturating_sub(gap * (stack_count + 1))) / stack_count;
 
                 windows[tiled[0]].geometry = WindowGeometry {
-                    x: gap as i32, y: gap as i32,
+                    x: gap as i32,
+                    y: gap as i32,
                     width: master_w,
                     height: mh.saturating_sub(gap * 2),
                 };
@@ -216,7 +222,9 @@ fn calculate_tiles(ws: &Workspace, windows: &mut [TiledWindow]) {
         TilingLayout::Grid => {
             // Integer square root ceiling: find smallest cols where cols*cols >= count.
             let mut cols = 1u32;
-            while (cols * cols) < count as u32 { cols += 1; }
+            while (cols * cols) < count as u32 {
+                cols += 1;
+            }
             let rows = (count as u32).div_ceil(cols);
             let cw = (mw.saturating_sub(gap * (cols + 1))) / cols;
             let ch = (mh.saturating_sub(gap * (rows + 1))) / rows;
@@ -246,14 +254,23 @@ fn calculate_tiles(ws: &Workspace, windows: &mut [TiledWindow]) {
                 // Center column gets master, sides split remaining.
                 let col_w = (mw.saturating_sub(gap * 4)) / 3;
                 windows[tiled[0]].geometry = WindowGeometry {
-                    x: (col_w + gap * 2) as i32, y: gap as i32,
+                    x: (col_w + gap * 2) as i32,
+                    y: gap as i32,
                     width: col_w,
                     height: mh.saturating_sub(gap * 2),
                 };
-                let left: Vec<usize> = tiled[1..].iter().enumerate()
-                    .filter(|(i, _)| *i % 2 == 0).map(|(_, idx)| *idx).collect();
-                let right: Vec<usize> = tiled[1..].iter().enumerate()
-                    .filter(|(i, _)| *i % 2 == 1).map(|(_, idx)| *idx).collect();
+                let left: Vec<usize> = tiled[1..]
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i % 2 == 0)
+                    .map(|(_, idx)| *idx)
+                    .collect();
+                let right: Vec<usize> = tiled[1..]
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i % 2 == 1)
+                    .map(|(_, idx)| *idx)
+                    .collect();
 
                 let left_count = left.len().max(1) as u32;
                 let lh = (mh.saturating_sub(gap * (left_count + 1))) / left_count;
@@ -287,7 +304,9 @@ fn calculate_tiles(ws: &Workspace, windows: &mut [TiledWindow]) {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let default_ws = Workspace {
         id: 1,
@@ -322,10 +341,14 @@ pub fn create_workspace(name: &str, layout: TilingLayout) -> KernelResult<u32> {
         let id = state.next_workspace_id;
         state.next_workspace_id += 1;
         state.workspaces.push(Workspace {
-            id, name: String::from(name), layout,
+            id,
+            name: String::from(name),
+            layout,
             gap_px: state.default_gap,
-            monitor_width: 1920, monitor_height: 1080,
-            master_ratio: 55, window_count: 0,
+            monitor_width: 1920,
+            monitor_height: 1080,
+            master_ratio: 55,
+            window_count: 0,
         });
         Ok(id)
     })
@@ -334,8 +357,13 @@ pub fn create_workspace(name: &str, layout: TilingLayout) -> KernelResult<u32> {
 /// Remove a workspace (moves windows to workspace 1).
 pub fn remove_workspace(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if id == 1 { return Err(KernelError::PermissionDenied); } // Can't remove default.
-        let pos = state.workspaces.iter().position(|w| w.id == id)
+        if id == 1 {
+            return Err(KernelError::PermissionDenied);
+        } // Can't remove default.
+        let pos = state
+            .workspaces
+            .iter()
+            .position(|w| w.id == id)
             .ok_or(KernelError::NotFound)?;
         state.workspaces.remove(pos);
         // Move windows to workspace 1.
@@ -344,7 +372,9 @@ pub fn remove_workspace(id: u32) -> KernelResult<()> {
                 w.workspace_id = 1;
             }
         }
-        if state.active_workspace == id { state.active_workspace = 1; }
+        if state.active_workspace == id {
+            state.active_workspace = 1;
+        }
         Ok(())
     })
 }
@@ -362,13 +392,25 @@ pub fn add_window(window_id: u32, title: &str, workspace_id: u32) -> KernelResul
             return Err(KernelError::NotFound);
         }
         state.windows.push(TiledWindow {
-            window_id, title: String::from(title), workspace_id,
-            geometry: WindowGeometry { x: 0, y: 0, width: 640, height: 480 },
-            is_floating: false, is_master: false,
+            window_id,
+            title: String::from(title),
+            workspace_id,
+            geometry: WindowGeometry {
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 480,
+            },
+            is_floating: false,
+            is_master: false,
         });
         // Update count.
         if let Some(ws) = state.workspaces.iter_mut().find(|ws| ws.id == workspace_id) {
-            ws.window_count = state.windows.iter().filter(|w| w.workspace_id == workspace_id).count();
+            ws.window_count = state
+                .windows
+                .iter()
+                .filter(|w| w.workspace_id == workspace_id)
+                .count();
         }
         Ok(())
     })
@@ -377,12 +419,19 @@ pub fn add_window(window_id: u32, title: &str, workspace_id: u32) -> KernelResul
 /// Remove a window.
 pub fn remove_window(window_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.windows.iter().position(|w| w.window_id == window_id)
+        let pos = state
+            .windows
+            .iter()
+            .position(|w| w.window_id == window_id)
             .ok_or(KernelError::NotFound)?;
         let ws_id = state.windows[pos].workspace_id;
         state.windows.remove(pos);
         if let Some(ws) = state.workspaces.iter_mut().find(|ws| ws.id == ws_id) {
-            ws.window_count = state.windows.iter().filter(|w| w.workspace_id == ws_id).count();
+            ws.window_count = state
+                .windows
+                .iter()
+                .filter(|w| w.workspace_id == ws_id)
+                .count();
         }
         Ok(())
     })
@@ -391,8 +440,12 @@ pub fn remove_window(window_id: u32) -> KernelResult<()> {
 /// Retile a workspace (recalculate all window positions).
 pub fn retile(workspace_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let ws = state.workspaces.iter().find(|ws| ws.id == workspace_id)
-            .ok_or(KernelError::NotFound)?.clone();
+        let ws = state
+            .workspaces
+            .iter()
+            .find(|ws| ws.id == workspace_id)
+            .ok_or(KernelError::NotFound)?
+            .clone();
         calculate_tiles(&ws, &mut state.windows);
         state.total_retiles += 1;
         Ok(())
@@ -402,7 +455,10 @@ pub fn retile(workspace_id: u32) -> KernelResult<()> {
 /// Set layout for a workspace.
 pub fn set_layout(workspace_id: u32, layout: TilingLayout) -> KernelResult<()> {
     with_state(|state| {
-        let ws = state.workspaces.iter_mut().find(|ws| ws.id == workspace_id)
+        let ws = state
+            .workspaces
+            .iter_mut()
+            .find(|ws| ws.id == workspace_id)
             .ok_or(KernelError::NotFound)?;
         ws.layout = layout;
         let ws_clone = ws.clone();
@@ -415,7 +471,10 @@ pub fn set_layout(workspace_id: u32, layout: TilingLayout) -> KernelResult<()> {
 /// Set gap size.
 pub fn set_gap(workspace_id: u32, gap_px: u32) -> KernelResult<()> {
     with_state(|state| {
-        let ws = state.workspaces.iter_mut().find(|ws| ws.id == workspace_id)
+        let ws = state
+            .workspaces
+            .iter_mut()
+            .find(|ws| ws.id == workspace_id)
             .ok_or(KernelError::NotFound)?;
         ws.gap_px = gap_px;
         Ok(())
@@ -425,7 +484,10 @@ pub fn set_gap(workspace_id: u32, gap_px: u32) -> KernelResult<()> {
 /// Set master ratio (0-100).
 pub fn set_master_ratio(workspace_id: u32, ratio: u32) -> KernelResult<()> {
     with_state(|state| {
-        let ws = state.workspaces.iter_mut().find(|ws| ws.id == workspace_id)
+        let ws = state
+            .workspaces
+            .iter_mut()
+            .find(|ws| ws.id == workspace_id)
             .ok_or(KernelError::NotFound)?;
         ws.master_ratio = ratio.clamp(10, 90);
         Ok(())
@@ -435,7 +497,10 @@ pub fn set_master_ratio(workspace_id: u32, ratio: u32) -> KernelResult<()> {
 /// Toggle a window's floating state.
 pub fn toggle_floating(window_id: u32) -> KernelResult<bool> {
     with_state(|state| {
-        let win = state.windows.iter_mut().find(|w| w.window_id == window_id)
+        let win = state
+            .windows
+            .iter_mut()
+            .find(|w| w.window_id == window_id)
             .ok_or(KernelError::NotFound)?;
         win.is_floating = !win.is_floating;
         Ok(win.is_floating)
@@ -448,14 +513,21 @@ pub fn move_to_workspace(window_id: u32, workspace_id: u32) -> KernelResult<()> 
         if !state.workspaces.iter().any(|ws| ws.id == workspace_id) {
             return Err(KernelError::NotFound);
         }
-        let win = state.windows.iter_mut().find(|w| w.window_id == window_id)
+        let win = state
+            .windows
+            .iter_mut()
+            .find(|w| w.window_id == window_id)
             .ok_or(KernelError::NotFound)?;
         let old_ws = win.workspace_id;
         win.workspace_id = workspace_id;
         // Update counts.
         for ws in state.workspaces.iter_mut() {
             if ws.id == old_ws || ws.id == workspace_id {
-                ws.window_count = state.windows.iter().filter(|w| w.workspace_id == ws.id).count();
+                ws.window_count = state
+                    .windows
+                    .iter()
+                    .filter(|w| w.workspace_id == ws.id)
+                    .count();
             }
         }
         Ok(())
@@ -475,7 +547,10 @@ pub fn set_active_workspace(id: u32) -> KernelResult<()> {
 
 /// List workspaces.
 pub fn list_workspaces() -> Vec<Workspace> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.workspaces.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.workspaces.clone())
 }
 
 /// List windows in a workspace.
@@ -484,7 +559,11 @@ pub fn list_windows(workspace_id: u32) -> Vec<TiledWindow> {
         if workspace_id == 0 {
             s.windows.clone()
         } else {
-            s.windows.iter().filter(|w| w.workspace_id == workspace_id).cloned().collect()
+            s.windows
+                .iter()
+                .filter(|w| w.workspace_id == workspace_id)
+                .cloned()
+                .collect()
         }
     })
 }
@@ -493,7 +572,13 @@ pub fn list_windows(workspace_id: u32) -> Vec<TiledWindow> {
 pub fn stats() -> (usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.workspaces.len(), s.windows.len(), s.total_tiles, s.total_retiles, s.ops),
+        Some(s) => (
+            s.workspaces.len(),
+            s.windows.len(),
+            s.total_tiles,
+            s.total_retiles,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

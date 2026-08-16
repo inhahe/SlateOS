@@ -27,15 +27,15 @@
 //! 5. Proxy → Client: reply (success/error)
 //! 6. Proxy relays data bidirectionally
 
+use alloc::format;
 use alloc::string::String;
 use alloc::{vec, vec::Vec};
-use alloc::format;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::error::{KernelError, KernelResult};
 use super::interface::{IpAddr, Ipv4Addr};
 use super::ipv6::Ipv6Addr;
+use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -148,7 +148,11 @@ pub fn connect(
 ) -> KernelResult<SocksResult> {
     CONNECTIONS.fetch_add(1, Ordering::Relaxed);
 
-    let port = if proxy_port == 0 { SOCKS_PORT } else { proxy_port };
+    let port = if proxy_port == 0 {
+        SOCKS_PORT
+    } else {
+        proxy_port
+    };
 
     // Connect to proxy.
     let handle = super::tcp::connect(crate::netns::ROOT_NS, proxy_ip, port)?;
@@ -241,9 +245,9 @@ pub fn connect(
     // Step 3: Send CONNECT request.
     // IPv4 request = 10 bytes, IPv6 = 22 bytes.
     let mut connect_req = Vec::with_capacity(22);
-    connect_req.push(SOCKS_VERSION);   // Version.
-    connect_req.push(CMD_CONNECT);     // Command.
-    connect_req.push(0x00);            // Reserved.
+    connect_req.push(SOCKS_VERSION); // Version.
+    connect_req.push(CMD_CONNECT); // Command.
+    connect_req.push(0x00); // Reserved.
     match target_ip {
         IpAddr::V4(v4) => {
             connect_req.push(ATYP_IPV4);
@@ -337,7 +341,11 @@ pub fn connect_domain(
 ) -> KernelResult<SocksResult> {
     CONNECTIONS.fetch_add(1, Ordering::Relaxed);
 
-    let port = if proxy_port == 0 { SOCKS_PORT } else { proxy_port };
+    let port = if proxy_port == 0 {
+        SOCKS_PORT
+    } else {
+        proxy_port
+    };
 
     // Connect to proxy.
     let handle = super::tcp::connect(crate::netns::ROOT_NS, proxy_ip, port)?;
@@ -391,7 +399,9 @@ pub fn connect_domain(
             ERRORS.fetch_add(1, Ordering::Relaxed);
             return Err(e);
         }
-        for _ in 0..REPLY_TIMEOUT_POLLS { super::poll(); }
+        for _ in 0..REPLY_TIMEOUT_POLLS {
+            super::poll();
+        }
         let auth_resp = match super::tcp::read_up_to(handle, MAX_REPLY_SIZE) {
             Ok(data) => data,
             Err(e) => {
@@ -429,7 +439,9 @@ pub fn connect_domain(
         return Err(e);
     }
 
-    for _ in 0..REPLY_TIMEOUT_POLLS { super::poll(); }
+    for _ in 0..REPLY_TIMEOUT_POLLS {
+        super::poll();
+    }
 
     let reply = match super::tcp::read_up_to(handle, MAX_REPLY_SIZE) {
         Ok(data) => data,

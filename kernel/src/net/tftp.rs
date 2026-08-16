@@ -38,16 +38,16 @@
 //! - Server handles one transfer at a time per client.
 //! - Maximum 4 concurrent server transfers.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::{vec, vec::Vec};
-use alloc::format;
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
 use super::ipv6::Ipv6Addr;
+use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -75,10 +75,10 @@ const MAX_SERVER_TRANSFERS: usize = 4;
 const SERVER_TICK_INTERVAL_NS: u64 = 500_000_000;
 
 // TFTP opcodes.
-const OP_RRQ: u16 = 1;   // Read request
-const OP_WRQ: u16 = 2;   // Write request
-const OP_DATA: u16 = 3;  // Data
-const OP_ACK: u16 = 4;   // Acknowledgment
+const OP_RRQ: u16 = 1; // Read request
+const OP_WRQ: u16 = 2; // Write request
+const OP_DATA: u16 = 3; // Data
+const OP_ACK: u16 = 4; // Acknowledgment
 const OP_ERROR: u16 = 5; // Error
 
 // TFTP error codes.
@@ -292,7 +292,8 @@ pub fn get(server_ip: Ipv4Addr, filename: &str) -> KernelResult<Vec<u8>> {
 
                             // Short block = EOF.
                             if payload.len() < BLOCK_SIZE {
-                                CLIENT_BYTES_RX.fetch_add(file_data.len() as u64, Ordering::Relaxed);
+                                CLIENT_BYTES_RX
+                                    .fetch_add(file_data.len() as u64, Ordering::Relaxed);
                                 super::udp::close(handle);
                                 return Ok(file_data);
                             }
@@ -307,8 +308,8 @@ pub fn get(server_ip: Ipv4Addr, filename: &str) -> KernelResult<Vec<u8>> {
                     // block > expected_block: ignore (out of order).
                 }
                 Some(OP_ERROR) => {
-                    let (code, msg) = parse_error(&dgram.data)
-                        .unwrap_or((0, String::from("Unknown error")));
+                    let (code, msg) =
+                        parse_error(&dgram.data).unwrap_or((0, String::from("Unknown error")));
                     super::udp::close(handle);
                     CLIENT_ERRORS.fetch_add(1, Ordering::Relaxed);
                     crate::serial_println!("[tftp] Server error {}: {}", code, msg);
@@ -427,8 +428,8 @@ pub fn put(server_ip: Ipv4Addr, filename: &str, data: &[u8]) -> KernelResult<()>
                     }
                 }
                 Some(OP_ERROR) => {
-                    let (code, msg) = parse_error(&dgram.data)
-                        .unwrap_or((0, String::from("Unknown error")));
+                    let (code, msg) =
+                        parse_error(&dgram.data).unwrap_or((0, String::from("Unknown error")));
                     super::udp::close(handle);
                     CLIENT_ERRORS.fetch_add(1, Ordering::Relaxed);
                     crate::serial_println!("[tftp] Server error {}: {}", code, msg);
@@ -516,7 +517,8 @@ pub fn get_v6(server_ip: Ipv6Addr, filename: &str) -> KernelResult<Vec<u8>> {
                         if let Some(payload) = dgram.data.get(4..) {
                             if file_data.len().saturating_add(payload.len()) > MAX_FILE_SIZE {
                                 let err = build_error(ERR_UNDEFINED, "File too large");
-                                let _ = super::udp::send_v6(local_port, server_ip, server_port, &err);
+                                let _ =
+                                    super::udp::send_v6(local_port, server_ip, server_port, &err);
                                 super::udp::close(handle);
                                 return Err(KernelError::ResourceExhausted);
                             }
@@ -529,7 +531,8 @@ pub fn get_v6(server_ip: Ipv6Addr, filename: &str) -> KernelResult<Vec<u8>> {
 
                             // Short block = EOF.
                             if payload.len() < BLOCK_SIZE {
-                                CLIENT_BYTES_RX.fetch_add(file_data.len() as u64, Ordering::Relaxed);
+                                CLIENT_BYTES_RX
+                                    .fetch_add(file_data.len() as u64, Ordering::Relaxed);
                                 super::udp::close(handle);
                                 return Ok(file_data);
                             }
@@ -543,8 +546,8 @@ pub fn get_v6(server_ip: Ipv6Addr, filename: &str) -> KernelResult<Vec<u8>> {
                     }
                 }
                 Some(OP_ERROR) => {
-                    let (code, msg) = parse_error(&dgram.data)
-                        .unwrap_or((0, String::from("Unknown error")));
+                    let (code, msg) =
+                        parse_error(&dgram.data).unwrap_or((0, String::from("Unknown error")));
                     super::udp::close(handle);
                     CLIENT_ERRORS.fetch_add(1, Ordering::Relaxed);
                     crate::serial_println!("[tftp] Server error {}: {}", code, msg);
@@ -655,8 +658,8 @@ pub fn put_v6(server_ip: Ipv6Addr, filename: &str, data: &[u8]) -> KernelResult<
                     }
                 }
                 Some(OP_ERROR) => {
-                    let (code, msg) = parse_error(&dgram.data)
-                        .unwrap_or((0, String::from("Unknown error")));
+                    let (code, msg) =
+                        parse_error(&dgram.data).unwrap_or((0, String::from("Unknown error")));
                     super::udp::close(handle);
                     CLIENT_ERRORS.fetch_add(1, Ordering::Relaxed);
                     crate::serial_println!("[tftp] Server error {}: {}", code, msg);
@@ -892,10 +895,18 @@ fn server_tick() {
                         xfer.current_block = xfer.current_block.wrapping_add(1);
                         xfer.retries = 0;
 
-                        let end = xfer.offset.saturating_add(BLOCK_SIZE).min(xfer.file_data.len());
+                        let end = xfer
+                            .offset
+                            .saturating_add(BLOCK_SIZE)
+                            .min(xfer.file_data.len());
                         let chunk = xfer.file_data.get(xfer.offset..end).unwrap_or(&[]);
                         let pkt = build_data(xfer.current_block, chunk);
-                        let _ = super::udp::send(xfer.local_port, xfer.client_ip, xfer.client_port, &pkt);
+                        let _ = super::udp::send(
+                            xfer.local_port,
+                            xfer.client_ip,
+                            xfer.client_port,
+                            &pkt,
+                        );
                         xfer.last_sent_ns = crate::hrtimer::now_ns();
 
                         let chunk_len = end.saturating_sub(xfer.offset);
@@ -909,8 +920,10 @@ fn server_tick() {
                             SERVER_COMPLETED.fetch_add(1, Ordering::Relaxed);
                             crate::serial_println!(
                                 "[tftp] Read transfer complete: {} ({} bytes) to {}:{}",
-                                xfer.filename, xfer.file_data.len(),
-                                xfer.client_ip, xfer.client_port,
+                                xfer.filename,
+                                xfer.file_data.len(),
+                                xfer.client_ip,
+                                xfer.client_port,
                             );
                         }
                     }
@@ -930,7 +943,12 @@ fn server_tick() {
                             // Enforce size limit to prevent heap exhaustion.
                             if xfer.recv_data.len().saturating_add(payload.len()) > MAX_FILE_SIZE {
                                 let err = build_error(ERR_UNDEFINED, "File too large");
-                                let _ = super::udp::send(xfer.local_port, xfer.client_ip, xfer.client_port, &err);
+                                let _ = super::udp::send(
+                                    xfer.local_port,
+                                    xfer.client_ip,
+                                    xfer.client_port,
+                                    &err,
+                                );
                                 super::udp::close(xfer.socket_handle);
                                 xfer.active = false;
                                 SERVER_ERRORS.fetch_add(1, Ordering::Relaxed);
@@ -941,7 +959,12 @@ fn server_tick() {
 
                             // ACK.
                             let ack = build_ack(block);
-                            let _ = super::udp::send(xfer.local_port, xfer.client_ip, xfer.client_port, &ack);
+                            let _ = super::udp::send(
+                                xfer.local_port,
+                                xfer.client_ip,
+                                xfer.client_port,
+                                &ack,
+                            );
                             xfer.last_sent_ns = crate::hrtimer::now_ns();
                             xfer.retries = 0;
 
@@ -954,8 +977,10 @@ fn server_tick() {
                                 SERVER_COMPLETED.fetch_add(1, Ordering::Relaxed);
                                 crate::serial_println!(
                                     "[tftp] Write transfer complete: {} ({} bytes) from {}:{}",
-                                    xfer.filename, xfer.recv_data.len(),
-                                    xfer.client_ip, xfer.client_port,
+                                    xfer.filename,
+                                    xfer.recv_data.len(),
+                                    xfer.client_ip,
+                                    xfer.client_port,
                                 );
                             }
                         }
@@ -972,7 +997,9 @@ fn server_tick() {
                 if xfer.retries > MAX_RETRIES {
                     crate::serial_println!(
                         "[tftp] Transfer timeout for {}:{} ({})",
-                        xfer.client_ip, xfer.client_port, xfer.filename
+                        xfer.client_ip,
+                        xfer.client_port,
+                        xfer.filename
                     );
                     super::udp::close(xfer.socket_handle);
                     xfer.active = false;
@@ -982,12 +1009,14 @@ fn server_tick() {
                     let start = xfer.offset.saturating_sub(BLOCK_SIZE).min(xfer.offset);
                     let chunk = xfer.file_data.get(start..xfer.offset).unwrap_or(&[]);
                     let pkt = build_data(xfer.current_block, chunk);
-                    let _ = super::udp::send(xfer.local_port, xfer.client_ip, xfer.client_port, &pkt);
+                    let _ =
+                        super::udp::send(xfer.local_port, xfer.client_ip, xfer.client_port, &pkt);
                     xfer.last_sent_ns = now;
                 } else {
                     // Retransmit last ACK.
                     let ack = build_ack(xfer.current_block);
-                    let _ = super::udp::send(xfer.local_port, xfer.client_ip, xfer.client_port, &ack);
+                    let _ =
+                        super::udp::send(xfer.local_port, xfer.client_ip, xfer.client_port, &ack);
                     xfer.last_sent_ns = now;
                 }
             }
@@ -1083,7 +1112,9 @@ fn handle_rrq(state: &mut TftpServerState, client_ip: Ipv4Addr, client_port: u16
 
     crate::serial_println!(
         "[tftp] Read request from {}:{} for '{}'",
-        client_ip, client_port, xfer.filename
+        client_ip,
+        client_port,
+        xfer.filename
     );
 }
 
@@ -1167,7 +1198,9 @@ fn handle_wrq(state: &mut TftpServerState, client_ip: Ipv4Addr, client_port: u16
 
     crate::serial_println!(
         "[tftp] Write request from {}:{} for '{}'",
-        client_ip, client_port, filename
+        client_ip,
+        client_port,
+        filename
     );
 }
 
@@ -1255,13 +1288,25 @@ pub fn procfs_content() -> String {
     out.push_str("==================\n\n");
 
     out.push_str("Client:\n");
-    out.push_str(&format!("  Downloads:   {} ({} bytes)\n", s.client_gets, s.client_bytes_rx));
-    out.push_str(&format!("  Uploads:     {} ({} bytes)\n", s.client_puts, s.client_bytes_tx));
+    out.push_str(&format!(
+        "  Downloads:   {} ({} bytes)\n",
+        s.client_gets, s.client_bytes_rx
+    ));
+    out.push_str(&format!(
+        "  Uploads:     {} ({} bytes)\n",
+        s.client_puts, s.client_bytes_tx
+    ));
     out.push_str(&format!("  Errors:      {}\n", s.client_errors));
     out.push_str(&format!("  Timeouts:    {}\n", s.client_timeouts));
 
-    out.push_str(&format!("\nServer:        {}\n",
-        if s.server_enabled { "running" } else { "stopped" }));
+    out.push_str(&format!(
+        "\nServer:        {}\n",
+        if s.server_enabled {
+            "running"
+        } else {
+            "stopped"
+        }
+    ));
     if s.server_enabled {
         out.push_str(&format!("  Root:        {}\n", s.server_root));
     }
@@ -1269,7 +1314,10 @@ pub fn procfs_content() -> String {
     out.push_str(&format!("  Completed:   {}\n", s.server_completed));
     out.push_str(&format!("  Errors:      {}\n", s.server_errors));
     out.push_str(&format!("  Bytes TX:    {}\n", s.server_bytes_tx));
-    out.push_str(&format!("  Active:      {}/{}\n", s.active_transfers, MAX_SERVER_TRANSFERS));
+    out.push_str(&format!(
+        "  Active:      {}/{}\n",
+        s.active_transfers, MAX_SERVER_TRANSFERS
+    ));
 
     out
 }
@@ -1363,7 +1411,10 @@ pub fn self_test() -> KernelResult<()> {
     {
         assert!(parse_block_num(&[0, 3, 0, 1]) == Some(1), "block 1");
         assert!(parse_block_num(&[0, 4, 1, 0]) == Some(256), "block 256");
-        assert!(parse_block_num(&[0, 3, 255, 255]) == Some(65535), "block max");
+        assert!(
+            parse_block_num(&[0, 3, 255, 255]) == Some(65535),
+            "block max"
+        );
         assert!(parse_block_num(&[0, 3]).is_none(), "too short");
 
         passed = passed.saturating_add(1);
@@ -1372,7 +1423,9 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 7: String parsing ---
     {
-        let data = [0, 1, b't', b'e', b's', b't', 0, b'o', b'c', b't', b'e', b't', 0];
+        let data = [
+            0, 1, b't', b'e', b's', b't', 0, b'o', b'c', b't', b'e', b't', 0,
+        ];
         let (s, next) = parse_string(&data, 2).unwrap();
         assert!(s == "test", "parse filename");
         assert!(next == 7, "next offset");

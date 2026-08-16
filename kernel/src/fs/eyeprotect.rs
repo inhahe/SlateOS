@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -138,7 +138,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         profiles: alloc::vec![
             EyeProfile {
@@ -179,7 +181,10 @@ pub fn init_defaults() {
 /// Check if a break is due.
 pub fn check_break() -> KernelResult<BreakState> {
     with_state(|state| {
-        let profile = state.profiles.iter().find(|p| p.id == state.active_profile_id);
+        let profile = state
+            .profiles
+            .iter()
+            .find(|p| p.id == state.active_profile_id);
         let profile = match profile {
             Some(p) if p.enabled => p,
             _ => return Ok(BreakState::Working),
@@ -225,12 +230,15 @@ pub fn snooze() -> KernelResult<()> {
         state.break_state = BreakState::Snoozed;
         state.total_snoozes += 1;
         // Extend last_break_ns by snooze duration.
-        let profile = state.profiles.iter().find(|p| p.id == state.active_profile_id);
+        let profile = state
+            .profiles
+            .iter()
+            .find(|p| p.id == state.active_profile_id);
         if let Some(p) = profile {
             let snooze_ns = (p.snooze_mins as u64) * 60 * 1_000_000_000;
-            state.last_break_ns = crate::hpet::elapsed_ns().saturating_sub(
-                (p.interval_mins as u64) * 60 * 1_000_000_000
-            ).saturating_add(snooze_ns);
+            state.last_break_ns = crate::hpet::elapsed_ns()
+                .saturating_sub((p.interval_mins as u64) * 60 * 1_000_000_000)
+                .saturating_add(snooze_ns);
         }
         Ok(())
     })
@@ -249,7 +257,10 @@ pub fn skip() -> KernelResult<()> {
 /// Set break interval.
 pub fn set_interval(profile_id: u32, minutes: u32) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let p = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         p.interval_mins = minutes.clamp(1, 120);
         Ok(())
@@ -259,7 +270,10 @@ pub fn set_interval(profile_id: u32, minutes: u32) -> KernelResult<()> {
 /// Set break duration.
 pub fn set_break_duration(profile_id: u32, seconds: u32) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let p = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         p.break_duration_secs = seconds.clamp(5, 1800);
         Ok(())
@@ -280,7 +294,10 @@ pub fn set_active(profile_id: u32) -> KernelResult<()> {
 /// Enable/disable a profile.
 pub fn set_profile_enabled(profile_id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let p = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         p.enabled = enabled;
         Ok(())
@@ -289,18 +306,27 @@ pub fn set_profile_enabled(profile_id: u32, enabled: bool) -> KernelResult<()> {
 
 /// Get current break state.
 pub fn break_state() -> BreakState {
-    STATE.lock().as_ref().map_or(BreakState::Working, |s| s.break_state)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(BreakState::Working, |s| s.break_state)
 }
 
 /// List profiles.
 pub fn list_profiles() -> Vec<EyeProfile> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.profiles.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.profiles.clone())
 }
 
 /// Get active profile.
 pub fn get_active() -> Option<EyeProfile> {
     STATE.lock().as_ref().and_then(|s| {
-        s.profiles.iter().find(|p| p.id == s.active_profile_id).cloned()
+        s.profiles
+            .iter()
+            .find(|p| p.id == s.active_profile_id)
+            .cloned()
     })
 }
 
@@ -308,7 +334,13 @@ pub fn get_active() -> Option<EyeProfile> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.profiles.len(), s.total_breaks, s.total_snoozes, s.total_skips, s.ops),
+        Some(s) => (
+            s.profiles.len(),
+            s.total_breaks,
+            s.total_snoozes,
+            s.total_skips,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

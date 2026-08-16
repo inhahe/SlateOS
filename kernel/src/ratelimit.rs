@@ -103,9 +103,11 @@ impl RateLimiter {
                 return false;
             }
             let new_val = current - PRECISION;
-            if self.tokens.compare_exchange_weak(
-                current, new_val, Ordering::Relaxed, Ordering::Relaxed
-            ).is_ok() {
+            if self
+                .tokens
+                .compare_exchange_weak(current, new_val, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
                 // Report suppressed count if any.
                 let _supp = self.suppressed.swap(0, Ordering::Relaxed);
                 self.total_allowed.fetch_add(1, Ordering::Relaxed);
@@ -129,9 +131,11 @@ impl RateLimiter {
                 return None;
             }
             let new_val = current - PRECISION;
-            if self.tokens.compare_exchange_weak(
-                current, new_val, Ordering::Relaxed, Ordering::Relaxed
-            ).is_ok() {
+            if self
+                .tokens
+                .compare_exchange_weak(current, new_val, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
                 let supp = self.suppressed.swap(0, Ordering::Relaxed);
                 self.total_allowed.fetch_add(1, Ordering::Relaxed);
                 return Some(supp);
@@ -146,9 +150,9 @@ impl RateLimiter {
 
         // First call: initialize timestamp.
         if last == 0 {
-            let _ = self.last_replenish.compare_exchange(
-                0, now, Ordering::Relaxed, Ordering::Relaxed
-            );
+            let _ =
+                self.last_replenish
+                    .compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
             return;
         }
 
@@ -173,9 +177,9 @@ impl RateLimiter {
         // Update last replenish time (best-effort CAS — if another CPU
         // beat us, that's fine; some extra tokens may be granted but
         // the burst cap prevents accumulation beyond the limit).
-        let _ = self.last_replenish.compare_exchange(
-            last, now, Ordering::Relaxed, Ordering::Relaxed
-        );
+        let _ =
+            self.last_replenish
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed);
 
         // Add tokens, capped at burst.
         loop {
@@ -185,9 +189,11 @@ impl RateLimiter {
             if new_val == current {
                 break; // Already at cap.
             }
-            if self.tokens.compare_exchange_weak(
-                current, new_val, Ordering::Relaxed, Ordering::Relaxed
-            ).is_ok() {
+            if self
+                .tokens
+                .compare_exchange_weak(current, new_val, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
                 break;
             }
         }

@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -133,7 +133,9 @@ where
 ///     node 0 and the node count is 1. DEFERRED: derive from ACPI SRAT.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let num_cpus = crate::smp::cpu_count().max(1);
 
@@ -210,23 +212,36 @@ pub fn list_cpus() -> Vec<LogicalCpu> {
 
 /// Get CPU info.
 pub fn get_cpu(id: u32) -> Option<LogicalCpu> {
-    STATE.lock().as_ref().and_then(|s| s.cpus.iter().find(|c| c.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.cpus.iter().find(|c| c.id == id).cloned())
 }
 
 /// Get cache hierarchy.
 pub fn cache_info() -> Vec<CacheInfo> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.caches.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.caches.clone())
 }
 
 /// Get package info.
 pub fn packages() -> Vec<PackageInfo> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.packages.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.packages.clone())
 }
 
 /// Get CPUs in a package.
 pub fn cpus_in_package(package_id: u32) -> Vec<LogicalCpu> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.cpus.iter().filter(|c| c.package_id == package_id).cloned().collect()
+        s.cpus
+            .iter()
+            .filter(|c| c.package_id == package_id)
+            .cloned()
+            .collect()
     })
 }
 
@@ -234,8 +249,11 @@ pub fn cpus_in_package(package_id: u32) -> Vec<LogicalCpu> {
 pub fn thread_siblings(cpu_id: u32) -> Vec<u32> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         if let Some(cpu) = s.cpus.iter().find(|c| c.id == cpu_id) {
-            s.cpus.iter()
-                .filter(|c| c.package_id == cpu.package_id && c.core_id == cpu.core_id && c.id != cpu_id)
+            s.cpus
+                .iter()
+                .filter(|c| {
+                    c.package_id == cpu.package_id && c.core_id == cpu.core_id && c.id != cpu_id
+                })
                 .map(|c| c.id)
                 .collect()
         } else {
@@ -252,7 +270,10 @@ pub fn smt_enabled() -> bool {
 /// Set CPU online/offline.
 pub fn set_online(cpu_id: u32, online: bool) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         // Cannot offline CPU 0 (boot CPU).
         if cpu_id == 0 && !online {
@@ -270,14 +291,24 @@ pub fn cpu_count() -> usize {
 
 /// Online CPU count.
 pub fn online_count() -> usize {
-    STATE.lock().as_ref().map_or(0, |s| s.cpus.iter().filter(|c| c.online).count())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(0, |s| s.cpus.iter().filter(|c| c.online).count())
 }
 
 /// Statistics: (cpu_count, package_count, numa_nodes, smt, total_queries, ops).
 pub fn stats() -> (usize, usize, u32, bool, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.cpus.len(), s.packages.len(), s.numa_nodes, s.smt_enabled, s.total_queries, s.ops),
+        Some(s) => (
+            s.cpus.len(),
+            s.packages.len(),
+            s.numa_nodes,
+            s.smt_enabled,
+            s.total_queries,
+            s.ops,
+        ),
         None => (0, 0, 0, false, 0, 0),
     }
 }
@@ -304,10 +335,19 @@ pub fn self_test() {
     assert!(!pkgs.is_empty(), "expected at least one package");
     // Sum of per-package total_threads must equal the logical CPU count.
     let pkg_thread_sum: u32 = pkgs.iter().map(|p| p.total_threads).sum();
-    assert_eq!(pkg_thread_sum as usize, n, "package threads must cover all CPUs");
+    assert_eq!(
+        pkg_thread_sum as usize, n,
+        "package threads must cover all CPUs"
+    );
     // Honest unknowns: no cache enumerator, no brand string, no SRAT.
-    assert!(cache_info().is_empty(), "caches must be empty (not fabricated)");
-    assert!(pkgs.iter().all(|p| p.model_name.is_empty()), "model_name must be empty");
+    assert!(
+        cache_info().is_empty(),
+        "caches must be empty (not fabricated)"
+    );
+    assert!(
+        pkgs.iter().all(|p| p.model_name.is_empty()),
+        "model_name must be empty"
+    );
     let (_c, _p, numa, _smt, _q, _o) = stats();
     assert_eq!(numa, 1, "numa_nodes is honestly 1 until SRAT is parsed");
     crate::serial_println!("  [1/8] read-through sanity: OK");
@@ -333,14 +373,42 @@ pub fn self_test() {
         *STATE.lock() = Some(State {
             cpus,
             caches: alloc::vec![
-                CacheInfo { cache_type: CacheType::L1Data, size_kb: 32, line_size: 64, associativity: 8, shared_by_threads: 2 },
-                CacheInfo { cache_type: CacheType::L1Instruction, size_kb: 32, line_size: 64, associativity: 8, shared_by_threads: 2 },
-                CacheInfo { cache_type: CacheType::L2Unified, size_kb: 256, line_size: 64, associativity: 4, shared_by_threads: 2 },
-                CacheInfo { cache_type: CacheType::L3Unified, size_kb: 8192, line_size: 64, associativity: 16, shared_by_threads: 8 },
+                CacheInfo {
+                    cache_type: CacheType::L1Data,
+                    size_kb: 32,
+                    line_size: 64,
+                    associativity: 8,
+                    shared_by_threads: 2
+                },
+                CacheInfo {
+                    cache_type: CacheType::L1Instruction,
+                    size_kb: 32,
+                    line_size: 64,
+                    associativity: 8,
+                    shared_by_threads: 2
+                },
+                CacheInfo {
+                    cache_type: CacheType::L2Unified,
+                    size_kb: 256,
+                    line_size: 64,
+                    associativity: 4,
+                    shared_by_threads: 2
+                },
+                CacheInfo {
+                    cache_type: CacheType::L3Unified,
+                    size_kb: 8192,
+                    line_size: 64,
+                    associativity: 16,
+                    shared_by_threads: 8
+                },
             ],
-            packages: alloc::vec![
-                PackageInfo { id: 0, model_name: String::new(), cores: 4, threads_per_core: 2, total_threads: 8 },
-            ],
+            packages: alloc::vec![PackageInfo {
+                id: 0,
+                model_name: String::new(),
+                cores: 4,
+                threads_per_core: 2,
+                total_threads: 8
+            },],
             numa_nodes: 1,
             smt_enabled: true,
             total_queries: 0,

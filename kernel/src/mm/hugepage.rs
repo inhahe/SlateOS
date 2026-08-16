@@ -40,11 +40,11 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame};
 use crate::mm::page_table::{self, PageFlags, PageTableEntry, VirtAddr};
 use crate::serial_println;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -160,14 +160,10 @@ pub unsafe fn map_huge_2m(
     // SAFETY: pml4_phys is valid (caller guarantee).  walk_or_create
     // and read_entry target valid page table levels at valid indices.
     let pml4_idx = virt.pml4_index();
-    let pdpt_phys = unsafe {
-        page_table::walk_or_create(pml4_phys, pml4_idx, true, user, hhdm)?
-    };
+    let pdpt_phys = unsafe { page_table::walk_or_create(pml4_phys, pml4_idx, true, user, hhdm)? };
 
     let pdpt_idx = virt.pdpt_index();
-    let pd_phys = unsafe {
-        page_table::walk_or_create(pdpt_phys, pdpt_idx, true, user, hhdm)?
-    };
+    let pd_phys = unsafe { page_table::walk_or_create(pdpt_phys, pdpt_idx, true, user, hhdm)? };
 
     // Check that the PD slot is not already occupied.
     let pd_idx = virt.pd_index();
@@ -181,7 +177,9 @@ pub unsafe fn map_huge_2m(
     let entry = PageTableEntry::new(paddr, pde_flags);
 
     // SAFETY: pd_phys is valid (from walk_or_create), pd_idx < 512.
-    unsafe { page_table::write_entry(pd_phys, pd_idx, entry, hhdm); }
+    unsafe {
+        page_table::write_entry(pd_phys, pd_idx, entry, hhdm);
+    }
 
     Ok(())
 }
@@ -196,10 +194,7 @@ pub unsafe fn map_huge_2m(
 /// - `virt` must be 2 MiB-aligned and must currently have a huge page
 ///   mapping.
 #[allow(clippy::arithmetic_side_effects)]
-pub unsafe fn unmap_huge_2m(
-    pml4_phys: u64,
-    virt: VirtAddr,
-) -> KernelResult<PhysFrame> {
+pub unsafe fn unmap_huge_2m(pml4_phys: u64, virt: VirtAddr) -> KernelResult<PhysFrame> {
     let vaddr = virt.as_u64();
     if !vaddr.is_multiple_of(HUGE_PAGE_SIZE_2M as u64) {
         return Err(KernelError::InvalidAddress);
@@ -211,14 +206,10 @@ pub unsafe fn unmap_huge_2m(
     // SAFETY: pml4_phys is valid (caller guarantee).  walk_or_create
     // and read_entry target valid page table levels.
     let pml4_idx = virt.pml4_index();
-    let pdpt_phys = unsafe {
-        page_table::walk_or_create(pml4_phys, pml4_idx, false, false, hhdm)?
-    };
+    let pdpt_phys = unsafe { page_table::walk_or_create(pml4_phys, pml4_idx, false, false, hhdm)? };
 
     let pdpt_idx = virt.pdpt_index();
-    let pd_phys = unsafe {
-        page_table::walk_or_create(pdpt_phys, pdpt_idx, false, false, hhdm)?
-    };
+    let pd_phys = unsafe { page_table::walk_or_create(pdpt_phys, pdpt_idx, false, false, hhdm)? };
 
     // Read and verify the PDE is a huge page.
     let pd_idx = virt.pd_index();
@@ -236,11 +227,15 @@ pub unsafe fn unmap_huge_2m(
     // Clear the PDE.
     let empty = PageTableEntry::new(0, PageFlags::empty());
     // SAFETY: pd_phys is valid from walk_or_create; pd_idx < 512.
-    unsafe { page_table::write_entry(pd_phys, pd_idx, empty, hhdm); }
+    unsafe {
+        page_table::write_entry(pd_phys, pd_idx, empty, hhdm);
+    }
 
     // Flush the TLB for this 2 MiB region.
     // SAFETY: We're invalidating our own mapping which we just removed.
-    unsafe { flush_tlb_range(vaddr, HUGE_PAGE_SIZE_2M); }
+    unsafe {
+        flush_tlb_range(vaddr, HUGE_PAGE_SIZE_2M);
+    }
 
     PhysFrame::from_addr(phys_addr).ok_or(KernelError::InvalidAddress)
 }
@@ -292,12 +287,16 @@ pub fn is_huge_mapped(pml4_phys: u64, virt: VirtAddr) -> Option<u64> {
     let pml4_idx = virt.pml4_index();
     // SAFETY: pml4_phys and indices are valid.
     let pml4e = unsafe { page_table::read_entry(pml4_phys, pml4_idx, hhdm) };
-    if !pml4e.is_present() { return None; }
+    if !pml4e.is_present() {
+        return None;
+    }
 
     let pdpt_phys = pml4e.phys_addr();
     let pdpt_idx = virt.pdpt_index();
     let pdpte = unsafe { page_table::read_entry(pdpt_phys, pdpt_idx, hhdm) };
-    if !pdpte.is_present() { return None; }
+    if !pdpte.is_present() {
+        return None;
+    }
     if pdpte.is_huge() {
         // 1 GiB huge page (not created by us, but respect it).
         return Some(pdpte.phys_addr());
@@ -306,7 +305,9 @@ pub fn is_huge_mapped(pml4_phys: u64, virt: VirtAddr) -> Option<u64> {
     let pd_phys = pdpte.phys_addr();
     let pd_idx = virt.pd_index();
     let pde = unsafe { page_table::read_entry(pd_phys, pd_idx, hhdm) };
-    if !pde.is_present() { return None; }
+    if !pde.is_present() {
+        return None;
+    }
     if pde.is_huge() {
         return Some(pde.phys_addr());
     }
@@ -356,13 +357,20 @@ pub fn self_test() {
     let frame = match alloc_huge_2m() {
         Ok(f) => f,
         Err(e) => {
-            serial_println!("[hugepage]   Allocation failed: {:?} (insufficient memory?)", e);
+            serial_println!(
+                "[hugepage]   Allocation failed: {:?} (insufficient memory?)",
+                e
+            );
             serial_println!("[hugepage] Self-test SKIPPED (not enough contiguous memory)");
             return;
         }
     };
     let phys_addr = frame.addr();
-    assert_eq!(phys_addr % HUGE_PAGE_SIZE_2M as u64, 0, "must be 2 MiB-aligned");
+    assert_eq!(
+        phys_addr % HUGE_PAGE_SIZE_2M as u64,
+        0,
+        "must be 2 MiB-aligned"
+    );
     serial_println!("[hugepage]   Alloc 2 MiB: OK (phys={:#x})", phys_addr);
 
     // Test 2: Map the huge page at a kernel virtual address.
@@ -374,7 +382,10 @@ pub fn self_test() {
     // SAFETY: pml4 is valid, test_virt is unused kernel space.
     let map_result = unsafe { map_huge_2m(pml4, test_virt, frame, map_flags) };
     assert!(map_result.is_ok(), "huge page map should succeed");
-    serial_println!("[hugepage]   Map 2 MiB: OK (virt={:#x})", test_virt.as_u64());
+    serial_println!(
+        "[hugepage]   Map 2 MiB: OK (virt={:#x})",
+        test_virt.as_u64()
+    );
 
     // Test 3: Verify the mapping is detected as a huge page.
     let detected = is_huge_mapped(pml4, test_virt);
@@ -426,15 +437,21 @@ pub fn self_test() {
 
     // Test 9: Free the physical memory.
     // SAFETY: returned_phys is the frame we allocated and just unmapped.
-    unsafe { free_huge_2m(returned_phys); }
+    unsafe {
+        free_huge_2m(returned_phys);
+    }
     serial_println!("[hugepage]   Free 2 MiB: OK");
 
     // Test 10: Stats.
     let st = stats();
     assert!(st.allocated >= 1);
     assert!(st.freed >= 1);
-    serial_println!("[hugepage]   Stats: OK (alloc={}, freed={}, failures={})",
-        st.allocated, st.freed, st.failures);
+    serial_println!(
+        "[hugepage]   Stats: OK (alloc={}, freed={}, failures={})",
+        st.allocated,
+        st.freed,
+        st.failures
+    );
 
     serial_println!("[hugepage] Self-test PASSED");
 }

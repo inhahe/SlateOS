@@ -118,7 +118,8 @@ fn xxhash32(data: &[u8], seed: u32) -> u32 {
             i += 16;
         }
 
-        h = v1.rotate_left(1)
+        h = v1
+            .rotate_left(1)
             .wrapping_add(v2.rotate_left(7))
             .wrapping_add(v3.rotate_left(12))
             .wrapping_add(v4.rotate_left(18));
@@ -336,7 +337,9 @@ pub fn compress_block(src: &[u8]) -> Vec<u8> {
 
         // Check if the candidate is valid: within range and 4-byte match.
         let dist = ip.wrapping_sub(candidate);
-        if dist == 0 || dist > MAX_DISTANCE || candidate >= ip
+        if dist == 0
+            || dist > MAX_DISTANCE
+            || candidate >= ip
             || read_le32(src, candidate) != read_le32(src, ip)
         {
             ip += 1;
@@ -353,16 +356,16 @@ pub fn compress_block(src: &[u8]) -> Vec<u8> {
         let mut mlen: usize = MINMATCH;
 
         while match_start_dst.wrapping_add(mlen) < slen {
-            if src[match_start_src.wrapping_add(mlen)]
-                != src[match_start_dst.wrapping_add(mlen)]
-            {
+            if src[match_start_src.wrapping_add(mlen)] != src[match_start_dst.wrapping_add(mlen)] {
                 break;
             }
             mlen += 1;
         }
 
         // Limit match so it doesn't eat into the last LAST_LITERALS bytes.
-        let max_mlen = slen.saturating_sub(LAST_LITERALS).saturating_sub(match_start_dst);
+        let max_mlen = slen
+            .saturating_sub(LAST_LITERALS)
+            .saturating_sub(match_start_dst);
         if mlen > max_mlen {
             mlen = max_mlen;
         }
@@ -631,7 +634,7 @@ pub fn compress(src: &[u8]) -> Vec<u8> {
     let flg: u8 = (1 << 6)  // version = 01
                | (1 << 5)   // block independence
                | (1 << 3)   // content size present
-               | (1 << 2);  // content checksum
+               | (1 << 2); // content checksum
     // BD: block max size ID = 4 (64 KiB)
     let bd: u8 = 4 << 4;
 
@@ -707,7 +710,11 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[lz4]   ERROR: block round-trip mismatch");
             return Err(KernelError::CorruptedData);
         }
-        serial_println!("[lz4]   block round-trip OK ({}B -> {}B)", input.len(), compressed.len());
+        serial_println!(
+            "[lz4]   block round-trip OK ({}B -> {}B)",
+            input.len(),
+            compressed.len()
+        );
     }
 
     // --- Test 2: frame-level round-trip ---
@@ -720,7 +727,11 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[lz4]   ERROR: frame round-trip mismatch");
             return Err(KernelError::CorruptedData);
         }
-        serial_println!("[lz4]   frame round-trip OK ({}B -> {}B)", input.len(), frame.len());
+        serial_println!(
+            "[lz4]   frame round-trip OK ({}B -> {}B)",
+            input.len(),
+            frame.len()
+        );
     }
 
     // --- Test 3: empty input ---
@@ -750,7 +761,11 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[lz4]   ERROR: incompressible round-trip mismatch");
             return Err(KernelError::CorruptedData);
         }
-        serial_println!("[lz4]   incompressible data OK ({}B -> {}B)", input.len(), frame.len());
+        serial_println!(
+            "[lz4]   incompressible data OK ({}B -> {}B)",
+            input.len(),
+            frame.len()
+        );
     }
 
     // --- Test 5: highly repetitive data ---
@@ -767,7 +782,11 @@ pub fn self_test() -> KernelResult<()> {
         } else {
             0
         };
-        serial_println!("[lz4]   repetitive data OK (4096B -> {}B, {}%)", frame.len(), ratio);
+        serial_println!(
+            "[lz4]   repetitive data OK (4096B -> {}B, {}%)",
+            frame.len(),
+            ratio
+        );
     }
 
     // --- Test 6: magic validation ---
@@ -808,7 +827,10 @@ pub fn self_test() -> KernelResult<()> {
         // From the xxHash reference: xxh32("", 0) = 0x02CC5D05
         let h_empty = xxhash32(b"", 0);
         if h_empty != 0x02CC5D05 {
-            serial_println!("[lz4]   ERROR: xxHash-32(\"\") = {:#010X}, expected 0x02CC5D05", h_empty);
+            serial_println!(
+                "[lz4]   ERROR: xxHash-32(\"\") = {:#010X}, expected 0x02CC5D05",
+                h_empty
+            );
             return Err(KernelError::CorruptedData);
         }
         serial_println!("[lz4]   xxHash-32 known vectors OK");

@@ -169,14 +169,18 @@ pub fn build_choices(path: &str) -> KernelResult<Vec<AppChoice>> {
     // 1. Registered handlers from associations.
     let registered = crate::fs::associations::apps_for(mime);
     let default_app = crate::fs::associations::default_app(mime);
-    let default_path = default_app.as_ref().map(|a| a.app_path.clone()).unwrap_or_default();
+    let default_path = default_app
+        .as_ref()
+        .map(|a| a.app_path.clone())
+        .unwrap_or_default();
 
     for assoc in &registered {
         seen_paths.push(assoc.app_path.clone());
 
         // Check recent usage count.
         let recent = RECENT.lock();
-        let usage = recent.iter()
+        let usage = recent
+            .iter()
             .find(|r| r.mime == mime && r.app_path == assoc.app_path);
         let (use_count, last_used) = match usage {
             Some(r) => (r.use_count, r.last_used_ns),
@@ -196,7 +200,8 @@ pub fn build_choices(path: &str) -> KernelResult<Vec<AppChoice>> {
     // 2. Recently used apps for this type (not already in the list).
     {
         let recent = RECENT.lock();
-        let mut recent_for_type: Vec<&RecentChoice> = recent.iter()
+        let mut recent_for_type: Vec<&RecentChoice> = recent
+            .iter()
             .filter(|r| r.mime == mime && !seen_paths.contains(&r.app_path))
             .collect();
         recent_for_type.sort_by_key(|e| core::cmp::Reverse(e.last_used_ns));
@@ -237,7 +242,12 @@ pub fn build_choices(path: &str) -> KernelResult<Vec<AppChoice>> {
 /// Open a file with a specific application.
 ///
 /// Records the choice and optionally sets as default.
-pub fn open_with(path: &str, app_path: &str, app_name: &str, set_as_default: bool) -> KernelResult<OpenWithResult> {
+pub fn open_with(
+    path: &str,
+    app_path: &str,
+    app_name: &str,
+    set_as_default: bool,
+) -> KernelResult<OpenWithResult> {
     OPEN_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let mime = crate::fs::mime::detect(path).unwrap_or("application/octet-stream");
@@ -246,13 +256,17 @@ pub fn open_with(path: &str, app_path: &str, app_name: &str, set_as_default: boo
     // Record in recent choices.
     {
         let mut recent = RECENT.lock();
-        if let Some(entry) = recent.iter_mut().find(|r| r.mime == mime && r.app_path == app_path) {
+        if let Some(entry) = recent
+            .iter_mut()
+            .find(|r| r.mime == mime && r.app_path == app_path)
+        {
             entry.use_count = entry.use_count.saturating_add(1);
             entry.last_used_ns = now;
         } else {
             if recent.len() >= MAX_RECENT_TOTAL {
                 // Evict oldest.
-                if let Some(oldest_idx) = recent.iter()
+                if let Some(oldest_idx) = recent
+                    .iter()
                     .enumerate()
                     .min_by_key(|(_, r)| r.last_used_ns)
                     .map(|(i, _)| i)
@@ -287,14 +301,14 @@ pub fn open_with(path: &str, app_path: &str, app_name: &str, set_as_default: boo
 
 /// Get the current default app for a file.
 pub fn current_default(path: &str) -> Option<String> {
-    crate::fs::associations::default_app_for_file(path)
-        .map(|a| a.app_name)
+    crate::fs::associations::default_app_for_file(path).map(|a| a.app_name)
 }
 
 /// Get recent choices for a MIME type.
 pub fn recent_for_type(mime: &str) -> Vec<(String, String, u64)> {
     let recent = RECENT.lock();
-    let mut entries: Vec<(String, String, u64)> = recent.iter()
+    let mut entries: Vec<(String, String, u64)> = recent
+        .iter()
         .filter(|r| r.mime == mime)
         .map(|r| (r.app_path.clone(), r.app_name.clone(), r.use_count))
         .collect();
@@ -356,7 +370,10 @@ pub fn self_test() -> KernelResult<()> {
         let choices = build_choices("/test.txt")?;
         // Should include registered handlers and all known apps.
         assert!(!choices.is_empty());
-        serial_println!("[openwith] test 2 passed: build choices ({} apps)", choices.len());
+        serial_println!(
+            "[openwith] test 2 passed: build choices ({} apps)",
+            choices.len()
+        );
     }
 
     // Test 3: open with and record recent.

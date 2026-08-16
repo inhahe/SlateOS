@@ -109,7 +109,11 @@ impl<'a> Iterator for SplitNByte<'a> {
         // for "split off the command, keep the argument string intact".
         if self.remaining <= 1 {
             self.rest = None;
-            return if self.remaining == 1 { Some(rest) } else { None };
+            return if self.remaining == 1 {
+                Some(rest)
+            } else {
+                None
+            };
         }
         match rest.iter().position(|&b| b == self.delim) {
             Some(idx) => {
@@ -209,11 +213,18 @@ impl ByteStrExt for [u8] {
     }
 
     fn split_byte(&self, delim: u8) -> SplitByte<'_> {
-        SplitByte { rest: Some(self), delim }
+        SplitByte {
+            rest: Some(self),
+            delim,
+        }
     }
 
     fn splitn_byte(&self, n: usize, delim: u8) -> SplitNByte<'_> {
-        SplitNByte { rest: Some(self), delim, remaining: n }
+        SplitNByte {
+            rest: Some(self),
+            delim,
+            remaining: n,
+        }
     }
 
     fn split_once_byte(&self, delim: u8) -> Option<(&[u8], &[u8])> {
@@ -310,8 +321,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert_eq!(f, alloc::vec![&b"a"[..], &b""[..]]);
 
     serial_println!("  bytestr::self_test 4: split_once / rsplit_once");
-    assert_eq!(b"key=val=ue".split_once_byte(b'='), Some((&b"key"[..], &b"val=ue"[..])));
-    assert_eq!(b"key=val=ue".rsplit_once_byte(b'='), Some((&b"key=val"[..], &b"ue"[..])));
+    assert_eq!(
+        b"key=val=ue".split_once_byte(b'='),
+        Some((&b"key"[..], &b"val=ue"[..]))
+    );
+    assert_eq!(
+        b"key=val=ue".rsplit_once_byte(b'='),
+        Some((&b"key=val"[..], &b"ue"[..]))
+    );
     assert_eq!(b"nodelim".split_once_byte(b'='), None);
     // A delimiter at either end gives an empty half, not None.
     assert_eq!(b"=v".split_once_byte(b'='), Some((&b""[..], &b"v"[..])));

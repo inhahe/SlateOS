@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -128,7 +128,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         lock_state: LockState::Idle,
@@ -178,7 +180,10 @@ pub fn remove_device(address: &str) -> KernelResult<()> {
 pub fn update_proximity(address: &str, status: ProximityStatus) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let dev = state.devices.iter_mut().find(|d| d.address == address)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.address == address)
             .ok_or(KernelError::NotFound)?;
         dev.status = status;
         if status == ProximityStatus::InRange {
@@ -197,7 +202,9 @@ pub fn check_proximity() -> KernelResult<bool> {
         }
 
         // Check if any enabled device is in range.
-        let any_in_range = state.devices.iter()
+        let any_in_range = state
+            .devices
+            .iter()
             .filter(|d| d.enabled)
             .any(|d| d.status == ProximityStatus::InRange);
 
@@ -272,12 +279,18 @@ pub fn manual_unlock() -> KernelResult<()> {
 
 /// Get current lock state.
 pub fn lock_state() -> LockState {
-    STATE.lock().as_ref().map_or(LockState::Idle, |s| s.lock_state)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(LockState::Idle, |s| s.lock_state)
 }
 
 /// List paired devices.
 pub fn list_devices() -> Vec<PairedDevice> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Statistics: (device_count, total_locks, total_unlocks, ops).

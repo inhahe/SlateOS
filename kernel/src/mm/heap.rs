@@ -41,7 +41,7 @@
 #![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
 
 use crate::error::{KernelError, KernelResult};
-use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::mm::rawmem;
 use crate::serial_println;
 use core::alloc::{GlobalAlloc, Layout};
@@ -144,13 +144,16 @@ unsafe fn poison_free(ptr: *mut u8, class_size: usize) -> bool {
     let m1 = unsafe { rawmem::read_u8(ptr.add(9)) };
     let m2 = unsafe { rawmem::read_u8(ptr.add(10)) };
     let m3 = unsafe { rawmem::read_u8(ptr.add(11)) };
-    if m0 == POISON_MAGIC[0] && m1 == POISON_MAGIC[1]
-        && m2 == POISON_MAGIC[2] && m3 == POISON_MAGIC[3]
+    if m0 == POISON_MAGIC[0]
+        && m1 == POISON_MAGIC[1]
+        && m2 == POISON_MAGIC[2]
+        && m3 == POISON_MAGIC[3]
     {
         DOUBLE_FREE_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
         serial_println!(
             "[heap] DOUBLE-FREE detected! slot={:#x}, class={}",
-            ptr as usize, class_size
+            ptr as usize,
+            class_size
         );
         return true;
     }
@@ -235,7 +238,10 @@ unsafe fn check_redzone(ptr: *mut u8, alloc_size: usize, class_size: usize) {
             REDZONE_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
             serial_println!(
                 "[heap] BUFFER OVERFLOW detected! slot={:#x}, alloc={}, class={}, offset={}",
-                ptr as usize, alloc_size, class_size, i
+                ptr as usize,
+                alloc_size,
+                class_size,
+                i
             );
             // Only report once per dealloc — no need to scan the rest.
             return;
@@ -322,8 +328,10 @@ unsafe fn check_poison(ptr: *mut u8, class_size: usize) {
     let m1 = unsafe { rawmem::read_u8(ptr.add(9)) };
     let m2 = unsafe { rawmem::read_u8(ptr.add(10)) };
     let m3 = unsafe { rawmem::read_u8(ptr.add(11)) };
-    if m0 != POISON_MAGIC[0] || m1 != POISON_MAGIC[1]
-        || m2 != POISON_MAGIC[2] || m3 != POISON_MAGIC[3]
+    if m0 != POISON_MAGIC[0]
+        || m1 != POISON_MAGIC[1]
+        || m2 != POISON_MAGIC[2]
+        || m3 != POISON_MAGIC[3]
     {
         return; // Virgin slot — never been through poison_free.
     }
@@ -340,7 +348,11 @@ unsafe fn check_poison(ptr: *mut u8, class_size: usize) {
             POISON_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
             serial_println!(
                 "[heap] USE-AFTER-FREE detected! slot={:#x}, offset={}, expected=0x{:02X}, found=0x{:02X}, class={}",
-                ptr as usize, i, FREE_POISON, byte, class_size
+                ptr as usize,
+                i,
+                FREE_POISON,
+                byte,
+                class_size
             );
             // Only report the first corrupted byte per slot.
             return;
@@ -539,7 +551,9 @@ impl Drop for TrackedGuard<'_> {
         // spins on it forever). See `lock_tracked`.
         // SAFETY: `guard` is a live ManuallyDrop dropped exactly once here; this
         // Drop runs once and the field is never touched afterwards.
-        unsafe { core::mem::ManuallyDrop::drop(&mut self.guard); }
+        unsafe {
+            core::mem::ManuallyDrop::drop(&mut self.guard);
+        }
         crate::sched::preempt_enable();
     }
 }
@@ -576,7 +590,9 @@ impl KernelHeap {
             core::panic::Location::caller() as *const _ as usize,
             Ordering::Relaxed,
         );
-        TrackedGuard { guard: core::mem::ManuallyDrop::new(guard) }
+        TrackedGuard {
+            guard: core::mem::ManuallyDrop::new(guard),
+        }
     }
 }
 
@@ -595,7 +611,10 @@ pub fn dump_lock_owner() {
     }
     let site_ptr = HEAP_LOCK_SITE.load(Ordering::Relaxed);
     if site_ptr == 0 {
-        serial_println!("[liveness]   heap-lock: HELD by tid={} (acquire site unknown)", owner);
+        serial_println!(
+            "[liveness]   heap-lock: HELD by tid={} (acquire site unknown)",
+            owner
+        );
         return;
     }
     // SAFETY: HEAP_LOCK_SITE, when non-zero, holds a `&'static Location`
@@ -657,15 +676,18 @@ impl HeapInner {
     /// out of memory.
     // cast_ptr_alignment: slot addresses are aligned to class_size (power of 2
     // >= 8 bytes), which meets FreeSlot's 8-byte alignment requirement.
-    #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, clippy::cast_ptr_alignment)]
+    #[allow(
+        clippy::arithmetic_side_effects,
+        clippy::indexing_slicing,
+        clippy::cast_ptr_alignment
+    )]
     fn refill(&mut self, class_idx: usize) -> bool {
         let class_size = SIZE_CLASSES[class_idx];
 
         // Allocate a physical frame.  Attribute it to the slab heap in the
         // owner census — the allocator cannot tell who is asking.
         let Ok(frame) = ({
-            let _own =
-                super::frame_owner::OwnerScope::new(super::frame_owner::Owner::HeapSlab);
+            let _own = super::frame_owner::OwnerScope::new(super::frame_owner::Owner::HeapSlab);
             frame::alloc_frame()
         }) else {
             return false;
@@ -720,7 +742,9 @@ impl HeapInner {
             serial_println!(
                 "[heap] FREE-LIST CORRUPTION! class={} slot={:#x} bad next={:#x} \
                  (use-after-free overwrote the intrusive link)",
-                SIZE_CLASSES[class_idx], slot as usize, next as usize,
+                SIZE_CLASSES[class_idx],
+                slot as usize,
+                next as usize,
             );
             // Sever the list rather than propagate the bad link: hand out this
             // slot but drop the corrupted tail (leak) so we neither loop nor
@@ -736,9 +760,13 @@ impl HeapInner {
             let class_size = SIZE_CLASSES[class_idx];
             // SAFETY: ptr is a valid slab slot of class_size bytes
             // (just popped from the free list which holds HHDM-mapped slots).
-            unsafe { check_poison(ptr, class_size); }
+            unsafe {
+                check_poison(ptr, class_size);
+            }
             // SAFETY: same ptr, same class_size — still valid.
-            unsafe { poison_alloc(ptr, class_size); }
+            unsafe {
+                poison_alloc(ptr, class_size);
+            }
         }
         ptr
     }
@@ -790,14 +818,10 @@ impl HeapInner {
     fn large_alloc(&self, layout: &Layout) -> *mut u8 {
         let order = Self::large_order(layout);
         // Large kernel allocations are still heap storage for census purposes.
-        let _own =
-            super::frame_owner::OwnerScope::new(super::frame_owner::Owner::HeapSlab);
+        let _own = super::frame_owner::OwnerScope::new(super::frame_owner::Owner::HeapSlab);
         match frame::alloc_order(order) {
             Ok(f) => {
-                super::memtype::charge(
-                    super::memtype::MemType::LargeHeap,
-                    1u64 << order,
-                );
+                super::memtype::charge(super::memtype::MemType::LargeHeap, 1u64 << order);
                 f.to_virt(self.hhdm_offset) as *mut u8
             }
             Err(_) => ptr::null_mut(),
@@ -824,10 +848,7 @@ impl HeapInner {
             // (which is better than corrupting the allocator).  In practice,
             // this cannot fail if the caller upholds the safety contract.
             let _ = unsafe { frame::free_order(frame, order) };
-            super::memtype::uncharge(
-                super::memtype::MemType::LargeHeap,
-                1u64 << order,
-            );
+            super::memtype::uncharge(super::memtype::MemType::LargeHeap, 1u64 << order);
         }
     }
 }
@@ -982,13 +1003,13 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
         // use-after-free may have overwritten before installing it as the new
         // head.  The per-CPU count bounds the list length (so no infinite pop),
         // but a corrupted link still aliases live memory — catch it here.
-        if POISON_ENABLED.load(Ordering::Relaxed)
-            && !free_link_valid(next, slot_ptr, class_size)
-        {
+        if POISON_ENABLED.load(Ordering::Relaxed) && !free_link_valid(next, slot_ptr, class_size) {
             serial_println!(
                 "[heap] FREE-LIST CORRUPTION (pcpu)! class={} slot={:#x} bad next={:#x} \
                  (use-after-free overwrote the intrusive link)",
-                class_size, slot_ptr as usize, next as usize,
+                class_size,
+                slot_ptr as usize,
+                next as usize,
             );
             // Sever: drop the rest of the per-CPU run (leak) rather than alias.
             cache.heads[class_idx] = 0;
@@ -1007,9 +1028,13 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
             // SAFETY: ptr (cast from slot_ptr) is a valid slab slot of
             // class_size bytes — it was on the per-CPU free list, which
             // only contains HHDM-mapped allocator-owned memory.
-            unsafe { check_poison(ptr, class_size); }
+            unsafe {
+                check_poison(ptr, class_size);
+            }
             // SAFETY: same ptr, same class_size — still valid.
-            unsafe { poison_alloc(ptr, class_size); }
+            unsafe {
+                poison_alloc(ptr, class_size);
+            }
         }
         return ptr;
     }
@@ -1032,7 +1057,9 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
         inner.free_lists[class_idx] = unsafe { (*head).next };
         // SAFETY: head is a valid FreeSlot (just read from global list).
         // Writing .next to re-link it into the per-CPU list is safe.
-        unsafe { (*head).next = cache.heads[class_idx] as *mut FreeSlot; }
+        unsafe {
+            (*head).next = cache.heads[class_idx] as *mut FreeSlot;
+        }
         cache.heads[class_idx] = head as usize;
         transferred += 1;
     }
@@ -1057,9 +1084,13 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
             // just transferred from the global free list to the per-CPU
             // cache.  All free-list entries are HHDM-mapped and owned
             // by the allocator.
-            unsafe { check_poison(ptr, class_size); }
+            unsafe {
+                check_poison(ptr, class_size);
+            }
             // SAFETY: same ptr, same class_size — still valid.
-            unsafe { poison_alloc(ptr, class_size); }
+            unsafe {
+                poison_alloc(ptr, class_size);
+            }
         }
         ptr
     } else {
@@ -1112,7 +1143,9 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
         // Fast path: push to local cache.
         let slot = ptr.cast::<FreeSlot>();
         // SAFETY: ptr is a valid slab slot (caller guarantee).
-        unsafe { (*slot).next = cache.heads[class_idx] as *mut FreeSlot; }
+        unsafe {
+            (*slot).next = cache.heads[class_idx] as *mut FreeSlot;
+        }
         cache.heads[class_idx] = slot as usize;
         cache.counts[class_idx] += 1;
         // OPT: Per-CPU counter — plain increment, no `lock` prefix.
@@ -1134,7 +1167,9 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
         // Push to global free list.
         // SAFETY: slot_ptr is valid (popped from per-CPU cache above).
         // Writing .next to re-link it into the global free list is safe.
-        unsafe { (*slot_ptr).next = inner.free_lists[class_idx]; }
+        unsafe {
+            (*slot_ptr).next = inner.free_lists[class_idx];
+        }
         inner.free_lists[class_idx] = slot_ptr;
     }
     drop(inner);
@@ -1142,7 +1177,9 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
     // Now push the new slot to the (no longer full) local cache.
     let slot = ptr.cast::<FreeSlot>();
     // SAFETY: ptr is a valid slab slot.
-    unsafe { (*slot).next = cache.heads[class_idx] as *mut FreeSlot; }
+    unsafe {
+        (*slot).next = cache.heads[class_idx] as *mut FreeSlot;
+    }
     cache.heads[class_idx] = slot as usize;
     cache.counts[class_idx] += 1;
     // OPT: Per-CPU counter (slow path but still per-CPU).
@@ -1163,8 +1200,14 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
 #[allow(clippy::arithmetic_side_effects)]
 fn kasan_slot_size(class_idx: Option<usize>, layout: &Layout) -> usize {
     match class_idx {
-        Some(idx) => SIZE_CLASSES.get(idx).copied().unwrap_or_else(|| layout.size()),
-        None => layout.size().div_ceil(FRAME_SIZE).saturating_mul(FRAME_SIZE),
+        Some(idx) => SIZE_CLASSES
+            .get(idx)
+            .copied()
+            .unwrap_or_else(|| layout.size()),
+        None => layout
+            .size()
+            .div_ceil(FRAME_SIZE)
+            .saturating_mul(FRAME_SIZE),
     }
 }
 
@@ -1189,16 +1232,21 @@ unsafe impl GlobalAlloc for KernelHeap {
                         counter.fetch_add(layout.size() as u64, Ordering::Relaxed);
                     }
                     // Track bytes-in-use watermark.
-                    let current = BYTES_IN_USE.fetch_add(layout.size() as u64, Ordering::Relaxed)
+                    let current = BYTES_IN_USE
+                        .fetch_add(layout.size() as u64, Ordering::Relaxed)
                         .saturating_add(layout.size() as u64);
                     let _ = PEAK_BYTES_IN_USE.fetch_update(
-                        Ordering::Relaxed, Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
                         |peak| if current > peak { Some(current) } else { None },
                     );
                     // KASAN: mark the object addressable + poison slot redzone.
                     if crate::mm::kasan::is_enabled() {
                         crate::mm::kasan::on_alloc(
-                            ptr, layout.size(), kasan_slot_size(Some(idx), &layout));
+                            ptr,
+                            layout.size(),
+                            kasan_slot_size(Some(idx), &layout),
+                        );
                     }
                     return ptr;
                 }
@@ -1229,28 +1277,27 @@ unsafe impl GlobalAlloc for KernelHeap {
                 counter.fetch_add(layout.size() as u64, Ordering::Relaxed);
             }
             // Track bytes-in-use watermark.
-            let current = BYTES_IN_USE.fetch_add(layout.size() as u64, Ordering::Relaxed)
+            let current = BYTES_IN_USE
+                .fetch_add(layout.size() as u64, Ordering::Relaxed)
                 .saturating_add(layout.size() as u64);
-            let _ = PEAK_BYTES_IN_USE.fetch_update(
-                Ordering::Relaxed, Ordering::Relaxed,
-                |peak| if current > peak { Some(current) } else { None },
-            );
+            let _ = PEAK_BYTES_IN_USE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |peak| {
+                if current > peak { Some(current) } else { None }
+            });
         } else {
             LARGE_ALLOCS.fetch_add(1, Ordering::Relaxed);
             // Track bytes-in-use watermark for large allocs.
-            let current = BYTES_IN_USE.fetch_add(layout.size() as u64, Ordering::Relaxed)
+            let current = BYTES_IN_USE
+                .fetch_add(layout.size() as u64, Ordering::Relaxed)
                 .saturating_add(layout.size() as u64);
-            let _ = PEAK_BYTES_IN_USE.fetch_update(
-                Ordering::Relaxed, Ordering::Relaxed,
-                |peak| if current > peak { Some(current) } else { None },
-            );
+            let _ = PEAK_BYTES_IN_USE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |peak| {
+                if current > peak { Some(current) } else { None }
+            });
         }
         // Release the heap lock before touching KASAN shadow (lazy shadow-page
         // mapping uses the frame allocator + page tables, never the heap lock).
         drop(inner);
         if crate::mm::kasan::is_enabled() && !ptr.is_null() {
-            crate::mm::kasan::on_alloc(
-                ptr, layout.size(), kasan_slot_size(class_idx, &layout));
+            crate::mm::kasan::on_alloc(ptr, layout.size(), kasan_slot_size(class_idx, &layout));
         }
         ptr
     }
@@ -1272,7 +1319,9 @@ unsafe impl GlobalAlloc for KernelHeap {
             if let Some(idx) = class_idx {
                 let class_size = SIZE_CLASSES[idx];
                 // SAFETY: ptr points to a valid slab slot of class_size bytes.
-                unsafe { check_redzone(ptr, layout.size(), class_size); }
+                unsafe {
+                    check_redzone(ptr, layout.size(), class_size);
+                }
             }
         }
 
@@ -1491,10 +1540,8 @@ pub fn class_stats() -> [SlabClassStats; NUM_CLASSES] {
     }; NUM_CLASSES];
 
     for (i, entry) in result.iter_mut().enumerate() {
-        let allocs = CLASS_ALLOCS.get(i)
-            .map_or(0, |c| c.load(Ordering::Relaxed));
-        let frees = CLASS_FREES.get(i)
-            .map_or(0, |c| c.load(Ordering::Relaxed));
+        let allocs = CLASS_ALLOCS.get(i).map_or(0, |c| c.load(Ordering::Relaxed));
+        let frees = CLASS_FREES.get(i).map_or(0, |c| c.load(Ordering::Relaxed));
         entry.class_size = SIZE_CLASSES.get(i).copied().unwrap_or(0);
         entry.allocs = allocs;
         entry.frees = frees;
@@ -1545,9 +1592,11 @@ pub fn fragmentation_stats() -> [ClassFragStats; NUM_CLASSES] {
     }; NUM_CLASSES];
 
     for (i, entry) in result.iter_mut().enumerate() {
-        let allocs = CLASS_ALLOCS.get(i)
+        let allocs = CLASS_ALLOCS
+            .get(i)
             .map_or(0u64, |c| c.load(Ordering::Relaxed));
-        let requested = CLASS_BYTES_REQUESTED.get(i)
+        let requested = CLASS_BYTES_REQUESTED
+            .get(i)
             .map_or(0u64, |c| c.load(Ordering::Relaxed));
         let class_size = SIZE_CLASSES.get(i).copied().unwrap_or(0);
         let consumed = allocs.saturating_mul(class_size as u64);
@@ -1655,7 +1704,9 @@ pub fn check_leaks() -> LeakCheckResult {
         // Update growth streak.
         let streak = if active > prev && prev > 0 {
             // Growing — increment streak.
-            GROWTH_STREAK.get(i).map_or(0, |c| c.fetch_add(1, Ordering::Relaxed) + 1)
+            GROWTH_STREAK
+                .get(i)
+                .map_or(0, |c| c.fetch_add(1, Ordering::Relaxed) + 1)
         } else {
             // Stable or shrinking — reset streak.
             if let Some(c) = GROWTH_STREAK.get(i) {
@@ -1765,8 +1816,10 @@ pub fn audit_free_lists() -> HeapAuditResult {
                 let m1 = unsafe { rawmem::read_u8(ptr.add(9)) };
                 let m2 = unsafe { rawmem::read_u8(ptr.add(10)) };
                 let m3 = unsafe { rawmem::read_u8(ptr.add(11)) };
-                if m0 != POISON_MAGIC[0] || m1 != POISON_MAGIC[1]
-                    || m2 != POISON_MAGIC[2] || m3 != POISON_MAGIC[3]
+                if m0 != POISON_MAGIC[0]
+                    || m1 != POISON_MAGIC[1]
+                    || m2 != POISON_MAGIC[2]
+                    || m3 != POISON_MAGIC[3]
                 {
                     corrupted += 1;
                 }
@@ -1820,7 +1873,13 @@ pub fn audit_free_lists() -> HeapAuditResult {
     }
 
     let ok = corrupted == 0 && cycles == 0 && bad_ptrs == 0;
-    HeapAuditResult { total_free_slots: total_free, corrupted_slots: corrupted, cycles_detected: cycles, bad_pointers: bad_ptrs, ok }
+    HeapAuditResult {
+        total_free_slots: total_free,
+        corrupted_slots: corrupted,
+        cycles_detected: cycles,
+        bad_pointers: bad_ptrs,
+        ok,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1849,8 +1908,7 @@ pub fn self_test() -> KernelResult<()> {
     // -- Test 1: Small slab allocations across size classes -------------------
     let test_sizes: [usize; 6] = [8, 32, 64, 256, 1024, 8192];
     for &size in &test_sizes {
-        let layout = Layout::from_size_align(size, 8)
-            .map_err(|_| KernelError::InvalidArgument)?;
+        let layout = Layout::from_size_align(size, 8).map_err(|_| KernelError::InvalidArgument)?;
 
         // SAFETY: layout is valid (non-zero size, power-of-2 alignment).
         let ptr = unsafe { alloc::alloc::alloc(layout) };
@@ -1861,7 +1919,9 @@ pub fn self_test() -> KernelResult<()> {
 
         // Write to the allocation to verify it's usable.
         // SAFETY: ptr is valid and points to at least `size` bytes.
-        unsafe { ptr.write_bytes(0xAA, size); }
+        unsafe {
+            ptr.write_bytes(0xAA, size);
+        }
 
         // Verify the write.
         // SAFETY: ptr is valid and initialized.
@@ -1872,13 +1932,15 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // SAFETY: ptr was just allocated with this layout.
-        unsafe { alloc::alloc::dealloc(ptr, layout); }
+        unsafe {
+            alloc::alloc::dealloc(ptr, layout);
+        }
     }
     serial_println!("[heap]   Slab allocations (6 sizes): OK");
 
     // -- Test 2: Large allocation (32 KiB = 2 frames) ------------------------
-    let large_layout = Layout::from_size_align(32 * 1024, 16)
-        .map_err(|_| KernelError::InvalidArgument)?;
+    let large_layout =
+        Layout::from_size_align(32 * 1024, 16).map_err(|_| KernelError::InvalidArgument)?;
 
     // SAFETY: layout is valid.
     let large_ptr = unsafe { alloc::alloc::alloc_zeroed(large_layout) };
@@ -1896,12 +1958,13 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // SAFETY: large_ptr was allocated with large_layout.
-    unsafe { alloc::alloc::dealloc(large_ptr, large_layout); }
+    unsafe {
+        alloc::alloc::dealloc(large_ptr, large_layout);
+    }
     serial_println!("[heap]   Large allocation (32 KiB): OK");
 
     // -- Test 3: Multiple allocations (slab refill) --------------------------
-    let small_layout = Layout::from_size_align(64, 8)
-        .map_err(|_| KernelError::InvalidArgument)?;
+    let small_layout = Layout::from_size_align(64, 8).map_err(|_| KernelError::InvalidArgument)?;
     let count = 32;
     let mut ptrs = [ptr::null_mut::<u8>(); 32];
     for slot in &mut ptrs {
@@ -1916,7 +1979,9 @@ pub fn self_test() -> KernelResult<()> {
     // Free all.
     for &p in &ptrs {
         // SAFETY: each pointer was allocated with small_layout.
-        unsafe { alloc::alloc::dealloc(p, small_layout); }
+        unsafe {
+            alloc::alloc::dealloc(p, small_layout);
+        }
     }
     serial_println!("[heap]   Batch alloc/free ({} x 64B): OK", count);
 
@@ -1949,7 +2014,9 @@ fn double_free_slot(ptr: *mut u8, layout: Layout) {
     // SAFETY: ptr was previously allocated with this layout.  This is
     // an intentional double-free to test detection — UB in normal code,
     // but the slab poison system is designed to catch and handle it.
-    unsafe { alloc::alloc::dealloc(ptr, layout); }
+    unsafe {
+        alloc::alloc::dealloc(ptr, layout);
+    }
 }
 
 #[inline(never)]
@@ -1984,7 +2051,9 @@ pub fn poison_self_test() {
     // SAFETY: disabling interrupts is required to ensure LIFO slot reuse
     // in the per-CPU slab cache (no ISR can steal the slot between free
     // and re-alloc).  Restored at the end of the test.
-    unsafe { crate::cpu::cli(); }
+    unsafe {
+        crate::cpu::cli();
+    }
 
     // --- Test 1: Normal cycle (no false positives) ---
     //
@@ -1995,7 +2064,9 @@ pub fn poison_self_test() {
     let warmup = unsafe { alloc::alloc::alloc(layout) };
     assert!(!warmup.is_null(), "poison test: warmup alloc failed");
     // SAFETY: warmup was just allocated with this layout and is non-null.
-    unsafe { alloc::alloc::dealloc(warmup, layout); }
+    unsafe {
+        alloc::alloc::dealloc(warmup, layout);
+    }
     let violations_after_warmup = POISON_VIOLATIONS.load(Ordering::Relaxed);
 
     // Now alloc → write → dealloc → realloc.  The realloc should NOT
@@ -2004,9 +2075,13 @@ pub fn poison_self_test() {
     let p1 = unsafe { alloc::alloc::alloc(layout) };
     assert!(!p1.is_null(), "poison test: alloc failed");
     // SAFETY: p1 is non-null and points to 64 allocated bytes.
-    unsafe { p1.write_bytes(0x42, 64); }
+    unsafe {
+        p1.write_bytes(0x42, 64);
+    }
     // SAFETY: p1 was allocated with this layout.
-    unsafe { alloc::alloc::dealloc(p1, layout); }
+    unsafe {
+        alloc::alloc::dealloc(p1, layout);
+    }
     // SAFETY: layout is valid, allocator initialized.
     let p2 = unsafe { alloc::alloc::alloc(layout) };
     assert!(!p2.is_null(), "poison test: realloc failed");
@@ -2029,7 +2104,9 @@ pub fn poison_self_test() {
     // breaks provenance tracking so the store is guaranteed.
     let p2_addr = p2 as usize;
     // SAFETY: p2 was allocated with this layout and is non-null.
-    unsafe { alloc::alloc::dealloc(p2, layout); }
+    unsafe {
+        alloc::alloc::dealloc(p2, layout);
+    }
     let violations_pre_uaf = POISON_VIOLATIONS.load(Ordering::Relaxed);
     // BAD: simulate use-after-free by writing to the freed slot.
     // Offset 16 is inside the poison zone (bytes 12..class_size).
@@ -2048,7 +2125,9 @@ pub fn poison_self_test() {
         "poison test: UAF not detected (violations didn't increment)"
     );
     // SAFETY: p4 was allocated by corrupt_and_realloc with this layout.
-    unsafe { alloc::alloc::dealloc(p4, layout); }
+    unsafe {
+        alloc::alloc::dealloc(p4, layout);
+    }
     serial_println!("[heap]   Use-after-free detection: OK (violation caught)");
 
     // --- Test 3: Double-free detection ---
@@ -2057,19 +2136,20 @@ pub fn poison_self_test() {
     // that the slot already has the poison magic (from the first free).
     // SAFETY: layout is valid, allocator initialized.
     let p5 = unsafe { alloc::alloc::alloc(layout) };
-    assert!(!p5.is_null(), "poison test: alloc for double-free test failed");
+    assert!(
+        !p5.is_null(),
+        "poison test: alloc for double-free test failed"
+    );
     // SAFETY: p5 was allocated with this layout and is non-null.
-    unsafe { alloc::alloc::dealloc(p5, layout); }
+    unsafe {
+        alloc::alloc::dealloc(p5, layout);
+    }
     let df_pre = DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed);
     // Second free via isolated #[inline(never)] helper — prevents LTO
     // from optimizing across both dealloc calls.
     double_free_slot(p5, layout);
     let df_post = DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed);
-    assert_eq!(
-        df_post,
-        df_pre + 1,
-        "poison test: double-free not detected"
-    );
+    assert_eq!(df_post, df_pre + 1, "poison test: double-free not detected");
     // No cleanup needed: the double-free'd slot was NOT re-added to the
     // free list (poison_free returns true → dealloc skips the push).
     // The slot from the first free is still validly on the list.
@@ -2090,10 +2170,14 @@ pub fn poison_self_test() {
     // SAFETY: p6 points to a 64-byte slab slot (class size for 40-byte
     // alloc).  Offset 44 is within the slot but past the allocation —
     // intentional corruption for testing the red zone detector.
-    unsafe { core::ptr::write_volatile(p6.add(44), 0x42); }
+    unsafe {
+        core::ptr::write_volatile(p6.add(44), 0x42);
+    }
     // Free triggers red zone check — should detect corruption at byte 44.
     // SAFETY: p6 was allocated with layout40.
-    unsafe { alloc::alloc::dealloc(p6, layout40); }
+    unsafe {
+        alloc::alloc::dealloc(p6, layout40);
+    }
     let rz_post = REDZONE_VIOLATIONS.load(Ordering::Relaxed);
     assert_eq!(
         rz_post,
@@ -2104,7 +2188,9 @@ pub fn poison_self_test() {
 
     // SAFETY: restoring the interrupt state disabled at the start of
     // this test.  All allocations have been freed.
-    unsafe { crate::cpu::sti(); }
+    unsafe {
+        crate::cpu::sti();
+    }
 
     // Restore previous state.
     POISON_ENABLED.store(was_enabled, Ordering::Relaxed);

@@ -47,8 +47,8 @@
 //! - Linux `mm/oom_kill.c` — oom_badness(), select_bad_process()
 //! - Our design spec: "don't allow swapping to tie up the system"
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Statistics
@@ -141,8 +141,7 @@ pub fn handle_oom(needed_pages: usize) -> usize {
     // chance to free memory before we resort to killing processes.
     super::pressure::notify(super::pressure::PressureLevel::Critical);
 
-    let policy = crate::sysctl::get(crate::sysctl::PARAM_MM_OOM_POLICY)
-        .unwrap_or(0) as u8;
+    let policy = crate::sysctl::get(crate::sysctl::PARAM_MM_OOM_POLICY).unwrap_or(0) as u8;
 
     let event_num = OOM_EVENTS.load(Ordering::Relaxed);
     serial_println!(
@@ -153,9 +152,13 @@ pub fn handle_oom(needed_pages: usize) -> usize {
     );
 
     // Structured log entry for dmesg/klog consumers.
-    crate::klog!(Warn, "mm.oom",
+    crate::klog!(
+        Warn,
+        "mm.oom",
         "OOM event #{}: need={} pages, policy={}",
-        event_num, needed_pages, policy
+        event_num,
+        needed_pages,
+        policy
     );
 
     match policy {
@@ -176,11 +179,15 @@ pub fn handle_oom(needed_pages: usize) -> usize {
                         let kills = OOM_KILLS.load(Ordering::Relaxed);
                         serial_println!(
                             "[oom] Killed a process, freed {} pages (total kills: {})",
-                            freed, kills,
+                            freed,
+                            kills,
                         );
-                        crate::klog!(Error, "mm.oom",
+                        crate::klog!(
+                            Error,
+                            "mm.oom",
                             "OOM kill: freed={} pages, total_kills={}",
-                            freed, kills
+                            freed,
+                            kills
                         );
                     } else {
                         serial_println!(
@@ -192,9 +199,7 @@ pub fn handle_oom(needed_pages: usize) -> usize {
                 None => {
                     // No kill callback registered (early boot or proc not
                     // initialized).  Can't kill anything — treat as policy 2.
-                    serial_println!(
-                        "[oom] No kill callback registered — returning OutOfMemory"
-                    );
+                    serial_println!("[oom] No kill callback registered — returning OutOfMemory");
                     0
                 }
             }
@@ -235,8 +240,7 @@ pub fn self_test() {
     serial_println!("[oom] Running self-test...");
 
     // Save original policy and event count.
-    let original_policy = crate::sysctl::get(crate::sysctl::PARAM_MM_OOM_POLICY)
-        .unwrap_or(0);
+    let original_policy = crate::sysctl::get(crate::sysctl::PARAM_MM_OOM_POLICY).unwrap_or(0);
     let events_before = oom_event_count();
 
     // -- Test 1: Policy 2 returns 0 --
@@ -271,10 +275,7 @@ pub fn self_test() {
     let _ = crate::sysctl::set(crate::sysctl::PARAM_MM_OOM_POLICY, 0);
     let freed = handle_oom(10);
     assert_eq!(freed, 42, "test callback should return 42");
-    assert!(
-        oom_kill_count() > 0,
-        "kill counter should increment"
-    );
+    assert!(oom_kill_count() > 0, "kill counter should increment");
     serial_println!("[oom]   Callback registration and invocation: OK");
 
     // Restore original state.
@@ -282,7 +283,9 @@ pub fn self_test() {
 
     // Clear the test callback — replace with None by registering a
     // no-op that returns 0 (until the real proc callback is registered).
-    fn noop_callback(_policy: u8, _needed: usize) -> usize { 0 }
+    fn noop_callback(_policy: u8, _needed: usize) -> usize {
+        0
+    }
     register_kill_callback(noop_callback);
 
     serial_println!("[oom] Self-test PASSED");

@@ -22,11 +22,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -144,7 +144,9 @@ where
 /// The self-test now builds its own fixtures via the real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         events: Vec::new(),
         processes: Vec::new(),
@@ -172,8 +174,14 @@ pub fn record(pid: u32, address: u64, kind: FaultKind, ip: u64) -> KernelResult<
             p.total += 1;
         } else if state.processes.len() < MAX_PROCESSES {
             let mut pf = ProcessFaults {
-                pid, name: format!("pid_{}", pid),
-                minor: 0, major: 0, invalid: 0, protection: 0, cow: 0, total: 1,
+                pid,
+                name: format!("pid_{}", pid),
+                minor: 0,
+                major: 0,
+                invalid: 0,
+                protection: 0,
+                cow: 0,
+                total: 1,
             };
             match kind {
                 FaultKind::Minor => pf.minor = 1,
@@ -191,7 +199,12 @@ pub fn record(pid: u32, address: u64, kind: FaultKind, ip: u64) -> KernelResult<
             h.last_pid = pid;
             h.last_kind = kind;
         } else if state.hotspots.len() < MAX_HOTSPOTS {
-            state.hotspots.push(Hotspot { address: page_addr, count: 1, last_pid: pid, last_kind: kind });
+            state.hotspots.push(Hotspot {
+                address: page_addr,
+                count: 1,
+                last_pid: pid,
+                last_kind: kind,
+            });
         }
         // Global counters.
         match kind {
@@ -201,20 +214,34 @@ pub fn record(pid: u32, address: u64, kind: FaultKind, ip: u64) -> KernelResult<
         }
         state.total_faults += 1;
         // Event log.
-        if state.events.len() >= MAX_EVENTS { state.events.remove(0); }
-        state.events.push(FaultEvent { pid, address, kind, timestamp_ns: now, instruction_ptr: ip });
+        if state.events.len() >= MAX_EVENTS {
+            state.events.remove(0);
+        }
+        state.events.push(FaultEvent {
+            pid,
+            address,
+            kind,
+            timestamp_ns: now,
+            instruction_ptr: ip,
+        });
         Ok(())
     })
 }
 
 /// Get fault stats for a process.
 pub fn get_process(pid: u32) -> Option<ProcessFaults> {
-    STATE.lock().as_ref().and_then(|s| s.processes.iter().find(|p| p.pid == pid).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.processes.iter().find(|p| p.pid == pid).cloned())
 }
 
 /// List all process fault stats.
 pub fn list_processes() -> Vec<ProcessFaults> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.processes.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.processes.clone())
 }
 
 /// Top N faulting processes by total faults.
@@ -240,7 +267,11 @@ pub fn hotspots(n: usize) -> Vec<Hotspot> {
 /// Recent fault events.
 pub fn recent_events(n: usize) -> Vec<FaultEvent> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let start = if n >= s.events.len() { 0 } else { s.events.len() - n };
+        let start = if n >= s.events.len() {
+            0
+        } else {
+            s.events.len() - n
+        };
         s.events[start..].to_vec()
     })
 }
@@ -251,8 +282,12 @@ pub fn clear() -> KernelResult<()> {
         state.events.clear();
         state.hotspots.clear();
         for p in &mut state.processes {
-            p.minor = 0; p.major = 0; p.invalid = 0;
-            p.protection = 0; p.cow = 0; p.total = 0;
+            p.minor = 0;
+            p.major = 0;
+            p.invalid = 0;
+            p.protection = 0;
+            p.cow = 0;
+            p.total = 0;
         }
         state.total_minor = 0;
         state.total_major = 0;
@@ -265,7 +300,14 @@ pub fn clear() -> KernelResult<()> {
 pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.processes.len(), s.events.len(), s.total_faults, s.total_minor, s.total_major, s.ops),
+        Some(s) => (
+            s.processes.len(),
+            s.events.len(),
+            s.total_faults,
+            s.total_minor,
+            s.total_major,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }

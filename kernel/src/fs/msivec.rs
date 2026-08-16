@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -112,7 +112,9 @@ where
 /// and 86 frees.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         total_vectors: 0,
@@ -126,11 +128,19 @@ pub fn init_defaults() {
 /// Allocate vectors for a device.
 pub fn alloc_vectors(device: &str, msi_type: MsiType, count: u32, cpu: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.devices.len() >= MAX_DEVICES { return Err(KernelError::ResourceExhausted); }
-        if state.devices.iter().any(|d| d.device == device) { return Err(KernelError::AlreadyExists); }
+        if state.devices.len() >= MAX_DEVICES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.devices.iter().any(|d| d.device == device) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.devices.push(DeviceMsi {
-            device: String::from(device), msi_type, vectors_allocated: count,
-            vectors_active: count, interrupts: 0, target_cpu: cpu,
+            device: String::from(device),
+            msi_type,
+            vectors_allocated: count,
+            vectors_active: count,
+            interrupts: 0,
+            target_cpu: cpu,
         });
         state.total_vectors += count;
         state.alloc_count += 1;
@@ -141,7 +151,10 @@ pub fn alloc_vectors(device: &str, msi_type: MsiType, count: u32, cpu: u32) -> K
 /// Free vectors for a device.
 pub fn free_vectors(device: &str) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.devices.iter().position(|d| d.device == device)
+        let idx = state
+            .devices
+            .iter()
+            .position(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         let count = state.devices[idx].vectors_allocated;
         state.devices.remove(idx);
@@ -154,7 +167,10 @@ pub fn free_vectors(device: &str) -> KernelResult<()> {
 /// Record an interrupt delivery.
 pub fn record_interrupt(device: &str) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.devices.iter_mut().find(|d| d.device == device)
+        let d = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         d.interrupts += 1;
         state.total_interrupts += 1;
@@ -165,7 +181,10 @@ pub fn record_interrupt(device: &str) -> KernelResult<()> {
 /// Set target CPU for a device's vectors.
 pub fn set_target_cpu(device: &str, cpu: u32) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.devices.iter_mut().find(|d| d.device == device)
+        let d = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         d.target_cpu = cpu;
         Ok(())
@@ -174,14 +193,24 @@ pub fn set_target_cpu(device: &str, cpu: u32) -> KernelResult<()> {
 
 /// Per-device stats.
 pub fn per_device() -> Vec<DeviceMsi> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Statistics: (device_count, total_vectors, total_interrupts, allocs, frees, ops).
 pub fn stats() -> (usize, u32, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.total_vectors, s.total_interrupts, s.alloc_count, s.free_count, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.total_vectors,
+            s.total_interrupts,
+            s.alloc_count,
+            s.free_count,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -209,7 +238,15 @@ pub fn self_test() {
     let devs = per_device();
     assert_eq!(devs.len(), 1);
     let d = devs.iter().find(|d| d.device == "test_dev").expect("find");
-    assert_eq!((d.vectors_allocated, d.vectors_active, d.interrupts, d.target_cpu), (4, 4, 0, 0));
+    assert_eq!(
+        (
+            d.vectors_allocated,
+            d.vectors_active,
+            d.interrupts,
+            d.target_cpu
+        ),
+        (4, 4, 0, 0)
+    );
     assert_eq!(d.msi_type, MsiType::MsiX);
     let (_, vecs, _, allocs, _, _) = stats();
     assert_eq!((vecs, allocs), (4, 1));
@@ -218,14 +255,20 @@ pub fn self_test() {
 
     // 3: Interrupt — per-device and global interrupt counters advance.
     record_interrupt("test_dev").expect("interrupt");
-    let d = per_device().into_iter().find(|d| d.device == "test_dev").expect("p3");
+    let d = per_device()
+        .into_iter()
+        .find(|d| d.device == "test_dev")
+        .expect("p3");
     assert_eq!(d.interrupts, 1);
     assert_eq!(stats().2, 1); // total_interrupts
     crate::serial_println!("  [3/8] interrupt: OK");
 
     // 4: Target CPU — retargeting updates the device's affinity.
     set_target_cpu("test_dev", 3).expect("target");
-    let d = per_device().into_iter().find(|d| d.device == "test_dev").expect("p4");
+    let d = per_device()
+        .into_iter()
+        .find(|d| d.device == "test_dev")
+        .expect("p4");
     assert_eq!(d.target_cpu, 3);
     crate::serial_println!("  [4/8] target cpu: OK");
 

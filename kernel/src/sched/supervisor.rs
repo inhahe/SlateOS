@@ -48,8 +48,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::Mutex;
 
 use crate::error::KernelResult;
-use crate::serial_println;
 use crate::sched::task::TaskId;
+use crate::serial_println;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -110,7 +110,11 @@ impl RestartPolicy {
     /// Create a "restart on failure" policy.
     #[must_use]
     #[allow(dead_code)] // Reserved for when exit codes are wired in.
-    pub const fn on_failure(max_restarts: u32, base_delay_ticks: u64, max_delay_ticks: u64) -> Self {
+    pub const fn on_failure(
+        max_restarts: u32,
+        base_delay_ticks: u64,
+        max_delay_ticks: u64,
+    ) -> Self {
         Self {
             mode: RestartMode::OnFailure,
             max_restarts,
@@ -364,7 +368,9 @@ fn on_task_exit(task_id: TaskId) {
     };
 
     if !should_restart {
-        crate::klog!(Info, "sched.supervisor",
+        crate::klog!(
+            Info,
+            "sched.supervisor",
             "Supervised task {} exited (policy=Never, no restart)",
             task_id
         );
@@ -374,9 +380,12 @@ fn on_task_exit(task_id: TaskId) {
 
     // Check restart limit.
     if policy.max_restarts > 0 && entry.restart_count >= policy.max_restarts {
-        crate::klog!(Warn, "sched.supervisor",
+        crate::klog!(
+            Warn,
+            "sched.supervisor",
             "Task {} exceeded max restarts ({}), giving up",
-            task_id, policy.max_restarts
+            task_id,
+            policy.max_restarts
         );
         entry.active = false;
         RESTART_FAILURES.fetch_add(1, Ordering::Relaxed);
@@ -408,9 +417,13 @@ fn on_task_exit(task_id: TaskId) {
 
     drop(table);
 
-    crate::klog!(Info, "sched.supervisor",
+    crate::klog!(
+        Info,
+        "sched.supervisor",
         "Task {} died, scheduling restart #{} in {} ticks",
-        task_id, slot_idx, delay
+        task_id,
+        slot_idx,
+        delay
     );
 
     // Schedule the restart via ktimer.
@@ -469,7 +482,10 @@ fn do_restart(slot_idx: u64) {
     };
 
     let Some(info) = info else {
-        serial_println!("[supervisor] WARNING: restart slot {} empty (cancelled?)", idx);
+        serial_println!(
+            "[supervisor] WARNING: restart slot {} empty (cancelled?)",
+            idx
+        );
         return;
     };
 
@@ -493,16 +509,22 @@ fn do_restart(slot_idx: u64) {
             drop(table);
 
             TOTAL_RESTARTS.fetch_add(1, Ordering::Relaxed);
-            crate::klog!(Info, "sched.supervisor",
+            crate::klog!(
+                Info,
+                "sched.supervisor",
                 "Restarted task as tid={} (slot {})",
-                new_tid, idx
+                new_tid,
+                idx
             );
         }
         Err(e) => {
             RESTART_FAILURES.fetch_add(1, Ordering::Relaxed);
-            crate::klog!(Error, "sched.supervisor",
+            crate::klog!(
+                Error,
+                "sched.supervisor",
                 "Failed to restart task (slot {}): {:?}",
-                idx, e
+                idx,
+                e
             );
         }
     }
@@ -546,14 +568,14 @@ pub fn self_test() {
     serial_println!("[supervisor]   Policy creation: OK");
 
     // --- 2. Backoff calculation ---
-    assert_eq!(calculate_backoff(0, 10, 500), 10);   // 1×10 = 10
-    assert_eq!(calculate_backoff(1, 10, 500), 20);   // 2×10 = 20
-    assert_eq!(calculate_backoff(2, 10, 500), 40);   // 4×10 = 40
-    assert_eq!(calculate_backoff(3, 10, 500), 80);   // 8×10 = 80
-    assert_eq!(calculate_backoff(5, 10, 500), 320);  // 32×10 = 320
-    assert_eq!(calculate_backoff(6, 10, 500), 500);  // 64×10 = 640 → capped at 500
+    assert_eq!(calculate_backoff(0, 10, 500), 10); // 1×10 = 10
+    assert_eq!(calculate_backoff(1, 10, 500), 20); // 2×10 = 20
+    assert_eq!(calculate_backoff(2, 10, 500), 40); // 4×10 = 40
+    assert_eq!(calculate_backoff(3, 10, 500), 80); // 8×10 = 80
+    assert_eq!(calculate_backoff(5, 10, 500), 320); // 32×10 = 320
+    assert_eq!(calculate_backoff(6, 10, 500), 500); // 64×10 = 640 → capped at 500
     assert_eq!(calculate_backoff(10, 10, 500), 500); // way over cap
-    assert_eq!(calculate_backoff(0, 0, 100), 1);     // base=0 → min 1
+    assert_eq!(calculate_backoff(0, 0, 100), 1); // base=0 → min 1
     serial_println!("[supervisor]   Backoff calculation: OK");
 
     // --- 3. Initialization ---
@@ -656,7 +678,8 @@ pub fn self_test() {
         } else {
             serial_println!(
                 "[supervisor]   Live restart: UNEXPECTED (spawns={}, exits={})",
-                spawns, exits
+                spawns,
+                exits
             );
         }
 

@@ -40,8 +40,8 @@
 // description even though current call sites don't exercise all paths.
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -160,8 +160,11 @@ pub fn detect() {
     let invpcid_support = ebx7 & (1 << 10) != 0;
     INVPCID_SUPPORTED.store(invpcid_support, Ordering::Release);
 
-    serial_println!("[pcid] PCID supported: {}, INVPCID: {}",
-        pcid_support, invpcid_support);
+    serial_println!(
+        "[pcid] PCID supported: {}, INVPCID: {}",
+        pcid_support,
+        invpcid_support
+    );
 }
 
 /// Enable PCID by setting CR4.PCIDE.
@@ -410,15 +413,24 @@ pub fn self_test() {
         assert!(pcid >= 1);
         assert!(pcid <= MAX_PCID);
         assert!(generation >= 1);
-        serial_println!("[pcid]   alloc_pcid: OK (pcid={}, gen={})", pcid, generation);
+        serial_println!(
+            "[pcid]   alloc_pcid: OK (pcid={}, gen={})",
+            pcid,
+            generation
+        );
     } else {
         serial_println!("[pcid]   (PCID not enabled on this CPU — skipping live tests)");
     }
 
     // Test 5: Stats.
     let st = stats();
-    serial_println!("[pcid]   Stats: enabled={}, invpcid={}, noflush={}, gen_flushes={}",
-        st.enabled, st.has_invpcid, st.noflush_switches, st.generation_flushes);
+    serial_println!(
+        "[pcid]   Stats: enabled={}, invpcid={}, noflush={}, gen_flushes={}",
+        st.enabled,
+        st.has_invpcid,
+        st.noflush_switches,
+        st.generation_flushes
+    );
 
     serial_println!("[pcid] Self-test PASSED");
 }

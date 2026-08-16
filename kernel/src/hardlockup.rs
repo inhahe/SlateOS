@@ -374,7 +374,9 @@ pub fn init(hhdm_offset: u64) {
 
     crate::serial_println!(
         "[hardlockup] i6300esb armed-ready at {:#x} (phys {:#x}), ~{} ms/stage",
-        mmio_virt, mmio_phys, STAGE_MS
+        mmio_virt,
+        mmio_phys,
+        STAGE_MS
     );
 }
 
@@ -578,4 +580,3 @@ pub fn self_test_fire() {
         );
     }
 }
-

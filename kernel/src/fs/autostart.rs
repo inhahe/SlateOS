@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -132,12 +132,7 @@ static OP_COUNT: AtomicU64 = AtomicU64::new(0);
 // ---------------------------------------------------------------------------
 
 /// Add an autostart item.
-pub fn add_item(
-    name: &str,
-    command: &str,
-    phase: StartPhase,
-    uid: u64,
-) -> KernelResult<u64> {
+pub fn add_item(name: &str, command: &str, phase: StartPhase, uid: u64) -> KernelResult<u64> {
     let mut state = STATE.lock();
     if state.items.len() >= 256 {
         return Err(KernelError::ResourceExhausted);
@@ -169,7 +164,10 @@ pub fn add_item(
 /// Remove an item (system items cannot be removed).
 pub fn remove_item(item_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let item = state.items.iter().find(|i| i.id == item_id)
+    let item = state
+        .items
+        .iter()
+        .find(|i| i.id == item_id)
         .ok_or(KernelError::NotFound)?;
     if item.system {
         return Err(KernelError::PermissionDenied);
@@ -182,7 +180,12 @@ pub fn remove_item(item_id: u64) -> KernelResult<()> {
 
 /// Get item by ID.
 pub fn get_item(item_id: u64) -> KernelResult<AutostartItem> {
-    STATE.lock().items.iter().find(|i| i.id == item_id).cloned()
+    STATE
+        .lock()
+        .items
+        .iter()
+        .find(|i| i.id == item_id)
+        .cloned()
         .ok_or(KernelError::NotFound)
 }
 
@@ -195,14 +198,19 @@ pub fn list_items() -> Vec<AutostartItem> {
 /// sorted by phase then order.
 pub fn items_for_user(uid: u64) -> Vec<AutostartItem> {
     let state = STATE.lock();
-    let mut items: Vec<AutostartItem> = state.items.iter()
+    let mut items: Vec<AutostartItem> = state
+        .items
+        .iter()
         .filter(|i| i.enabled && (i.uid == 0 || i.uid == uid))
         .cloned()
         .collect();
     items.sort_by(|a, b| {
         let phase_ord = (a.phase as u32).cmp(&(b.phase as u32));
-        if phase_ord != core::cmp::Ordering::Equal { phase_ord }
-        else { a.order.cmp(&b.order) }
+        if phase_ord != core::cmp::Ordering::Equal {
+            phase_ord
+        } else {
+            a.order.cmp(&b.order)
+        }
     });
     items
 }
@@ -214,7 +222,10 @@ pub fn items_for_user(uid: u64) -> Vec<AutostartItem> {
 /// Enable or disable an item.
 pub fn set_enabled(item_id: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let item = state.items.iter_mut().find(|i| i.id == item_id)
+    let item = state
+        .items
+        .iter_mut()
+        .find(|i| i.id == item_id)
         .ok_or(KernelError::NotFound)?;
     item.enabled = enabled;
     state.changes += 1;
@@ -224,7 +235,10 @@ pub fn set_enabled(item_id: u64, enabled: bool) -> KernelResult<()> {
 /// Set delay.
 pub fn set_delay(item_id: u64, delay_ms: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let item = state.items.iter_mut().find(|i| i.id == item_id)
+    let item = state
+        .items
+        .iter_mut()
+        .find(|i| i.id == item_id)
         .ok_or(KernelError::NotFound)?;
     item.delay_ms = delay_ms;
     state.changes += 1;
@@ -234,7 +248,10 @@ pub fn set_delay(item_id: u64, delay_ms: u32) -> KernelResult<()> {
 /// Set order within phase (lower = earlier).
 pub fn set_order(item_id: u64, order: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let item = state.items.iter_mut().find(|i| i.id == item_id)
+    let item = state
+        .items
+        .iter_mut()
+        .find(|i| i.id == item_id)
         .ok_or(KernelError::NotFound)?;
     item.order = order;
     state.changes += 1;
@@ -244,7 +261,10 @@ pub fn set_order(item_id: u64, order: u32) -> KernelResult<()> {
 /// Set phase.
 pub fn set_phase(item_id: u64, phase: StartPhase) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let item = state.items.iter_mut().find(|i| i.id == item_id)
+    let item = state
+        .items
+        .iter_mut()
+        .find(|i| i.id == item_id)
         .ok_or(KernelError::NotFound)?;
     item.phase = phase;
     state.changes += 1;
@@ -254,7 +274,10 @@ pub fn set_phase(item_id: u64, phase: StartPhase) -> KernelResult<()> {
 /// Set condition.
 pub fn set_condition(item_id: u64, condition: StartCondition) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let item = state.items.iter_mut().find(|i| i.id == item_id)
+    let item = state
+        .items
+        .iter_mut()
+        .find(|i| i.id == item_id)
         .ok_or(KernelError::NotFound)?;
     item.condition = condition;
     state.changes += 1;
@@ -264,7 +287,10 @@ pub fn set_condition(item_id: u64, condition: StartCondition) -> KernelResult<()
 /// Set arguments.
 pub fn set_arguments(item_id: u64, args: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let item = state.items.iter_mut().find(|i| i.id == item_id)
+    let item = state
+        .items
+        .iter_mut()
+        .find(|i| i.id == item_id)
         .ok_or(KernelError::NotFound)?;
     item.arguments = String::from(args);
     state.changes += 1;
@@ -274,7 +300,10 @@ pub fn set_arguments(item_id: u64, args: &str) -> KernelResult<()> {
 /// Set description.
 pub fn set_description(item_id: u64, desc: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let item = state.items.iter_mut().find(|i| i.id == item_id)
+    let item = state
+        .items
+        .iter_mut()
+        .find(|i| i.id == item_id)
         .ok_or(KernelError::NotFound)?;
     item.description = String::from(desc);
     state.changes += 1;
@@ -284,7 +313,10 @@ pub fn set_description(item_id: u64, desc: &str) -> KernelResult<()> {
 /// Set impact level.
 pub fn set_impact(item_id: u64, impact: Impact) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let item = state.items.iter_mut().find(|i| i.id == item_id)
+    let item = state
+        .items
+        .iter_mut()
+        .find(|i| i.id == item_id)
         .ok_or(KernelError::NotFound)?;
     item.impact = impact;
     state.changes += 1;
@@ -294,7 +326,10 @@ pub fn set_impact(item_id: u64, impact: Impact) -> KernelResult<()> {
 /// Record a launch event (called by session manager).
 pub fn record_launch(item_id: u64, duration_ms: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let item = state.items.iter_mut().find(|i| i.id == item_id)
+    let item = state
+        .items
+        .iter_mut()
+        .find(|i| i.id == item_id)
         .ok_or(KernelError::NotFound)?;
     item.launch_count += 1;
     item.last_launch_ns = crate::hpet::elapsed_ns();
@@ -312,9 +347,15 @@ pub fn record_launch(item_id: u64, duration_ms: u32) -> KernelResult<()> {
 // Init / stats
 // ---------------------------------------------------------------------------
 
-fn add_system_item(state: &mut State, name: &str, cmd: &str, phase: StartPhase,
-    order: u32, delay: u32, desc: &str)
-{
+fn add_system_item(
+    state: &mut State,
+    name: &str,
+    cmd: &str,
+    phase: StartPhase,
+    order: u32,
+    delay: u32,
+    desc: &str,
+) {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     state.items.push(AutostartItem {
         id,
@@ -343,18 +384,60 @@ pub fn init_defaults() {
         return;
     }
 
-    add_system_item(&mut state, "Compositor", "/usr/bin/compositor",
-        StartPhase::SystemService, 10, 0, "Display compositor");
-    add_system_item(&mut state, "Window Manager", "/usr/bin/wm",
-        StartPhase::DesktopReady, 10, 0, "Window manager and taskbar");
-    add_system_item(&mut state, "System Tray", "/usr/bin/systray",
-        StartPhase::DesktopReady, 20, 100, "System tray notifications");
-    add_system_item(&mut state, "Network Manager", "/usr/bin/netmgr",
-        StartPhase::SystemService, 20, 0, "Network connection manager");
-    add_system_item(&mut state, "Sound Server", "/usr/bin/soundsrv",
-        StartPhase::SystemService, 30, 0, "Audio mixing daemon");
-    add_system_item(&mut state, "File Indexer", "/usr/bin/findex",
-        StartPhase::Deferred, 50, 5000, "Background file search indexer");
+    add_system_item(
+        &mut state,
+        "Compositor",
+        "/usr/bin/compositor",
+        StartPhase::SystemService,
+        10,
+        0,
+        "Display compositor",
+    );
+    add_system_item(
+        &mut state,
+        "Window Manager",
+        "/usr/bin/wm",
+        StartPhase::DesktopReady,
+        10,
+        0,
+        "Window manager and taskbar",
+    );
+    add_system_item(
+        &mut state,
+        "System Tray",
+        "/usr/bin/systray",
+        StartPhase::DesktopReady,
+        20,
+        100,
+        "System tray notifications",
+    );
+    add_system_item(
+        &mut state,
+        "Network Manager",
+        "/usr/bin/netmgr",
+        StartPhase::SystemService,
+        20,
+        0,
+        "Network connection manager",
+    );
+    add_system_item(
+        &mut state,
+        "Sound Server",
+        "/usr/bin/soundsrv",
+        StartPhase::SystemService,
+        30,
+        0,
+        "Audio mixing daemon",
+    );
+    add_system_item(
+        &mut state,
+        "File Indexer",
+        "/usr/bin/findex",
+        StartPhase::Deferred,
+        50,
+        5000,
+        "Background file search indexer",
+    );
 
     state.changes += 1;
 }

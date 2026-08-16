@@ -22,11 +22,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -142,7 +142,9 @@ where
 /// builds its own fixtures via the real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         messages: Vec::new(),
         channels: Vec::new(),
@@ -156,9 +158,19 @@ pub fn init_defaults() {
 }
 
 /// Record an IPC message.
-pub fn record(msg_type: MsgType, src: u32, dst: u32, channel: u32, size: u32, latency_us: u64, label: &str) -> KernelResult<u64> {
+pub fn record(
+    msg_type: MsgType,
+    src: u32,
+    dst: u32,
+    channel: u32,
+    size: u32,
+    latency_us: u64,
+    label: &str,
+) -> KernelResult<u64> {
     with_state(|state| {
-        if !state.logging_enabled { return Ok(0); }
+        if !state.logging_enabled {
+            return Ok(0);
+        }
         let now = crate::hpet::elapsed_ns();
         let seq = state.next_seq;
         state.next_seq += 1;
@@ -173,7 +185,9 @@ pub fn record(msg_type: MsgType, src: u32, dst: u32, channel: u32, size: u32, la
                     ch.messages_received += 1;
                     ch.bytes_received += size as u64;
                 }
-                MsgType::Error => { ch.errors += 1; }
+                MsgType::Error => {
+                    ch.errors += 1;
+                }
             }
             // Running average latency.
             let total = ch.messages_sent + ch.messages_received;
@@ -182,26 +196,48 @@ pub fn record(msg_type: MsgType, src: u32, dst: u32, channel: u32, size: u32, la
             }
         } else if state.channels.len() < MAX_CHANNELS {
             let mut cs = ChannelStats {
-                channel_id: channel, name: format!("ch_{}", channel),
-                messages_sent: 0, messages_received: 0,
-                bytes_sent: 0, bytes_received: 0,
-                avg_latency_us: latency_us, errors: 0,
+                channel_id: channel,
+                name: format!("ch_{}", channel),
+                messages_sent: 0,
+                messages_received: 0,
+                bytes_sent: 0,
+                bytes_received: 0,
+                avg_latency_us: latency_us,
+                errors: 0,
             };
             match msg_type {
-                MsgType::Send | MsgType::Broadcast | MsgType::Signal => { cs.messages_sent = 1; cs.bytes_sent = size as u64; }
-                MsgType::Receive | MsgType::Reply => { cs.messages_received = 1; cs.bytes_received = size as u64; }
-                MsgType::Error => { cs.errors = 1; }
+                MsgType::Send | MsgType::Broadcast | MsgType::Signal => {
+                    cs.messages_sent = 1;
+                    cs.bytes_sent = size as u64;
+                }
+                MsgType::Receive | MsgType::Reply => {
+                    cs.messages_received = 1;
+                    cs.bytes_received = size as u64;
+                }
+                MsgType::Error => {
+                    cs.errors = 1;
+                }
             }
             state.channels.push(cs);
         }
         state.total_messages += 1;
         state.total_bytes += size as u64;
-        if msg_type == MsgType::Error { state.total_errors += 1; }
+        if msg_type == MsgType::Error {
+            state.total_errors += 1;
+        }
         // Store message.
-        if state.messages.len() >= MAX_MESSAGES { state.messages.remove(0); }
+        if state.messages.len() >= MAX_MESSAGES {
+            state.messages.remove(0);
+        }
         state.messages.push(IpcMessage {
-            seq, msg_type, src_pid: src, dst_pid: dst, channel_id: channel,
-            size_bytes: size, latency_us, timestamp_ns: now,
+            seq,
+            msg_type,
+            src_pid: src,
+            dst_pid: dst,
+            channel_id: channel,
+            size_bytes: size,
+            latency_us,
+            timestamp_ns: now,
             label: String::from(label),
         });
         Ok(seq)
@@ -211,10 +247,17 @@ pub fn record(msg_type: MsgType, src: u32, dst: u32, channel: u32, size: u32, la
 /// Query messages by PID (src or dst).
 pub fn query_pid(pid: u32, last_n: usize) -> Vec<IpcMessage> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let filtered: Vec<_> = s.messages.iter()
+        let filtered: Vec<_> = s
+            .messages
+            .iter()
             .filter(|m| m.src_pid == pid || m.dst_pid == pid)
-            .cloned().collect();
-        let start = if last_n >= filtered.len() { 0 } else { filtered.len() - last_n };
+            .cloned()
+            .collect();
+        let start = if last_n >= filtered.len() {
+            0
+        } else {
+            filtered.len() - last_n
+        };
         filtered[start..].to_vec()
     })
 }
@@ -222,10 +265,17 @@ pub fn query_pid(pid: u32, last_n: usize) -> Vec<IpcMessage> {
 /// Query messages by channel.
 pub fn query_channel(channel_id: u32, last_n: usize) -> Vec<IpcMessage> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let filtered: Vec<_> = s.messages.iter()
+        let filtered: Vec<_> = s
+            .messages
+            .iter()
             .filter(|m| m.channel_id == channel_id)
-            .cloned().collect();
-        let start = if last_n >= filtered.len() { 0 } else { filtered.len() - last_n };
+            .cloned()
+            .collect();
+        let start = if last_n >= filtered.len() {
+            0
+        } else {
+            filtered.len() - last_n
+        };
         filtered[start..].to_vec()
     })
 }
@@ -233,36 +283,62 @@ pub fn query_channel(channel_id: u32, last_n: usize) -> Vec<IpcMessage> {
 /// Get recent messages.
 pub fn recent(n: usize) -> Vec<IpcMessage> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let start = if n >= s.messages.len() { 0 } else { s.messages.len() - n };
+        let start = if n >= s.messages.len() {
+            0
+        } else {
+            s.messages.len() - n
+        };
         s.messages[start..].to_vec()
     })
 }
 
 /// Get per-channel stats.
 pub fn channel_stats(channel_id: u32) -> Option<ChannelStats> {
-    STATE.lock().as_ref().and_then(|s| s.channels.iter().find(|c| c.channel_id == channel_id).cloned())
+    STATE.lock().as_ref().and_then(|s| {
+        s.channels
+            .iter()
+            .find(|c| c.channel_id == channel_id)
+            .cloned()
+    })
 }
 
 /// List all channels.
 pub fn list_channels() -> Vec<ChannelStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.channels.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.channels.clone())
 }
 
 /// Enable/disable logging.
 pub fn set_enabled(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.logging_enabled = enabled; Ok(()) })
+    with_state(|state| {
+        state.logging_enabled = enabled;
+        Ok(())
+    })
 }
 
 /// Clear message log.
 pub fn clear() -> KernelResult<()> {
-    with_state(|state| { state.messages.clear(); Ok(()) })
+    with_state(|state| {
+        state.messages.clear();
+        Ok(())
+    })
 }
 
 /// Statistics: (channel_count, message_count, total_messages, total_bytes, total_errors, enabled, ops).
 pub fn stats() -> (usize, usize, u64, u64, u64, bool, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.channels.len(), s.messages.len(), s.total_messages, s.total_bytes, s.total_errors, s.logging_enabled, s.ops),
+        Some(s) => (
+            s.channels.len(),
+            s.messages.len(),
+            s.total_messages,
+            s.total_bytes,
+            s.total_errors,
+            s.logging_enabled,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, false, 0),
     }
 }

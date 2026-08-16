@@ -32,8 +32,8 @@
 //! - Linux /proc/net/stat — per-protocol statistics
 //! - QNX pulse/message statistics
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Per-mechanism counters
@@ -293,7 +293,9 @@ pub fn stream_socket_write(bytes: u64) {
 #[inline]
 pub fn stream_socket_read(bytes: u64) {
     STREAM_SOCKET.recvs.fetch_add(1, Ordering::Relaxed);
-    STREAM_SOCKET.bytes_recvd.fetch_add(bytes, Ordering::Relaxed);
+    STREAM_SOCKET
+        .bytes_recvd
+        .fetch_add(bytes, Ordering::Relaxed);
 }
 
 /// Record a stream socket send that blocked.
@@ -317,7 +319,9 @@ pub fn stream_socket_created() {
 /// Record stream socket pair destruction.
 #[inline]
 pub fn stream_socket_destroyed() {
-    STREAM_SOCKET.pairs_destroyed.fetch_add(1, Ordering::Relaxed);
+    STREAM_SOCKET
+        .pairs_destroyed
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 // --- Shared memory ---
@@ -400,7 +404,9 @@ pub fn futex_wait() {
 #[inline]
 pub fn futex_wake(threads_woken: u32) {
     FUTEX.wakes.fetch_add(1, Ordering::Relaxed);
-    FUTEX.threads_woken.fetch_add(u64::from(threads_woken), Ordering::Relaxed);
+    FUTEX
+        .threads_woken
+        .fetch_add(u64::from(threads_woken), Ordering::Relaxed);
 }
 
 /// Record a spurious futex wait (value mismatch, returned immediately).
@@ -557,7 +563,9 @@ pub fn reset() {
 /// Total IPC operations (sends + recvs + writes + reads + signals + waits).
 #[must_use]
 pub fn total_operations() -> u64 {
-    CHANNEL.sends.load(Ordering::Relaxed)
+    CHANNEL
+        .sends
+        .load(Ordering::Relaxed)
         .saturating_add(CHANNEL.recvs.load(Ordering::Relaxed))
         .saturating_add(PIPE.writes.load(Ordering::Relaxed))
         .saturating_add(PIPE.reads.load(Ordering::Relaxed))
@@ -700,7 +708,11 @@ pub fn self_test() {
     assert!(total > 0);
     let avg = avg_channel_msg_size();
     assert_eq!(avg, 192); // 384 bytes / 2 sends = 192
-    serial_println!("[ipc_stats]   Aggregates: OK (total_ops={}, avg_msg={})", total, avg);
+    serial_println!(
+        "[ipc_stats]   Aggregates: OK (total_ops={}, avg_msg={})",
+        total,
+        avg
+    );
 
     // Cleanup.
     reset();

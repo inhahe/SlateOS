@@ -27,16 +27,16 @@
 //! DMA; virtual addresses (via HHDM) are used by the driver to write
 //! headers and read status.
 
-use core::sync::atomic::{AtomicU8, AtomicU16, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame};
 use crate::pci::{self, PciDevice};
-use spin::Mutex;
-use crate::virtio::queue::{Virtqueue, VRING_DESC_F_WRITE};
+use crate::virtio::queue::{VRING_DESC_F_WRITE, Virtqueue};
 use crate::virtio::{
-    VirtioLegacyPci, REG_ISR_STATUS, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
+    REG_ISR_STATUS, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, VirtioLegacyPci,
 };
+use spin::Mutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -71,9 +71,9 @@ const VIRTIO_BLK_S_OK: u8 = 0;
 const POLL_TIMEOUT_SPINS: u32 = 100_000_000;
 
 // DMA buffer offsets within the request frame.
-const DMA_HEADER_OFFSET: usize = 0;           // 16 bytes
-const DMA_DATA_OFFSET: usize = 512;           // Up to 4096 bytes
-const DMA_STATUS_OFFSET: usize = 512 + 4096;  // 1 byte
+const DMA_HEADER_OFFSET: usize = 0; // 16 bytes
+const DMA_DATA_OFFSET: usize = 512; // Up to 4096 bytes
+const DMA_STATUS_OFFSET: usize = 512 + 4096; // 1 byte
 
 // ---------------------------------------------------------------------------
 // IRQ support — lock-free state for ISR context
@@ -205,22 +205,31 @@ impl VirtioBlkDevice {
 
         let (queue, pfn) = Virtqueue::new(queue_size, hhdm_offset)?;
         transport.set_queue_pfn(pfn);
-        crate::serial_println!("[virtio-blk] Queue PFN: {:#x} (phys {:#x})", pfn, u64::from(pfn) << 12);
+        crate::serial_println!(
+            "[virtio-blk] Queue PFN: {:#x} (phys {:#x})",
+            pfn,
+            u64::from(pfn) << 12
+        );
 
         // 6. Set DRIVER_OK — device is live.
         transport.set_status(STATUS_DRIVER_OK);
 
         // Read device config: capacity (8 bytes at device config offset 0).
         let capacity = transport.read_device_config64(0);
-        crate::serial_println!("[virtio-blk] Disk capacity: {} sectors ({} KiB)",
-            capacity, capacity * 512 / 1024);
+        crate::serial_println!(
+            "[virtio-blk] Disk capacity: {} sectors ({} KiB)",
+            capacity,
+            capacity * 512 / 1024
+        );
 
         // Allocate a DMA frame for request headers/data/status.
         let dma_frame = frame::alloc_frame()?;
         let dma_virt = (dma_frame.addr() + hhdm_offset) as *mut u8;
         // Zero the DMA frame.
         // SAFETY: We just allocated this frame; HHDM maps it writable.
-        unsafe { core::ptr::write_bytes(dma_virt, 0, frame::FRAME_SIZE); }
+        unsafe {
+            core::ptr::write_bytes(dma_virt, 0, frame::FRAME_SIZE);
+        }
 
         // Store the I/O base globally so the ISR can acknowledge
         // interrupts without holding a lock.
@@ -255,8 +264,12 @@ impl VirtioBlkDevice {
         // SAFETY: The IRQ line is valid (from PCI config space) and the
         // IOAPIC is initialized by this point.
         // PCI interrupts are level-triggered, active-low.
-        unsafe { crate::ioapic::set_level_triggered(irq_line); }
-        unsafe { crate::ioapic::unmask_irq(irq_line); }
+        unsafe {
+            crate::ioapic::set_level_triggered(irq_line);
+        }
+        unsafe {
+            crate::ioapic::unmask_irq(irq_line);
+        }
         IRQ_ENABLED.store(true, Ordering::Release);
         crate::serial_println!(
             "[virtio-blk] IRQ {} unmasked — interrupt-driven I/O enabled",
@@ -287,7 +300,8 @@ impl VirtioBlkDevice {
                 if attempts > 500 {
                     crate::serial_println!(
                         "[virtio-blk] {} sector {} timed out (IRQ mode)",
-                        op, sector,
+                        op,
+                        sector,
                     );
                     self.recover_after_timeout();
                     return Err(KernelError::TimedOut);
@@ -308,7 +322,8 @@ impl VirtioBlkDevice {
                 if spins > POLL_TIMEOUT_SPINS {
                     crate::serial_println!(
                         "[virtio-blk] {} sector {} timed out (polling)",
-                        op, sector,
+                        op,
+                        sector,
                     );
                     self.recover_after_timeout();
                     return Err(KernelError::TimedOut);
@@ -339,7 +354,10 @@ impl VirtioBlkDevice {
             // its descriptors and keep looking for ours.
             crate::serial_println!(
                 "[virtio-blk] {} sector {}: draining stale completion head={} (expected {})",
-                op, sector, completed_head, head,
+                op,
+                sector,
+                completed_head,
+                head,
             );
             self.queue.free_chain(completed_head);
         }
@@ -358,12 +376,10 @@ impl VirtioBlkDevice {
     /// starts from a clean, consistent state.
     fn recover_after_timeout(&mut self) {
         match self.recover() {
-            Ok(()) => crate::serial_println!(
-                "[virtio-blk] device reset to recover from timeout"
-            ),
-            Err(e) => crate::serial_println!(
-                "[virtio-blk] device recovery after timeout FAILED: {:?}", e
-            ),
+            Ok(()) => crate::serial_println!("[virtio-blk] device reset to recover from timeout"),
+            Err(e) => {
+                crate::serial_println!("[virtio-blk] device recovery after timeout FAILED: {:?}", e)
+            }
         }
     }
 
@@ -405,13 +421,13 @@ impl VirtioBlkDevice {
         // SAFETY: dma_virt points to an exclusively-owned 16 KiB frame.
         // DMA_STATUS_OFFSET (4608) is well within 16384.  Volatile read
         // because the device writes this byte asynchronously via DMA.
-        let status = unsafe {
-            core::ptr::read_volatile(self.dma_virt.add(DMA_STATUS_OFFSET))
-        };
+        let status = unsafe { core::ptr::read_volatile(self.dma_virt.add(DMA_STATUS_OFFSET)) };
         if status != VIRTIO_BLK_S_OK {
             crate::serial_println!(
                 "[virtio-blk] {} sector {} failed: status={}",
-                op, sector, status,
+                op,
+                sector,
+                status,
             );
             return Err(KernelError::IoError);
         }
@@ -436,11 +452,14 @@ impl VirtioBlkDevice {
         // Volatile because the device reads this via DMA.
         let header_ptr = self.dma_virt as *mut VirtioBlkReqHeader;
         unsafe {
-            core::ptr::write_volatile(header_ptr, VirtioBlkReqHeader {
-                type_: VIRTIO_BLK_T_IN,
-                reserved: 0,
-                sector,
-            });
+            core::ptr::write_volatile(
+                header_ptr,
+                VirtioBlkReqHeader {
+                    type_: VIRTIO_BLK_T_IN,
+                    reserved: 0,
+                    sector,
+                },
+            );
         }
 
         // SAFETY: DMA_STATUS_OFFSET (4608) < 16384.  Writing 0xFF as a
@@ -457,9 +476,9 @@ impl VirtioBlkDevice {
         let status_phys = dma_phys + DMA_STATUS_OFFSET as u64;
 
         let chain = [
-            (header_phys, 16, 0u16),                           // Header: device-readable
+            (header_phys, 16, 0u16), // Header: device-readable
             (data_phys, SECTOR_SIZE as u32, VRING_DESC_F_WRITE), // Data: device-writable
-            (status_phys, 1, VRING_DESC_F_WRITE),               // Status: device-writable
+            (status_phys, 1, VRING_DESC_F_WRITE), // Status: device-writable
         ];
 
         let head = self.queue.submit(&chain)?;
@@ -502,11 +521,14 @@ impl VirtioBlkDevice {
         // (1 byte) — all well within the 16384-byte frame.
         let header_ptr = self.dma_virt as *mut VirtioBlkReqHeader;
         unsafe {
-            core::ptr::write_volatile(header_ptr, VirtioBlkReqHeader {
-                type_: VIRTIO_BLK_T_OUT,
-                reserved: 0,
-                sector,
-            });
+            core::ptr::write_volatile(
+                header_ptr,
+                VirtioBlkReqHeader {
+                    type_: VIRTIO_BLK_T_OUT,
+                    reserved: 0,
+                    sector,
+                },
+            );
         }
 
         // Copy caller's data into the DMA buffer for the device to read.
@@ -533,9 +555,9 @@ impl VirtioBlkDevice {
         let status_phys = dma_phys + DMA_STATUS_OFFSET as u64;
 
         let chain = [
-            (header_phys, 16, 0u16),                           // Header: device-readable
-            (data_phys, SECTOR_SIZE as u32, 0u16),              // Data: device-readable
-            (status_phys, 1, VRING_DESC_F_WRITE),               // Status: device-writable
+            (header_phys, 16, 0u16),               // Header: device-readable
+            (data_phys, SECTOR_SIZE as u32, 0u16), // Data: device-readable
+            (status_phys, 1, VRING_DESC_F_WRITE),  // Status: device-writable
         ];
 
         let head = self.queue.submit(&chain)?;
@@ -557,10 +579,7 @@ impl Drop for VirtioBlkDevice {
         // Free the DMA frame.
         // SAFETY: We own this frame and are being dropped.
         if let Err(e) = unsafe { frame::free_frame(self.dma_frame) } {
-            crate::serial_println!(
-                "[virtio-blk] WARNING: failed to free DMA frame: {:?}",
-                e
-            );
+            crate::serial_println!("[virtio-blk] WARNING: failed to free DMA frame: {:?}", e);
         }
     }
 }
@@ -645,10 +664,7 @@ pub fn probe_all(hhdm_offset: u64) -> alloc::vec::Vec<VirtioBlkDevice> {
     if devices.is_empty() {
         crate::serial_println!("[virtio-blk] No devices found");
     } else {
-        crate::serial_println!(
-            "[virtio-blk] {} device(s) discovered",
-            devices.len()
-        );
+        crate::serial_println!("[virtio-blk] {} device(s) discovered", devices.len());
     }
 
     devices
@@ -674,10 +690,7 @@ pub fn init(hhdm_offset: u64) {
                 *DEVICE.lock() = Some(dev);
             }
             Err(e) => {
-                crate::serial_println!(
-                    "[virtio-blk] Self-test failed, device NOT stored: {:?}",
-                    e
-                );
+                crate::serial_println!("[virtio-blk] Self-test failed, device NOT stored: {:?}", e);
             }
         }
     } else {
@@ -747,9 +760,13 @@ pub fn enable_interrupts() {
     }
     // PCI interrupts are level-triggered, active-low.
     // SAFETY: IOAPIC is initialized (caller guarantees).
-    unsafe { crate::ioapic::set_level_triggered(irq); }
+    unsafe {
+        crate::ioapic::set_level_triggered(irq);
+    }
     // SAFETY: The IDT handler is installed and calls handle_irq().
-    unsafe { crate::ioapic::unmask_irq(irq); }
+    unsafe {
+        crate::ioapic::unmask_irq(irq);
+    }
     IRQ_ENABLED.store(true, Ordering::Release);
     crate::serial_println!(
         "[virtio-blk] IRQ {} enabled — interrupt-driven I/O active",

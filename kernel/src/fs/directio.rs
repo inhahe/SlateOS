@@ -136,7 +136,14 @@ pub fn dio_read(path: &str, offset: u64, len: usize) -> KernelResult<(Vec<u8>, D
 
     let read_len = len.min(MAX_DIO_TRANSFER);
     if read_len == 0 {
-        return Ok((Vec::new(), DioResult { bytes: 0, aligned: true, cache_invalidated: false }));
+        return Ok((
+            Vec::new(),
+            DioResult {
+                bytes: 0,
+                aligned: true,
+                cache_invalidated: false,
+            },
+        ));
     }
 
     DIO_READ_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -155,11 +162,14 @@ pub fn dio_read(path: &str, offset: u64, len: usize) -> KernelResult<(Vec<u8>, D
     // In a full implementation, we'd mark these pages as not-cacheable.
     let invalidated = invalidate_cache_range(path, offset, bytes_read);
 
-    Ok((data, DioResult {
-        bytes: bytes_read,
-        aligned,
-        cache_invalidated: invalidated,
-    }))
+    Ok((
+        data,
+        DioResult {
+            bytes: bytes_read,
+            aligned,
+            cache_invalidated: invalidated,
+        },
+    ))
 }
 
 /// Write data bypassing the buffer cache.
@@ -174,7 +184,11 @@ pub fn dio_write(path: &str, offset: u64, data: &[u8]) -> KernelResult<DioResult
     }
 
     if data.is_empty() {
-        return Ok(DioResult { bytes: 0, aligned: true, cache_invalidated: false });
+        return Ok(DioResult {
+            bytes: 0,
+            aligned: true,
+            cache_invalidated: false,
+        });
     }
 
     let write_len = data.len().min(MAX_DIO_TRANSFER);
@@ -218,11 +232,14 @@ pub fn dio_read_file(path: &str) -> KernelResult<(Vec<u8>, DioResult)> {
 
     let invalidated = invalidate_cache_range(path, 0, bytes);
 
-    Ok((data, DioResult {
-        bytes,
-        aligned: is_aligned(bytes),
-        cache_invalidated: invalidated,
-    }))
+    Ok((
+        data,
+        DioResult {
+            bytes,
+            aligned: is_aligned(bytes),
+            cache_invalidated: invalidated,
+        },
+    ))
 }
 
 /// Write an entire file with direct I/O semantics.
@@ -269,7 +286,9 @@ pub fn register_path(path: &str) -> bool {
 
     // Evict oldest if at capacity.
     if paths.len() >= MAX_DIO_PATHS {
-        if let Some(oldest_idx) = paths.iter().enumerate()
+        if let Some(oldest_idx) = paths
+            .iter()
+            .enumerate()
             .min_by_key(|(_, e)| e.registered_ns)
             .map(|(i, _)| i)
         {

@@ -337,11 +337,7 @@ impl SchedulerBackend {
     /// Returns `true` if the task was accepted (passes admission control).
     /// For non-deadline backends, always returns `false`.
     #[allow(dead_code)]
-    pub fn register_deadline(
-        &mut self,
-        id: TaskId,
-        params: deadline::DeadlineParams,
-    ) -> bool {
+    pub fn register_deadline(&mut self, id: TaskId, params: deadline::DeadlineParams) -> bool {
         match self {
             Self::Deadline(s) => s.register(id, params),
             _ => false,
@@ -493,11 +489,14 @@ pub fn self_test() {
 
     // Test 10: Deadline-specific operations on non-deadline backends.
     let mut rr = SchedulerBackend::from_id(BACKEND_PRIORITY_RR);
-    assert!(!rr.register_deadline(1, deadline::DeadlineParams {
-        budget_ticks: 1,
-        deadline_ticks: 5,
-        period_ticks: 10,
-    }));
+    assert!(!rr.register_deadline(
+        1,
+        deadline::DeadlineParams {
+            budget_ticks: 1,
+            deadline_ticks: 5,
+            period_ticks: 10,
+        }
+    ));
     assert_eq!(rr.deadline_utilization(), 0);
     assert_eq!(rr.deadline_throttled_count(), 0);
     assert_eq!(rr.deadline_current_tick(), 0);
@@ -505,11 +504,14 @@ pub fn self_test() {
 
     // Test 11: Deadline-specific operations on deadline backend.
     let mut dl = SchedulerBackend::from_id(BACKEND_DEADLINE);
-    assert!(dl.register_deadline(1, deadline::DeadlineParams {
-        budget_ticks: 1,
-        deadline_ticks: 5,
-        period_ticks: 10,
-    }));
+    assert!(dl.register_deadline(
+        1,
+        deadline::DeadlineParams {
+            budget_ticks: 1,
+            deadline_ticks: 5,
+            period_ticks: 10,
+        }
+    ));
     assert!(dl.deadline_utilization() > 0);
     dl.unregister_deadline(1);
     assert_eq!(dl.deadline_utilization(), 0);

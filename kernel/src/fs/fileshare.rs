@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -228,7 +228,10 @@ pub fn init_defaults() {
 
 /// Enable or disable file sharing.
 pub fn set_sharing_enabled(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.sharing_enabled = enabled; Ok(()) })
+    with_state(|state| {
+        state.sharing_enabled = enabled;
+        Ok(())
+    })
 }
 
 /// Check if sharing is enabled.
@@ -242,13 +245,18 @@ pub fn set_hostname(name: &str) -> KernelResult<()> {
     if name.is_empty() || name.len() > 63 {
         return Err(KernelError::InvalidArgument);
     }
-    with_state(|state| { state.hostname = String::from(name); Ok(()) })
+    with_state(|state| {
+        state.hostname = String::from(name);
+        Ok(())
+    })
 }
 
 /// Get the sharing hostname.
 pub fn hostname() -> String {
     let guard = STATE.lock();
-    guard.as_ref().map_or_else(|| String::from("unknown"), |s| s.hostname.clone())
+    guard
+        .as_ref()
+        .map_or_else(|| String::from("unknown"), |s| s.hostname.clone())
 }
 
 /// Set the workgroup.
@@ -256,7 +264,10 @@ pub fn set_workgroup(name: &str) -> KernelResult<()> {
     if name.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
-    with_state(|state| { state.workgroup = String::from(name); Ok(()) })
+    with_state(|state| {
+        state.workgroup = String::from(name);
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +275,12 @@ pub fn set_workgroup(name: &str) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Add a local shared folder.
-pub fn add_share(name: &str, path: &str, protocol: ShareProtocol, access: ShareAccess) -> KernelResult<u32> {
+pub fn add_share(
+    name: &str,
+    path: &str,
+    protocol: ShareProtocol,
+    access: ShareAccess,
+) -> KernelResult<u32> {
     if name.is_empty() || path.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -308,7 +324,11 @@ pub fn remove_share(id: u32) -> KernelResult<()> {
 /// Enable or disable a local share.
 pub fn set_share_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let share = state.local_shares.iter_mut().find(|s| s.id == id).ok_or(KernelError::NotFound)?;
+        let share = state
+            .local_shares
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or(KernelError::NotFound)?;
         share.enabled = enabled;
         Ok(())
     })
@@ -317,7 +337,11 @@ pub fn set_share_enabled(id: u32, enabled: bool) -> KernelResult<()> {
 /// Set guest access on a share.
 pub fn set_guest_access(id: u32, allowed: bool) -> KernelResult<()> {
     with_state(|state| {
-        let share = state.local_shares.iter_mut().find(|s| s.id == id).ok_or(KernelError::NotFound)?;
+        let share = state
+            .local_shares
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or(KernelError::NotFound)?;
         share.guest_access = allowed;
         Ok(())
     })
@@ -326,7 +350,11 @@ pub fn set_guest_access(id: u32, allowed: bool) -> KernelResult<()> {
 /// Set share access level.
 pub fn set_share_access(id: u32, access: ShareAccess) -> KernelResult<()> {
     with_state(|state| {
-        let share = state.local_shares.iter_mut().find(|s| s.id == id).ok_or(KernelError::NotFound)?;
+        let share = state
+            .local_shares
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or(KernelError::NotFound)?;
         share.access = access;
         Ok(())
     })
@@ -335,7 +363,11 @@ pub fn set_share_access(id: u32, access: ShareAccess) -> KernelResult<()> {
 /// Set share description.
 pub fn set_share_description(id: u32, desc: &str) -> KernelResult<()> {
     with_state(|state| {
-        let share = state.local_shares.iter_mut().find(|s| s.id == id).ok_or(KernelError::NotFound)?;
+        let share = state
+            .local_shares
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or(KernelError::NotFound)?;
         share.description = String::from(desc);
         Ok(())
     })
@@ -345,13 +377,20 @@ pub fn set_share_description(id: u32, desc: &str) -> KernelResult<()> {
 pub fn get_share(id: u32) -> KernelResult<LocalShare> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.local_shares.iter().find(|s| s.id == id).cloned().ok_or(KernelError::NotFound)
+    state
+        .local_shares
+        .iter()
+        .find(|s| s.id == id)
+        .cloned()
+        .ok_or(KernelError::NotFound)
 }
 
 /// List local shares.
 pub fn list_shares() -> Vec<LocalShare> {
     let guard = STATE.lock();
-    guard.as_ref().map_or_else(Vec::new, |s| s.local_shares.clone())
+    guard
+        .as_ref()
+        .map_or_else(Vec::new, |s| s.local_shares.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -393,7 +432,11 @@ pub fn connect_remote(
 /// Disconnect a remote share.
 pub fn disconnect_remote(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let share = state.remote_shares.iter_mut().find(|s| s.id == id).ok_or(KernelError::NotFound)?;
+        let share = state
+            .remote_shares
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or(KernelError::NotFound)?;
         share.status = ShareStatus::Disconnected;
         Ok(())
     })
@@ -414,7 +457,11 @@ pub fn remove_remote(id: u32) -> KernelResult<()> {
 /// Set auto-mount on boot.
 pub fn set_auto_mount(id: u32, auto_mount: bool) -> KernelResult<()> {
     with_state(|state| {
-        let share = state.remote_shares.iter_mut().find(|s| s.id == id).ok_or(KernelError::NotFound)?;
+        let share = state
+            .remote_shares
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or(KernelError::NotFound)?;
         share.auto_mount = auto_mount;
         Ok(())
     })
@@ -423,14 +470,20 @@ pub fn set_auto_mount(id: u32, auto_mount: bool) -> KernelResult<()> {
 /// List remote shares.
 pub fn list_remotes() -> Vec<RemoteShare> {
     let guard = STATE.lock();
-    guard.as_ref().map_or_else(Vec::new, |s| s.remote_shares.clone())
+    guard
+        .as_ref()
+        .map_or_else(Vec::new, |s| s.remote_shares.clone())
 }
 
 /// Get auto-mount remote shares (for boot).
 pub fn auto_mount_shares() -> Vec<RemoteShare> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.remote_shares.iter().filter(|r| r.auto_mount).cloned().collect()
+        s.remote_shares
+            .iter()
+            .filter(|r| r.auto_mount)
+            .cloned()
+            .collect()
     })
 }
 
@@ -443,8 +496,18 @@ pub fn stats() -> (usize, usize, bool, usize, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let connected = s.remote_shares.iter().filter(|r| r.status == ShareStatus::Connected).count();
-            (s.local_shares.len(), s.remote_shares.len(), s.sharing_enabled, connected, s.ops)
+            let connected = s
+                .remote_shares
+                .iter()
+                .filter(|r| r.status == ShareStatus::Connected)
+                .count();
+            (
+                s.local_shares.len(),
+                s.remote_shares.len(),
+                s.sharing_enabled,
+                connected,
+                s.ops,
+            )
         }
         None => (0, 0, false, 0, 0),
     }
@@ -489,7 +552,13 @@ pub fn self_test() {
 
     // Test 4: add local share.
     {
-        let id = add_share("Public", "/home/public", ShareProtocol::Smb, ShareAccess::ReadOnly).unwrap();
+        let id = add_share(
+            "Public",
+            "/home/public",
+            ShareProtocol::Smb,
+            ShareAccess::ReadOnly,
+        )
+        .unwrap();
         let share = get_share(id).unwrap();
         assert_eq!(share.name, "Public");
         assert_eq!(share.path, "/home/public");
@@ -514,13 +583,28 @@ pub fn self_test() {
 
     // Test 6: duplicate name.
     {
-        assert!(add_share("Public", "/other", ShareProtocol::Smb, ShareAccess::ReadOnly).is_err());
+        assert!(
+            add_share(
+                "Public",
+                "/other",
+                ShareProtocol::Smb,
+                ShareAccess::ReadOnly
+            )
+            .is_err()
+        );
     }
     serial_println!("[fileshare]  6/11 duplicate check OK");
 
     // Test 7: connect remote.
     {
-        let id = connect_remote("192.168.1.100", "Documents", "/mnt/remote", ShareProtocol::Smb, "user1").unwrap();
+        let id = connect_remote(
+            "192.168.1.100",
+            "Documents",
+            "/mnt/remote",
+            ShareProtocol::Smb,
+            "user1",
+        )
+        .unwrap();
         let remotes = list_remotes();
         assert_eq!(remotes.len(), 1);
         assert_eq!(remotes.first().unwrap().host, "192.168.1.100");

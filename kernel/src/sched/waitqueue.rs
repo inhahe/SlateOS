@@ -480,12 +480,18 @@ pub fn self_test() {
     let wq = WaitQueue::new();
     assert!(wq.is_empty(), "New queue should be empty");
     assert_eq!(wq.waiter_count(), 0);
-    assert!(!wq.wake_one(), "wake_one on empty queue should return false");
+    assert!(
+        !wq.wake_one(),
+        "wake_one on empty queue should return false"
+    );
     assert_eq!(wq.wake_all(), 0, "wake_all on empty queue should return 0");
     serial_println!("[waitqueue]   Empty queue operations: OK");
 
     // --- 2. try_wake_one on empty ---
-    assert!(!wq.try_wake_one(), "try_wake_one on empty should return false");
+    assert!(
+        !wq.try_wake_one(),
+        "try_wake_one on empty should return false"
+    );
     serial_println!("[waitqueue]   try_wake_one (empty): OK");
 
     // --- 3. wait_until with already-true condition ---
@@ -495,20 +501,20 @@ pub fn self_test() {
     serial_println!("[waitqueue]   wait_until (already true): OK");
 
     // --- 4. wait_timeout with already-true condition ---
-    let result = wq2.wait_timeout(
-        || TEST_FLAG.load(Ordering::Relaxed) != 0,
-        10,
+    let result = wq2.wait_timeout(|| TEST_FLAG.load(Ordering::Relaxed) != 0, 10);
+    assert!(
+        result,
+        "wait_timeout should return true when condition is met"
     );
-    assert!(result, "wait_timeout should return true when condition is met");
     serial_println!("[waitqueue]   wait_timeout (already true): OK");
 
     // --- 5. wait_timeout with false condition (immediate timeout) ---
     TEST_FLAG.store(0, Ordering::Relaxed);
-    let result = wq2.wait_timeout(
-        || TEST_FLAG.load(Ordering::Relaxed) != 0,
-        0,
+    let result = wq2.wait_timeout(|| TEST_FLAG.load(Ordering::Relaxed) != 0, 0);
+    assert!(
+        !result,
+        "wait_timeout(0) with false condition should timeout"
     );
-    assert!(!result, "wait_timeout(0) with false condition should timeout");
     serial_println!("[waitqueue]   wait_timeout (immediate timeout): OK");
 
     // --- 6. wait_timeout_ns with already-true condition ---
@@ -518,16 +524,19 @@ pub fn self_test() {
         || TEST_FLAG.load(Ordering::Relaxed) != 0,
         1_000_000, // 1ms
     );
-    assert!(result, "wait_timeout_ns should return true when condition is met");
+    assert!(
+        result,
+        "wait_timeout_ns should return true when condition is met"
+    );
     serial_println!("[waitqueue]   wait_timeout_ns (already true): OK");
 
     // --- 7. wait_timeout_ns with false condition (immediate timeout) ---
     TEST_FLAG.store(0, Ordering::Relaxed);
-    let result = wq3.wait_timeout_ns(
-        || TEST_FLAG.load(Ordering::Relaxed) != 0,
-        0,
+    let result = wq3.wait_timeout_ns(|| TEST_FLAG.load(Ordering::Relaxed) != 0, 0);
+    assert!(
+        !result,
+        "wait_timeout_ns(0) with false condition should timeout"
     );
-    assert!(!result, "wait_timeout_ns(0) with false condition should timeout");
     serial_println!("[waitqueue]   wait_timeout_ns (zero timeout): OK");
 
     // --- 8. wait_timeout_ns with false condition (real ns timeout) ---
@@ -535,7 +544,10 @@ pub fn self_test() {
         || TEST_FLAG.load(Ordering::Relaxed) != 0,
         500_000, // 500µs — should expire
     );
-    assert!(!result, "wait_timeout_ns should return false when timeout expires");
+    assert!(
+        !result,
+        "wait_timeout_ns should return false when timeout expires"
+    );
     serial_println!("[waitqueue]   wait_timeout_ns (expired): OK");
 
     // --- 9. wait_timeout_ns falls back for long timeouts (>100ms) ---
@@ -545,7 +557,10 @@ pub fn self_test() {
         || TEST_FLAG.load(Ordering::Relaxed) != 0,
         200_000_000, // 200ms — triggers tick-based fallback, but condition is true
     );
-    assert!(result, "wait_timeout_ns long timeout should return true if condition is met");
+    assert!(
+        result,
+        "wait_timeout_ns long timeout should return true if condition is met"
+    );
     serial_println!("[waitqueue]   wait_timeout_ns (long, already true): OK");
 
     serial_println!("[waitqueue] Self-test PASSED");

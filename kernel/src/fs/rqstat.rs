@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -99,7 +99,9 @@ where
 /// balance decision.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         cpus: Vec::new(),
         total_enqueues: 0,
@@ -116,11 +118,21 @@ pub fn init_defaults() {
 /// [`KernelError::ResourceExhausted`].
 pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.cpus.len() >= MAX_CPUS { return Err(KernelError::ResourceExhausted); }
-        if state.cpus.iter().any(|c| c.cpu_id == cpu_id) { return Err(KernelError::AlreadyExists); }
+        if state.cpus.len() >= MAX_CPUS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.cpus.iter().any(|c| c.cpu_id == cpu_id) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.cpus.push(CpuRqStats {
-            cpu_id, current_depth: 0, max_depth: 0, enqueues: 0, dequeues: 0,
-            balance_pulls: 0, balance_pushes: 0, total_wait_ns: 0,
+            cpu_id,
+            current_depth: 0,
+            max_depth: 0,
+            enqueues: 0,
+            dequeues: 0,
+            balance_pulls: 0,
+            balance_pushes: 0,
+            total_wait_ns: 0,
         });
         Ok(())
     })
@@ -129,7 +141,10 @@ pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
 /// Enqueue a task on a CPU's runqueue.
 pub fn enqueue(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.current_depth += 1;
         cpu.enqueues += 1;
@@ -144,7 +159,10 @@ pub fn enqueue(cpu_id: u32) -> KernelResult<()> {
 /// Dequeue a task from a CPU's runqueue.
 pub fn dequeue(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.current_depth = cpu.current_depth.saturating_sub(1);
         cpu.dequeues += 1;
@@ -170,7 +188,10 @@ pub fn record_balance(from_cpu: u32, to_cpu: u32) -> KernelResult<()> {
 /// Record wait time.
 pub fn record_wait(cpu_id: u32, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.total_wait_ns += ns;
         Ok(())
@@ -186,7 +207,13 @@ pub fn per_cpu() -> Vec<CpuRqStats> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.cpus.len(), s.total_enqueues, s.total_dequeues, s.total_balances, s.ops),
+        Some(s) => (
+            s.cpus.len(),
+            s.total_enqueues,
+            s.total_dequeues,
+            s.total_balances,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -218,13 +245,22 @@ pub fn self_test() {
     register_cpu(1).expect("reg1");
     assert!(register_cpu(0).is_err());
     assert_eq!(per_cpu().len(), 2);
-    let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
-    assert_eq!((c.current_depth, c.max_depth, c.enqueues, c.dequeues), (0, 0, 0, 0));
+    let c = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 0)
+        .expect("find0");
+    assert_eq!(
+        (c.current_depth, c.max_depth, c.enqueues, c.dequeues),
+        (0, 0, 0, 0)
+    );
     crate::serial_println!("  [2/8] register: OK");
 
     // 3: Enqueue — depth and count rise, max tracks the peak.
     enqueue(0).expect("enqueue");
-    let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
+    let c = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 0)
+        .expect("find0");
     assert_eq!(c.current_depth, 1);
     assert_eq!(c.enqueues, 1);
     assert_eq!(c.max_depth, 1);
@@ -232,7 +268,10 @@ pub fn self_test() {
 
     // 4: Dequeue — depth falls, count rises; max_depth stays at the peak.
     dequeue(0).expect("dequeue");
-    let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
+    let c = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 0)
+        .expect("find0");
     assert_eq!(c.current_depth, 0);
     assert_eq!(c.dequeues, 1);
     assert_eq!(c.max_depth, 1);
@@ -240,24 +279,43 @@ pub fn self_test() {
 
     // 5: Balance — push counted on `from`, pull on `to`.
     record_balance(0, 1).expect("balance");
-    let from = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
-    let to = per_cpu().into_iter().find(|c| c.cpu_id == 1).expect("find1");
+    let from = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 0)
+        .expect("find0");
+    let to = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 1)
+        .expect("find1");
     assert_eq!(from.balance_pushes, 1);
     assert_eq!(to.balance_pulls, 1);
     crate::serial_println!("  [5/8] balance: OK");
 
     // 6: Max depth tracks the high-water mark across a burst, then dequeues
     // drain back to 0 without underflowing (saturating_sub).
-    for _ in 0..5 { enqueue(1).expect("burst_enqueue"); }
-    let c = per_cpu().into_iter().find(|c| c.cpu_id == 1).expect("find1");
+    for _ in 0..5 {
+        enqueue(1).expect("burst_enqueue");
+    }
+    let c = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 1)
+        .expect("find1");
     assert_eq!(c.current_depth, 5);
     assert_eq!(c.max_depth, 5);
-    for _ in 0..5 { dequeue(1).expect("burst_dequeue"); }
-    let c = per_cpu().into_iter().find(|c| c.cpu_id == 1).expect("find1");
+    for _ in 0..5 {
+        dequeue(1).expect("burst_dequeue");
+    }
+    let c = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 1)
+        .expect("find1");
     assert_eq!(c.current_depth, 0);
     assert_eq!(c.max_depth, 5); // peak retained
     dequeue(1).expect("underflow_guard"); // already 0 → saturates, no underflow
-    let c = per_cpu().into_iter().find(|c| c.cpu_id == 1).expect("find1");
+    let c = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 1)
+        .expect("find1");
     assert_eq!(c.current_depth, 0);
     crate::serial_println!("  [6/8] max depth: OK");
 
@@ -266,7 +324,10 @@ pub fn self_test() {
     assert!(dequeue(99).is_err());
     assert!(record_wait(99, 1).is_err());
     record_wait(0, 100_000).expect("wait");
-    let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
+    let c = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 0)
+        .expect("find0");
     assert_eq!(c.total_wait_ns, 100_000);
     crate::serial_println!("  [7/8] wait + not found: OK");
 

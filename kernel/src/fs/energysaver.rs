@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -111,29 +111,54 @@ where
 fn default_profile(mode: EnergyMode) -> EnergyProfile {
     match mode {
         EnergyMode::Performance => EnergyProfile {
-            mode, display_brightness_pct: 100, display_timeout_sec: 600,
-            cpu_max_freq_pct: 100, wifi_power_save: false, bluetooth_off: false,
-            reduce_animations: false, background_app_limit: 0,
+            mode,
+            display_brightness_pct: 100,
+            display_timeout_sec: 600,
+            cpu_max_freq_pct: 100,
+            wifi_power_save: false,
+            bluetooth_off: false,
+            reduce_animations: false,
+            background_app_limit: 0,
         },
         EnergyMode::Balanced => EnergyProfile {
-            mode, display_brightness_pct: 70, display_timeout_sec: 300,
-            cpu_max_freq_pct: 80, wifi_power_save: true, bluetooth_off: false,
-            reduce_animations: false, background_app_limit: 20,
+            mode,
+            display_brightness_pct: 70,
+            display_timeout_sec: 300,
+            cpu_max_freq_pct: 80,
+            wifi_power_save: true,
+            bluetooth_off: false,
+            reduce_animations: false,
+            background_app_limit: 20,
         },
         EnergyMode::PowerSaver => EnergyProfile {
-            mode, display_brightness_pct: 40, display_timeout_sec: 120,
-            cpu_max_freq_pct: 60, wifi_power_save: true, bluetooth_off: true,
-            reduce_animations: true, background_app_limit: 5,
+            mode,
+            display_brightness_pct: 40,
+            display_timeout_sec: 120,
+            cpu_max_freq_pct: 60,
+            wifi_power_save: true,
+            bluetooth_off: true,
+            reduce_animations: true,
+            background_app_limit: 5,
         },
         EnergyMode::UltraSaver => EnergyProfile {
-            mode, display_brightness_pct: 20, display_timeout_sec: 30,
-            cpu_max_freq_pct: 40, wifi_power_save: true, bluetooth_off: true,
-            reduce_animations: true, background_app_limit: 2,
+            mode,
+            display_brightness_pct: 20,
+            display_timeout_sec: 30,
+            cpu_max_freq_pct: 40,
+            wifi_power_save: true,
+            bluetooth_off: true,
+            reduce_animations: true,
+            background_app_limit: 2,
         },
         EnergyMode::Custom => EnergyProfile {
-            mode, display_brightness_pct: 70, display_timeout_sec: 300,
-            cpu_max_freq_pct: 80, wifi_power_save: false, bluetooth_off: false,
-            reduce_animations: false, background_app_limit: 10,
+            mode,
+            display_brightness_pct: 70,
+            display_timeout_sec: 300,
+            cpu_max_freq_pct: 80,
+            wifi_power_save: false,
+            bluetooth_off: false,
+            reduce_animations: false,
+            background_app_limit: 10,
         },
     }
 }
@@ -144,7 +169,9 @@ fn default_profile(mode: EnergyMode) -> EnergyProfile {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         active_mode: EnergyMode::Balanced,
         profile: default_profile(EnergyMode::Balanced),
@@ -170,7 +197,10 @@ pub fn set_mode(mode: EnergyMode) -> KernelResult<()> {
 
 /// Get current mode.
 pub fn get_mode() -> EnergyMode {
-    STATE.lock().as_ref().map_or(EnergyMode::Balanced, |s| s.active_mode)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(EnergyMode::Balanced, |s| s.active_mode)
 }
 
 /// Get current profile.
@@ -180,15 +210,24 @@ pub fn get_profile() -> Option<EnergyProfile> {
 
 /// Set a custom profile setting.
 pub fn set_brightness(pct: u32) -> KernelResult<()> {
-    with_state(|state| { state.profile.display_brightness_pct = pct.min(100); Ok(()) })
+    with_state(|state| {
+        state.profile.display_brightness_pct = pct.min(100);
+        Ok(())
+    })
 }
 
 pub fn set_cpu_limit(pct: u32) -> KernelResult<()> {
-    with_state(|state| { state.profile.cpu_max_freq_pct = pct.min(100); Ok(()) })
+    with_state(|state| {
+        state.profile.cpu_max_freq_pct = pct.min(100);
+        Ok(())
+    })
 }
 
 pub fn set_display_timeout(sec: u32) -> KernelResult<()> {
-    with_state(|state| { state.profile.display_timeout_sec = sec; Ok(()) })
+    with_state(|state| {
+        state.profile.display_timeout_sec = sec;
+        Ok(())
+    })
 }
 
 /// Throttle a background app.
@@ -203,8 +242,11 @@ pub fn throttle_app(name: &str, cpu_limit_pct: u32) -> KernelResult<()> {
                 return Err(KernelError::ResourceExhausted);
             }
             state.throttled_apps.push(ThrottledApp {
-                name: String::from(name), cpu_limit_pct,
-                network_allowed: true, background_allowed: true, applied_ns: now,
+                name: String::from(name),
+                cpu_limit_pct,
+                network_allowed: true,
+                background_allowed: true,
+                applied_ns: now,
             });
         }
         state.total_throttles += 1;
@@ -217,14 +259,19 @@ pub fn unthrottle_app(name: &str) -> KernelResult<()> {
     with_state(|state| {
         let before = state.throttled_apps.len();
         state.throttled_apps.retain(|a| a.name != name);
-        if state.throttled_apps.len() == before { return Err(KernelError::NotFound); }
+        if state.throttled_apps.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
 
 /// Set estimated battery remaining.
 pub fn set_estimate(minutes: u64) -> KernelResult<()> {
-    with_state(|state| { state.estimated_minutes = minutes; Ok(()) })
+    with_state(|state| {
+        state.estimated_minutes = minutes;
+        Ok(())
+    })
 }
 
 /// Set auto-switch settings.
@@ -238,14 +285,23 @@ pub fn set_auto_switch(enabled: bool, threshold_pct: u32) -> KernelResult<()> {
 
 /// List throttled apps.
 pub fn list_throttled() -> Vec<ThrottledApp> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.throttled_apps.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.throttled_apps.clone())
 }
 
 /// Statistics: (throttled_count, mode_changes, total_throttles, estimated_min, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.throttled_apps.len(), s.total_mode_changes, s.total_throttles, s.estimated_minutes, s.ops),
+        Some(s) => (
+            s.throttled_apps.len(),
+            s.total_mode_changes,
+            s.total_throttles,
+            s.estimated_minutes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

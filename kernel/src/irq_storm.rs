@@ -173,15 +173,16 @@ pub fn periodic_check() {
 
                 crate::serial_println!(
                     "[irq-storm] IRQ {} unmasked after {}s cooldown (observing...)",
-                    irq, cooldown
+                    irq,
+                    cooldown
                 );
             } else {
                 // Still in cooldown — estimate suppressed interrupts.
                 // Use the last known rate (count should be 0 while masked,
                 // but account for any that slipped through during unmask).
-                state.total_suppressed.fetch_add(
-                    u64::from(STORM_THRESHOLD), Ordering::Relaxed
-                );
+                state
+                    .total_suppressed
+                    .fetch_add(u64::from(STORM_THRESHOLD), Ordering::Relaxed);
             }
             continue;
         }
@@ -189,7 +190,9 @@ pub fn periodic_check() {
         // IRQ is active — check rate.
         if count >= STORM_THRESHOLD {
             // Over threshold — record a strike.
-            let strikes = state.strike_count.fetch_add(1, Ordering::Relaxed)
+            let strikes = state
+                .strike_count
+                .fetch_add(1, Ordering::Relaxed)
                 .saturating_add(1);
 
             if strikes >= STORM_STRIKES {
@@ -210,29 +213,30 @@ pub fn periodic_check() {
 
                 crate::serial_println!(
                     "[irq-storm] IRQ {} MASKED: {} IRQs/sec for {}s (storm #{}, cooldown {}s)",
-                    irq, count, strikes, state.total_storms.load(Ordering::Relaxed),
+                    irq,
+                    count,
+                    strikes,
+                    state.total_storms.load(Ordering::Relaxed),
                     new_cooldown
                 );
 
                 // Log to kwarn for kshell visibility.
-                crate::kwarn::warn(
-                    "IRQ storm detected and masked",
-                    "irq_storm.rs",
-                    line!(),
-                );
+                crate::kwarn::warn("IRQ storm detected and masked", "irq_storm.rs", line!());
             }
         } else {
             // Rate is normal — decay the strike count.
             let current_strikes = state.strike_count.load(Ordering::Relaxed);
             if current_strikes > 0 {
-                state.strike_count.store(
-                    current_strikes.saturating_sub(1), Ordering::Relaxed
-                );
+                state
+                    .strike_count
+                    .store(current_strikes.saturating_sub(1), Ordering::Relaxed);
             }
 
             // Reset cooldown on sustained good behavior.
             if current_strikes == 0 {
-                state.cooldown_secs.store(COOLDOWN_SECONDS, Ordering::Relaxed);
+                state
+                    .cooldown_secs
+                    .store(COOLDOWN_SECONDS, Ordering::Relaxed);
             }
         }
     }
@@ -303,7 +307,9 @@ pub fn force_unmask(irq: usize) {
     if let Some(state) = IRQ_STORM.get(irq) {
         state.masked.store(false, Ordering::Relaxed);
         state.strike_count.store(0, Ordering::Relaxed);
-        state.cooldown_secs.store(COOLDOWN_SECONDS, Ordering::Relaxed);
+        state
+            .cooldown_secs
+            .store(COOLDOWN_SECONDS, Ordering::Relaxed);
 
         #[allow(clippy::cast_possible_truncation)]
         // SAFETY: irq is a valid IRQ line; unmasking re-enables it after cooldown.

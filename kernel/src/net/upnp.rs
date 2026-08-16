@@ -50,11 +50,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -453,10 +453,7 @@ fn build_soap_add_mapping(
 }
 
 /// Build a SOAP DeletePortMapping request body.
-fn build_soap_delete_mapping(
-    protocol: Protocol,
-    external_port: u16,
-) -> Vec<u8> {
+fn build_soap_delete_mapping(protocol: Protocol, external_port: u16) -> Vec<u8> {
     let proto_str = match protocol {
         Protocol::Tcp => "TCP",
         Protocol::Udp => "UDP",
@@ -509,7 +506,9 @@ pub fn init() {
     let request = build_natpmp_extern_addr_request();
     crate::serial_println!(
         "[upnp] Attempting NAT-PMP discovery (gateway {} port {}), {} bytes",
-        format_ipv4(gateway), NATPMP_PORT, request.len(),
+        format_ipv4(gateway),
+        NATPMP_PORT,
+        request.len(),
     );
 
     // Store that we've attempted discovery.
@@ -568,14 +567,17 @@ pub fn add_mapping(
 
     // Check for duplicate (same protocol + internal port).
     for m in &state.mappings {
-        if m.protocol == protocol && m.internal_port == internal_port
+        if m.protocol == protocol
+            && m.internal_port == internal_port
             && m.state != MappingState::Failed
             && m.state != MappingState::Expired
         {
             crate::syslog!(
-                "upnp", Warning,
+                "upnp",
+                Warning,
                 "Mapping already exists for {} port {}",
-                protocol.label(), internal_port,
+                protocol.label(),
+                internal_port,
             );
             return None;
         }
@@ -587,7 +589,11 @@ pub fn add_mapping(
     } else {
         lifetime_secs.clamp(MIN_LIFETIME_SECS, MAX_LIFETIME_SECS)
     };
-    let ext_port = if external_port == 0 { internal_port } else { external_port };
+    let ext_port = if external_port == 0 {
+        internal_port
+    } else {
+        external_port
+    };
 
     let mapping = PortMapping {
         protocol,
@@ -605,16 +611,19 @@ pub fn add_mapping(
     // Build the mapping request packet.
     match state.method {
         DiscoveryMethod::NatPmp => {
-            let _pkt = build_natpmp_map_request(
-                protocol, internal_port, ext_port, lifetime,
-            );
+            let _pkt = build_natpmp_map_request(protocol, internal_port, ext_port, lifetime);
             // In a full implementation: send via UDP to gateway:5351.
         }
         DiscoveryMethod::UpnpIgd => {
             let local_ip = crate::net::interface::ip().to_u32();
             let ip_str = format_ipv4(local_ip);
             let _body = build_soap_add_mapping(
-                protocol, ext_port, &ip_str, internal_port, description, lifetime,
+                protocol,
+                ext_port,
+                &ip_str,
+                internal_port,
+                description,
+                lifetime,
             );
             // In a full implementation: HTTP POST to control URL.
         }
@@ -629,10 +638,15 @@ pub fn add_mapping(
     MAPPING_COUNT.store(state.mappings.len() as u32, Ordering::Relaxed);
 
     crate::syslog!(
-        "upnp", Info,
+        "upnp",
+        Info,
         "Added mapping: {} {}:{} → ext:{} ({}s, \"{}\")",
-        protocol.label(), format_ipv4(0), internal_port,
-        ext_port, lifetime, description,
+        protocol.label(),
+        format_ipv4(0),
+        internal_port,
+        ext_port,
+        lifetime,
+        description,
     );
 
     Some(idx)
@@ -646,7 +660,8 @@ pub fn remove_mapping(protocol: Protocol, internal_port: u16) -> bool {
     let mut state = STATE.lock();
 
     let pos = state.mappings.iter().position(|m| {
-        m.protocol == protocol && m.internal_port == internal_port
+        m.protocol == protocol
+            && m.internal_port == internal_port
             && m.state != MappingState::Expired
     });
 
@@ -675,9 +690,12 @@ pub fn remove_mapping(protocol: Protocol, internal_port: u16) -> bool {
     MAPPING_COUNT.store(state.mappings.len() as u32, Ordering::Relaxed);
 
     crate::syslog!(
-        "upnp", Info,
+        "upnp",
+        Info,
         "Removed mapping: {} int:{} ext:{}",
-        protocol.label(), internal_port, ext_port,
+        protocol.label(),
+        internal_port,
+        ext_port,
     );
 
     true
@@ -752,9 +770,7 @@ pub fn tick() {
 
             match state.method {
                 DiscoveryMethod::NatPmp => {
-                    let _pkt = build_natpmp_map_request(
-                        protocol, int_port, ext_port, lifetime,
-                    );
+                    let _pkt = build_natpmp_map_request(protocol, int_port, ext_port, lifetime);
                     // Send renewal packet.
                 }
                 DiscoveryMethod::UpnpIgd => {
@@ -764,9 +780,8 @@ pub fn tick() {
             }
 
             state.mappings[i].renewals = state.mappings[i].renewals.saturating_add(1);
-            state.mappings[i].expires_ns = now.saturating_add(
-                u64::from(lifetime).saturating_mul(1_000_000_000)
-            );
+            state.mappings[i].expires_ns =
+                now.saturating_add(u64::from(lifetime).saturating_mul(1_000_000_000));
             state.total_renewals = state.total_renewals.saturating_add(1);
         } else if now >= m.expires_ns {
             // Mapping expired.
@@ -828,7 +843,10 @@ pub fn procfs_content() -> String {
     out.push_str(&format!("initialized: {}\n", state.initialized));
     out.push_str(&format!("method: {}\n", state.method.label()));
     out.push_str(&format!("gateway: {}\n", format_ipv4(state.gateway_ip)));
-    out.push_str(&format!("external_ip: {}\n", format_ipv4(state.external_ip)));
+    out.push_str(&format!(
+        "external_ip: {}\n",
+        format_ipv4(state.external_ip)
+    ));
     out.push_str(&format!("active_mappings: {}\n", state.mappings.len()));
     out.push_str(&format!("total_created: {}\n", state.total_created));
     out.push_str(&format!("total_removed: {}\n", state.total_removed));
@@ -867,7 +885,11 @@ pub fn self_test() {
 
     // Test 1: NAT-PMP packet building.
     let pkt = build_natpmp_extern_addr_request();
-    assert_eq!(pkt.len(), 2, "NAT-PMP extern addr request should be 2 bytes");
+    assert_eq!(
+        pkt.len(),
+        2,
+        "NAT-PMP extern addr request should be 2 bytes"
+    );
     assert_eq!(pkt[0], 0, "Version should be 0");
     assert_eq!(pkt[1], 0, "Opcode should be 0");
     crate::serial_println!("[upnp]   NAT-PMP extern addr request: OK");
@@ -888,7 +910,7 @@ pub fn self_test() {
     // Test 3: NAT-PMP extern addr response parsing.
     let resp = [
         0u8, 128, // version, opcode (response)
-        0, 0,     // result code = success
+        0, 0, // result code = success
         0, 0, 0, 100, // epoch = 100
         203, 0, 113, 1, // external IP = 203.0.113.1
     ];
@@ -902,11 +924,11 @@ pub fn self_test() {
 
     // Test 4: NAT-PMP map response parsing.
     let resp = [
-        0u8, 130,     // version, opcode (TCP map response)
-        0, 0,         // result = success
-        0, 0, 1, 0,   // epoch = 256
-        0x1F, 0x90,   // internal port = 8080
-        0x1F, 0x91,   // external port = 8081
+        0u8, 130, // version, opcode (TCP map response)
+        0, 0, // result = success
+        0, 0, 1, 0, // epoch = 256
+        0x1F, 0x90, // internal port = 8080
+        0x1F, 0x91, // external port = 8081
         0, 0, 0x0E, 0x10, // lifetime = 3600
     ];
     let parsed = parse_natpmp_map_response(&resp);
@@ -926,19 +948,32 @@ pub fn self_test() {
     // Test 6: SSDP M-SEARCH packet.
     let ssdp = build_ssdp_msearch();
     let ssdp_str = core::str::from_utf8(&ssdp).unwrap_or("");
-    assert!(ssdp_str.starts_with("M-SEARCH"), "SSDP should start with M-SEARCH");
-    assert!(ssdp_str.contains("InternetGatewayDevice"), "Should search for IGD");
-    assert!(ssdp_str.contains("239.255.255.250:1900"), "Should target SSDP multicast");
+    assert!(
+        ssdp_str.starts_with("M-SEARCH"),
+        "SSDP should start with M-SEARCH"
+    );
+    assert!(
+        ssdp_str.contains("InternetGatewayDevice"),
+        "Should search for IGD"
+    );
+    assert!(
+        ssdp_str.contains("239.255.255.250:1900"),
+        "Should target SSDP multicast"
+    );
     crate::serial_println!("[upnp]   SSDP M-SEARCH: OK ({} bytes)", ssdp.len());
 
     // Test 7: SOAP AddPortMapping body.
-    let soap = build_soap_add_mapping(
-        Protocol::Tcp, 8080, "192.168.1.100", 8080, "Test", 3600,
-    );
+    let soap = build_soap_add_mapping(Protocol::Tcp, 8080, "192.168.1.100", 8080, "Test", 3600);
     let soap_str = core::str::from_utf8(&soap).unwrap_or("");
-    assert!(soap_str.contains("AddPortMapping"), "SOAP should contain action");
+    assert!(
+        soap_str.contains("AddPortMapping"),
+        "SOAP should contain action"
+    );
     assert!(soap_str.contains("8080"), "SOAP should contain port");
-    assert!(soap_str.contains("192.168.1.100"), "SOAP should contain client IP");
+    assert!(
+        soap_str.contains("192.168.1.100"),
+        "SOAP should contain client IP"
+    );
     assert!(soap_str.contains("TCP"), "SOAP should contain protocol");
     crate::serial_println!("[upnp]   SOAP AddPortMapping: OK ({} bytes)", soap.len());
 
@@ -991,7 +1026,13 @@ pub fn self_test() {
     {
         let state = STATE.lock();
         assert_eq!(state.mappings[1].state, MappingState::Failed);
-        assert!(state.mappings[1].last_error.as_ref().unwrap().contains("port in use"));
+        assert!(
+            state.mappings[1]
+                .last_error
+                .as_ref()
+                .unwrap()
+                .contains("port in use")
+        );
     }
     crate::serial_println!("[upnp]   Fail mapping: OK");
 
@@ -1010,7 +1051,11 @@ pub fn self_test() {
     assert!(removed_count >= 1, "Should have >= 1 removed");
     crate::serial_println!(
         "[upnp]   Stats: created={}, removed={}, renewals={}, failures={}, active={}",
-        created, removed_count, renewals, failures, count,
+        created,
+        removed_count,
+        renewals,
+        failures,
+        count,
     );
 
     // Test 11: IPv4 formatting.

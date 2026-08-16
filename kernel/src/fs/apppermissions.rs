@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -147,7 +147,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         entries: Vec::new(),
         log: Vec::new(),
@@ -169,7 +171,10 @@ pub fn check(app_name: &str, permission: Permission) -> Decision {
     state.total_checks += 1;
     OPS.store(state.ops, Ordering::Relaxed);
 
-    state.entries.iter().find(|e| e.app_name == app_name && e.permission == permission)
+    state
+        .entries
+        .iter()
+        .find(|e| e.app_name == app_name && e.permission == permission)
         .map_or(Decision::NotDecided, |e| e.decision)
 }
 
@@ -177,7 +182,11 @@ pub fn check(app_name: &str, permission: Permission) -> Decision {
 pub fn grant(app_name: &str, permission: Permission) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        if let Some(existing) = state.entries.iter_mut().find(|e| e.app_name == app_name && e.permission == permission) {
+        if let Some(existing) = state
+            .entries
+            .iter_mut()
+            .find(|e| e.app_name == app_name && e.permission == permission)
+        {
             existing.decision = Decision::Allowed;
             existing.last_requested_ns = now;
         } else {
@@ -186,8 +195,10 @@ pub fn grant(app_name: &str, permission: Permission) -> KernelResult<()> {
             }
             state.entries.push(AppPermission {
                 app_name: String::from(app_name),
-                permission, decision: Decision::Allowed,
-                last_requested_ns: now, request_count: 0,
+                permission,
+                decision: Decision::Allowed,
+                last_requested_ns: now,
+                request_count: 0,
             });
         }
         state.total_grants += 1;
@@ -197,7 +208,9 @@ pub fn grant(app_name: &str, permission: Permission) -> KernelResult<()> {
         }
         state.log.push(PermissionLog {
             app_name: String::from(app_name),
-            permission, granted: true, timestamp_ns: now,
+            permission,
+            granted: true,
+            timestamp_ns: now,
         });
         Ok(())
     })
@@ -207,7 +220,11 @@ pub fn grant(app_name: &str, permission: Permission) -> KernelResult<()> {
 pub fn deny(app_name: &str, permission: Permission) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        if let Some(existing) = state.entries.iter_mut().find(|e| e.app_name == app_name && e.permission == permission) {
+        if let Some(existing) = state
+            .entries
+            .iter_mut()
+            .find(|e| e.app_name == app_name && e.permission == permission)
+        {
             existing.decision = Decision::Denied;
             existing.last_requested_ns = now;
         } else {
@@ -216,8 +233,10 @@ pub fn deny(app_name: &str, permission: Permission) -> KernelResult<()> {
             }
             state.entries.push(AppPermission {
                 app_name: String::from(app_name),
-                permission, decision: Decision::Denied,
-                last_requested_ns: now, request_count: 0,
+                permission,
+                decision: Decision::Denied,
+                last_requested_ns: now,
+                request_count: 0,
             });
         }
         state.total_denials += 1;
@@ -227,7 +246,9 @@ pub fn deny(app_name: &str, permission: Permission) -> KernelResult<()> {
         }
         state.log.push(PermissionLog {
             app_name: String::from(app_name),
-            permission, granted: false, timestamp_ns: now,
+            permission,
+            granted: false,
+            timestamp_ns: now,
         });
         Ok(())
     })
@@ -246,14 +267,22 @@ pub fn revoke_all(app_name: &str) -> KernelResult<usize> {
 /// List permissions for an app.
 pub fn list_app_permissions(app_name: &str) -> Vec<AppPermission> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.entries.iter().filter(|e| e.app_name == app_name).cloned().collect()
+        s.entries
+            .iter()
+            .filter(|e| e.app_name == app_name)
+            .cloned()
+            .collect()
     })
 }
 
 /// List all apps with a specific permission.
 pub fn list_by_permission(permission: Permission) -> Vec<AppPermission> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.entries.iter().filter(|e| e.permission == permission).cloned().collect()
+        s.entries
+            .iter()
+            .filter(|e| e.permission == permission)
+            .cloned()
+            .collect()
     })
 }
 
@@ -269,7 +298,13 @@ pub fn list_log(count: usize) -> Vec<PermissionLog> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.entries.len(), s.total_checks, s.total_grants, s.total_denials, s.ops),
+        Some(s) => (
+            s.entries.len(),
+            s.total_checks,
+            s.total_grants,
+            s.total_denials,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

@@ -49,9 +49,9 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use crate::serial_println;
 use crate::smp;
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -160,17 +160,23 @@ static TASKS_MIGRATED: AtomicU64 = AtomicU64::new(0);
 pub fn init() {
     let cpus = smp::cpu_count();
     for i in 0..cpus {
-        if let Some(s) = CPU_STATES.get(i) { s.store(CpuState::Online as u8, Ordering::Release) }
+        if let Some(s) = CPU_STATES.get(i) {
+            s.store(CpuState::Online as u8, Ordering::Release)
+        }
     }
     ONLINE_COUNT.store(cpus as u64, Ordering::Release);
 
-    serial_println!("[hotplug] CPU hotplug framework initialized ({} CPUs online)", cpus);
+    serial_println!(
+        "[hotplug] CPU hotplug framework initialized ({} CPUs online)",
+        cpus
+    );
 }
 
 /// Get the current state of a CPU.
 #[must_use]
 pub fn cpu_state(cpu: usize) -> CpuState {
-    CPU_STATES.get(cpu)
+    CPU_STATES
+        .get(cpu)
         .map(|s| CpuState::from_u8(s.load(Ordering::Acquire)))
         .unwrap_or(CpuState::NotPresent)
 }
@@ -238,7 +244,11 @@ pub fn offline(cpu: usize) -> Result<usize, &'static str> {
     // Post-offline notification.
     notify_all(cpu, HotplugEvent::PostOffline);
 
-    serial_println!("[hotplug] CPU {} offlined (migrated {} tasks)", cpu, migrated);
+    serial_println!(
+        "[hotplug] CPU {} offlined (migrated {} tasks)",
+        cpu,
+        migrated
+    );
     Ok(migrated)
 }
 
@@ -347,7 +357,8 @@ pub struct HotplugStats {
 #[must_use]
 #[inline]
 pub fn is_scheduling_eligible(cpu: usize) -> bool {
-    CPU_STATES.get(cpu)
+    CPU_STATES
+        .get(cpu)
         .map(|s| s.load(Ordering::Relaxed) == CpuState::Online as u8)
         .unwrap_or(false)
 }
@@ -408,17 +419,26 @@ pub fn self_test() {
     serial_println!("[hotplug]   Scheduling eligibility: OK");
 
     // Test 5: Notifier registration.
-    fn test_notifier(_cpu: usize, _event: HotplugEvent) -> bool { true }
+    fn test_notifier(_cpu: usize, _event: HotplugEvent) -> bool {
+        true
+    }
     let slot = register_notifier(test_notifier);
     assert!(slot.is_some());
-    serial_println!("[hotplug]   Notifier registration: OK (slot={})", slot.unwrap());
+    serial_println!(
+        "[hotplug]   Notifier registration: OK (slot={})",
+        slot.unwrap()
+    );
     unregister_notifier(slot.unwrap());
 
     // Test 6: Statistics.
     let st = stats();
     assert_eq!(st.online_cpus, cpus);
     assert_eq!(st.total_cpus, cpus);
-    serial_println!("[hotplug]   Stats: OK (online={}, total={})", st.online_cpus, st.total_cpus);
+    serial_println!(
+        "[hotplug]   Stats: OK (online={}, total={})",
+        st.online_cpus,
+        st.total_cpus
+    );
 
     // Test 7: On multi-CPU systems, test actual offline/online cycle.
     if cpus > 1 {
@@ -428,7 +448,11 @@ pub fn self_test() {
         let migrated = result.unwrap();
         assert!(!is_online(target));
         assert_eq!(online_count(), cpus - 1);
-        serial_println!("[hotplug]   CPU {} offline: OK (migrated {} tasks)", target, migrated);
+        serial_println!(
+            "[hotplug]   CPU {} offline: OK (migrated {} tasks)",
+            target,
+            migrated
+        );
 
         // Online it again.
         let result = online(target);

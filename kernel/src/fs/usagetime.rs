@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -115,7 +115,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         apps: Vec::new(),
         categories: Vec::new(),
@@ -129,7 +131,9 @@ pub fn init_defaults() {
 /// Record app gaining focus.
 pub fn app_focused(app_name: &str) -> KernelResult<()> {
     with_state(|state| {
-        if !state.tracking_enabled { return Ok(()); }
+        if !state.tracking_enabled {
+            return Ok(());
+        }
         let now = crate::hpet::elapsed_ns();
         if let Some(app) = state.apps.iter_mut().find(|a| a.app_name == app_name) {
             if app.current_session_start.is_none() {
@@ -159,7 +163,10 @@ pub fn app_focused(app_name: &str) -> KernelResult<()> {
 pub fn app_blurred(app_name: &str) -> KernelResult<u64> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let app = state.apps.iter_mut().find(|a| a.app_name == app_name)
+        let app = state
+            .apps
+            .iter_mut()
+            .find(|a| a.app_name == app_name)
             .ok_or(KernelError::NotFound)?;
         if let Some(start) = app.current_session_start.take() {
             let duration_ms = now.saturating_sub(start) / 1_000_000;
@@ -198,7 +205,10 @@ pub fn set_limit(app_name: &str, limit_ms: u64) -> KernelResult<()> {
 /// Remove daily limit.
 pub fn remove_limit(app_name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let app = state.apps.iter_mut().find(|a| a.app_name == app_name)
+        let app = state
+            .apps
+            .iter_mut()
+            .find(|a| a.app_name == app_name)
             .ok_or(KernelError::NotFound)?;
         app.daily_limit_ms = None;
         Ok(())
@@ -208,9 +218,13 @@ pub fn remove_limit(app_name: &str) -> KernelResult<()> {
 /// Check if an app is over its limit.
 pub fn is_over_limit(app_name: &str) -> bool {
     STATE.lock().as_ref().is_some_and(|s| {
-        s.apps.iter().find(|a| a.app_name == app_name).is_some_and(|a| {
-            a.daily_limit_ms.is_some_and(|limit| a.total_foreground_ms >= limit)
-        })
+        s.apps
+            .iter()
+            .find(|a| a.app_name == app_name)
+            .is_some_and(|a| {
+                a.daily_limit_ms
+                    .is_some_and(|limit| a.total_foreground_ms >= limit)
+            })
     })
 }
 
@@ -252,13 +266,19 @@ pub fn top_apps(max: usize) -> Vec<AppUsage> {
 
 /// Get usage for a specific app.
 pub fn get_usage(app_name: &str) -> Option<AppUsage> {
-    STATE.lock().as_ref().and_then(|s| s.apps.iter().find(|a| a.app_name == app_name).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.apps.iter().find(|a| a.app_name == app_name).cloned())
 }
 
 /// Get category for an app.
 pub fn get_category(app_name: &str) -> Option<UsageCategory> {
     STATE.lock().as_ref().and_then(|s| {
-        s.categories.iter().find(|c| c.app_name == app_name).map(|c| c.category)
+        s.categories
+            .iter()
+            .find(|c| c.app_name == app_name)
+            .map(|c| c.category)
     })
 }
 
@@ -282,7 +302,13 @@ pub fn stats() -> (usize, u64, u64, usize, u64) {
     match guard.as_ref() {
         Some(s) => {
             let limited = s.apps.iter().filter(|a| a.daily_limit_ms.is_some()).count();
-            (s.apps.len(), s.total_sessions, s.total_tracked_ms, limited, s.ops)
+            (
+                s.apps.len(),
+                s.total_sessions,
+                s.total_tracked_ms,
+                limited,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }

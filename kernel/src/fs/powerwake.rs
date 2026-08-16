@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -126,17 +126,17 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
         timers: Vec::new(),
-        history: alloc::vec![
-            WakeEvent {
-                timestamp_ns: now,
-                source: WakeSource::PowerButton,
-                detail: String::from("System boot"),
-            },
-        ],
+        history: alloc::vec![WakeEvent {
+            timestamp_ns: now,
+            source: WakeSource::PowerButton,
+            detail: String::from("System boot"),
+        },],
         wol_targets: Vec::new(),
         next_timer_id: 1,
         next_wol_id: 1,
@@ -147,7 +147,12 @@ pub fn init_defaults() {
 }
 
 /// Schedule a wake timer.
-pub fn schedule_wake(wake_at_ns: u64, reason: &str, recurring: bool, interval_ns: u64) -> KernelResult<u32> {
+pub fn schedule_wake(
+    wake_at_ns: u64,
+    reason: &str,
+    recurring: bool,
+    interval_ns: u64,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.timers.len() >= MAX_TIMERS {
             return Err(KernelError::ResourceExhausted);
@@ -156,8 +161,13 @@ pub fn schedule_wake(wake_at_ns: u64, reason: &str, recurring: bool, interval_ns
         let id = state.next_timer_id;
         state.next_timer_id += 1;
         state.timers.push(WakeTimer {
-            id, wake_at_ns, reason: String::from(reason),
-            enabled: true, recurring, interval_ns, created_ns: now,
+            id,
+            wake_at_ns,
+            reason: String::from(reason),
+            enabled: true,
+            recurring,
+            interval_ns,
+            created_ns: now,
         });
         Ok(id)
     })
@@ -168,7 +178,9 @@ pub fn cancel_timer(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.timers.len();
         state.timers.retain(|t| t.id != id);
-        if state.timers.len() == before { return Err(KernelError::NotFound); }
+        if state.timers.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -176,7 +188,10 @@ pub fn cancel_timer(id: u32) -> KernelResult<()> {
 /// Enable/disable a timer.
 pub fn set_timer_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let timer = state.timers.iter_mut().find(|t| t.id == id)
+        let timer = state
+            .timers
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         timer.enabled = enabled;
         Ok(())
@@ -192,8 +207,11 @@ pub fn add_wol_target(name: &str, mac: &str) -> KernelResult<u32> {
         let id = state.next_wol_id;
         state.next_wol_id += 1;
         state.wol_targets.push(WolTarget {
-            id, name: String::from(name), mac_address: String::from(mac),
-            last_sent_ns: 0, send_count: 0,
+            id,
+            name: String::from(name),
+            mac_address: String::from(mac),
+            last_sent_ns: 0,
+            send_count: 0,
         });
         Ok(id)
     })
@@ -204,7 +222,9 @@ pub fn remove_wol_target(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.wol_targets.len();
         state.wol_targets.retain(|w| w.id != id);
-        if state.wol_targets.len() == before { return Err(KernelError::NotFound); }
+        if state.wol_targets.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -213,7 +233,10 @@ pub fn remove_wol_target(id: u32) -> KernelResult<()> {
 pub fn send_wol(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let target = state.wol_targets.iter_mut().find(|w| w.id == id)
+        let target = state
+            .wol_targets
+            .iter_mut()
+            .find(|w| w.id == id)
             .ok_or(KernelError::NotFound)?;
         target.last_sent_ns = now;
         target.send_count += 1;
@@ -230,7 +253,9 @@ pub fn record_wake(source: WakeSource, detail: &str) -> KernelResult<()> {
             state.history.remove(0);
         }
         state.history.push(WakeEvent {
-            timestamp_ns: now, source, detail: String::from(detail),
+            timestamp_ns: now,
+            source,
+            detail: String::from(detail),
         });
         state.total_wakes += 1;
         Ok(())
@@ -239,24 +264,39 @@ pub fn record_wake(source: WakeSource, detail: &str) -> KernelResult<()> {
 
 /// List active timers.
 pub fn list_timers() -> Vec<WakeTimer> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.timers.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.timers.clone())
 }
 
 /// List WoL targets.
 pub fn list_wol_targets() -> Vec<WolTarget> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.wol_targets.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.wol_targets.clone())
 }
 
 /// Get wake history.
 pub fn wake_history() -> Vec<WakeEvent> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.history.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.history.clone())
 }
 
 /// Statistics: (timer_count, wol_target_count, total_wakes, total_wol_sent, ops).
 pub fn stats() -> (usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.timers.len(), s.wol_targets.len(), s.total_wakes, s.total_wol_sent, s.ops),
+        Some(s) => (
+            s.timers.len(),
+            s.wol_targets.len(),
+            s.total_wakes,
+            s.total_wol_sent,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -281,7 +321,11 @@ pub fn self_test() {
 
     // 3: Enable/disable timer.
     set_timer_enabled(tid, false).expect("disable");
-    let t = list_timers().iter().find(|t| t.id == tid).cloned().expect("find");
+    let t = list_timers()
+        .iter()
+        .find(|t| t.id == tid)
+        .cloned()
+        .expect("find");
     assert!(!t.enabled);
     set_timer_enabled(tid, true).expect("enable");
     crate::serial_println!("  [3/8] timer toggle: OK");
@@ -299,7 +343,11 @@ pub fn self_test() {
 
     // 6: Send WoL.
     send_wol(wid).expect("send_wol");
-    let w = list_wol_targets().iter().find(|w| w.id == wid).cloned().expect("find");
+    let w = list_wol_targets()
+        .iter()
+        .find(|w| w.id == wid)
+        .cloned()
+        .expect("find");
     assert_eq!(w.send_count, 1);
     crate::serial_println!("  [6/8] send wol: OK");
 

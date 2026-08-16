@@ -24,12 +24,12 @@
 //! For link aggregation, multiple physical links are combined
 //! into a single logical interface for bandwidth and redundancy.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::virtio::net::MacAddress;
@@ -304,9 +304,7 @@ impl Bridge {
 }
 
 /// Bridge table.
-static BRIDGES: Mutex<[Bridge; MAX_BRIDGES]> = Mutex::new(
-    [const { Bridge::empty() }; MAX_BRIDGES]
-);
+static BRIDGES: Mutex<[Bridge; MAX_BRIDGES]> = Mutex::new([const { Bridge::empty() }; MAX_BRIDGES]);
 
 // ---------------------------------------------------------------------------
 // Bond / Link Aggregation
@@ -398,9 +396,8 @@ impl BondInterface {
 }
 
 /// Bond table.
-static BONDS: Mutex<[BondInterface; MAX_BONDS]> = Mutex::new(
-    [const { BondInterface::empty() }; MAX_BONDS]
-);
+static BONDS: Mutex<[BondInterface; MAX_BONDS]> =
+    Mutex::new([const { BondInterface::empty() }; MAX_BONDS]);
 
 // Statistics.
 static BRIDGE_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -425,8 +422,12 @@ pub fn create_bridge(name: &str) -> KernelResult<usize> {
             bridge.frames_bridged = 0;
             bridge.frames_flooded = 0;
             // Reset FDB and ports.
-            for entry in bridge.fdb.iter_mut() { entry.active = false; }
-            for port in bridge.ports.iter_mut() { port.active = false; }
+            for entry in bridge.fdb.iter_mut() {
+                entry.active = false;
+            }
+            for port in bridge.ports.iter_mut() {
+                port.active = false;
+            }
             BRIDGE_COUNT.fetch_add(1, Ordering::Relaxed);
             return Ok(i);
         }
@@ -450,7 +451,9 @@ pub fn delete_bridge(index: usize) -> KernelResult<()> {
 #[allow(dead_code)] // Public API.
 pub fn add_port(bridge_idx: usize, port_id: u8) -> KernelResult<()> {
     let mut bridges = BRIDGES.lock();
-    let bridge = bridges.get_mut(bridge_idx).ok_or(KernelError::InvalidArgument)?;
+    let bridge = bridges
+        .get_mut(bridge_idx)
+        .ok_or(KernelError::InvalidArgument)?;
     if !bridge.active {
         return Err(KernelError::NotFound);
     }
@@ -475,7 +478,9 @@ pub fn add_port(bridge_idx: usize, port_id: u8) -> KernelResult<()> {
 #[allow(dead_code)] // Public API.
 pub fn remove_port(bridge_idx: usize, port_id: u8) -> KernelResult<()> {
     let mut bridges = BRIDGES.lock();
-    let bridge = bridges.get_mut(bridge_idx).ok_or(KernelError::InvalidArgument)?;
+    let bridge = bridges
+        .get_mut(bridge_idx)
+        .ok_or(KernelError::InvalidArgument)?;
     if !bridge.active {
         return Err(KernelError::NotFound);
     }
@@ -494,7 +499,9 @@ pub fn remove_port(bridge_idx: usize, port_id: u8) -> KernelResult<()> {
 #[allow(dead_code)] // Public API.
 pub fn set_port_stp(bridge_idx: usize, port_id: u8, state: StpState) -> KernelResult<()> {
     let mut bridges = BRIDGES.lock();
-    let bridge = bridges.get_mut(bridge_idx).ok_or(KernelError::InvalidArgument)?;
+    let bridge = bridges
+        .get_mut(bridge_idx)
+        .ok_or(KernelError::InvalidArgument)?;
     if !bridge.active {
         return Err(KernelError::NotFound);
     }
@@ -538,12 +545,18 @@ use crate::net::veth::{self, VethEndId, VethPairId};
 pub fn attach_veth(bridge_idx: usize, pair: VethPairId) -> KernelResult<u8> {
     let port_id = {
         let mut bridges = BRIDGES.lock();
-        let bridge = bridges.get_mut(bridge_idx).ok_or(KernelError::InvalidArgument)?;
+        let bridge = bridges
+            .get_mut(bridge_idx)
+            .ok_or(KernelError::InvalidArgument)?;
         if !bridge.active {
             return Err(KernelError::NotFound);
         }
         // Already attached? Return the existing port id (idempotent).
-        if let Some(p) = bridge.ports.iter().find(|p| p.active && p.veth_pair == Some(pair)) {
+        if let Some(p) = bridge
+            .ports
+            .iter()
+            .find(|p| p.active && p.veth_pair == Some(pair))
+        {
             return Ok(p.id);
         }
         // Claim a free port slot; the port id is its slot index.
@@ -583,12 +596,16 @@ pub fn attach_veth(bridge_idx: usize, pair: VethPairId) -> KernelResult<u8> {
 pub fn detach_veth(bridge_idx: usize, pair: VethPairId) -> KernelResult<()> {
     {
         let mut bridges = BRIDGES.lock();
-        let bridge = bridges.get_mut(bridge_idx).ok_or(KernelError::InvalidArgument)?;
+        let bridge = bridges
+            .get_mut(bridge_idx)
+            .ok_or(KernelError::InvalidArgument)?;
         if !bridge.active {
             return Err(KernelError::NotFound);
         }
         let freed_port = {
-            let port = bridge.ports.iter_mut()
+            let port = bridge
+                .ports
+                .iter_mut()
                 .find(|p| p.active && p.veth_pair == Some(pair))
                 .ok_or(KernelError::NotFound)?;
             port.active = false;
@@ -611,10 +628,12 @@ pub fn detach_veth(bridge_idx: usize, pair: VethPairId) -> KernelResult<()> {
 #[must_use]
 pub fn veth_port_count(bridge_idx: usize) -> usize {
     let bridges = BRIDGES.lock();
-    bridges
-        .get(bridge_idx)
-        .filter(|b| b.active)
-        .map_or(0, |b| b.ports.iter().filter(|p| p.active && p.veth_pair.is_some()).count())
+    bridges.get(bridge_idx).filter(|b| b.active).map_or(0, |b| {
+        b.ports
+            .iter()
+            .filter(|p| p.active && p.veth_pair.is_some())
+            .count()
+    })
 }
 
 /// Whether a bridge index refers to an active bridge.
@@ -644,7 +663,13 @@ pub fn forward(bridge_idx: usize) {
             Some(b) if b.active => b
                 .ports
                 .iter()
-                .filter_map(|p| if p.active { p.veth_pair.map(|vp| (p.id, vp)) } else { None })
+                .filter_map(|p| {
+                    if p.active {
+                        p.veth_pair.map(|vp| (p.id, vp))
+                    } else {
+                        None
+                    }
+                })
                 .collect(),
             _ => return,
         }
@@ -752,7 +777,9 @@ pub fn create_bond(name: &str, mode: BondMode) -> KernelResult<usize> {
             bond.rr_counter = 0;
             bond.total_tx = 0;
             bond.total_rx = 0;
-            for member in bond.members.iter_mut() { member.active = false; }
+            for member in bond.members.iter_mut() {
+                member.active = false;
+            }
             BOND_COUNT.fetch_add(1, Ordering::Relaxed);
             return Ok(i);
         }
@@ -776,7 +803,9 @@ pub fn delete_bond(index: usize) -> KernelResult<()> {
 #[allow(dead_code)] // Public API.
 pub fn add_bond_member(bond_idx: usize, member_id: u8) -> KernelResult<()> {
     let mut bonds = BONDS.lock();
-    let bond = bonds.get_mut(bond_idx).ok_or(KernelError::InvalidArgument)?;
+    let bond = bonds
+        .get_mut(bond_idx)
+        .ok_or(KernelError::InvalidArgument)?;
     if !bond.active {
         return Err(KernelError::NotFound);
     }
@@ -898,9 +927,13 @@ pub fn procfs_content() -> String {
         for b in &bridges {
             out.push_str(&format!(
                 "  {} ({}): {} ports, {} FDB entries, STP={}, bridged={}, flooded={}\n",
-                b.name, b.index, b.port_count, b.fdb_count,
+                b.name,
+                b.index,
+                b.port_count,
+                b.fdb_count,
                 if b.stp_enabled { "on" } else { "off" },
-                b.frames_bridged, b.frames_flooded,
+                b.frames_bridged,
+                b.frames_flooded,
             ));
         }
     }
@@ -934,10 +967,16 @@ pub fn self_test() -> KernelResult<()> {
     {
         let idx = create_bridge("br-test")?;
         let bridges = list_bridges();
-        assert!(bridges.iter().any(|b| b.name == "br-test"), "bridge created");
+        assert!(
+            bridges.iter().any(|b| b.name == "br-test"),
+            "bridge created"
+        );
         delete_bridge(idx)?;
         let bridges = list_bridges();
-        assert!(!bridges.iter().any(|b| b.name == "br-test"), "bridge deleted");
+        assert!(
+            !bridges.iter().any(|b| b.name == "br-test"),
+            "bridge deleted"
+        );
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[bridge]   test 1 (create/delete bridge) PASSED");

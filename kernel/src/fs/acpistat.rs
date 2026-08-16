@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -77,11 +77,11 @@ const NUM_EVENT_TYPES: usize = 8;
 /// System sleep state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SState {
-    S0,  // Working
-    S1,  // Power on suspend
-    S3,  // Suspend to RAM
-    S4,  // Suspend to disk (hibernate)
-    S5,  // Soft off
+    S0, // Working
+    S1, // Power on suspend
+    S3, // Suspend to RAM
+    S4, // Suspend to disk (hibernate)
+    S5, // Soft off
 }
 
 impl SState {
@@ -163,7 +163,9 @@ where
 /// fire.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         event_counts: [0; NUM_EVENT_TYPES],
         gpes: Vec::new(),
@@ -191,8 +193,14 @@ pub fn record_gpe(gpe_num: u32) -> KernelResult<()> {
         if let Some(g) = state.gpes.iter_mut().find(|g| g.gpe_num == gpe_num) {
             g.count += 1;
         } else {
-            if state.gpes.len() >= MAX_GPES { return Err(KernelError::ResourceExhausted); }
-            state.gpes.push(GpeStats { gpe_num, count: 1, enabled: true });
+            if state.gpes.len() >= MAX_GPES {
+                return Err(KernelError::ResourceExhausted);
+            }
+            state.gpes.push(GpeStats {
+                gpe_num,
+                count: 1,
+                enabled: true,
+            });
         }
         state.total_gpes += 1;
         Ok(())
@@ -207,9 +215,17 @@ pub fn record_gpe(gpe_num: u32) -> KernelResult<()> {
 /// auto-registering [`record_gpe`] path).  Counts start at zero.
 pub fn register_gpe(gpe_num: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        if state.gpes.iter().any(|g| g.gpe_num == gpe_num) { return Err(KernelError::AlreadyExists); }
-        if state.gpes.len() >= MAX_GPES { return Err(KernelError::ResourceExhausted); }
-        state.gpes.push(GpeStats { gpe_num, count: 0, enabled });
+        if state.gpes.iter().any(|g| g.gpe_num == gpe_num) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if state.gpes.len() >= MAX_GPES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        state.gpes.push(GpeStats {
+            gpe_num,
+            count: 0,
+            enabled,
+        });
         Ok(())
     })
 }
@@ -230,7 +246,9 @@ pub fn set_s_state(new_state: SState) -> KernelResult<()> {
 /// Event counts per type.
 pub fn event_counts() -> [(AcpiEvent, u64); NUM_EVENT_TYPES] {
     let guard = STATE.lock();
-    let counts = guard.as_ref().map_or([0u64; NUM_EVENT_TYPES], |s| s.event_counts);
+    let counts = guard
+        .as_ref()
+        .map_or([0u64; NUM_EVENT_TYPES], |s| s.event_counts);
     [
         (AcpiEvent::PowerButton, counts[0]),
         (AcpiEvent::SleepButton, counts[1]),
@@ -252,7 +270,13 @@ pub fn gpe_list() -> Vec<GpeStats> {
 pub fn stats() -> (u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.total_events, s.total_gpes, s.suspend_count, s.resume_count, s.ops),
+        Some(s) => (
+            s.total_events,
+            s.total_gpes,
+            s.suspend_count,
+            s.resume_count,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -274,7 +298,9 @@ pub fn self_test() {
     // 1: Empty after init — no fabricated GPEs, event counts, or totals.
     //    The initial sleep state is S0 (a real power-on condition, not data).
     assert_eq!(gpe_list().len(), 0);
-    for (_, count) in event_counts() { assert_eq!(count, 0); }
+    for (_, count) in event_counts() {
+        assert_eq!(count, 0);
+    }
     let (e0, g0, s0, r0, _o0) = stats();
     assert_eq!((e0, g0, s0, r0), (0, 0, 0, 0));
     crate::serial_println!("  [1/8] empty init: OK");
@@ -284,7 +310,11 @@ pub fn self_test() {
     register_gpe(0x6e, false).expect("reg gpe disabled");
     assert!(register_gpe(0x11, true).is_err());
     assert_eq!(gpe_list().len(), 2);
-    let g = gpe_list().iter().find(|g| g.gpe_num == 0x6e).cloned().expect("gpe");
+    let g = gpe_list()
+        .iter()
+        .find(|g| g.gpe_num == 0x6e)
+        .cloned()
+        .expect("gpe");
     assert_eq!(g.count, 0);
     assert!(!g.enabled);
     crate::serial_println!("  [2/8] register_gpe: OK");
@@ -296,14 +326,22 @@ pub fn self_test() {
 
     // 4: GPE firing on a registered GPE increments its count from zero.
     record_gpe(0x11).expect("gpe_exist");
-    let g = gpe_list().iter().find(|g| g.gpe_num == 0x11).cloned().expect("gpe");
+    let g = gpe_list()
+        .iter()
+        .find(|g| g.gpe_num == 0x11)
+        .cloned()
+        .expect("gpe");
     assert_eq!(g.count, 1);
     crate::serial_println!("  [4/8] gpe existing: OK");
 
     // 5: GPE firing on an unseen number auto-registers it (count 1, enabled).
     record_gpe(0xFF).expect("gpe_new");
     assert_eq!(gpe_list().len(), 3);
-    let g = gpe_list().iter().find(|g| g.gpe_num == 0xFF).cloned().expect("gpe");
+    let g = gpe_list()
+        .iter()
+        .find(|g| g.gpe_num == 0xFF)
+        .cloned()
+        .expect("gpe");
     assert_eq!(g.count, 1);
     assert!(g.enabled);
     crate::serial_println!("  [5/8] gpe new: OK");
@@ -325,8 +363,8 @@ pub fn self_test() {
 
     // 8: Aggregate totals equal the exact sums of the operations above.
     let (events, gpes, suspends, resumes, ops) = stats();
-    assert_eq!(events, 1);   // one record_event
-    assert_eq!(gpes, 2);     // two record_gpe firings (0x11, 0xFF)
+    assert_eq!(events, 1); // one record_event
+    assert_eq!(gpes, 2); // two record_gpe firings (0x11, 0xFF)
     assert_eq!(suspends, 1);
     assert_eq!(resumes, 1);
     assert!(ops > 0);

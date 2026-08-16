@@ -18,10 +18,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -91,8 +91,16 @@ pub struct EqConfig {
 
 const MAX_CONFIGS: usize = 16;
 const DEFAULT_BANDS: &[(u32, i32)] = &[
-    (32, 0), (64, 0), (125, 0), (250, 0), (500, 0),
-    (1000, 0), (2000, 0), (4000, 0), (8000, 0), (16000, 0),
+    (32, 0),
+    (64, 0),
+    (125, 0),
+    (250, 0),
+    (500, 0),
+    (1000, 0),
+    (2000, 0),
+    (4000, 0),
+    (8000, 0),
+    (16000, 0),
 ];
 
 struct State {
@@ -118,23 +126,127 @@ where
 }
 
 fn make_bands(gains: &[(u32, i32)]) -> Vec<EqBand> {
-    gains.iter().map(|&(freq, gain)| EqBand {
-        freq_hz: freq, gain_cb: gain, q_factor: 141,
-    }).collect()
+    gains
+        .iter()
+        .map(|&(freq, gain)| EqBand {
+            freq_hz: freq,
+            gain_cb: gain,
+            q_factor: 141,
+        })
+        .collect()
 }
 
 fn preset_gains(preset: EqPreset) -> Vec<(u32, i32)> {
     match preset {
         EqPreset::Flat => DEFAULT_BANDS.to_vec(),
-        EqPreset::Rock => alloc::vec![(32,300),(64,200),(125,100),(250,0),(500,-50),(1000,-50),(2000,100),(4000,200),(8000,300),(16000,300)],
-        EqPreset::Pop => alloc::vec![(32,-100),(64,0),(125,100),(250,200),(500,200),(1000,100),(2000,0),(4000,-100),(8000,-100),(16000,-100)],
-        EqPreset::Jazz => alloc::vec![(32,200),(64,100),(125,0),(250,100),(500,-100),(1000,-100),(2000,0),(4000,100),(8000,200),(16000,300)],
-        EqPreset::Classical => alloc::vec![(32,200),(64,100),(125,0),(250,0),(500,0),(1000,0),(2000,0),(4000,100),(8000,200),(16000,200)],
-        EqPreset::HipHop => alloc::vec![(32,400),(64,300),(125,200),(250,100),(500,0),(1000,0),(2000,0),(4000,100),(8000,200),(16000,100)],
-        EqPreset::Electronic => alloc::vec![(32,300),(64,200),(125,0),(250,-100),(500,0),(1000,100),(2000,0),(4000,-100),(8000,200),(16000,400)],
-        EqPreset::Vocal => alloc::vec![(32,-200),(64,-100),(125,0),(250,100),(500,200),(1000,300),(2000,200),(4000,100),(8000,0),(16000,-100)],
-        EqPreset::Bass => alloc::vec![(32,500),(64,400),(125,300),(250,200),(500,100),(1000,0),(2000,0),(4000,0),(8000,0),(16000,0)],
-        EqPreset::Treble => alloc::vec![(32,0),(64,0),(125,0),(250,0),(500,0),(1000,100),(2000,200),(4000,300),(8000,400),(16000,500)],
+        EqPreset::Rock => alloc::vec![
+            (32, 300),
+            (64, 200),
+            (125, 100),
+            (250, 0),
+            (500, -50),
+            (1000, -50),
+            (2000, 100),
+            (4000, 200),
+            (8000, 300),
+            (16000, 300)
+        ],
+        EqPreset::Pop => alloc::vec![
+            (32, -100),
+            (64, 0),
+            (125, 100),
+            (250, 200),
+            (500, 200),
+            (1000, 100),
+            (2000, 0),
+            (4000, -100),
+            (8000, -100),
+            (16000, -100)
+        ],
+        EqPreset::Jazz => alloc::vec![
+            (32, 200),
+            (64, 100),
+            (125, 0),
+            (250, 100),
+            (500, -100),
+            (1000, -100),
+            (2000, 0),
+            (4000, 100),
+            (8000, 200),
+            (16000, 300)
+        ],
+        EqPreset::Classical => alloc::vec![
+            (32, 200),
+            (64, 100),
+            (125, 0),
+            (250, 0),
+            (500, 0),
+            (1000, 0),
+            (2000, 0),
+            (4000, 100),
+            (8000, 200),
+            (16000, 200)
+        ],
+        EqPreset::HipHop => alloc::vec![
+            (32, 400),
+            (64, 300),
+            (125, 200),
+            (250, 100),
+            (500, 0),
+            (1000, 0),
+            (2000, 0),
+            (4000, 100),
+            (8000, 200),
+            (16000, 100)
+        ],
+        EqPreset::Electronic => alloc::vec![
+            (32, 300),
+            (64, 200),
+            (125, 0),
+            (250, -100),
+            (500, 0),
+            (1000, 100),
+            (2000, 0),
+            (4000, -100),
+            (8000, 200),
+            (16000, 400)
+        ],
+        EqPreset::Vocal => alloc::vec![
+            (32, -200),
+            (64, -100),
+            (125, 0),
+            (250, 100),
+            (500, 200),
+            (1000, 300),
+            (2000, 200),
+            (4000, 100),
+            (8000, 0),
+            (16000, -100)
+        ],
+        EqPreset::Bass => alloc::vec![
+            (32, 500),
+            (64, 400),
+            (125, 300),
+            (250, 200),
+            (500, 100),
+            (1000, 0),
+            (2000, 0),
+            (4000, 0),
+            (8000, 0),
+            (16000, 0)
+        ],
+        EqPreset::Treble => alloc::vec![
+            (32, 0),
+            (64, 0),
+            (125, 0),
+            (250, 0),
+            (500, 0),
+            (1000, 100),
+            (2000, 200),
+            (4000, 300),
+            (8000, 400),
+            (16000, 500)
+        ],
         EqPreset::Custom => DEFAULT_BANDS.to_vec(),
     }
 }
@@ -145,13 +257,17 @@ fn preset_gains(preset: EqPreset) -> Vec<(u32, i32)> {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let config = EqConfig {
-        id: 1, device_name: String::from("Built-in Audio"),
+        id: 1,
+        device_name: String::from("Built-in Audio"),
         preset: EqPreset::Flat,
         bands: make_bands(DEFAULT_BANDS),
-        enabled: true, preamp_cb: 0,
+        enabled: true,
+        preamp_cb: 0,
     };
 
     *guard = Some(State {
@@ -172,10 +288,12 @@ pub fn create_config(device_name: &str) -> KernelResult<u32> {
         let id = state.next_id;
         state.next_id += 1;
         state.configs.push(EqConfig {
-            id, device_name: String::from(device_name),
+            id,
+            device_name: String::from(device_name),
             preset: EqPreset::Flat,
             bands: make_bands(DEFAULT_BANDS),
-            enabled: true, preamp_cb: 0,
+            enabled: true,
+            preamp_cb: 0,
         });
         Ok(id)
     })
@@ -184,7 +302,10 @@ pub fn create_config(device_name: &str) -> KernelResult<u32> {
 /// Apply a preset to a config.
 pub fn set_preset(config_id: u32, preset: EqPreset) -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
         let gains = preset_gains(preset);
         cfg.bands = make_bands(&gains);
@@ -197,9 +318,14 @@ pub fn set_preset(config_id: u32, preset: EqPreset) -> KernelResult<()> {
 /// Adjust a single band's gain.
 pub fn set_band_gain(config_id: u32, band_index: usize, gain_cb: i32) -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
-        let band = cfg.bands.get_mut(band_index)
+        let band = cfg
+            .bands
+            .get_mut(band_index)
             .ok_or(KernelError::InvalidArgument)?;
         band.gain_cb = gain_cb.clamp(-1200, 1200);
         cfg.preset = EqPreset::Custom;
@@ -211,7 +337,10 @@ pub fn set_band_gain(config_id: u32, band_index: usize, gain_cb: i32) -> KernelR
 /// Set preamp gain.
 pub fn set_preamp(config_id: u32, preamp_cb: i32) -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
         cfg.preamp_cb = preamp_cb.clamp(-1200, 1200);
         state.total_adjustments += 1;
@@ -222,7 +351,10 @@ pub fn set_preamp(config_id: u32, preamp_cb: i32) -> KernelResult<()> {
 /// Enable/disable equalizer.
 pub fn set_enabled(config_id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
         cfg.enabled = enabled;
         Ok(())
@@ -232,7 +364,10 @@ pub fn set_enabled(config_id: u32, enabled: bool) -> KernelResult<()> {
 /// Remove a config.
 pub fn remove_config(config_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.configs.iter().position(|c| c.id == config_id)
+        let pos = state
+            .configs
+            .iter()
+            .position(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
         state.configs.remove(pos);
         Ok(())
@@ -241,13 +376,21 @@ pub fn remove_config(config_id: u32) -> KernelResult<()> {
 
 /// List all configs.
 pub fn list_configs() -> Vec<EqConfig> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.configs.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.configs.clone())
 }
 
 /// Get a config.
 pub fn get_config(id: u32) -> KernelResult<EqConfig> {
     with_state(|state| {
-        state.configs.iter().find(|c| c.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .configs
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -255,7 +398,12 @@ pub fn get_config(id: u32) -> KernelResult<EqConfig> {
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.configs.len(), s.total_adjustments, s.total_preset_changes, s.ops),
+        Some(s) => (
+            s.configs.len(),
+            s.total_adjustments,
+            s.total_preset_changes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }

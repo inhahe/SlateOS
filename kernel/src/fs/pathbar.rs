@@ -197,10 +197,7 @@ pub fn normalize<P: AsRef<Path> + ?Sized>(path: &P) -> PathBuf {
 }
 
 /// Join a base directory and a relative path.
-pub fn join<B: AsRef<Path> + ?Sized, R: AsRef<Path> + ?Sized>(
-    base: &B,
-    relative: &R,
-) -> PathBuf {
+pub fn join<B: AsRef<Path> + ?Sized, R: AsRef<Path> + ?Sized>(base: &B, relative: &R) -> PathBuf {
     // `PathBuf::push` already lets an absolute `relative` replace the base and
     // collapses the root case, so both hand-written branches are gone.
     normalize(&base.as_ref().join(relative))
@@ -466,7 +463,10 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: path normalization.
     {
-        assert_eq!(normalize("/home/user/../user/./docs"), PathBuf::from("/home/user/docs"));
+        assert_eq!(
+            normalize("/home/user/../user/./docs"),
+            PathBuf::from("/home/user/docs")
+        );
         assert_eq!(normalize("/"), PathBuf::from("/"));
         assert_eq!(normalize("//foo///bar//"), PathBuf::from("/foo/bar"));
         assert_eq!(normalize("/a/b/c/../../d"), PathBuf::from("/a/d"));

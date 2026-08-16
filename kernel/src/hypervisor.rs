@@ -39,8 +39,8 @@
 //! - Linux `arch/x86/kernel/cpu/hypervisor.c`
 //! - Microsoft TLFS: Hypervisor CPUID Interface
 
-use core::sync::atomic::{AtomicU8, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 // ---------------------------------------------------------------------------
 // Hypervisor identification
@@ -209,8 +209,11 @@ pub fn detect() {
     DETECTED_VALID.store(1, Ordering::Release);
 
     if hv.is_virtual() {
-        serial_println!("[hypervisor] Detected: {} (signature: {:?})",
-            hv.name(), signature_str());
+        serial_println!(
+            "[hypervisor] Detected: {} (signature: {:?})",
+            hv.name(),
+            signature_str()
+        );
     } else {
         serial_println!("[hypervisor] Running on bare metal (no hypervisor detected)");
     }
@@ -237,9 +240,7 @@ pub fn signature_str() -> &'static str {
     // SAFETY: SIGNATURE is only written once during detect() (single-threaded
     // BSP context) and then only read afterwards.  We use a raw pointer to
     // avoid creating a reference to a mutable static.
-    let sig: &[u8; 12] = unsafe {
-        &*core::ptr::addr_of!(SIGNATURE)
-    };
+    let sig: &[u8; 12] = unsafe { &*core::ptr::addr_of!(SIGNATURE) };
     core::str::from_utf8(sig).unwrap_or("<invalid>")
 }
 
@@ -252,21 +253,29 @@ pub fn self_test() {
     serial_println!("[hypervisor] Running self-test...");
 
     // Test 1: Detection has been run (detect() called before self_test).
-    assert_eq!(DETECTED_VALID.load(Ordering::Relaxed), 1,
-        "detect() should have been called before self_test()");
+    assert_eq!(
+        DETECTED_VALID.load(Ordering::Relaxed),
+        1,
+        "detect() should have been called before self_test()"
+    );
     serial_println!("[hypervisor]   Detection completed: OK");
 
     // Test 2: Result is accessible.
     let hv = detected();
-    serial_println!("[hypervisor]   Detected: {} (virtual={})",
-        hv.name(), hv.is_virtual());
+    serial_println!(
+        "[hypervisor]   Detected: {} (virtual={})",
+        hv.name(),
+        hv.is_virtual()
+    );
 
     // Test 3: Signature is valid ASCII (or zeros).
     let sig_str = signature_str();
     // Under QEMU with KVM or WHPX, we expect a non-empty signature.
     if hv.is_virtual() {
-        assert!(!sig_str.trim_end_matches('\0').is_empty(),
-            "virtual env should have a signature");
+        assert!(
+            !sig_str.trim_end_matches('\0').is_empty(),
+            "virtual env should have a signature"
+        );
     }
     serial_println!("[hypervisor]   Signature: {:?}", sig_str);
 

@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -133,7 +133,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         enrollments: Vec::new(),
         security_level: SecurityLevel::Standard,
@@ -216,7 +218,9 @@ pub fn unenroll(user_id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.enrollments.len();
         state.enrollments.retain(|e| e.user_id != user_id);
-        if state.enrollments.len() == before { return Err(KernelError::NotFound); }
+        if state.enrollments.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -253,14 +257,18 @@ pub fn verify(user_id: u32, is_live: bool) -> KernelResult<VerifyResult> {
 
 /// Get enrollment for a user.
 pub fn get_enrollment(user_id: u32) -> Option<Enrollment> {
-    STATE.lock().as_ref().and_then(|s| {
-        s.enrollments.iter().find(|e| e.user_id == user_id).cloned()
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.enrollments.iter().find(|e| e.user_id == user_id).cloned())
 }
 
 /// List all enrollments.
 pub fn list_enrollments() -> Vec<Enrollment> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.enrollments.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.enrollments.clone())
 }
 
 /// Is face unlock enabled?
@@ -270,14 +278,23 @@ pub fn is_enabled() -> bool {
 
 /// Get current security level.
 pub fn get_security() -> SecurityLevel {
-    STATE.lock().as_ref().map_or(SecurityLevel::Standard, |s| s.security_level)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(SecurityLevel::Standard, |s| s.security_level)
 }
 
 /// Statistics: (enrollments, verifications, matches, rejections, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.enrollments.len(), s.total_verifications, s.total_matches, s.total_rejections, s.ops),
+        Some(s) => (
+            s.enrollments.len(),
+            s.total_verifications,
+            s.total_matches,
+            s.total_rejections,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

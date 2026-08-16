@@ -39,7 +39,7 @@
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::fault;
-use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::mm::vma::{Vma, VmaKind};
 use crate::serial_println;
@@ -278,8 +278,7 @@ pub fn alloc() -> KernelResult<KstackInfo> {
         STACK_FRAMES.next_power_of_two().trailing_zeros() as usize
     };
     // Attribute the stack's frames to `KernelStack` in the owner census.
-    let _own =
-        super::frame_owner::OwnerScope::new(super::frame_owner::Owner::KernelStack);
+    let _own = super::frame_owner::OwnerScope::new(super::frame_owner::Owner::KernelStack);
     let phys_frame = match frame::alloc_order(order) {
         Ok(f) => f,
         Err(e) => {
@@ -304,8 +303,8 @@ pub fn alloc() -> KernelResult<KstackInfo> {
         let phys_offset = (i as u64) * (FRAME_SIZE as u64);
         #[allow(clippy::arithmetic_side_effects)]
         let frame_virt = VirtAddr::new(stack_bottom + virt_offset);
-        let frame_phys = PhysFrame::from_addr(stack_phys + phys_offset)
-            .ok_or(KernelError::InvalidAddress)?;
+        let frame_phys =
+            PhysFrame::from_addr(stack_phys + phys_offset).ok_or(KernelError::InvalidAddress)?;
 
         // SAFETY: We own these physical frames (just allocated them) and
         // the virtual addresses are in our dedicated region (not used by
@@ -320,7 +319,9 @@ pub fn alloc() -> KernelResult<KstackInfo> {
                 let _ = unsafe { page_table::unmap_frame(pml4, undo_virt) };
             }
             // SAFETY: We just allocated this frame.
-            unsafe { let _ = frame::free_order(phys_frame, order); }
+            unsafe {
+                let _ = frame::free_order(phys_frame, order);
+            }
             super::memtype::uncharge(super::memtype::MemType::KernelStack, 1u64 << order);
             fault::remove_kernel_vma(guard_start);
             ALLOCATOR.lock().free_slot(slot);
@@ -377,7 +378,9 @@ pub unsafe fn free(info: KstackInfo) -> KernelResult<()> {
         let virt = VirtAddr::new(info.stack_bottom + (i as u64) * (FRAME_SIZE as u64));
         // SAFETY: invlpg is always safe in ring 0.  We use flush_frame
         // which handles SMP TLB shootdown if multiple CPUs are online.
-        unsafe { page_table::flush_frame(virt); }
+        unsafe {
+            page_table::flush_frame(virt);
+        }
     }
 
     // Free the physical frames.
@@ -388,7 +391,9 @@ pub unsafe fn free(info: KstackInfo) -> KernelResult<()> {
     };
     if let Some(frame) = PhysFrame::from_addr(info.stack_phys) {
         // SAFETY: Caller guarantees no CPU is using this stack.
-        unsafe { frame::free_order(frame, order)?; }
+        unsafe {
+            frame::free_order(frame, order)?;
+        }
         super::memtype::uncharge(super::memtype::MemType::KernelStack, 1u64 << order);
     }
 
@@ -513,14 +518,18 @@ pub fn self_test() -> KernelResult<()> {
     // Test 4: Free the stack.
     let slot = info.slot;
     // SAFETY: We're in a single-threaded self-test; no CPU is using this stack.
-    unsafe { free(info)?; }
+    unsafe {
+        free(info)?;
+    }
     serial_println!("[kstack]   Free: OK");
 
     // Test 5: Re-allocate — should reuse the same slot (hint reset).
     let info2 = alloc()?;
     assert_eq!(info2.slot, slot, "slot reuse failed");
     // SAFETY: Self-test, not in use.
-    unsafe { free(info2)?; }
+    unsafe {
+        free(info2)?;
+    }
     serial_println!("[kstack]   Slot reuse: OK");
 
     // Test 6: Bulk allocation — verify unique slots.
@@ -552,7 +561,9 @@ pub fn self_test() -> KernelResult<()> {
     // Free all.
     for info in &infos {
         // SAFETY: Self-test, not in use.
-        unsafe { free(*info)?; }
+        unsafe {
+            free(*info)?;
+        }
     }
     serial_println!("[kstack]   Bulk free: OK");
 

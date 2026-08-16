@@ -30,9 +30,9 @@
 #![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
 
 use crate::limine::{
-    BaseRevision, ExecutableAddressResponse, FramebufferResponse, HhdmResponse,
-    KernelFileResponse, LimineRequest, MemmapEntry, MemmapResponse, RequestsEndMarker,
-    RequestsStartMarker, RsdpResponse, memmap_type,
+    BaseRevision, ExecutableAddressResponse, FramebufferResponse, HhdmResponse, KernelFileResponse,
+    LimineRequest, MemmapEntry, MemmapResponse, RequestsEndMarker, RequestsStartMarker,
+    RsdpResponse, memmap_type,
 };
 use crate::serial_println;
 
@@ -269,10 +269,7 @@ pub fn parse_boot_info() -> Option<BootInfo> {
     // RSDP (optional — needed for ACPI hardware discovery).
     // Limine provides the address of the RSDP directly.
     let rsdp_address = RSDP_REQUEST.response().map(|rsdp| {
-        serial_println!(
-            "[boot] RSDP address from Limine: {:#x}",
-            rsdp.address
-        );
+        serial_println!("[boot] RSDP address from Limine: {:#x}", rsdp.address);
         rsdp.address
     });
     if rsdp_address.is_none() {

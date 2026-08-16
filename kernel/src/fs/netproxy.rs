@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::{vec, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -120,7 +120,11 @@ pub struct AppProxyOverride {
 #[derive(Debug, Clone)]
 pub enum ProxyResolution {
     /// Use a proxy.
-    Proxy { host: String, port: u16, protocol: ProxyProtocol },
+    Proxy {
+        host: String,
+        port: u16,
+        protocol: ProxyProtocol,
+    },
     /// Connect directly (no proxy).
     Direct,
 }
@@ -227,7 +231,10 @@ pub fn set_proxy(protocol: ProxyProtocol, host: &str, port: u16) -> KernelResult
 /// Remove a proxy for a given protocol.
 pub fn remove_proxy(protocol: ProxyProtocol) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.proxies.iter().position(|p| p.protocol == protocol)
+        let pos = state
+            .proxies
+            .iter()
+            .position(|p| p.protocol == protocol)
             .ok_or(KernelError::NotFound)?;
         state.proxies.remove(pos);
         Ok(())
@@ -237,7 +244,10 @@ pub fn remove_proxy(protocol: ProxyProtocol) -> KernelResult<()> {
 /// Set proxy authentication credentials.
 pub fn set_proxy_auth(protocol: ProxyProtocol, username: &str) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.proxies.iter_mut().find(|p| p.protocol == protocol)
+        let p = state
+            .proxies
+            .iter_mut()
+            .find(|p| p.protocol == protocol)
             .ok_or(KernelError::NotFound)?;
         p.auth_required = true;
         p.username = String::from(username);
@@ -284,7 +294,10 @@ pub fn add_bypass(pattern: &str, description: &str) -> KernelResult<()> {
 /// Remove a bypass rule.
 pub fn remove_bypass(pattern: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.bypass_rules.iter().position(|b| b.pattern == pattern)
+        let pos = state
+            .bypass_rules
+            .iter()
+            .position(|b| b.pattern == pattern)
             .ok_or(KernelError::NotFound)?;
         state.bypass_rules.remove(pos);
         Ok(())
@@ -330,7 +343,10 @@ pub fn set_app_override(app_id: &str, mode: ProxyMode, host: &str, port: u16) ->
 /// Remove per-application proxy override.
 pub fn remove_app_override(app_id: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.app_overrides.iter().position(|o| o.app_id == app_id)
+        let pos = state
+            .app_overrides
+            .iter()
+            .position(|o| o.app_id == app_id)
             .ok_or(KernelError::NotFound)?;
         state.app_overrides.remove(pos);
         Ok(())
@@ -367,14 +383,17 @@ pub fn resolve_proxy(host: &str, protocol: ProxyProtocol) -> ProxyResolution {
 
     // Check bypass local.
     if state.bypass_local
-        && (host == "localhost" || host == "127.0.0.1" || host == "::1"
-            || host.ends_with(".local"))
+        && (host == "localhost" || host == "127.0.0.1" || host == "::1" || host.ends_with(".local"))
     {
         return ProxyResolution::Direct;
     }
 
     // Find matching proxy.
-    if let Some(p) = state.proxies.iter().find(|p| p.protocol == protocol && p.enabled) {
+    if let Some(p) = state
+        .proxies
+        .iter()
+        .find(|p| p.protocol == protocol && p.enabled)
+    {
         return ProxyResolution::Proxy {
             host: p.host.clone(),
             port: p.port,
@@ -384,7 +403,11 @@ pub fn resolve_proxy(host: &str, protocol: ProxyProtocol) -> ProxyResolution {
 
     // Fall back to HTTP proxy for HTTPS if no specific HTTPS proxy.
     if protocol == ProxyProtocol::Https {
-        if let Some(p) = state.proxies.iter().find(|p| p.protocol == ProxyProtocol::Http && p.enabled) {
+        if let Some(p) = state
+            .proxies
+            .iter()
+            .find(|p| p.protocol == ProxyProtocol::Http && p.enabled)
+        {
             return ProxyResolution::Proxy {
                 host: p.host.clone(),
                 port: p.port,
@@ -400,7 +423,13 @@ pub fn resolve_proxy(host: &str, protocol: ProxyProtocol) -> ProxyResolution {
 pub fn stats() -> (usize, usize, &'static str, usize, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.proxies.len(), s.bypass_rules.len(), s.mode.label(), s.app_overrides.len(), s.ops),
+        Some(s) => (
+            s.proxies.len(),
+            s.bypass_rules.len(),
+            s.mode.label(),
+            s.app_overrides.len(),
+            s.ops,
+        ),
         None => (0, 0, "N/A", 0, 0),
     }
 }

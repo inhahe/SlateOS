@@ -33,9 +33,9 @@
 //! - seL4 formal verification — proven invariant preservation
 //! - SPARK Ada — runtime assertion checking
 
+use crate::serial_println;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::serial_println;
 
 // ---------------------------------------------------------------------------
 // Invariant result
@@ -80,7 +80,9 @@ fn check_frame_accounting() -> InvariantResult {
                     category: "mm",
                     passed: false,
                     message: Some(alloc::format!(
-                        "free ({}) > total ({})", s.free_frames, s.total_frames
+                        "free ({}) > total ({})",
+                        s.free_frames,
+                        s.total_frames
                     )),
                 };
             }
@@ -90,7 +92,9 @@ fn check_frame_accounting() -> InvariantResult {
                 passed: true,
                 message: Some(alloc::format!(
                     "OK: free={} + used={} = total={}",
-                    s.free_frames, computed_used, s.total_frames
+                    s.free_frames,
+                    computed_used,
+                    s.total_frames
                 )),
             }
         }
@@ -113,7 +117,8 @@ fn check_heap_balance() -> InvariantResult {
             passed: false,
             message: Some(alloc::format!(
                 "slab frees ({}) > allocs ({}) — double-free?",
-                hs.slab_frees, hs.slab_allocs
+                hs.slab_frees,
+                hs.slab_allocs
             )),
         };
     }
@@ -124,7 +129,9 @@ fn check_heap_balance() -> InvariantResult {
         passed: true,
         message: Some(alloc::format!(
             "OK: allocs={} frees={} active={}",
-            hs.slab_allocs, hs.slab_frees, net
+            hs.slab_allocs,
+            hs.slab_frees,
+            net
         )),
     }
 }
@@ -138,7 +145,8 @@ fn check_frag_range() -> InvariantResult {
             category: "mm",
             passed: false,
             message: Some(alloc::format!(
-                "fragmentation {}% > 100%", info.fragmentation_pct
+                "fragmentation {}% > 100%",
+                info.fragmentation_pct
             )),
         };
     }
@@ -160,7 +168,8 @@ fn check_sched_balance() -> InvariantResult {
             passed: false,
             message: Some(alloc::format!(
                 "exited ({}) > spawned ({})",
-                stats.total_tasks_exited, stats.total_tasks_spawned
+                stats.total_tasks_exited,
+                stats.total_tasks_spawned
             )),
         };
     }
@@ -171,7 +180,9 @@ fn check_sched_balance() -> InvariantResult {
         passed: true,
         message: Some(alloc::format!(
             "OK: spawned={} exited={} active={}",
-            stats.total_tasks_spawned, stats.total_tasks_exited, active
+            stats.total_tasks_spawned,
+            stats.total_tasks_exited,
+            active
         )),
     }
 }
@@ -187,7 +198,9 @@ fn check_object_balance() -> InvariantResult {
                 passed: false,
                 message: Some(alloc::format!(
                     "{}: destroyed ({}) > created ({})",
-                    s.obj_type.name(), s.destroyed, s.created
+                    s.obj_type.name(),
+                    s.destroyed,
+                    s.created
                 )),
             };
         }
@@ -247,7 +260,8 @@ fn check_cap_audit() -> InvariantResult {
             passed: false,
             message: Some(alloc::format!(
                 "denials ({}) > total events ({})",
-                s.total_denials, s.total_events
+                s.total_denials,
+                s.total_events
             )),
         };
     }
@@ -257,7 +271,8 @@ fn check_cap_audit() -> InvariantResult {
         passed: true,
         message: Some(alloc::format!(
             "OK: {} events, {} denials",
-            s.total_events, s.total_denials
+            s.total_events,
+            s.total_denials
         )),
     }
 }
@@ -304,7 +319,9 @@ pub fn check_all() -> CheckResults {
 /// Run invariant checks for a specific category.
 pub fn check_category(category: &str) -> CheckResults {
     let all = check_all();
-    let filtered: Vec<InvariantResult> = all.results.into_iter()
+    let filtered: Vec<InvariantResult> = all
+        .results
+        .into_iter()
         .filter(|r| r.category == category)
         .collect();
     let passed = filtered.iter().filter(|r| r.passed).count();
@@ -334,15 +351,24 @@ pub fn self_test() {
 
     // Test 1: Check all invariants pass (they should during boot).
     let results = check_all();
-    serial_println!("[invariant]   All checks: {}/{} passed", results.passed, results.total);
+    serial_println!(
+        "[invariant]   All checks: {}/{} passed",
+        results.passed,
+        results.total
+    );
     for r in &results.results {
         let status = if r.passed { "PASS" } else { "FAIL" };
-        serial_println!("[invariant]     [{}] {}: {}",
-            status, r.name,
-            r.message.as_deref().unwrap_or(""));
+        serial_println!(
+            "[invariant]     [{}] {}: {}",
+            status,
+            r.name,
+            r.message.as_deref().unwrap_or("")
+        );
     }
-    assert_eq!(results.failed, 0,
-        "invariant check failed during boot — system inconsistent");
+    assert_eq!(
+        results.failed, 0,
+        "invariant check failed during boot — system inconsistent"
+    );
 
     // Test 2: Quick check.
     assert!(all_ok());
@@ -352,7 +378,10 @@ pub fn self_test() {
     let mm = check_category("mm");
     assert!(mm.total >= 3); // frame_accounting, heap_balance, frag_range, pressure_range
     assert_eq!(mm.failed, 0);
-    serial_println!("[invariant]   Category filter (mm): OK ({} checks)", mm.total);
+    serial_println!(
+        "[invariant]   Category filter (mm): OK ({} checks)",
+        mm.total
+    );
 
     serial_println!("[invariant] Self-test PASSED");
 }

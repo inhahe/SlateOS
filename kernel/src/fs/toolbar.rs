@@ -319,13 +319,14 @@ pub fn build(ctx: &ToolbarContext) -> ToolbarLayout {
         ("Details", "Details"),
         ("Tiles", "Tiles"),
     ];
-    let view_dropdown: Vec<DropdownItem> = view_modes.iter().map(|(id, label)| {
-        DropdownItem {
+    let view_dropdown: Vec<DropdownItem> = view_modes
+        .iter()
+        .map(|(id, label)| DropdownItem {
             action: alloc::format!("view_{}", id),
             label: String::from(*label),
             checked: ctx.view_mode == *id,
-        }
-    }).collect();
+        })
+        .collect();
 
     buttons.push(ToolbarButton {
         action: String::from("view_mode"),
@@ -352,10 +353,26 @@ pub fn build(ctx: &ToolbarContext) -> ToolbarLayout {
         section: ToolbarSection::View,
         has_dropdown: true,
         dropdown: alloc::vec![
-            DropdownItem { action: String::from("sort_name"), label: String::from("Name"), checked: true },
-            DropdownItem { action: String::from("sort_date"), label: String::from("Date modified"), checked: false },
-            DropdownItem { action: String::from("sort_size"), label: String::from("Size"), checked: false },
-            DropdownItem { action: String::from("sort_type"), label: String::from("Type"), checked: false },
+            DropdownItem {
+                action: String::from("sort_name"),
+                label: String::from("Name"),
+                checked: true
+            },
+            DropdownItem {
+                action: String::from("sort_date"),
+                label: String::from("Date modified"),
+                checked: false
+            },
+            DropdownItem {
+                action: String::from("sort_size"),
+                label: String::from("Size"),
+                checked: false
+            },
+            DropdownItem {
+                action: String::from("sort_type"),
+                label: String::from("Type"),
+                checked: false
+            },
         ],
     });
 
@@ -392,12 +409,18 @@ pub fn build(ctx: &ToolbarContext) -> ToolbarLayout {
 
 /// Get buttons for a specific section.
 pub fn section_buttons(layout: &ToolbarLayout, section: ToolbarSection) -> Vec<&ToolbarButton> {
-    layout.buttons.iter().filter(|b| b.section == section).collect()
+    layout
+        .buttons
+        .iter()
+        .filter(|b| b.section == section)
+        .collect()
 }
 
 /// Check if an action is valid in the current context.
 pub fn is_action_enabled(layout: &ToolbarLayout, action: &str) -> bool {
-    layout.buttons.iter()
+    layout
+        .buttons
+        .iter()
         .find(|b| b.action == action)
         .map(|b| b.enabled)
         .unwrap_or(false)
@@ -443,7 +466,10 @@ pub fn self_test() -> KernelResult<()> {
         assert!(layout.buttons.iter().any(|b| b.action == "back"));
         assert!(layout.buttons.iter().any(|b| b.action == "forward"));
         assert!(layout.buttons.iter().any(|b| b.action == "up"));
-        serial_println!("[toolbar] test 1 passed: default build ({} buttons)", layout.buttons.len());
+        serial_println!(
+            "[toolbar] test 1 passed: default build ({} buttons)",
+            layout.buttons.len()
+        );
     }
 
     // Test 2: selection enables cut/copy/delete.

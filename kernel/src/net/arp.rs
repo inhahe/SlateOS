@@ -87,7 +87,7 @@ static ARP_CACHE: Mutex<[ArpEntry; ARP_CACHE_SIZE]> = Mutex::new(
         mac: MacAddress([0; 6]),
         valid: false,
         updated_ns: 0,
-    }; ARP_CACHE_SIZE]
+    }; ARP_CACHE_SIZE],
 );
 
 /// Look up a MAC address in the ARP cache.
@@ -128,7 +128,12 @@ fn cache_insert(ip: Ipv4Addr, mac: MacAddress) {
     // Find an empty or expired slot.
     for entry in cache.iter_mut() {
         if !entry.is_fresh(now) {
-            *entry = ArpEntry { ip, mac, valid: true, updated_ns: now };
+            *entry = ArpEntry {
+                ip,
+                mac,
+                valid: true,
+                updated_ns: now,
+            };
             return;
         }
     }
@@ -143,7 +148,12 @@ fn cache_insert(ip: Ipv4Addr, mac: MacAddress) {
         }
     }
     if let Some(slot) = cache.get_mut(oldest_idx) {
-        *slot = ArpEntry { ip, mac, valid: true, updated_ns: now };
+        *slot = ArpEntry {
+            ip,
+            mac,
+            valid: true,
+            updated_ns: now,
+        };
     }
 }
 
@@ -167,8 +177,7 @@ fn parse_arp(data: &[u8]) -> KernelResult<(u16, MacAddress, Ipv4Addr, MacAddress
     let operation = u16::from_be_bytes([data[6], data[7]]);
 
     // Validate: must be Ethernet/IPv4.
-    if hw_type != HW_TYPE_ETHERNET || proto_type != PROTO_TYPE_IPV4
-        || hw_len != 6 || proto_len != 4
+    if hw_type != HW_TYPE_ETHERNET || proto_type != PROTO_TYPE_IPV4 || hw_len != 6 || proto_len != 4
     {
         return Err(KernelError::InvalidArgument);
     }
@@ -252,10 +261,7 @@ pub fn process_arp(data: &[u8], ns_id: crate::netns::NetNsId) -> KernelResult<()
         }
         ARP_REPLY => {
             // Already cached the sender above — nothing else to do.
-            crate::serial_println!(
-                "[arp] Reply: {} is at {}",
-                sender_ip, sender_mac
-            );
+            crate::serial_println!("[arp] Reply: {} is at {}", sender_ip, sender_mac);
         }
         _ => {
             // Unknown ARP operation — ignore.
@@ -299,10 +305,7 @@ pub fn send_request(target_ip: Ipv4Addr) -> KernelResult<()> {
 /// through that namespace's link: the physical NIC in the root namespace,
 /// or the container's veth (via [`net::send_frame_ns`]) in a container
 /// namespace so a container can resolve its user-defined-network peers.
-pub fn send_request_ns(
-    ns_id: crate::netns::NetNsId,
-    target_ip: Ipv4Addr,
-) -> KernelResult<()> {
+pub fn send_request_ns(ns_id: crate::netns::NetNsId, target_ip: Ipv4Addr) -> KernelResult<()> {
     let our_mac = interface::ns_mac(ns_id);
     let our_ip = interface::ns_ip(ns_id);
 
@@ -310,7 +313,7 @@ pub fn send_request_ns(
         ARP_REQUEST,
         &our_mac,
         our_ip,
-        &MacAddress([0; 6]),  // Target MAC unknown — that's what we're asking for.
+        &MacAddress([0; 6]), // Target MAC unknown — that's what we're asking for.
         target_ip,
     );
     let frame = ethernet::build_frame(&BROADCAST_MAC, &our_mac, ETHERTYPE_ARP, &arp_data);
@@ -449,9 +452,8 @@ impl NsArpCache {
 }
 
 /// Per-namespace ARP cache table.
-static NS_ARP: Mutex<[NsArpCache; NS_ARP_MAX]> = Mutex::new(
-    [const { NsArpCache::empty() }; NS_ARP_MAX]
-);
+static NS_ARP: Mutex<[NsArpCache; NS_ARP_MAX]> =
+    Mutex::new([const { NsArpCache::empty() }; NS_ARP_MAX]);
 
 /// Initialize the per-namespace ARP cache for a namespace.
 ///
@@ -536,7 +538,9 @@ pub fn ns_insert(ns_id: crate::netns::NetNsId, ip: Ipv4Addr, mac: MacAddress) {
     let now = crate::hrtimer::now_ns();
     let idx = ns_id as usize;
     let mut table = NS_ARP.lock();
-    let Some(cache) = table.get_mut(idx) else { return };
+    let Some(cache) = table.get_mut(idx) else {
+        return;
+    };
     if !cache.active {
         return;
     }
@@ -553,7 +557,12 @@ pub fn ns_insert(ns_id: crate::netns::NetNsId, ip: Ipv4Addr, mac: MacAddress) {
     // Find an empty or expired slot.
     for entry in cache.entries.iter_mut() {
         if !entry.is_fresh(now) {
-            *entry = ArpEntry { ip, mac, valid: true, updated_ns: now };
+            *entry = ArpEntry {
+                ip,
+                mac,
+                valid: true,
+                updated_ns: now,
+            };
             return;
         }
     }
@@ -568,7 +577,12 @@ pub fn ns_insert(ns_id: crate::netns::NetNsId, ip: Ipv4Addr, mac: MacAddress) {
         }
     }
     if let Some(slot) = cache.entries.get_mut(oldest_idx) {
-        *slot = ArpEntry { ip, mac, valid: true, updated_ns: now };
+        *slot = ArpEntry {
+            ip,
+            mac,
+            valid: true,
+            updated_ns: now,
+        };
     }
 }
 
@@ -661,7 +675,9 @@ pub fn ns_entry_count(ns_id: crate::netns::NetNsId) -> usize {
     let now = crate::hrtimer::now_ns();
     let idx = ns_id as usize;
     let table = NS_ARP.lock();
-    let Some(cache) = table.get(idx) else { return 0 };
+    let Some(cache) = table.get(idx) else {
+        return 0;
+    };
     if !cache.active {
         return 0;
     }
@@ -817,8 +833,11 @@ fn test_build_roundtrip() -> KernelResult<()> {
     let pkt = build_arp(ARP_REPLY, &src_mac, src_ip, &dst_mac, dst_ip);
     let (op, s_mac, s_ip, t_mac, t_ip) = parse_arp(&pkt)?;
 
-    if op != ARP_REPLY || s_mac.0 != src_mac.0 || s_ip != src_ip
-        || t_mac.0 != dst_mac.0 || t_ip != dst_ip
+    if op != ARP_REPLY
+        || s_mac.0 != src_mac.0
+        || s_ip != src_ip
+        || t_mac.0 != dst_mac.0
+        || t_ip != dst_ip
     {
         crate::serial_println!("[arp]   FAIL: round-trip mismatch");
         return Err(KernelError::InternalError);
@@ -1014,7 +1033,8 @@ fn test_ns_arp_isolation() -> KernelResult<()> {
         _ => {
             crate::serial_println!(
                 "[arp]   FAIL: ns isolation: ns1={:?} ns2={:?}",
-                found1.map(|m| m.0), found2.map(|m| m.0)
+                found1.map(|m| m.0),
+                found2.map(|m| m.0)
             );
             ns_destroy(ns1);
             ns_destroy(ns2);

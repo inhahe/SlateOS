@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -137,7 +137,9 @@ pub fn init_defaults() {
     // (a privacy/security surface) through /proc and the `vpn` shell command as
     // if the user had configured it. Profiles appear only via create_profile().
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         profiles: Vec::new(),
         next_id: 1,
@@ -150,7 +152,12 @@ pub fn init_defaults() {
 }
 
 /// Create a VPN profile.
-pub fn create_profile(name: &str, protocol: VpnProtocol, server: &str, port: u16) -> KernelResult<u32> {
+pub fn create_profile(
+    name: &str,
+    protocol: VpnProtocol,
+    server: &str,
+    port: u16,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.profiles.len() >= MAX_PROFILES {
             return Err(KernelError::ResourceExhausted);
@@ -158,10 +165,19 @@ pub fn create_profile(name: &str, protocol: VpnProtocol, server: &str, port: u16
         let id = state.next_id;
         state.next_id += 1;
         state.profiles.push(VpnProfile {
-            id, name: String::from(name), protocol, server: String::from(server),
-            port, state: ConnectionState::Disconnected, auto_connect: false,
-            kill_switch: false, dns_override: None,
-            bytes_sent: 0, bytes_received: 0, connected_ns: 0, total_connections: 0,
+            id,
+            name: String::from(name),
+            protocol,
+            server: String::from(server),
+            port,
+            state: ConnectionState::Disconnected,
+            auto_connect: false,
+            kill_switch: false,
+            dns_override: None,
+            bytes_sent: 0,
+            bytes_received: 0,
+            connected_ns: 0,
+            total_connections: 0,
         });
         state.total_created += 1;
         Ok(id)
@@ -173,7 +189,9 @@ pub fn delete_profile(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.profiles.len();
         state.profiles.retain(|p| p.id != id);
-        if state.profiles.len() == before { return Err(KernelError::NotFound); }
+        if state.profiles.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -182,7 +200,10 @@ pub fn delete_profile(id: u32) -> KernelResult<()> {
 pub fn connect(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let profile = state.profiles.iter_mut().find(|p| p.id == id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         profile.state = ConnectionState::Connected;
         profile.connected_ns = now;
@@ -195,7 +216,10 @@ pub fn connect(id: u32) -> KernelResult<()> {
 /// Disconnect.
 pub fn disconnect(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         profile.state = ConnectionState::Disconnected;
         state.total_disconnects += 1;
@@ -206,7 +230,10 @@ pub fn disconnect(id: u32) -> KernelResult<()> {
 /// Set auto-connect.
 pub fn set_auto_connect(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         profile.auto_connect = enabled;
         Ok(())
@@ -216,7 +243,10 @@ pub fn set_auto_connect(id: u32, enabled: bool) -> KernelResult<()> {
 /// Set kill switch.
 pub fn set_kill_switch(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         profile.kill_switch = enabled;
         Ok(())
@@ -226,7 +256,10 @@ pub fn set_kill_switch(id: u32, enabled: bool) -> KernelResult<()> {
 /// Record traffic (simulation).
 pub fn record_traffic(id: u32, sent: u64, received: u64) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         profile.bytes_sent += sent;
         profile.bytes_received += received;
@@ -236,19 +269,31 @@ pub fn record_traffic(id: u32, sent: u64, received: u64) -> KernelResult<()> {
 
 /// List profiles.
 pub fn list_profiles() -> Vec<VpnProfile> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.profiles.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.profiles.clone())
 }
 
 /// Get a profile.
 pub fn get_profile(id: u32) -> Option<VpnProfile> {
-    STATE.lock().as_ref().and_then(|s| s.profiles.iter().find(|p| p.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.profiles.iter().find(|p| p.id == id).cloned())
 }
 
 /// Statistics: (profile_count, total_connects, total_disconnects, total_errors, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.profiles.len(), s.total_connects, s.total_disconnects, s.total_errors, s.ops),
+        Some(s) => (
+            s.profiles.len(),
+            s.total_connects,
+            s.total_disconnects,
+            s.total_errors,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -270,7 +315,8 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] defaults: OK");
 
     // 2: Create profile via the real API.
-    let id = create_profile("Home VPN", VpnProtocol::OpenVpn, "home.vpn.net", 1194).expect("create");
+    let id =
+        create_profile("Home VPN", VpnProtocol::OpenVpn, "home.vpn.net", 1194).expect("create");
     assert_eq!(list_profiles().len(), 1);
     crate::serial_println!("  [2/8] create: OK");
 

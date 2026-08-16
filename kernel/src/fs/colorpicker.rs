@@ -22,11 +22,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -102,8 +102,20 @@ impl Color {
         let g = self.g as f64 / 255.0;
         let b = self.b as f64 / 255.0;
 
-        let max = if r >= g && r >= b { r } else if g >= b { g } else { b };
-        let min = if r <= g && r <= b { r } else if g <= b { g } else { b };
+        let max = if r >= g && r >= b {
+            r
+        } else if g >= b {
+            g
+        } else {
+            b
+        };
+        let min = if r <= g && r <= b {
+            r
+        } else if g <= b {
+            g
+        } else {
+            b
+        };
         let delta = max - min;
 
         let v = (max * 100.0) as u8;
@@ -163,8 +175,20 @@ impl Color {
         let g = self.g as f64 / 255.0;
         let b = self.b as f64 / 255.0;
 
-        let max = if r >= g && r >= b { r } else if g >= b { g } else { b };
-        let min = if r <= g && r <= b { r } else if g <= b { g } else { b };
+        let max = if r >= g && r >= b {
+            r
+        } else if g >= b {
+            g
+        } else {
+            b
+        };
+        let min = if r <= g && r <= b {
+            r
+        } else if g <= b {
+            g
+        } else {
+            b
+        };
         let delta = max - min;
         let l = f64::midpoint(max, min);
 
@@ -226,7 +250,14 @@ impl Color {
         let r = self.r as f64 / 255.0;
         let g = self.g as f64 / 255.0;
         let b = self.b as f64 / 255.0;
-        let k = 1.0 - if r >= g && r >= b { r } else if g >= b { g } else { b };
+        let k = 1.0
+            - if r >= g && r >= b {
+                r
+            } else if g >= b {
+                g
+            } else {
+                b
+            };
         if k >= 1.0 {
             return (0, 0, 0, 100);
         }
@@ -338,22 +369,28 @@ pub fn open_picker(initial: Color, alpha: bool) -> KernelResult<u64> {
     }
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let ts = crate::hpet::elapsed_ns();
-    state.pickers.insert(id, PickerInstance {
+    state.pickers.insert(
         id,
-        color: initial,
-        model: ColorModel::Hsv,
-        alpha_enabled: alpha,
-        initial_color: initial,
-        confirmed: false,
-        created_ns: ts,
-    });
+        PickerInstance {
+            id,
+            color: initial,
+            model: ColorModel::Hsv,
+            alpha_enabled: alpha,
+            initial_color: initial,
+            confirmed: false,
+            created_ns: ts,
+        },
+    );
     Ok(id)
 }
 
 /// Set the color model for a picker.
 pub fn set_model(picker_id: u64, model: ColorModel) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.pickers.get_mut(&picker_id).ok_or(KernelError::NotFound)?;
+    let p = state
+        .pickers
+        .get_mut(&picker_id)
+        .ok_or(KernelError::NotFound)?;
     p.model = model;
     Ok(())
 }
@@ -361,7 +398,10 @@ pub fn set_model(picker_id: u64, model: ColorModel) -> KernelResult<()> {
 /// Set color via RGB.
 pub fn set_rgb(picker_id: u64, r: u8, g: u8, b: u8) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.pickers.get_mut(&picker_id).ok_or(KernelError::NotFound)?;
+    let p = state
+        .pickers
+        .get_mut(&picker_id)
+        .ok_or(KernelError::NotFound)?;
     p.color = Color::rgb(r, g, b);
     Ok(())
 }
@@ -369,7 +409,10 @@ pub fn set_rgb(picker_id: u64, r: u8, g: u8, b: u8) -> KernelResult<()> {
 /// Set color via RGBA.
 pub fn set_rgba(picker_id: u64, r: u8, g: u8, b: u8, a: u8) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.pickers.get_mut(&picker_id).ok_or(KernelError::NotFound)?;
+    let p = state
+        .pickers
+        .get_mut(&picker_id)
+        .ok_or(KernelError::NotFound)?;
     p.color = Color::rgba(r, g, b, a);
     Ok(())
 }
@@ -377,7 +420,10 @@ pub fn set_rgba(picker_id: u64, r: u8, g: u8, b: u8, a: u8) -> KernelResult<()> 
 /// Set color via HSV.
 pub fn set_hsv(picker_id: u64, h: u16, s: u8, v: u8) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.pickers.get_mut(&picker_id).ok_or(KernelError::NotFound)?;
+    let p = state
+        .pickers
+        .get_mut(&picker_id)
+        .ok_or(KernelError::NotFound)?;
     let a = p.color.a;
     p.color = Color::from_hsv(h, s, v);
     p.color.a = a;
@@ -387,7 +433,10 @@ pub fn set_hsv(picker_id: u64, h: u16, s: u8, v: u8) -> KernelResult<()> {
 /// Set color via HSL.
 pub fn set_hsl(picker_id: u64, h: u16, s: u8, l: u8) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.pickers.get_mut(&picker_id).ok_or(KernelError::NotFound)?;
+    let p = state
+        .pickers
+        .get_mut(&picker_id)
+        .ok_or(KernelError::NotFound)?;
     let a = p.color.a;
     p.color = Color::from_hsl(h, s, l);
     p.color.a = a;
@@ -398,7 +447,10 @@ pub fn set_hsl(picker_id: u64, h: u16, s: u8, l: u8) -> KernelResult<()> {
 pub fn set_hex(picker_id: u64, hex: &str) -> KernelResult<()> {
     let c = Color::from_hex(hex).ok_or(KernelError::InvalidArgument)?;
     let mut state = STATE.lock();
-    let p = state.pickers.get_mut(&picker_id).ok_or(KernelError::NotFound)?;
+    let p = state
+        .pickers
+        .get_mut(&picker_id)
+        .ok_or(KernelError::NotFound)?;
     p.color = c;
     Ok(())
 }
@@ -406,7 +458,10 @@ pub fn set_hex(picker_id: u64, hex: &str) -> KernelResult<()> {
 /// Set alpha channel.
 pub fn set_alpha(picker_id: u64, a: u8) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.pickers.get_mut(&picker_id).ok_or(KernelError::NotFound)?;
+    let p = state
+        .pickers
+        .get_mut(&picker_id)
+        .ok_or(KernelError::NotFound)?;
     p.color.a = a;
     Ok(())
 }
@@ -414,7 +469,10 @@ pub fn set_alpha(picker_id: u64, a: u8) -> KernelResult<()> {
 /// Revert to initial color.
 pub fn revert(picker_id: u64) -> KernelResult<Color> {
     let mut state = STATE.lock();
-    let p = state.pickers.get_mut(&picker_id).ok_or(KernelError::NotFound)?;
+    let p = state
+        .pickers
+        .get_mut(&picker_id)
+        .ok_or(KernelError::NotFound)?;
     p.color = p.initial_color;
     Ok(p.color)
 }
@@ -436,7 +494,10 @@ pub fn get_picker(picker_id: u64) -> KernelResult<PickerInstance> {
 /// Confirm selection and close picker. Returns the selected color.
 pub fn confirm(picker_id: u64) -> KernelResult<Color> {
     let mut state = STATE.lock();
-    let p = state.pickers.remove(&picker_id).ok_or(KernelError::NotFound)?;
+    let p = state
+        .pickers
+        .remove(&picker_id)
+        .ok_or(KernelError::NotFound)?;
     PICK_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // Add to recent colors.
@@ -452,7 +513,10 @@ pub fn confirm(picker_id: u64) -> KernelResult<Color> {
 /// Cancel picker without selecting.
 pub fn cancel(picker_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    state.pickers.remove(&picker_id).ok_or(KernelError::NotFound)?;
+    state
+        .pickers
+        .remove(&picker_id)
+        .ok_or(KernelError::NotFound)?;
     Ok(())
 }
 
@@ -519,7 +583,10 @@ pub fn remove_palette(name: &str) -> KernelResult<()> {
 /// Add a color to a palette.
 pub fn palette_add(name: &str, color: Color) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let pal = state.palettes.iter_mut().find(|p| p.name == name)
+    let pal = state
+        .palettes
+        .iter_mut()
+        .find(|p| p.name == name)
         .ok_or(KernelError::NotFound)?;
     if pal.colors.len() >= MAX_PALETTE {
         return Err(KernelError::ResourceExhausted);
@@ -531,7 +598,10 @@ pub fn palette_add(name: &str, color: Color) -> KernelResult<()> {
 /// Remove a color from a palette by index.
 pub fn palette_remove(name: &str, index: usize) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let pal = state.palettes.iter_mut().find(|p| p.name == name)
+    let pal = state
+        .palettes
+        .iter_mut()
+        .find(|p| p.name == name)
         .ok_or(KernelError::NotFound)?;
     if index >= pal.colors.len() {
         return Err(KernelError::InvalidArgument);
@@ -548,7 +618,12 @@ pub fn list_palettes() -> Vec<Palette> {
 /// Get a palette by name.
 pub fn get_palette(name: &str) -> KernelResult<Palette> {
     let state = STATE.lock();
-    state.palettes.iter().find(|p| p.name == name).cloned().ok_or(KernelError::NotFound)
+    state
+        .palettes
+        .iter()
+        .find(|p| p.name == name)
+        .cloned()
+        .ok_or(KernelError::NotFound)
 }
 
 /// Recent colors (most recent first).
@@ -559,7 +634,9 @@ pub fn recent_colors() -> Vec<Color> {
 /// Initialize built-in palettes.
 pub fn init_defaults() {
     let mut state = STATE.lock();
-    if !state.palettes.is_empty() { return; }
+    if !state.palettes.is_empty() {
+        return;
+    }
 
     // Basic web colors.
     state.palettes.push(Palette {
@@ -588,22 +665,22 @@ pub fn init_defaults() {
     state.palettes.push(Palette {
         name: String::from("Material"),
         colors: alloc::vec![
-            Color::rgb(244, 67, 54),   // Red
-            Color::rgb(233, 30, 99),   // Pink
-            Color::rgb(156, 39, 176),  // Purple
-            Color::rgb(103, 58, 183),  // Deep Purple
-            Color::rgb(63, 81, 181),   // Indigo
-            Color::rgb(33, 150, 243),  // Blue
-            Color::rgb(3, 169, 244),   // Light Blue
-            Color::rgb(0, 188, 212),   // Cyan
-            Color::rgb(0, 150, 136),   // Teal
-            Color::rgb(76, 175, 80),   // Green
-            Color::rgb(139, 195, 74),  // Light Green
-            Color::rgb(205, 220, 57),  // Lime
-            Color::rgb(255, 235, 59),  // Yellow
-            Color::rgb(255, 193, 7),   // Amber
-            Color::rgb(255, 152, 0),   // Orange
-            Color::rgb(255, 87, 34),   // Deep Orange
+            Color::rgb(244, 67, 54),  // Red
+            Color::rgb(233, 30, 99),  // Pink
+            Color::rgb(156, 39, 176), // Purple
+            Color::rgb(103, 58, 183), // Deep Purple
+            Color::rgb(63, 81, 181),  // Indigo
+            Color::rgb(33, 150, 243), // Blue
+            Color::rgb(3, 169, 244),  // Light Blue
+            Color::rgb(0, 188, 212),  // Cyan
+            Color::rgb(0, 150, 136),  // Teal
+            Color::rgb(76, 175, 80),  // Green
+            Color::rgb(139, 195, 74), // Light Green
+            Color::rgb(205, 220, 57), // Lime
+            Color::rgb(255, 235, 59), // Yellow
+            Color::rgb(255, 193, 7),  // Amber
+            Color::rgb(255, 152, 0),  // Orange
+            Color::rgb(255, 87, 34),  // Deep Orange
         ],
     });
 }

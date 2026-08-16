@@ -44,7 +44,7 @@
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, FRAME_SIZE};
-use crate::mm::page_table::{self, PageFlags, VirtAddr, USER_SPACE_END};
+use crate::mm::page_table::{self, PageFlags, USER_SPACE_END, VirtAddr};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -59,7 +59,8 @@ const EI_CLASS: usize = 4;
 const EI_DATA: usize = 5;
 const EI_VERSION: usize = 6;
 const EI_OSABI: usize = 7;
-#[allow(dead_code)] const EI_ABIVERSION: usize = 8;
+#[allow(dead_code)]
+const EI_ABIVERSION: usize = 8;
 
 // EI_CLASS values.
 const ELFCLASS64: u8 = 2;
@@ -85,16 +86,24 @@ const ET_DYN: u16 = 3; // Shared object / PIE.
 const EM_X86_64: u16 = 62;
 
 // Program header p_type values.
-#[allow(dead_code)] const PT_NULL: u32 = 0;
+#[allow(dead_code)]
+const PT_NULL: u32 = 0;
 const PT_LOAD: u32 = 1;
-#[allow(dead_code)] const PT_DYNAMIC: u32 = 2;
+#[allow(dead_code)]
+const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
-#[allow(dead_code)] const PT_NOTE: u32 = 4;
-#[allow(dead_code)] const PT_PHDR: u32 = 6;
-#[allow(dead_code)] const PT_TLS: u32 = 7;
-#[allow(dead_code)] const PT_GNU_EH_FRAME: u32 = 0x6474_E550;
-#[allow(dead_code)] const PT_GNU_STACK: u32 = 0x6474_E551;
-#[allow(dead_code)] const PT_GNU_RELRO: u32 = 0x6474_E552;
+#[allow(dead_code)]
+const PT_NOTE: u32 = 4;
+#[allow(dead_code)]
+const PT_PHDR: u32 = 6;
+#[allow(dead_code)]
+const PT_TLS: u32 = 7;
+#[allow(dead_code)]
+const PT_GNU_EH_FRAME: u32 = 0x6474_E550;
+#[allow(dead_code)]
+const PT_GNU_STACK: u32 = 0x6474_E551;
+#[allow(dead_code)]
+const PT_GNU_RELRO: u32 = 0x6474_E552;
 /// GNU property note — a strong Linux indicator emitted by binutils/gcc.
 /// Defined in the Linux Foundation gABI proposal.  Not used by FreeBSD/
 /// OpenBSD/NetBSD as of writing.
@@ -300,9 +309,7 @@ impl<'a> ElfFile<'a> {
         // Reject e_phentsize < ELF64_PHDR_SIZE when program headers exist.
         // A zero e_phentsize with e_phnum > 0 would cause all headers to
         // be read from the same offset, producing silently wrong results.
-        if header.e_phnum > 0
-            && (header.e_phentsize as usize) < ELF64_PHDR_SIZE
-        {
+        if header.e_phnum > 0 && (header.e_phentsize as usize) < ELF64_PHDR_SIZE {
             return Err(KernelError::InvalidExecutable);
         }
 
@@ -357,9 +364,7 @@ impl<'a> ElfFile<'a> {
         }
 
         let offset = (self.header.e_phoff as usize)
-            .checked_add(
-                index.checked_mul(self.header.e_phentsize as usize)?
-            )?;
+            .checked_add(index.checked_mul(self.header.e_phentsize as usize)?)?;
 
         // Bounds check: the program header table was validated in parse(),
         // but be defensive.
@@ -460,7 +465,9 @@ impl<'a> ElfFile<'a> {
         // Signal 2 + 3: walk program headers once, checking for
         // PT_INTERP with a Linux loader path and PT_GNU_PROPERTY.
         for i in 0..self.program_header_count() {
-            let Some(phdr) = self.program_header(i) else { continue };
+            let Some(phdr) = self.program_header(i) else {
+                continue;
+            };
 
             match phdr.p_type {
                 PT_INTERP => {
@@ -696,10 +703,7 @@ pub fn segment_flags_to_page_flags(seg: &LoadableSegment) -> PageFlags {
 /// `pml4_phys` must be the physical address of a valid PML4 table.
 /// The caller must ensure no other CPU is using this address space
 /// concurrently.
-pub unsafe fn load_segments(
-    elf: &ElfFile<'_>,
-    pml4_phys: u64,
-) -> KernelResult<()> {
+pub unsafe fn load_segments(elf: &ElfFile<'_>, pml4_phys: u64) -> KernelResult<()> {
     // SAFETY: forwarding caller's safety requirements to the bias-aware
     // loader; bias 0 maps every segment at its own `p_vaddr`, exactly the
     // historical behaviour of this function.
@@ -752,8 +756,13 @@ pub unsafe fn load_segments_with_bias(
     let mut min_page: u64 = u64::MAX;
     let mut max_end: u64 = 0;
     for seg in elf.loadable_segments()? {
-        let start = seg.vaddr.checked_add(bias).ok_or(KernelError::InvalidAddress)?;
-        let end = start.checked_add(seg.mem_size).ok_or(KernelError::InvalidAddress)?;
+        let start = seg
+            .vaddr
+            .checked_add(bias)
+            .ok_or(KernelError::InvalidAddress)?;
+        let end = start
+            .checked_add(seg.mem_size)
+            .ok_or(KernelError::InvalidAddress)?;
         if end > USER_SPACE_END {
             return Err(KernelError::InvalidAddress);
         }
@@ -794,8 +803,13 @@ pub unsafe fn load_segments_with_bias(
         let mut subpage_flags = [PageFlags::empty(); page_table::HW_PAGES_PER_FRAME];
         let mut page_used = false;
         for seg in elf.loadable_segments()? {
-            let s = seg.vaddr.checked_add(bias).ok_or(KernelError::InvalidAddress)?;
-            let e = s.checked_add(seg.mem_size).ok_or(KernelError::InvalidAddress)?;
+            let s = seg
+                .vaddr
+                .checked_add(bias)
+                .ok_or(KernelError::InvalidAddress)?;
+            let e = s
+                .checked_add(seg.mem_size)
+                .ok_or(KernelError::InvalidAddress)?;
             // Skip a segment that does not intersect this frame at all.
             if e <= page || s >= page_end_addr {
                 continue;
@@ -834,8 +848,10 @@ pub unsafe fn load_segments_with_bias(
         // segment's file region with this frame, so a large segment is filled
         // in across successive frames and a small one only touches its bytes.
         for seg in elf.loadable_segments()? {
-            let biased_vaddr =
-                seg.vaddr.checked_add(bias).ok_or(KernelError::InvalidAddress)?;
+            let biased_vaddr = seg
+                .vaddr
+                .checked_add(bias)
+                .ok_or(KernelError::InvalidAddress)?;
             let biased = LoadableSegment {
                 vaddr: biased_vaddr,
                 ..seg
@@ -849,9 +865,9 @@ pub unsafe fn load_segments_with_bias(
         let virt = VirtAddr::new(page);
         // SAFETY: pml4_phys is valid (caller invariant), phys_frame is freshly
         // allocated and exclusively ours, virt is a frame-aligned user address.
-        if let Err(e) = unsafe {
-            page_table::map_frame_subpages(pml4_phys, virt, phys_frame, subpage_flags)
-        } {
+        if let Err(e) =
+            unsafe { page_table::map_frame_subpages(pml4_phys, virt, phys_frame, subpage_flags) }
+        {
             // SAFETY: phys_frame was just allocated and never shared.
             let _ = unsafe { frame::free_frame(phys_frame) };
             return Err(e);
@@ -934,7 +950,10 @@ fn copy_segment_data_to_frame(
     let byte_count = (overlap_end - overlap_start) as usize;
 
     // Offset into the file.
-    let file_offset = match seg.file_offset.checked_add(overlap_start.saturating_sub(seg.vaddr)) {
+    let file_offset = match seg
+        .file_offset
+        .checked_add(overlap_start.saturating_sub(seg.vaddr))
+    {
         Some(v) => v,
         None => return, // Overflow — skip (validation already caught bad segments).
     };
@@ -994,8 +1013,7 @@ fn is_linux_interp(bytes: &[u8]) -> bool {
         None => bytes,
     };
 
-    contains_subslice(path, b"ld-linux-x86-64")
-        || contains_subslice(path, b"ld-musl-x86_64")
+    contains_subslice(path, b"ld-linux-x86-64") || contains_subslice(path, b"ld-musl-x86_64")
 }
 
 /// Returns `true` if `haystack` contains `needle` as a contiguous
@@ -1275,7 +1293,11 @@ pub fn build_linux_argc_exit_test_elf() -> alloc::vec::Vec<u8> {
 ///
 /// Tagged `ELFOSABI_GNU` so `spawn_process` builds a System V stack for it.
 #[must_use]
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 pub fn build_linux_argv0_deref_exit_elf() -> alloc::vec::Vec<u8> {
     use alloc::vec;
 
@@ -1374,7 +1396,11 @@ pub fn build_linux_argv0_deref_exit_elf() -> alloc::vec::Vec<u8> {
 ///
 /// Tagged `ELFOSABI_GNU` so `spawn_process` builds a System V stack for it.
 #[must_use]
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 pub fn build_linux_envp0_deref_exit_elf() -> alloc::vec::Vec<u8> {
     use alloc::vec;
 
@@ -1515,7 +1541,11 @@ pub fn build_linux_envp0_deref_exit_elf() -> alloc::vec::Vec<u8> {
 /// Tagged `ELFOSABI_GNU` so `spawn_process` builds a System V stack and routes
 /// the process through the Linux ABI.
 #[must_use]
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 pub fn build_linux_fork_wait_test_elf() -> alloc::vec::Vec<u8> {
     use alloc::vec;
 
@@ -2862,10 +2892,7 @@ pub fn build_linux_truncate_test_elf(
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation
 )]
-pub fn build_linux_fchmodat2_emptypath_test_elf(
-    path_nul: &[u8],
-    mode: u32,
-) -> alloc::vec::Vec<u8> {
+pub fn build_linux_fchmodat2_emptypath_test_elf(path_nul: &[u8], mode: u32) -> alloc::vec::Vec<u8> {
     use alloc::vec;
 
     let phdr_offset: u64 = 64;
@@ -3176,10 +3203,7 @@ pub fn build_linux_virtgpu_getparam_test_elf() -> alloc::vec::Vec<u8> {
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation
 )]
-pub fn build_linux_fallocate_grow_test_elf(
-    path_nul: &[u8],
-    grow_len: u32,
-) -> alloc::vec::Vec<u8> {
+pub fn build_linux_fallocate_grow_test_elf(path_nul: &[u8], grow_len: u32) -> alloc::vec::Vec<u8> {
     use alloc::vec;
 
     let phdr_offset: u64 = 64;
@@ -3685,7 +3709,11 @@ pub fn build_linux_execveat_test_elf(
     // mov r8d, <flags>             (41 B8 <imm32>)  — the fexecve form must
     // carry AT_EMPTY_PATH (0x1000); both forms OR in any caller-requested
     // extra flag bits (e.g. AT_SYMLINK_NOFOLLOW for the reject-symlink test).
-    let final_flags = if fexecve { 0x1000u32 | flags_extra } else { flags_extra };
+    let final_flags = if fexecve {
+        0x1000u32 | flags_extra
+    } else {
+        flags_extra
+    };
     code.extend_from_slice(&[0x41, 0xB8]);
     code.extend_from_slice(&final_flags.to_le_bytes());
     // mov eax, 322                 (B8 42 01 00 00)  SYS_execveat
@@ -3721,9 +3749,7 @@ pub fn build_linux_execveat_test_elf(
     let envp_off = argv_off + (argc + 1) * 8; // argc ptrs + NULL
     let file_size = envp_off + 8; // envp = [NULL]
 
-    let vaddr_of = |file_off: usize| -> u64 {
-        load_vaddr + (file_off as u64 - code_offset)
-    };
+    let vaddr_of = |file_off: usize| -> u64 { load_vaddr + (file_off as u64 - code_offset) };
     let path_vaddr = vaddr_of(path_off);
     let empty_vaddr = vaddr_of(empty_off);
     let argv_vaddr = vaddr_of(argv_off);
@@ -3983,7 +4009,8 @@ pub fn build_linux_brk_test_elf(sentinel: u8) -> alloc::vec::Vec<u8> {
         0x0F, 0x05, // syscall                                          @27
         0x48, 0x39, 0xE8, // cmp rax, rbp         (granted == desired?) @29
         0x0F, 0x85, 0x15, 0x00, 0x00, 0x00, // jne fail (disp=21)       @32
-        0xC6, 0x83, 0x00, 0x40, 0x00, 0x00, 0x00, // mov byte[rbx+0x4000],sentinel @38 (imm @44)
+        0xC6, 0x83, 0x00, 0x40, 0x00, 0x00,
+        0x00, // mov byte[rbx+0x4000],sentinel @38 (imm @44)
         0x0F, 0xB6, 0xBB, 0x00, 0x40, 0x00, 0x00, // movzx edi,byte[rbx+0x4000]    @45
         0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60 (SYS_exit)         @52
         0x0F, 0x05, // syscall                                          @57
@@ -4096,10 +4123,12 @@ pub fn build_linux_sa_restart_test_elf(sentinel: u8) -> alloc::vec::Vec<u8> {
         0x0F, 0x05, //                         syscall                     @12
         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, // mov rax, handler_addr       @14 (imm@16)
         0x48, 0x89, 0x44, 0x24, 0x10, //       mov [rsp+16], rax           @24
-        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x14, // mov qword [rsp+24],0x14000000 @29
+        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00,
+        0x14, // mov qword [rsp+24],0x14000000 @29
         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, // mov rax, restorer_addr      @38 (imm@40)
         0x48, 0x89, 0x44, 0x24, 0x20, //       mov [rsp+32], rax           @48
-        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00, 0x00, // mov qword [rsp+40],0 (mask)   @53
+        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00,
+        0x00, // mov qword [rsp+40],0 (mask)   @53
         0xBF, 0x0A, 0x00, 0x00, 0x00, //       mov edi, 10   (SIGUSR1)     @62
         0x48, 0x8D, 0x74, 0x24, 0x10, //       lea rsi, [rsp+16] (&act)    @67
         0x31, 0xD2, //                         xor edx, edx  (oact=NULL)   @72
@@ -4234,17 +4263,20 @@ pub fn build_linux_signalfd_interrupt_test_elf(sentinel: u8) -> alloc::vec::Vec<
         0x48, 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00, // sub rsp, 256             @0
         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, handler_addr    @7 (imm@9)
         0x48, 0x89, 0x44, 0x24, 0x10, //             mov [rsp+16], rax        @17
-        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x04, // mov qword [rsp+24],0x04000000 @22
+        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00,
+        0x04, // mov qword [rsp+24],0x04000000 @22
         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, restorer_addr   @31 (imm@33)
         0x48, 0x89, 0x44, 0x24, 0x20, //             mov [rsp+32], rax        @41
-        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00, 0x00, // mov qword [rsp+40],0 (mask)  @46
+        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00,
+        0x00, // mov qword [rsp+40],0 (mask)  @46
         0xBF, 0x0A, 0x00, 0x00, 0x00, //             mov edi, 10  (SIGUSR1)   @55
         0x48, 0x8D, 0x74, 0x24, 0x10, //             lea rsi, [rsp+16] (&act) @60
         0x31, 0xD2, //                               xor edx, edx (oact=NULL) @65
         0x41, 0xBA, 0x08, 0x00, 0x00, 0x00, //       mov r10d, 8  (sigsetsz)  @67
         0xB8, 0x0D, 0x00, 0x00, 0x00, //             mov eax, 13 (rt_sigaction)@73
         0x0F, 0x05, //                               syscall                  @78
-        0x48, 0xC7, 0x44, 0x24, 0x30, 0x00, 0x08, 0x00, 0x00, // mov qword [rsp+48],0x800 (SIGUSR2) @80
+        0x48, 0xC7, 0x44, 0x24, 0x30, 0x00, 0x08, 0x00,
+        0x00, // mov qword [rsp+48],0x800 (SIGUSR2) @80
         0xBF, 0xFF, 0xFF, 0xFF, 0xFF, //             mov edi, -1  (create)    @89
         0x48, 0x8D, 0x74, 0x24, 0x30, //             lea rsi, [rsp+48] (&mask)@94
         0xBA, 0x08, 0x00, 0x00, 0x00, //             mov edx, 8   (sizemask)  @99
@@ -4373,10 +4405,12 @@ pub fn build_linux_eventfd_interrupt_test_elf(sentinel: u8) -> alloc::vec::Vec<u
         0x48, 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00, // sub rsp, 256             @0
         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, handler_addr    @7 (imm@9)
         0x48, 0x89, 0x44, 0x24, 0x10, //             mov [rsp+16], rax        @17
-        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x04, // mov qword [rsp+24],0x04000000 @22
+        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00,
+        0x04, // mov qword [rsp+24],0x04000000 @22
         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, restorer_addr   @31 (imm@33)
         0x48, 0x89, 0x44, 0x24, 0x20, //             mov [rsp+32], rax        @41
-        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00, 0x00, // mov qword [rsp+40],0 (mask)  @46
+        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00,
+        0x00, // mov qword [rsp+40],0 (mask)  @46
         0xBF, 0x0A, 0x00, 0x00, 0x00, //             mov edi, 10  (SIGUSR1)   @55
         0x48, 0x8D, 0x74, 0x24, 0x10, //             lea rsi, [rsp+16] (&act) @60
         0x31, 0xD2, //                               xor edx, edx (oact=NULL) @65
@@ -4514,10 +4548,12 @@ pub fn build_linux_timerfd_interrupt_test_elf(sentinel: u8) -> alloc::vec::Vec<u
         0x48, 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00, // sub rsp, 256             @0
         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, handler_addr    @7 (imm@9)
         0x48, 0x89, 0x44, 0x24, 0x10, //             mov [rsp+16], rax        @17
-        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x04, // mov qword [rsp+24],0x04000000 @22
+        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00,
+        0x04, // mov qword [rsp+24],0x04000000 @22
         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, restorer_addr   @31 (imm@33)
         0x48, 0x89, 0x44, 0x24, 0x20, //             mov [rsp+32], rax        @41
-        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00, 0x00, // mov qword [rsp+40],0 (mask)  @46
+        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00,
+        0x00, // mov qword [rsp+40],0 (mask)  @46
         0xBF, 0x0A, 0x00, 0x00, 0x00, //             mov edi, 10  (SIGUSR1)   @55
         0x48, 0x8D, 0x74, 0x24, 0x10, //             lea rsi, [rsp+16] (&act) @60
         0x31, 0xD2, //                               xor edx, edx (oact=NULL) @65
@@ -4652,10 +4688,12 @@ pub fn build_linux_inotify_interrupt_test_elf(sentinel: u8) -> alloc::vec::Vec<u
         0x48, 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00, // sub rsp, 256             @0
         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, handler_addr    @7 (imm@9)
         0x48, 0x89, 0x44, 0x24, 0x10, //             mov [rsp+16], rax        @17
-        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x04, // mov qword [rsp+24],0x04000000 @22
+        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00,
+        0x04, // mov qword [rsp+24],0x04000000 @22
         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, restorer_addr   @31 (imm@33)
         0x48, 0x89, 0x44, 0x24, 0x20, //             mov [rsp+32], rax        @41
-        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00, 0x00, // mov qword [rsp+40],0 (mask)  @46
+        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00,
+        0x00, // mov qword [rsp+40],0 (mask)  @46
         0xBF, 0x0A, 0x00, 0x00, 0x00, //             mov edi, 10  (SIGUSR1)   @55
         0x48, 0x8D, 0x74, 0x24, 0x10, //             lea rsi, [rsp+16] (&act) @60
         0x31, 0xD2, //                               xor edx, edx (oact=NULL) @65
@@ -4788,10 +4826,12 @@ pub fn build_linux_poll_interrupt_test_elf(sentinel: u8) -> alloc::vec::Vec<u8> 
         0x48, 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00, // sub rsp, 256             @0
         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, handler_addr    @7 (imm@9)
         0x48, 0x89, 0x44, 0x24, 0x10, //             mov [rsp+16], rax        @17
-        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x04, // mov qword [rsp+24],0x04000000 @22
+        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00,
+        0x04, // mov qword [rsp+24],0x04000000 @22
         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, restorer_addr   @31 (imm@33)
         0x48, 0x89, 0x44, 0x24, 0x20, //             mov [rsp+32], rax        @41
-        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00, 0x00, // mov qword [rsp+40],0 (mask)  @46
+        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00,
+        0x00, // mov qword [rsp+40],0 (mask)  @46
         0xBF, 0x0A, 0x00, 0x00, 0x00, //             mov edi, 10  (SIGUSR1)   @55
         0x48, 0x8D, 0x74, 0x24, 0x10, //             lea rsi, [rsp+16] (&act) @60
         0x31, 0xD2, //                               xor edx, edx (oact=NULL) @65
@@ -4915,10 +4955,12 @@ pub fn build_linux_poll_empty_infinite_test_elf(sentinel: u8) -> alloc::vec::Vec
         0x48, 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00, // sub rsp, 256             @0
         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, handler_addr    @7 (imm@9)
         0x48, 0x89, 0x44, 0x24, 0x10, //             mov [rsp+16], rax        @17
-        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x04, // mov qword [rsp+24],0x04000000 @22
+        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00,
+        0x04, // mov qword [rsp+24],0x04000000 @22
         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, restorer_addr   @31 (imm@33)
         0x48, 0x89, 0x44, 0x24, 0x20, //             mov [rsp+32], rax        @41
-        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00, 0x00, // mov qword [rsp+40],0 (mask)  @46
+        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00,
+        0x00, // mov qword [rsp+40],0 (mask)  @46
         0xBF, 0x0A, 0x00, 0x00, 0x00, //             mov edi, 10  (SIGUSR1)   @55
         0x48, 0x8D, 0x74, 0x24, 0x10, //             lea rsi, [rsp+16] (&act) @60
         0x31, 0xD2, //                               xor edx, edx (oact=NULL) @65
@@ -5155,8 +5197,7 @@ pub fn build_hello_elf() -> alloc::vec::Vec<u8> {
     buf[cs + 28] = 0xCC;
 
     // --- String data ---
-    buf[cs + code_instructions_len..cs + code_instructions_len + msg_len]
-        .copy_from_slice(msg);
+    buf[cs + code_instructions_len..cs + code_instructions_len + msg_len].copy_from_slice(msg);
 
     buf
 }
@@ -5819,7 +5860,10 @@ fn test_parse_valid_elf() -> KernelResult<()> {
     }
 
     if elf.program_header_count() != 1 {
-        serial_println!("[elf]   FAIL: expected 1 program header, got {}", elf.program_header_count());
+        serial_println!(
+            "[elf]   FAIL: expected 1 program header, got {}",
+            elf.program_header_count()
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -5835,7 +5879,10 @@ fn test_parse_invalid_magic() -> KernelResult<()> {
     match ElfFile::parse(&data) {
         Err(KernelError::InvalidExecutable) => {}
         other => {
-            serial_println!("[elf]   FAIL: invalid magic should fail: {:?}", other.map(|_| ()));
+            serial_println!(
+                "[elf]   FAIL: invalid magic should fail: {:?}",
+                other.map(|_| ())
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -5852,7 +5899,10 @@ fn test_parse_wrong_class() -> KernelResult<()> {
     match ElfFile::parse(&data) {
         Err(KernelError::InvalidExecutable) => {}
         other => {
-            serial_println!("[elf]   FAIL: wrong class should fail: {:?}", other.map(|_| ()));
+            serial_println!(
+                "[elf]   FAIL: wrong class should fail: {:?}",
+                other.map(|_| ())
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -5869,7 +5919,10 @@ fn test_parse_wrong_machine() -> KernelResult<()> {
     match ElfFile::parse(&data) {
         Err(KernelError::InvalidExecutable) => {}
         other => {
-            serial_println!("[elf]   FAIL: wrong machine should fail: {:?}", other.map(|_| ()));
+            serial_println!(
+                "[elf]   FAIL: wrong machine should fail: {:?}",
+                other.map(|_| ())
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -5885,7 +5938,10 @@ fn test_parse_too_small() -> KernelResult<()> {
     match ElfFile::parse(&data) {
         Err(KernelError::InvalidExecutable) => {}
         other => {
-            serial_println!("[elf]   FAIL: truncated data should fail: {:?}", other.map(|_| ()));
+            serial_println!(
+                "[elf]   FAIL: truncated data should fail: {:?}",
+                other.map(|_| ())
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -5899,11 +5955,13 @@ fn test_loadable_segments() -> KernelResult<()> {
     let data = build_test_elf();
     let elf = ElfFile::parse(&data)?;
 
-    let segments: alloc::vec::Vec<LoadableSegment> =
-        elf.loadable_segments()?.collect();
+    let segments: alloc::vec::Vec<LoadableSegment> = elf.loadable_segments()?.collect();
 
     if segments.len() != 1 {
-        serial_println!("[elf]   FAIL: expected 1 loadable segment, got {}", segments.len());
+        serial_println!(
+            "[elf]   FAIL: expected 1 loadable segment, got {}",
+            segments.len()
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -5932,11 +5990,13 @@ fn test_bss_segment() -> KernelResult<()> {
     let data = build_test_elf_with_bss();
     let elf = ElfFile::parse(&data)?;
 
-    let segments: alloc::vec::Vec<LoadableSegment> =
-        elf.loadable_segments()?.collect();
+    let segments: alloc::vec::Vec<LoadableSegment> = elf.loadable_segments()?.collect();
 
     if segments.len() != 1 {
-        serial_println!("[elf]   FAIL: expected 1 loadable segment, got {}", segments.len());
+        serial_println!(
+            "[elf]   FAIL: expected 1 loadable segment, got {}",
+            segments.len()
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -6400,9 +6460,7 @@ fn test_detect_linux_abi_osabi_gnu() -> KernelResult<()> {
     data[EI_OSABI] = ELFOSABI_GNU;
     let elf = ElfFile::parse(&data)?;
     if !elf.detect_linux_abi() {
-        serial_println!(
-            "[elf]   FAIL: ELFOSABI_GNU should be detected as Linux",
-        );
+        serial_println!("[elf]   FAIL: ELFOSABI_GNU should be detected as Linux",);
         return Err(KernelError::InternalError);
     }
     serial_println!("[elf]   Detect Linux ABI: ELFOSABI_GNU: OK");
@@ -6429,9 +6487,7 @@ fn test_detect_linux_abi_interp_musl() -> KernelResult<()> {
     let data = build_interp_elf(ELFOSABI_SYSV, b"/lib/ld-musl-x86_64.so.1\0");
     let elf = ElfFile::parse(&data)?;
     if !elf.detect_linux_abi() {
-        serial_println!(
-            "[elf]   FAIL: PT_INTERP=/lib/ld-musl-x86_64.so.1 should detect as Linux",
-        );
+        serial_println!("[elf]   FAIL: PT_INTERP=/lib/ld-musl-x86_64.so.1 should detect as Linux",);
         return Err(KernelError::InternalError);
     }
     serial_println!("[elf]   Detect Linux ABI: musl PT_INTERP: OK");
@@ -6445,9 +6501,7 @@ fn test_detect_linux_abi_interp_unrelated() -> KernelResult<()> {
     let data = build_interp_elf(ELFOSABI_SYSV, b"/system/loader\0");
     let elf = ElfFile::parse(&data)?;
     if elf.detect_linux_abi() {
-        serial_println!(
-            "[elf]   FAIL: PT_INTERP=/system/loader should NOT detect as Linux",
-        );
+        serial_println!("[elf]   FAIL: PT_INTERP=/system/loader should NOT detect as Linux",);
         return Err(KernelError::InternalError);
     }
     serial_println!("[elf]   Detect Linux ABI: unrelated PT_INTERP stays Native: OK");
@@ -6459,9 +6513,7 @@ fn test_detect_linux_abi_gnu_property() -> KernelResult<()> {
     let data = build_gnu_property_elf();
     let elf = ElfFile::parse(&data)?;
     if !elf.detect_linux_abi() {
-        serial_println!(
-            "[elf]   FAIL: PT_GNU_PROPERTY should detect as Linux",
-        );
+        serial_println!("[elf]   FAIL: PT_GNU_PROPERTY should detect as Linux",);
         return Err(KernelError::InternalError);
     }
     serial_println!("[elf]   Detect Linux ABI: PT_GNU_PROPERTY: OK");
@@ -6495,8 +6547,8 @@ fn test_is_linux_interp_helper() -> KernelResult<()> {
         b"\0",
         b"",
         b"/system/loader\0",
-        b"/lib/ld-elf.so.1\0",     // FreeBSD's loader.
-        b"/libexec/ld.so\0",       // OpenBSD's loader.
+        b"/lib/ld-elf.so.1\0", // FreeBSD's loader.
+        b"/libexec/ld.so\0",   // OpenBSD's loader.
         // Substring after the NUL terminator must NOT count.
         b"/system/loader\0/lib64/ld-linux-x86-64.so.2",
     ];

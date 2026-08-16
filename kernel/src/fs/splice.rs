@@ -125,7 +125,10 @@ pub fn copy_file_range(
 
     let transfer_len = len.min(MAX_TRANSFER);
     if transfer_len == 0 {
-        return Ok(TransferResult { bytes_transferred: 0, chunks: 0 });
+        return Ok(TransferResult {
+            bytes_transferred: 0,
+            chunks: 0,
+        });
     }
 
     COPY_RANGE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -158,7 +161,10 @@ pub fn copy_file_range(
     }
 
     COPY_RANGE_BYTES.fetch_add(total_transferred, Ordering::Relaxed);
-    Ok(TransferResult { bytes_transferred: total_transferred, chunks })
+    Ok(TransferResult {
+        bytes_transferred: total_transferred,
+        chunks,
+    })
 }
 
 /// Send file data to a destination path (sendfile equivalent).
@@ -181,7 +187,10 @@ pub fn sendfile(
 
     let transfer_len = len.min(MAX_TRANSFER);
     if transfer_len == 0 {
-        return Ok(TransferResult { bytes_transferred: 0, chunks: 0 });
+        return Ok(TransferResult {
+            bytes_transferred: 0,
+            chunks: 0,
+        });
     }
 
     SENDFILE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -224,7 +233,10 @@ pub fn sendfile(
     }
 
     SENDFILE_BYTES.fetch_add(total_transferred, Ordering::Relaxed);
-    Ok(TransferResult { bytes_transferred: total_transferred, chunks })
+    Ok(TransferResult {
+        bytes_transferred: total_transferred,
+        chunks,
+    })
 }
 
 /// Splice data from a file into a pipe (or vice versa).
@@ -248,7 +260,10 @@ pub fn splice(
 
     let transfer_len = len.min(MAX_TRANSFER);
     if transfer_len == 0 {
-        return Ok(TransferResult { bytes_transferred: 0, chunks: 0 });
+        return Ok(TransferResult {
+            bytes_transferred: 0,
+            chunks: 0,
+        });
     }
 
     SPLICE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -290,7 +305,10 @@ pub fn splice(
     }
 
     SPLICE_BYTES.fetch_add(total_transferred, Ordering::Relaxed);
-    Ok(TransferResult { bytes_transferred: total_transferred, chunks })
+    Ok(TransferResult {
+        bytes_transferred: total_transferred,
+        chunks,
+    })
 }
 
 /// Duplicate data from one file into another without consuming from source.
@@ -313,7 +331,10 @@ pub fn tee(
 
     let transfer_len = len.min(MAX_TRANSFER);
     if transfer_len == 0 {
-        return Ok(TransferResult { bytes_transferred: 0, chunks: 0 });
+        return Ok(TransferResult {
+            bytes_transferred: 0,
+            chunks: 0,
+        });
     }
 
     TEE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -321,7 +342,10 @@ pub fn tee(
     // Read source data.
     let data = Vfs::read_at(src_path, src_offset, transfer_len)?;
     if data.is_empty() {
-        return Ok(TransferResult { bytes_transferred: 0, chunks: 0 });
+        return Ok(TransferResult {
+            bytes_transferred: 0,
+            chunks: 0,
+        });
     }
 
     let bytes = data.len() as u64;
@@ -338,7 +362,10 @@ pub fn tee(
     Vfs::write_at(dst_path, dst_offset, &data)?;
 
     TEE_BYTES.fetch_add(bytes, Ordering::Relaxed);
-    Ok(TransferResult { bytes_transferred: bytes, chunks: 1 })
+    Ok(TransferResult {
+        bytes_transferred: bytes,
+        chunks: 1,
+    })
 }
 
 /// Get aggregate statistics for all splice operations.
@@ -391,11 +418,16 @@ pub fn summary() -> String {
     alloc::format!(
         "splice: {} ops ({}), sendfile: {} ops ({}), copy_range: {} ops ({}), tee: {} ops ({})\n\
          total: {} ops, {} transferred, {} errors",
-        s.splice_ops, format_bytes(s.splice_bytes),
-        s.sendfile_ops, format_bytes(s.sendfile_bytes),
-        s.copy_range_ops, format_bytes(s.copy_range_bytes),
-        s.tee_ops, format_bytes(s.tee_bytes),
-        total_ops, format_bytes(total_bytes),
+        s.splice_ops,
+        format_bytes(s.splice_bytes),
+        s.sendfile_ops,
+        format_bytes(s.sendfile_bytes),
+        s.copy_range_ops,
+        format_bytes(s.copy_range_bytes),
+        s.tee_ops,
+        format_bytes(s.tee_bytes),
+        total_ops,
+        format_bytes(total_bytes),
         s.errors,
     )
 }

@@ -44,9 +44,9 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use crate::serial_println;
 use crate::pci;
+use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -235,7 +235,9 @@ pub fn find_msi_capability(bus: u8, device: u8, function: u8) -> Option<MsiConfi
     let max_vectors = 1u8 << mmc;
 
     Some(MsiConfig {
-        bus, device, function,
+        bus,
+        device,
+        function,
         cap_offset,
         is_64bit,
         per_vector_mask,
@@ -278,7 +280,13 @@ pub fn enable_msi(config: &mut MsiConfig, target_cpu_lapic: u8) -> Option<u8> {
 
     // Enable MSI (set bit 0 of Message Control).
     let msg_control = pci::config_read16(bus, dev, func, cap.wrapping_add(2));
-    pci::config_write16(bus, dev, func, cap.wrapping_add(2), msg_control | MSI_CONTROL_ENABLE);
+    pci::config_write16(
+        bus,
+        dev,
+        func,
+        cap.wrapping_add(2),
+        msg_control | MSI_CONTROL_ENABLE,
+    );
 
     // Disable legacy INTx (set bit 10 of PCI Command register).
     let cmd = pci::config_read16(bus, dev, func, 4);
@@ -286,7 +294,11 @@ pub fn enable_msi(config: &mut MsiConfig, target_cpu_lapic: u8) -> Option<u8> {
 
     serial_println!(
         "[msi] Enabled MSI for {:02x}:{:02x}.{}: vector={}, cpu={}",
-        config.bus, config.device, config.function, vector, target_cpu_lapic
+        config.bus,
+        config.device,
+        config.function,
+        vector,
+        target_cpu_lapic
     );
 
     Some(vector)
@@ -303,7 +315,13 @@ pub fn disable_msi(config: &mut MsiConfig) {
 
     // Clear MSI enable bit.
     let msg_control = pci::config_read16(bus, dev, func, cap.wrapping_add(2));
-    pci::config_write16(bus, dev, func, cap.wrapping_add(2), msg_control & !MSI_CONTROL_ENABLE);
+    pci::config_write16(
+        bus,
+        dev,
+        func,
+        cap.wrapping_add(2),
+        msg_control & !MSI_CONTROL_ENABLE,
+    );
 
     // Free allocated vectors.
     free_vectors(config.allocated_vector, config.allocated_count as usize);
@@ -401,13 +419,21 @@ pub fn self_test() {
     assert_eq!((addr >> 12) & 0xFF, 0x01);
     let data = format_data(100, true, true);
     assert_eq!(data & 0xFF, 100);
-    serial_println!("[msi]   Address/data format: OK (addr={:#x}, data={:#x})", addr, data);
+    serial_println!(
+        "[msi]   Address/data format: OK (addr={:#x}, data={:#x})",
+        addr,
+        data
+    );
 
     // Test 5: Stats.
     let st = stats();
     assert!(st.vectors_used > 0);
     assert_eq!(st.vectors_total, MSI_VECTOR_COUNT);
-    serial_println!("[msi]   Stats: OK ({}/{} vectors used)", st.vectors_used, st.vectors_total);
+    serial_println!(
+        "[msi]   Stats: OK ({}/{} vectors used)",
+        st.vectors_used,
+        st.vectors_total
+    );
 
     // Cleanup.
     free_vector(v1);

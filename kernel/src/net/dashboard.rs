@@ -31,8 +31,8 @@
 //! The httpd module routes `/api/*` and `/dashboard` paths to
 //! `handle_api_request()` before the normal VFS file-serving path.
 
-use alloc::string::String;
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::serial_println;
@@ -107,54 +107,25 @@ pub fn handle_api_request(path: &str) -> Option<(String, Vec<u8>)> {
         "/dashboard" | "/dashboard/" => {
             Some((String::from("text/html; charset=utf-8"), dashboard_html()))
         }
-        "/api/status" => {
-            Some((String::from("application/json"), api_status()))
-        }
-        "/api/tasks" => {
-            Some((String::from("application/json"), api_tasks()))
-        }
-        "/api/network" => {
-            Some((String::from("application/json"), api_network()))
-        }
-        "/api/memory" => {
-            Some((String::from("application/json"), api_memory()))
-        }
-        "/api/httpd" => {
-            Some((String::from("application/json"), api_httpd()))
-        }
-        "/api/dns" => {
-            Some((String::from("application/json"), api_dns()))
-        }
-        "/api/firewall" => {
-            Some((String::from("application/json"), api_firewall()))
-        }
-        "/api/bench" => {
-            Some((String::from("application/json"), api_bench()))
-        }
-        "/api/health" => {
-            Some((String::from("application/json"), api_health()))
-        }
-        "/api/ipv6" => {
-            Some((String::from("application/json"), api_ipv6()))
-        }
-        "/api/containers" => {
-            Some((String::from("application/json"), api_containers()))
-        }
-        "/api/tcp" => {
-            Some((String::from("application/json"), api_tcp()))
-        }
-        "/api/scheduler" => {
-            Some((String::from("application/json"), api_scheduler()))
-        }
-        "/api/swap" => {
-            Some((String::from("application/json"), api_swap()))
-        }
-        "/api/fs" => {
-            Some((String::from("application/json"), api_fs()))
-        }
-        "/metrics" => {
-            Some((String::from("text/plain; version=0.0.4; charset=utf-8"), api_metrics()))
-        }
+        "/api/status" => Some((String::from("application/json"), api_status())),
+        "/api/tasks" => Some((String::from("application/json"), api_tasks())),
+        "/api/network" => Some((String::from("application/json"), api_network())),
+        "/api/memory" => Some((String::from("application/json"), api_memory())),
+        "/api/httpd" => Some((String::from("application/json"), api_httpd())),
+        "/api/dns" => Some((String::from("application/json"), api_dns())),
+        "/api/firewall" => Some((String::from("application/json"), api_firewall())),
+        "/api/bench" => Some((String::from("application/json"), api_bench())),
+        "/api/health" => Some((String::from("application/json"), api_health())),
+        "/api/ipv6" => Some((String::from("application/json"), api_ipv6())),
+        "/api/containers" => Some((String::from("application/json"), api_containers())),
+        "/api/tcp" => Some((String::from("application/json"), api_tcp())),
+        "/api/scheduler" => Some((String::from("application/json"), api_scheduler())),
+        "/api/swap" => Some((String::from("application/json"), api_swap())),
+        "/api/fs" => Some((String::from("application/json"), api_fs())),
+        "/metrics" => Some((
+            String::from("text/plain; version=0.0.4; charset=utf-8"),
+            api_metrics(),
+        )),
         _ => None,
     }
 }
@@ -192,15 +163,30 @@ fn api_status() -> Vec<u8> {
             r#""mac":"{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}","#,
             r#""rx_bytes":{},"tx_bytes":{},"rx_packets":{},"tx_packets":{}}}}}"#,
         ),
-        uptime_secs, uptime_ns,
-        total_mem, used_mem, free_mem, total_frames, used_frames, page_size,
+        uptime_secs,
+        uptime_ns,
+        total_mem,
+        used_mem,
+        free_mem,
+        total_frames,
+        used_frames,
+        page_size,
         task_count,
         iface.up,
-        iface.ip.0[0], iface.ip.0[1], iface.ip.0[2], iface.ip.0[3],
-        iface.mac.0[0], iface.mac.0[1], iface.mac.0[2],
-        iface.mac.0[3], iface.mac.0[4], iface.mac.0[5],
-        net_stats.rx_bytes, net_stats.tx_bytes,
-        net_stats.rx_packets, net_stats.tx_packets,
+        iface.ip.0[0],
+        iface.ip.0[1],
+        iface.ip.0[2],
+        iface.ip.0[3],
+        iface.mac.0[0],
+        iface.mac.0[1],
+        iface.mac.0[2],
+        iface.mac.0[3],
+        iface.mac.0[4],
+        iface.mac.0[5],
+        net_stats.rx_bytes,
+        net_stats.tx_bytes,
+        net_stats.rx_packets,
+        net_stats.tx_packets,
     );
 
     json.into_bytes()
@@ -231,7 +217,7 @@ fn api_tasks() -> Vec<u8> {
             task.id,
             json_escape(name_str),
             task.priority,
-            task.state,  // TaskState implements Display
+            task.state, // TaskState implements Display
             task.last_cpu,
             task.total_ticks,
             task.schedule_count,
@@ -262,12 +248,24 @@ fn api_network() -> Vec<u8> {
             r#""rx_drops":{},"tx_errors":{}}}"#,
         ),
         iface.up,
-        iface.ip.0[0], iface.ip.0[1], iface.ip.0[2], iface.ip.0[3],
-        iface.gateway.0[0], iface.gateway.0[1], iface.gateway.0[2], iface.gateway.0[3],
-        iface.dns.0[0], iface.dns.0[1], iface.dns.0[2], iface.dns.0[3],
-        net_stats.rx_bytes, net_stats.tx_bytes,
-        net_stats.rx_packets, net_stats.tx_packets,
-        net_stats.rx_drops, net_stats.tx_errors,
+        iface.ip.0[0],
+        iface.ip.0[1],
+        iface.ip.0[2],
+        iface.ip.0[3],
+        iface.gateway.0[0],
+        iface.gateway.0[1],
+        iface.gateway.0[2],
+        iface.gateway.0[3],
+        iface.dns.0[0],
+        iface.dns.0[1],
+        iface.dns.0[2],
+        iface.dns.0[3],
+        net_stats.rx_bytes,
+        net_stats.tx_bytes,
+        net_stats.rx_packets,
+        net_stats.tx_packets,
+        net_stats.rx_drops,
+        net_stats.tx_errors,
     ));
 
     json.push_str(",\"tcp_connections\":[");
@@ -310,10 +308,17 @@ fn api_memory() -> Vec<u8> {
             r#""heap":{{"bytes_in_use":{},"peak_bytes_in_use":{},"#,
             r#""slab_allocs":{},"large_allocs":{},"alloc_failures":{}}}}}"#,
         ),
-        total_mem, used_mem, total_mem.saturating_sub(used_mem),
-        total_frames, used_frames, page_size,
-        heap.bytes_in_use, heap.peak_bytes_in_use,
-        heap.slab_allocs, heap.large_allocs, heap.alloc_failures,
+        total_mem,
+        used_mem,
+        total_mem.saturating_sub(used_mem),
+        total_frames,
+        used_frames,
+        page_size,
+        heap.bytes_in_use,
+        heap.peak_bytes_in_use,
+        heap.slab_allocs,
+        heap.large_allocs,
+        heap.alloc_failures,
     );
 
     json.into_bytes()
@@ -347,10 +352,16 @@ fn api_httpd() -> Vec<u8> {
             r#""rate_limit":{{"enabled":{}}},"#,
             r#""access_log":["#,
         ),
-        running, port,
-        tls_running, tls_port,
-        requests, not_modified, partial,
-        rate_limited, gzip_compressed, gzip_saved,
+        running,
+        port,
+        tls_running,
+        tls_port,
+        requests,
+        not_modified,
+        partial,
+        rate_limited,
+        gzip_compressed,
+        gzip_saved,
         rl_enabled,
     );
 
@@ -385,8 +396,7 @@ fn api_dns() -> Vec<u8> {
             r#"{{"cache":{{"hits":{},"misses":{},"evictions":{},"#,
             r#""entries":{},"capacity":{}}}}}"#,
         ),
-        stats.hits, stats.misses, stats.evictions,
-        stats.entries, stats.capacity,
+        stats.hits, stats.misses, stats.evictions, stats.entries, stats.capacity,
     );
 
     json.into_bytes()
@@ -410,9 +420,7 @@ fn api_firewall() -> Vec<u8> {
 
     let mut json = format!(
         r#"{{"enabled":{},"default_policy":"{}","conntrack_entries":{},"rules":["#,
-        enabled,
-        policy_str,
-        conntrack,
+        enabled, policy_str, conntrack,
     );
 
     for i in 0..rule_count {
@@ -494,8 +502,8 @@ fn api_bench() -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 fn api_ipv6() -> Vec<u8> {
-    use crate::net::icmpv6;
     use crate::net::dhcpv6;
+    use crate::net::icmpv6;
     use crate::net::ipv6::Ipv6Addr;
 
     let link_local = {
@@ -510,7 +518,11 @@ fn api_ipv6() -> Vec<u8> {
     let ra_received = icmpv6::ra_received();
     let (slaac_addrs, slaac_count) = icmpv6::slaac_addresses();
     let rdnss = icmpv6::slaac_rdnss();
-    let router = if ra_received { Some(icmpv6::slaac_router()) } else { None };
+    let router = if ra_received {
+        Some(icmpv6::slaac_router())
+    } else {
+        None
+    };
 
     let dhcpv6 = dhcpv6::stats();
 
@@ -531,8 +543,7 @@ fn api_ipv6() -> Vec<u8> {
         }
         json.push_str(&format!(
             r#"{{"addr":"{}","prefix_len":{}}}"#,
-            slaac_addrs[i].0,
-            slaac_addrs[i].1,
+            slaac_addrs[i].0, slaac_addrs[i].1,
         ));
     }
     json.push(']');
@@ -609,10 +620,7 @@ fn api_containers() -> Vec<u8> {
         if let Some(info) = crate::container::info(*id) {
             json.push_str(&format!(
                 r#","pid_ns":{},"net_ns":{},"cgroup_id":{},"nr_procs":{}"#,
-                info.pid_ns,
-                info.net_ns,
-                info.cgroup_id,
-                info.nr_procs,
+                info.pid_ns, info.net_ns, info.cgroup_id, info.nr_procs,
             ));
         }
 
@@ -639,9 +647,14 @@ fn api_tcp() -> Vec<u8> {
             r#""time_wait":{},"close_wait":{},"listeners":{},"#,
             r#""rx_bytes":{},"tx_bytes":{}}}"#,
         ),
-        tcp_stats.active_connections, tcp_stats.established,
-        tcp_stats.syn_sent, tcp_stats.time_wait, tcp_stats.close_wait,
-        tcp_stats.listeners, tcp_stats.total_rx_bytes, tcp_stats.total_tx_bytes,
+        tcp_stats.active_connections,
+        tcp_stats.established,
+        tcp_stats.syn_sent,
+        tcp_stats.time_wait,
+        tcp_stats.close_wait,
+        tcp_stats.listeners,
+        tcp_stats.total_rx_bytes,
+        tcp_stats.total_tx_bytes,
     ));
 
     json.push_str(",\"connections\":[");
@@ -663,12 +676,20 @@ fn api_tcp() -> Vec<u8> {
             conn.remote_port,
             tcp_state_str(conn.state),
             conn.ns_id,
-            conn.srtt_ns / 1000, // convert to microseconds for readability
+            conn.srtt_ns / 1000,     // convert to microseconds for readability
             conn.rto_ns / 1_000_000, // convert to milliseconds
-            conn.cwnd, conn.ssthresh, conn.snd_wnd, conn.eff_mss,
-            conn.rx_buffered, conn.tx_buffered,
-            conn.ecn_ok, conn.sack_ok, conn.wscale_ok, conn.ts_ok,
-            conn.keepalive, conn.nagle,
+            conn.cwnd,
+            conn.ssthresh,
+            conn.snd_wnd,
+            conn.eff_mss,
+            conn.rx_buffered,
+            conn.tx_buffered,
+            conn.ecn_ok,
+            conn.sack_ok,
+            conn.wscale_ok,
+            conn.ts_ok,
+            conn.keepalive,
+            conn.nagle,
         ));
     }
 
@@ -706,9 +727,12 @@ fn api_scheduler() -> Vec<u8> {
             r#""total_work_steals":{},"tasks_spawned":{},"#,
             r#""tasks_exited":{},"load_avg_x100":{}"#,
         ),
-        num_cpus, stats.total_ctx_switches,
-        stats.total_work_steals, stats.total_tasks_spawned,
-        stats.total_tasks_exited, stats.load_avg_x100,
+        num_cpus,
+        stats.total_ctx_switches,
+        stats.total_work_steals,
+        stats.total_tasks_spawned,
+        stats.total_tasks_exited,
+        stats.load_avg_x100,
     ));
 
     json.push_str(",\"cpus\":[");
@@ -726,7 +750,8 @@ fn api_scheduler() -> Vec<u8> {
         } else {
             0
         };
-        let _ = write!(json,
+        let _ = write!(
+            json,
             concat!(
                 r#"{{"cpu":{},"total_ticks":{},"idle_ticks":{},"#,
                 r#""utilization_pct":{},"ctx_switches":{},"#,
@@ -766,11 +791,18 @@ fn api_swap() -> Vec<u8> {
             r#""compressed_pages":{},"uncompressed_pages":{},"#,
             r#""ratio_pct":{},"bytes_saved":{}}}"#,
         ),
-        available, total_bytes, used_bytes,
-        free, used, reclaimable,
-        compression.compressed_bytes, compression.uncompressed_bytes,
-        compression.compressed_count, compression.uncompressed_count,
-        ratio, saved,
+        available,
+        total_bytes,
+        used_bytes,
+        free,
+        used,
+        reclaimable,
+        compression.compressed_bytes,
+        compression.uncompressed_bytes,
+        compression.compressed_count,
+        compression.uncompressed_count,
+        ratio,
+        saved,
     );
 
     json.push_str(",\"devices\":[");
@@ -879,9 +911,13 @@ fn api_health() -> Vec<u8> {
     } else {
         0
     };
-    let mem_status = if mem_pct > 95 { "critical" }
-        else if mem_pct > 85 { "degraded" }
-        else { "ok" };
+    let mem_status = if mem_pct > 95 {
+        "critical"
+    } else if mem_pct > 85 {
+        "degraded"
+    } else {
+        "ok"
+    };
 
     // Network health: check interface is up and has an IP.
     let iface = crate::net::interface::info();
@@ -903,25 +939,30 @@ fn api_health() -> Vec<u8> {
     } else {
         0
     };
-    let fs_status = if fs_dirty_pct > 90 { "critical" }
-        else if fs_dirty_pct > 70 { "degraded" }
-        else { "ok" };
+    let fs_status = if fs_dirty_pct > 90 {
+        "critical"
+    } else if fs_dirty_pct > 70 {
+        "degraded"
+    } else {
+        "ok"
+    };
 
     // Uptime (seconds).
     let uptime_secs = crate::hrtimer::now_ns() / 1_000_000_000;
 
     // Overall status: worst of all individual checks.
-    let overall = if mem_status == "critical" || tasks_status == "critical"
-                  || fs_status == "critical"
-    {
-        "critical"
-    } else if mem_status == "degraded" || net_status == "degraded"
-           || httpd_status == "degraded" || fs_status == "degraded"
-    {
-        "degraded"
-    } else {
-        "ok"
-    };
+    let overall =
+        if mem_status == "critical" || tasks_status == "critical" || fs_status == "critical" {
+            "critical"
+        } else if mem_status == "degraded"
+            || net_status == "degraded"
+            || httpd_status == "degraded"
+            || fs_status == "degraded"
+        {
+            "degraded"
+        } else {
+            "ok"
+        };
 
     let json = format!(
         concat!(
@@ -932,12 +973,18 @@ fn api_health() -> Vec<u8> {
             r#""tasks":{{"status":"{}","count":{}}},"#,
             r#""filesystem":{{"status":"{}","dirty_pct":{}}}}}}}"#,
         ),
-        overall, uptime_secs,
-        mem_status, mem_pct,
-        net_status, net_up,
-        httpd_status, httpd_running,
-        tasks_status, task_count,
-        fs_status, fs_dirty_pct,
+        overall,
+        uptime_secs,
+        mem_status,
+        mem_pct,
+        net_status,
+        net_up,
+        httpd_status,
+        httpd_running,
+        tasks_status,
+        task_count,
+        fs_status,
+        fs_dirty_pct,
     );
 
     json.into_bytes()
@@ -963,8 +1010,12 @@ fn api_metrics() -> Vec<u8> {
 
     // -- Uptime ---------------------------------------------------------------
     let uptime_secs = crate::hrtimer::now_ns() / 1_000_000_000;
-    prom_gauge(&mut t, "os_uptime_seconds",
-        "System uptime in seconds.", uptime_secs);
+    prom_gauge(
+        &mut t,
+        "os_uptime_seconds",
+        "System uptime in seconds.",
+        uptime_secs,
+    );
 
     // -- Physical memory ------------------------------------------------------
     let (total_frames, free_frames) = crate::mm::frame::stats()
@@ -975,21 +1026,45 @@ fn api_metrics() -> Vec<u8> {
     let total_mem = (total_frames as u64).saturating_mul(page_size);
     let used_mem = (used_frames as u64).saturating_mul(page_size);
 
-    prom_gauge(&mut t, "os_memory_total_bytes",
-        "Total physical memory in bytes.", total_mem);
-    prom_gauge(&mut t, "os_memory_used_bytes",
-        "Used physical memory in bytes.", used_mem);
-    prom_gauge(&mut t, "os_memory_frames_total",
-        "Total physical frames.", total_frames as u64);
-    prom_gauge(&mut t, "os_memory_frames_used",
-        "Used physical frames.", used_frames as u64);
+    prom_gauge(
+        &mut t,
+        "os_memory_total_bytes",
+        "Total physical memory in bytes.",
+        total_mem,
+    );
+    prom_gauge(
+        &mut t,
+        "os_memory_used_bytes",
+        "Used physical memory in bytes.",
+        used_mem,
+    );
+    prom_gauge(
+        &mut t,
+        "os_memory_frames_total",
+        "Total physical frames.",
+        total_frames as u64,
+    );
+    prom_gauge(
+        &mut t,
+        "os_memory_frames_used",
+        "Used physical frames.",
+        used_frames as u64,
+    );
 
     // -- Kernel heap ----------------------------------------------------------
     let heap = crate::mm::heap::stats();
-    prom_gauge(&mut t, "os_heap_bytes_in_use",
-        "Kernel heap bytes in use.", heap.bytes_in_use);
-    prom_gauge(&mut t, "os_heap_peak_bytes",
-        "Peak kernel heap usage.", heap.peak_bytes_in_use);
+    prom_gauge(
+        &mut t,
+        "os_heap_bytes_in_use",
+        "Kernel heap bytes in use.",
+        heap.bytes_in_use,
+    );
+    prom_gauge(
+        &mut t,
+        "os_heap_peak_bytes",
+        "Peak kernel heap usage.",
+        heap.peak_bytes_in_use,
+    );
 
     // -- Tasks ----------------------------------------------------------------
     let task_count = crate::sched::task_list().len() as u64;
@@ -997,111 +1072,222 @@ fn api_metrics() -> Vec<u8> {
 
     // -- Network interface (L2) -----------------------------------------------
     let net_stats = crate::net::interface::stats();
-    prom_counter(&mut t, "os_net_rx_bytes_total",
-        "Network bytes received.", net_stats.rx_bytes);
-    prom_counter(&mut t, "os_net_tx_bytes_total",
-        "Network bytes transmitted.", net_stats.tx_bytes);
-    prom_counter(&mut t, "os_net_rx_packets_total",
-        "Network packets received.", net_stats.rx_packets);
-    prom_counter(&mut t, "os_net_tx_packets_total",
-        "Network packets transmitted.", net_stats.tx_packets);
+    prom_counter(
+        &mut t,
+        "os_net_rx_bytes_total",
+        "Network bytes received.",
+        net_stats.rx_bytes,
+    );
+    prom_counter(
+        &mut t,
+        "os_net_tx_bytes_total",
+        "Network bytes transmitted.",
+        net_stats.tx_bytes,
+    );
+    prom_counter(
+        &mut t,
+        "os_net_rx_packets_total",
+        "Network packets received.",
+        net_stats.rx_packets,
+    );
+    prom_counter(
+        &mut t,
+        "os_net_tx_packets_total",
+        "Network packets transmitted.",
+        net_stats.tx_packets,
+    );
 
     // -- TCP ------------------------------------------------------------------
     let tcp = super::tcp::stats();
-    prom_gauge(&mut t, "os_tcp_connections_active",
+    prom_gauge(
+        &mut t,
+        "os_tcp_connections_active",
         "Active TCP connections (any state except Closed).",
-        tcp.active_connections as u64);
-    prom_gauge(&mut t, "os_tcp_connections_established",
+        tcp.active_connections as u64,
+    );
+    prom_gauge(
+        &mut t,
+        "os_tcp_connections_established",
         "TCP connections in ESTABLISHED state.",
-        tcp.established as u64);
-    prom_gauge(&mut t, "os_tcp_connections_syn_sent",
+        tcp.established as u64,
+    );
+    prom_gauge(
+        &mut t,
+        "os_tcp_connections_syn_sent",
         "TCP connections in SYN_SENT state.",
-        tcp.syn_sent as u64);
-    prom_gauge(&mut t, "os_tcp_connections_time_wait",
+        tcp.syn_sent as u64,
+    );
+    prom_gauge(
+        &mut t,
+        "os_tcp_connections_time_wait",
         "TCP connections in TIME_WAIT state.",
-        tcp.time_wait as u64);
-    prom_gauge(&mut t, "os_tcp_connections_close_wait",
+        tcp.time_wait as u64,
+    );
+    prom_gauge(
+        &mut t,
+        "os_tcp_connections_close_wait",
         "TCP connections in CLOSE_WAIT state.",
-        tcp.close_wait as u64);
-    prom_gauge(&mut t, "os_tcp_listeners",
-        "Active TCP listeners.", tcp.listeners as u64);
-    prom_counter(&mut t, "os_tcp_rx_bytes_total",
+        tcp.close_wait as u64,
+    );
+    prom_gauge(
+        &mut t,
+        "os_tcp_listeners",
+        "Active TCP listeners.",
+        tcp.listeners as u64,
+    );
+    prom_counter(
+        &mut t,
+        "os_tcp_rx_bytes_total",
         "TCP receive buffer bytes across all connections.",
-        tcp.total_rx_bytes as u64);
-    prom_counter(&mut t, "os_tcp_tx_bytes_total",
+        tcp.total_rx_bytes as u64,
+    );
+    prom_counter(
+        &mut t,
+        "os_tcp_tx_bytes_total",
         "TCP transmit buffer bytes across all connections.",
-        tcp.total_tx_bytes as u64);
+        tcp.total_tx_bytes as u64,
+    );
 
     // -- HTTP -----------------------------------------------------------------
-    prom_counter(&mut t, "os_http_requests_total",
-        "HTTP requests served.", httpd::request_count());
-    prom_counter(&mut t, "os_http_304_total",
-        "HTTP 304 Not Modified responses.", httpd::not_modified_count());
-    prom_counter(&mut t, "os_http_206_total",
-        "HTTP 206 Partial Content responses.", httpd::partial_count());
-    prom_counter(&mut t, "os_http_429_total",
-        "HTTP 429 Rate Limited responses.", httpd::rate_limited_count());
-    prom_counter(&mut t, "os_http_gzip_total",
-        "Gzip-compressed responses served.", httpd::gzip_count());
-    prom_counter(&mut t, "os_http_gzip_bytes_saved_total",
-        "Bytes saved by gzip compression.", httpd::gzip_bytes_saved());
+    prom_counter(
+        &mut t,
+        "os_http_requests_total",
+        "HTTP requests served.",
+        httpd::request_count(),
+    );
+    prom_counter(
+        &mut t,
+        "os_http_304_total",
+        "HTTP 304 Not Modified responses.",
+        httpd::not_modified_count(),
+    );
+    prom_counter(
+        &mut t,
+        "os_http_206_total",
+        "HTTP 206 Partial Content responses.",
+        httpd::partial_count(),
+    );
+    prom_counter(
+        &mut t,
+        "os_http_429_total",
+        "HTTP 429 Rate Limited responses.",
+        httpd::rate_limited_count(),
+    );
+    prom_counter(
+        &mut t,
+        "os_http_gzip_total",
+        "Gzip-compressed responses served.",
+        httpd::gzip_count(),
+    );
+    prom_counter(
+        &mut t,
+        "os_http_gzip_bytes_saved_total",
+        "Bytes saved by gzip compression.",
+        httpd::gzip_bytes_saved(),
+    );
 
     // -- DNS ------------------------------------------------------------------
     let dns = super::dns::cache_stats();
-    prom_counter(&mut t, "os_dns_cache_hits_total",
-        "DNS cache hits.", dns.hits);
-    prom_counter(&mut t, "os_dns_cache_misses_total",
-        "DNS cache misses.", dns.misses);
-    prom_gauge(&mut t, "os_dns_cache_entries",
-        "Current DNS cache entries.", dns.entries);
+    prom_counter(
+        &mut t,
+        "os_dns_cache_hits_total",
+        "DNS cache hits.",
+        dns.hits,
+    );
+    prom_counter(
+        &mut t,
+        "os_dns_cache_misses_total",
+        "DNS cache misses.",
+        dns.misses,
+    );
+    prom_gauge(
+        &mut t,
+        "os_dns_cache_entries",
+        "Current DNS cache entries.",
+        dns.entries,
+    );
 
     // -- Swap / zram ----------------------------------------------------------
     let swap = crate::mm::swap::compression_stats();
-    prom_gauge(&mut t, "os_swap_compressed_bytes",
+    prom_gauge(
+        &mut t,
+        "os_swap_compressed_bytes",
         "Compressed size of swapped pages (actual storage).",
-        swap.compressed_bytes);
-    prom_gauge(&mut t, "os_swap_uncompressed_bytes",
+        swap.compressed_bytes,
+    );
+    prom_gauge(
+        &mut t,
+        "os_swap_uncompressed_bytes",
         "Logical (uncompressed) size of swapped pages.",
-        swap.uncompressed_bytes);
-    prom_gauge(&mut t, "os_swap_compressed_pages",
+        swap.uncompressed_bytes,
+    );
+    prom_gauge(
+        &mut t,
+        "os_swap_compressed_pages",
         "Number of pages stored with compression.",
-        swap.compressed_count);
-    prom_gauge(&mut t, "os_swap_uncompressed_pages",
+        swap.compressed_count,
+    );
+    prom_gauge(
+        &mut t,
+        "os_swap_uncompressed_pages",
         "Number of pages stored uncompressed (incompressible).",
-        swap.uncompressed_count);
+        swap.uncompressed_count,
+    );
 
     // -- Scheduler ------------------------------------------------------------
     let sched = crate::sched::sched_stats();
-    prom_counter(&mut t, "os_sched_context_switches_total",
+    prom_counter(
+        &mut t,
+        "os_sched_context_switches_total",
         "Total context switches across all CPUs.",
-        sched.total_ctx_switches);
-    prom_counter(&mut t, "os_sched_work_steals_total",
-        "Total work-stealing operations.", sched.total_work_steals);
-    prom_counter(&mut t, "os_sched_tasks_spawned_total",
-        "Total tasks spawned since boot.", sched.total_tasks_spawned);
-    prom_counter(&mut t, "os_sched_tasks_exited_total",
-        "Total tasks exited since boot.", sched.total_tasks_exited);
+        sched.total_ctx_switches,
+    );
+    prom_counter(
+        &mut t,
+        "os_sched_work_steals_total",
+        "Total work-stealing operations.",
+        sched.total_work_steals,
+    );
+    prom_counter(
+        &mut t,
+        "os_sched_tasks_spawned_total",
+        "Total tasks spawned since boot.",
+        sched.total_tasks_spawned,
+    );
+    prom_counter(
+        &mut t,
+        "os_sched_tasks_exited_total",
+        "Total tasks exited since boot.",
+        sched.total_tasks_exited,
+    );
     // Load average is stored ×100 (e.g. 150 = load 1.50).
     // Emit as integer ×100 — Prometheus can divide in queries.
-    prom_gauge(&mut t, "os_sched_load_avg_x100",
+    prom_gauge(
+        &mut t,
+        "os_sched_load_avg_x100",
         "System load average times 100 (150 = 1.50).",
-        sched.load_avg_x100);
+        sched.load_avg_x100,
+    );
 
     // -- Per-CPU utilization --------------------------------------------------
     // Emit (total_ticks, idle_ticks) per online CPU as labeled counters.
     // Prometheus consumers compute utilization as:
     //   1 - rate(os_cpu_idle_ticks[5m]) / rate(os_cpu_total_ticks[5m])
-    let _ = write!(t,
+    let _ = write!(
+        t,
         "# HELP os_cpu_total_ticks Total scheduler ticks per CPU.\n\
-         # TYPE os_cpu_total_ticks counter\n");
+         # TYPE os_cpu_total_ticks counter\n"
+    );
     for cpu in 0..sched.num_cpus {
         if let Some(&(total, _idle)) = sched.cpu_ticks.get(cpu) {
             let _ = writeln!(t, "os_cpu_total_ticks{{cpu=\"{}\"}} {}", cpu, total);
         }
     }
-    let _ = write!(t,
+    let _ = write!(
+        t,
         "# HELP os_cpu_idle_ticks Idle scheduler ticks per CPU.\n\
-         # TYPE os_cpu_idle_ticks counter\n");
+         # TYPE os_cpu_idle_ticks counter\n"
+    );
     for cpu in 0..sched.num_cpus {
         if let Some(&(_total, idle)) = sched.cpu_ticks.get(cpu) {
             let _ = writeln!(t, "os_cpu_idle_ticks{{cpu=\"{}\"}} {}", cpu, idle);
@@ -1109,9 +1295,12 @@ fn api_metrics() -> Vec<u8> {
     }
 
     // -- Firewall -------------------------------------------------------------
-    prom_gauge(&mut t, "os_firewall_conntrack_entries",
+    prom_gauge(
+        &mut t,
+        "os_firewall_conntrack_entries",
         "Active firewall connection tracking entries.",
-        super::firewall::conntrack_count() as u64);
+        super::firewall::conntrack_count() as u64,
+    );
 
     // -- Containers -----------------------------------------------------------
     let ct_active = if crate::container::is_initialized() {
@@ -1119,27 +1308,63 @@ fn api_metrics() -> Vec<u8> {
     } else {
         0
     };
-    prom_gauge(&mut t, "os_containers_active",
-        "Active container count.", ct_active);
+    prom_gauge(
+        &mut t,
+        "os_containers_active",
+        "Active container count.",
+        ct_active,
+    );
 
     // -- Block cache -----------------------------------------------------------
     let bcache = crate::fs::cache::stats();
-    prom_counter(&mut t, "os_bcache_reads_total",
-        "Block cache read requests.", bcache.reads);
-    prom_counter(&mut t, "os_bcache_hits_total",
-        "Block cache hits.", bcache.hits);
-    prom_counter(&mut t, "os_bcache_misses_total",
-        "Block cache misses.", bcache.misses);
-    prom_counter(&mut t, "os_bcache_writes_total",
-        "Block cache write requests.", bcache.writes);
-    prom_counter(&mut t, "os_bcache_writebacks_total",
-        "Block cache dirty writebacks.", bcache.writebacks);
-    prom_gauge(&mut t, "os_bcache_entries_used",
-        "Block cache entries in use.", bcache.entries_used);
-    prom_gauge(&mut t, "os_bcache_entries_dirty",
-        "Block cache dirty entries.", bcache.entries_dirty);
-    prom_gauge(&mut t, "os_bcache_capacity",
-        "Block cache capacity.", bcache.capacity);
+    prom_counter(
+        &mut t,
+        "os_bcache_reads_total",
+        "Block cache read requests.",
+        bcache.reads,
+    );
+    prom_counter(
+        &mut t,
+        "os_bcache_hits_total",
+        "Block cache hits.",
+        bcache.hits,
+    );
+    prom_counter(
+        &mut t,
+        "os_bcache_misses_total",
+        "Block cache misses.",
+        bcache.misses,
+    );
+    prom_counter(
+        &mut t,
+        "os_bcache_writes_total",
+        "Block cache write requests.",
+        bcache.writes,
+    );
+    prom_counter(
+        &mut t,
+        "os_bcache_writebacks_total",
+        "Block cache dirty writebacks.",
+        bcache.writebacks,
+    );
+    prom_gauge(
+        &mut t,
+        "os_bcache_entries_used",
+        "Block cache entries in use.",
+        bcache.entries_used,
+    );
+    prom_gauge(
+        &mut t,
+        "os_bcache_entries_dirty",
+        "Block cache dirty entries.",
+        bcache.entries_dirty,
+    );
+    prom_gauge(
+        &mut t,
+        "os_bcache_capacity",
+        "Block cache capacity.",
+        bcache.capacity,
+    );
 
     t.into_bytes()
 }
@@ -1151,18 +1376,24 @@ fn api_metrics() -> Vec<u8> {
 /// Emit a gauge metric (HELP + TYPE + value) into the buffer.
 fn prom_gauge(buf: &mut String, name: &str, help: &str, value: impl core::fmt::Display) {
     use core::fmt::Write;
-    let _ = write!(buf,
+    let _ = write!(
+        buf,
         "# HELP {n} {h}\n# TYPE {n} gauge\n{n} {v}\n",
-        n = name, h = help, v = value,
+        n = name,
+        h = help,
+        v = value,
     );
 }
 
 /// Emit a counter metric (HELP + TYPE + value) into the buffer.
 fn prom_counter(buf: &mut String, name: &str, help: &str, value: impl core::fmt::Display) {
     use core::fmt::Write;
-    let _ = write!(buf,
+    let _ = write!(
+        buf,
         "# HELP {n} {h}\n# TYPE {n} counter\n{n} {v}\n",
-        n = name, h = help, v = value,
+        n = name,
+        h = help,
+        v = value,
     );
 }
 
@@ -1732,8 +1963,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // Status must be one of the three valid values.
         assert!(
             health_str.contains("\"ok\"")
-            || health_str.contains("\"degraded\"")
-            || health_str.contains("\"critical\"")
+                || health_str.contains("\"degraded\"")
+                || health_str.contains("\"critical\"")
         );
         serial_println!("[dashboard]   API health: OK ({} bytes)", health.len());
     }
@@ -1775,18 +2006,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(metrics_str.contains("os_bcache_capacity "));
         // Each metric line should end with a number (no trailing whitespace).
         // Lines with labels like {cpu="0"} have the value after the closing brace.
-        let has_numeric_values = metrics_str.lines()
+        let has_numeric_values = metrics_str
+            .lines()
             .filter(|l| !l.starts_with('#') && !l.is_empty())
-            .all(|l| l.split_whitespace().last().is_some_and(|v| v.parse::<u64>().is_ok()));
-        assert!(has_numeric_values, "All metric lines must have numeric values");
+            .all(|l| {
+                l.split_whitespace()
+                    .last()
+                    .is_some_and(|v| v.parse::<u64>().is_ok())
+            });
+        assert!(
+            has_numeric_values,
+            "All metric lines must have numeric values"
+        );
         // Count total metric families (# TYPE lines).
-        let type_lines = metrics_str.lines()
+        let type_lines = metrics_str
+            .lines()
             .filter(|l| l.starts_with("# TYPE "))
             .count();
-        assert!(type_lines >= 43,
-            "Expected at least 43 metric families, got {}", type_lines);
-        serial_println!("[dashboard]   Prometheus metrics: OK ({} bytes, {} families)",
-            metrics.len(), type_lines);
+        assert!(
+            type_lines >= 43,
+            "Expected at least 43 metric families, got {}",
+            type_lines
+        );
+        serial_println!(
+            "[dashboard]   Prometheus metrics: OK ({} bytes, {} families)",
+            metrics.len(),
+            type_lines
+        );
     }
 
     // Test 14: API ipv6 returns valid JSON with expected fields.

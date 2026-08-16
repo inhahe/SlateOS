@@ -39,11 +39,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -305,17 +305,20 @@ pub fn mkfifo_with_capacity(path: &str, capacity: usize) -> KernelResult<PipeId>
     let id = inner.next_id;
     inner.next_id = inner.next_id.wrapping_add(1);
 
-    inner.pipes.insert(id, NamedPipe {
-        path: path.into(),
-        buffer: RingBuffer::new(cap),
-        readers: 0,
-        writers: 0,
-        bytes_written: 0,
-        bytes_read: 0,
-        write_ops: 0,
-        read_ops: 0,
-        eof: false,
-    });
+    inner.pipes.insert(
+        id,
+        NamedPipe {
+            path: path.into(),
+            buffer: RingBuffer::new(cap),
+            readers: 0,
+            writers: 0,
+            bytes_written: 0,
+            bytes_read: 0,
+            write_ops: 0,
+            read_ops: 0,
+            eof: false,
+        },
+    );
     inner.path_index.insert(path.into(), id);
 
     Ok(id)
@@ -381,7 +384,9 @@ pub fn open(path: &str, mode: PipeMode) -> KernelResult<PipeHandle> {
 pub fn close(handle: PipeHandle) -> KernelResult<()> {
     let mut inner = PIPES.lock();
 
-    let pipe = inner.pipes.get_mut(&handle.pipe_id)
+    let pipe = inner
+        .pipes
+        .get_mut(&handle.pipe_id)
         .ok_or(KernelError::NotFound)?;
 
     match handle.mode {
@@ -422,7 +427,9 @@ pub fn read(handle: &PipeHandle, max_bytes: usize) -> KernelResult<Vec<u8>> {
     }
 
     let mut inner = PIPES.lock();
-    let pipe = inner.pipes.get_mut(&handle.pipe_id)
+    let pipe = inner
+        .pipes
+        .get_mut(&handle.pipe_id)
         .ok_or(KernelError::NotFound)?;
 
     let data = pipe.buffer.read(max_bytes);
@@ -459,7 +466,9 @@ pub fn write(handle: &PipeHandle, data: &[u8]) -> KernelResult<usize> {
     }
 
     let mut inner = PIPES.lock();
-    let pipe = inner.pipes.get_mut(&handle.pipe_id)
+    let pipe = inner
+        .pipes
+        .get_mut(&handle.pipe_id)
         .ok_or(KernelError::NotFound)?;
 
     // Broken pipe: no readers.
@@ -494,7 +503,9 @@ pub fn peek(handle: &PipeHandle, max_bytes: usize) -> KernelResult<Vec<u8>> {
     }
 
     let inner = PIPES.lock();
-    let pipe = inner.pipes.get(&handle.pipe_id)
+    let pipe = inner
+        .pipes
+        .get(&handle.pipe_id)
         .ok_or(KernelError::NotFound)?;
 
     Ok(pipe.buffer.peek(max_bytes))
@@ -556,18 +567,22 @@ pub fn find(path: &str) -> Option<PipeId> {
 /// List all named pipes.
 pub fn list() -> Vec<PipeInfo> {
     let inner = PIPES.lock();
-    inner.pipes.values().map(|p| PipeInfo {
-        path: p.path.clone(),
-        capacity: p.buffer.capacity(),
-        buffered: p.buffer.available(),
-        readers: p.readers,
-        writers: p.writers,
-        bytes_written: p.bytes_written,
-        bytes_read: p.bytes_read,
-        write_ops: p.write_ops,
-        read_ops: p.read_ops,
-        eof: p.eof,
-    }).collect()
+    inner
+        .pipes
+        .values()
+        .map(|p| PipeInfo {
+            path: p.path.clone(),
+            capacity: p.buffer.capacity(),
+            buffered: p.buffer.available(),
+            readers: p.readers,
+            writers: p.writers,
+            bytes_written: p.bytes_written,
+            bytes_read: p.bytes_read,
+            write_ops: p.write_ops,
+            read_ops: p.read_ops,
+            eof: p.eof,
+        })
+        .collect()
 }
 
 /// Get the total number of active pipes.
@@ -619,21 +634,30 @@ pub fn anonymous_pipe_with_capacity(capacity: usize) -> KernelResult<(PipeHandle
     // Anonymous pipes get a synthetic path for debugging.
     let path: String = alloc::format!("<pipe:{}>", id);
 
-    inner.pipes.insert(id, NamedPipe {
-        path: path.clone(),
-        buffer: RingBuffer::new(cap),
-        readers: 1,
-        writers: 1,
-        bytes_written: 0,
-        bytes_read: 0,
-        write_ops: 0,
-        read_ops: 0,
-        eof: false,
-    });
+    inner.pipes.insert(
+        id,
+        NamedPipe {
+            path: path.clone(),
+            buffer: RingBuffer::new(cap),
+            readers: 1,
+            writers: 1,
+            bytes_written: 0,
+            bytes_read: 0,
+            write_ops: 0,
+            read_ops: 0,
+            eof: false,
+        },
+    );
     // Don't index anonymous pipes by path.
 
-    let read_handle = PipeHandle { pipe_id: id, mode: PipeMode::Read };
-    let write_handle = PipeHandle { pipe_id: id, mode: PipeMode::Write };
+    let read_handle = PipeHandle {
+        pipe_id: id,
+        mode: PipeMode::Read,
+    };
+    let write_handle = PipeHandle {
+        pipe_id: id,
+        mode: PipeMode::Write,
+    };
 
     Ok((read_handle, write_handle))
 }
@@ -660,7 +684,7 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[pipe]   ERROR: pipe found after unlink");
             return Err(KernelError::InternalError);
         }
-        let _ = id;  // suppress warning
+        let _ = id; // suppress warning
         serial_println!("[pipe]   create + unlink: OK");
     }
 
@@ -772,7 +796,7 @@ pub fn self_test() -> KernelResult<()> {
         let rh = open("/tmp/test_pipe_6", PipeMode::Read)?;
 
         write(&wh, b"final")?;
-        close(wh)?;  // Last writer closes.
+        close(wh)?; // Last writer closes.
 
         // Should still be able to read buffered data.
         let data = read(&rh, 1024)?;
@@ -927,8 +951,11 @@ pub fn self_test() -> KernelResult<()> {
 
         let pi = info("/tmp/test_pipe_11")?;
         if pi.write_ops != 2 || pi.read_ops != 1 {
-            serial_println!("[pipe]   ERROR: stats wrong (wops={} rops={})",
-                pi.write_ops, pi.read_ops);
+            serial_println!(
+                "[pipe]   ERROR: stats wrong (wops={} rops={})",
+                pi.write_ops,
+                pi.read_ops
+            );
             close(rh)?;
             close(wh)?;
             let _ = unlink_force("/tmp/test_pipe_11");
@@ -971,7 +998,10 @@ pub fn self_test() -> KernelResult<()> {
         match result {
             Err(KernelError::WouldBlock) => { /* correct */ }
             _ => {
-                serial_println!("[pipe]   ERROR: expected WouldBlock on full, got {:?}", result);
+                serial_println!(
+                    "[pipe]   ERROR: expected WouldBlock on full, got {:?}",
+                    result
+                );
                 close(rh)?;
                 close(wh)?;
                 let _ = unlink_force("/tmp/test_pipe_12");

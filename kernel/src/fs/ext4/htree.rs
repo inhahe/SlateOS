@@ -39,11 +39,8 @@ use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::Path;
 
-use super::driver::{read_struct_pub, Ext4Driver};
-use super::ondisk::{
-    DxCountLimit, DxRootInfo, Ext4DirEntry2,
-    inode_flags,
-};
+use super::driver::{Ext4Driver, read_struct_pub};
+use super::ondisk::{DxCountLimit, DxRootInfo, Ext4DirEntry2, inode_flags};
 
 // ---------------------------------------------------------------------------
 // Hash functions
@@ -56,11 +53,7 @@ use super::ondisk::{
 ///
 /// Returns `(hash, minor_hash)`.  The minor_hash is used for tiebreaking
 /// but most lookups only need the primary hash.
-pub fn ext4_dirhash(
-    name: &[u8],
-    hash_version: u8,
-    seed: &[u32; 4],
-) -> (u32, u32) {
+pub fn ext4_dirhash(name: &[u8], hash_version: u8, seed: &[u32; 4]) -> (u32, u32) {
     match hash_version {
         // 0 = legacy (signed), 3 = legacy (unsigned) — simple DJB-style
         0 | 3 => legacy_hash(name, hash_version == 3),
@@ -197,17 +190,11 @@ fn fold_hash(mut h: u32) -> u32 {
 /// This is a simplified version of MD4 using only 2 of the 3 MD4 rounds
 /// (F and G, skipping H).  Matches Linux `fs/ext4/hash.c` exactly.
 #[allow(clippy::many_single_char_names)]
-fn half_md4_transform(
-    a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32,
-    buf: &[u32; 8],
-) {
+fn half_md4_transform(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32, buf: &[u32; 8]) {
     // Round 1 (F function: (b & c) | (!b & d))
     macro_rules! round1 {
         ($a:expr, $b:expr, $c:expr, $d:expr, $k:expr, $s:expr) => {
-            $a = $a.wrapping_add(
-                (($b & $c) | (!$b & $d))
-                    .wrapping_add(buf[$k])
-            );
+            $a = $a.wrapping_add((($b & $c) | (!$b & $d)).wrapping_add(buf[$k]));
             $a = $a.rotate_left($s);
         };
     }
@@ -229,7 +216,7 @@ fn half_md4_transform(
             $a = $a.wrapping_add(
                 (($b & $c) | ($b & $d) | ($c & $d))
                     .wrapping_add(buf[$k])
-                    .wrapping_add(K2)
+                    .wrapping_add(K2),
             );
             $a = $a.rotate_left($s);
         };
@@ -249,10 +236,7 @@ fn half_md4_transform(
 ///
 /// Matches Linux `fs/ext4/hash.c` TEA hash implementation.
 #[allow(clippy::many_single_char_names)]
-fn tea_transform(
-    a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32,
-    buf: &[u32; 4],
-) {
+fn tea_transform(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32, buf: &[u32; 4]) {
     let mut sum: u32 = 0;
     const DELTA: u32 = 0x9E37_79B9;
 
@@ -261,13 +245,13 @@ fn tea_transform(
         sum = sum.wrapping_add(DELTA);
         *b = b.wrapping_add(
             ((*a << 4).wrapping_add(buf[0]))
-            ^ a.wrapping_add(sum)
-            ^ ((*a >> 5).wrapping_add(buf[1]))
+                ^ a.wrapping_add(sum)
+                ^ ((*a >> 5).wrapping_add(buf[1])),
         );
         *a = a.wrapping_add(
             ((*b << 4).wrapping_add(buf[2]))
-            ^ b.wrapping_add(sum)
-            ^ ((*b >> 5).wrapping_add(buf[3]))
+                ^ b.wrapping_add(sum)
+                ^ ((*b >> 5).wrapping_add(buf[3])),
         );
     }
 
@@ -369,16 +353,18 @@ pub fn htree_lookup(
     // Entry 0 has the count/limit in its hash field + block for hash=0.
     // Entries 1..count have real (hash, block) pairs sorted by hash.
     // Binary search for the target hash in entries[1..count].
-    let leaf_block = find_leaf_block(
-        &root_data,
-        DX_ROOT_ENTRIES_OFFSET,
-        entry_count,
-        target_hash,
-    )?;
+    let leaf_block = find_leaf_block(&root_data, DX_ROOT_ENTRIES_OFFSET, entry_count, target_hash)?;
 
     // If there are indirect levels, we need to descend through dx_nodes.
     let final_block = if info.indirect_levels > 0 {
-        descend_dx_nodes(driver, &dir_inode, dir_ino, leaf_block, target_hash, info.indirect_levels)?
+        descend_dx_nodes(
+            driver,
+            &dir_inode,
+            dir_ino,
+            leaf_block,
+            target_hash,
+            info.indirect_levels,
+        )?
     } else {
         leaf_block
     };
@@ -496,10 +482,7 @@ fn descend_dx_nodes(
 /// Linear scan a leaf block for a directory entry matching `name`.
 ///
 /// Returns `Ok(Some((inode, file_type)))` if found, `Ok(None)` if not.
-fn scan_leaf_block(
-    data: &[u8],
-    name: &Path,
-) -> KernelResult<Option<(u32, u8)>> {
+fn scan_leaf_block(data: &[u8], name: &Path) -> KernelResult<Option<(u32, u8)>> {
     let name_bytes = name.as_bytes();
     let hdr_size = core::mem::size_of::<Ext4DirEntry2>();
     let mut offset = 0usize;
@@ -612,16 +595,24 @@ pub fn htree_add_entry(
 
     // If indirect levels, descend to the actual leaf.
     let final_leaf_block = if info.indirect_levels > 0 {
-        descend_dx_nodes(driver, dir_inode, dir_ino, leaf_block_num, target_hash, info.indirect_levels)?
+        descend_dx_nodes(
+            driver,
+            dir_inode,
+            dir_ino,
+            leaf_block_num,
+            target_hash,
+            info.indirect_levels,
+        )?
     } else {
         leaf_block_num
     };
 
     // Read the target leaf block.
-    let leaf_phys = match driver.logical_to_physical(dir_ino, dir_inode, u64::from(final_leaf_block)) {
-        Ok(Some(pb)) => pb,
-        _ => return Err(KernelError::IoError),
-    };
+    let leaf_phys =
+        match driver.logical_to_physical(dir_ino, dir_inode, u64::from(final_leaf_block)) {
+            Ok(Some(pb)) => pb,
+            _ => return Err(KernelError::IoError),
+        };
 
     let mut leaf_data = driver.read_block(leaf_phys)?;
     let block_size = driver.superblock().block_size as usize;
@@ -633,7 +624,10 @@ pub fn htree_add_entry(
 
     // Try to insert into the existing leaf block.
     if let Some(insert_offset) = find_leaf_insert_point(
-        &leaf_data, block_size, entry_size_aligned, driver.superblock().has_metadata_csum,
+        &leaf_data,
+        block_size,
+        entry_size_aligned,
+        driver.superblock().has_metadata_csum,
     ) {
         // Space available — insert the entry and write the block back.
         insert_leaf_entry(
@@ -714,7 +708,9 @@ fn find_leaf_insert_point(
         let hdr_bytes = data.get(offset..offset.saturating_add(entry_hdr))?;
         let hdr: Ext4DirEntry2 = read_struct_pub(hdr_bytes).ok()?;
 
-        if hdr.rec_len == 0 { break; }
+        if hdr.rec_len == 0 {
+            break;
+        }
 
         // Skip the dirent tail sentinel.
         if hdr.inode == 0
@@ -773,9 +769,7 @@ fn insert_leaf_entry(
                 if next > offset || hdr.rec_len == 0 {
                     // Shrink this entry to end exactly at `offset`.
                     let new_rec_len = (offset.saturating_sub(pos)) as u16;
-                    if let Some(rl) = data.get_mut(
-                        pos.saturating_add(4)..pos.saturating_add(6)
-                    ) {
+                    if let Some(rl) = data.get_mut(pos.saturating_add(4)..pos.saturating_add(6)) {
                         rl.copy_from_slice(&new_rec_len.to_le_bytes());
                     }
                     break;
@@ -821,9 +815,7 @@ fn write_leaf_dirent(
     if let Some(dest) = buf.get_mut(offset..offset.saturating_add(4)) {
         dest.copy_from_slice(&inode.to_le_bytes());
     }
-    if let Some(dest) = buf.get_mut(
-        offset.saturating_add(4)..offset.saturating_add(6)
-    ) {
+    if let Some(dest) = buf.get_mut(offset.saturating_add(4)..offset.saturating_add(6)) {
         dest.copy_from_slice(&(rec_len as u16).to_le_bytes());
     }
     if let Some(b) = buf.get_mut(offset.saturating_add(6)) {
@@ -914,7 +906,9 @@ fn split_leaf_and_insert(
     }
 
     // Ensure at least one entry in each leaf.
-    if split_idx == 0 { split_idx = 1; }
+    if split_idx == 0 {
+        split_idx = 1;
+    }
     if split_idx >= entries.len() {
         split_idx = entries.len().saturating_sub(1);
     }
@@ -931,17 +925,20 @@ fn split_leaf_and_insert(
 
     // Stamp checksums.
     super::driver::stamp_dirent_checksum_pub(
-        driver.superblock(), dir_ino, dir_inode.i_generation, &mut left_buf,
+        driver.superblock(),
+        dir_ino,
+        dir_inode.i_generation,
+        &mut left_buf,
     );
     super::driver::stamp_dirent_checksum_pub(
-        driver.superblock(), dir_ino, dir_inode.i_generation, &mut right_buf,
+        driver.superblock(),
+        dir_ino,
+        dir_inode.i_generation,
+        &mut right_buf,
     );
 
     // The new leaf's hash boundary is the smallest hash in the right half.
-    let new_leaf_hash = right_entries
-        .first()
-        .map(|e| e.hash)
-        .unwrap_or(0);
+    let new_leaf_hash = right_entries.first().map(|e| e.hash).unwrap_or(0);
 
     // Allocate a logical block number for the new leaf.
     // The new leaf needs a logical block number in the directory's extent tree.
@@ -993,11 +990,14 @@ fn collect_leaf_entries(
     let mut offset = 0usize;
 
     while offset.saturating_add(entry_hdr) <= usable {
-        let hdr_bytes = data.get(offset..offset.saturating_add(entry_hdr))
+        let hdr_bytes = data
+            .get(offset..offset.saturating_add(entry_hdr))
             .ok_or(KernelError::IoError)?;
         let hdr: Ext4DirEntry2 = read_struct_pub(hdr_bytes)?;
 
-        if hdr.rec_len == 0 { break; }
+        if hdr.rec_len == 0 {
+            break;
+        }
 
         // Skip the dirent tail.
         if hdr.inode == 0
@@ -1011,7 +1011,8 @@ fn collect_leaf_entries(
         if hdr.inode != 0 && hdr.name_len > 0 {
             let name_start = offset.saturating_add(entry_hdr);
             let name_end = name_start.saturating_add(hdr.name_len as usize);
-            let name = data.get(name_start..name_end)
+            let name = data
+                .get(name_start..name_end)
                 .ok_or(KernelError::IoError)?
                 .to_vec();
 
@@ -1077,7 +1078,9 @@ fn write_leaf_entries(
             d.copy_from_slice(&12u16.to_le_bytes());
         }
         // name_len = 0
-        if let Some(b) = buf.get_mut(tail_offset + 6) { *b = 0; }
+        if let Some(b) = buf.get_mut(tail_offset + 6) {
+            *b = 0;
+        }
         // file_type = EXT4_DIRENT_TAIL_MARKER (0xDE)
         if let Some(b) = buf.get_mut(tail_offset + 7) {
             *b = super::ondisk::EXT4_DIRENT_TAIL_MARKER;
@@ -1247,12 +1250,11 @@ fn add_dx_entry_indirect(
     )?;
 
     // Map logical → physical for the dx_node.
-    let dx_node_phys = match driver.logical_to_physical(
-        dir_ino, dir_inode, u64::from(dx_node_logical),
-    ) {
-        Ok(Some(pb)) => pb,
-        _ => return Err(KernelError::IoError),
-    };
+    let dx_node_phys =
+        match driver.logical_to_physical(dir_ino, dir_inode, u64::from(dx_node_logical)) {
+            Ok(Some(pb)) => pb,
+            _ => return Err(KernelError::IoError),
+        };
 
     // Add the new entry to the dx_node.  dx_nodes have entries starting
     // at DX_NODE_HEADER_SIZE (8 bytes past the fake dir entry header).
@@ -1310,7 +1312,8 @@ pub fn self_test() -> KernelResult<()> {
     if val != expected {
         serial_println!(
             "[ext4-htree]   FAIL: str2hashbuf('ab', 0) = 0x{:08x}, expected 0x{:08x}",
-            val, expected
+            val,
+            expected
         );
         return Err(KernelError::InternalError);
     }

@@ -19,10 +19,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -100,7 +100,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         entries: Vec::new(),
         global_enabled: true,
@@ -113,10 +115,16 @@ pub fn init_defaults() {
 /// Record a search query.
 pub fn record(query: &str, source: SearchSource, result_count: u32) -> KernelResult<()> {
     with_state(|state| {
-        if !state.global_enabled { return Ok(()); }
+        if !state.global_enabled {
+            return Ok(());
+        }
         let now = crate::hpet::elapsed_ns();
         // Check if same query+source exists; if so, bump use_count.
-        if let Some(entry) = state.entries.iter_mut().find(|e| e.query == query && e.source == source) {
+        if let Some(entry) = state
+            .entries
+            .iter_mut()
+            .find(|e| e.query == query && e.source == source)
+        {
             entry.use_count += 1;
             entry.timestamp_ns = now;
             entry.result_count = result_count;
@@ -149,13 +157,16 @@ pub fn record(query: &str, source: SearchSource, result_count: u32) -> KernelRes
 pub fn suggest(prefix: &str, max_results: usize) -> Vec<SearchEntry> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let prefix_lower = prefix.to_lowercase();
-        let mut matches: Vec<SearchEntry> = s.entries.iter()
+        let mut matches: Vec<SearchEntry> = s
+            .entries
+            .iter()
             .filter(|e| e.query.to_lowercase().starts_with(&prefix_lower))
             .cloned()
             .collect();
         // Sort by use_count descending, then timestamp descending.
         matches.sort_by(|a, b| {
-            b.use_count.cmp(&a.use_count)
+            b.use_count
+                .cmp(&a.use_count)
                 .then(b.timestamp_ns.cmp(&a.timestamp_ns))
         });
         matches.truncate(max_results);
@@ -178,7 +189,10 @@ pub fn use_suggestion(query: &str) -> KernelResult<()> {
 /// Pin a search entry (prevent eviction).
 pub fn pin(query: &str) -> KernelResult<()> {
     with_state(|state| {
-        let entry = state.entries.iter_mut().find(|e| e.query == query)
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|e| e.query == query)
             .ok_or(KernelError::NotFound)?;
         entry.pinned = true;
         Ok(())
@@ -188,7 +202,10 @@ pub fn pin(query: &str) -> KernelResult<()> {
 /// Unpin a search entry.
 pub fn unpin(query: &str) -> KernelResult<()> {
     with_state(|state| {
-        let entry = state.entries.iter_mut().find(|e| e.query == query)
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|e| e.query == query)
             .ok_or(KernelError::NotFound)?;
         entry.pinned = false;
         Ok(())
@@ -199,8 +216,12 @@ pub fn unpin(query: &str) -> KernelResult<()> {
 pub fn remove(query: &str, source: SearchSource) -> KernelResult<()> {
     with_state(|state| {
         let before = state.entries.len();
-        state.entries.retain(|e| !(e.query == query && e.source == source));
-        if state.entries.len() == before { return Err(KernelError::NotFound); }
+        state
+            .entries
+            .retain(|e| !(e.query == query && e.source == source));
+        if state.entries.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -247,7 +268,13 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
     match guard.as_ref() {
         Some(s) => {
             let pinned = s.entries.iter().filter(|e| e.pinned).count();
-            (s.entries.len(), pinned, s.total_searches, s.total_suggestions_used, s.ops)
+            (
+                s.entries.len(),
+                pinned,
+                s.total_searches,
+                s.total_suggestions_used,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }

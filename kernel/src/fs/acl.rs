@@ -39,10 +39,10 @@
 //! POSIX 1003.1e draft 17 (ACL specification)
 //! Linux: `man acl`, `man getfacl`, `man setfacl`
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -226,7 +226,10 @@ pub fn set_acl(path: &str, acl: Acl) -> KernelResult<()> {
     }
 
     // If named entries exist, mask is required.
-    let has_named = acl.entries.iter().any(|e| matches!(e.tag, AclTag::User(_) | AclTag::Group(_)));
+    let has_named = acl
+        .entries
+        .iter()
+        .any(|e| matches!(e.tag, AclTag::User(_) | AclTag::Group(_)));
     let has_mask = acl.entries.iter().any(|e| e.tag == AclTag::Mask);
     if has_named && !has_mask {
         return Err(KernelError::InvalidArgument);
@@ -280,7 +283,9 @@ pub fn check_access(
     };
 
     // Find the mask entry (if any).
-    let mask = acl.entries.iter()
+    let mask = acl
+        .entries
+        .iter()
         .find(|e| e.tag == AclTag::Mask)
         .map(|e| e.perm)
         .unwrap_or(AclPerm::ALL);
@@ -297,7 +302,11 @@ pub fn check_access(
     }
 
     // Step 2: Named user check.
-    if let Some(entry) = acl.entries.iter().find(|e| e.tag == AclTag::User(requester_uid)) {
+    if let Some(entry) = acl
+        .entries
+        .iter()
+        .find(|e| e.tag == AclTag::User(requester_uid))
+    {
         let effective = entry.perm.intersect(mask);
         if request.is_satisfied_by(effective) {
             return Ok(());
@@ -382,9 +391,18 @@ pub fn from_mode(mode: u16) -> Acl {
 
     Acl {
         entries: Vec::from([
-            AclEntry { tag: AclTag::UserObj, perm: owner },
-            AclEntry { tag: AclTag::GroupObj, perm: group },
-            AclEntry { tag: AclTag::Other, perm: other },
+            AclEntry {
+                tag: AclTag::UserObj,
+                perm: owner,
+            },
+            AclEntry {
+                tag: AclTag::GroupObj,
+                perm: group,
+            },
+            AclEntry {
+                tag: AclTag::Other,
+                perm: other,
+            },
         ]),
     }
 }
@@ -402,16 +420,28 @@ pub fn build_acl(
 ) -> Acl {
     let mut entries = Vec::with_capacity(3 + named_users.len() + named_groups.len() + 1);
 
-    entries.push(AclEntry { tag: AclTag::UserObj, perm: owner_perm });
+    entries.push(AclEntry {
+        tag: AclTag::UserObj,
+        perm: owner_perm,
+    });
 
     for &(uid, perm) in named_users {
-        entries.push(AclEntry { tag: AclTag::User(uid), perm });
+        entries.push(AclEntry {
+            tag: AclTag::User(uid),
+            perm,
+        });
     }
 
-    entries.push(AclEntry { tag: AclTag::GroupObj, perm: group_perm });
+    entries.push(AclEntry {
+        tag: AclTag::GroupObj,
+        perm: group_perm,
+    });
 
     for &(gid, perm) in named_groups {
-        entries.push(AclEntry { tag: AclTag::Group(gid), perm });
+        entries.push(AclEntry {
+            tag: AclTag::Group(gid),
+            perm,
+        });
     }
 
     // Compute mask: union of GROUP_OBJ + all named entries.
@@ -422,9 +452,15 @@ pub fn build_acl(
     for &(_, perm) in named_groups {
         mask_bits |= perm.0;
     }
-    entries.push(AclEntry { tag: AclTag::Mask, perm: AclPerm(mask_bits) });
+    entries.push(AclEntry {
+        tag: AclTag::Mask,
+        perm: AclPerm(mask_bits),
+    });
 
-    entries.push(AclEntry { tag: AclTag::Other, perm: other_perm });
+    entries.push(AclEntry {
+        tag: AclTag::Other,
+        perm: other_perm,
+    });
 
     Acl { entries }
 }
@@ -432,7 +468,7 @@ pub fn build_acl(
 /// Format an ACL entry as a human-readable string.
 pub fn format_entry(entry: &AclEntry) -> String {
     match entry.tag {
-        AclTag::UserObj => alloc::format!("user::{}",  entry.perm.as_str()),
+        AclTag::UserObj => alloc::format!("user::{}", entry.perm.as_str()),
         AclTag::User(uid) => alloc::format!("user:{}:{}", uid, entry.perm.as_str()),
         AclTag::GroupObj => alloc::format!("group::{}", entry.perm.as_str()),
         AclTag::Group(gid) => alloc::format!("group:{}:{}", gid, entry.perm.as_str()),
@@ -444,27 +480,31 @@ pub fn format_entry(entry: &AclEntry) -> String {
 /// Format a complete ACL in getfacl-style output.
 pub fn format_acl(acl: &Acl, mask: Option<AclPerm>) -> Vec<String> {
     let mask_perm = mask.or_else(|| {
-        acl.entries.iter()
+        acl.entries
+            .iter()
             .find(|e| e.tag == AclTag::Mask)
             .map(|e| e.perm)
     });
 
-    acl.entries.iter().map(|entry| {
-        let base = format_entry(entry);
-        // Show effective permissions when mask applies.
-        match entry.tag {
-            AclTag::User(_) | AclTag::GroupObj | AclTag::Group(_) => {
-                if let Some(m) = mask_perm {
-                    let effective = entry.perm.intersect(m);
-                    if effective != entry.perm {
-                        return alloc::format!("{}\t#effective:{}", base, effective.as_str());
+    acl.entries
+        .iter()
+        .map(|entry| {
+            let base = format_entry(entry);
+            // Show effective permissions when mask applies.
+            match entry.tag {
+                AclTag::User(_) | AclTag::GroupObj | AclTag::Group(_) => {
+                    if let Some(m) = mask_perm {
+                        let effective = entry.perm.intersect(m);
+                        if effective != entry.perm {
+                            return alloc::format!("{}\t#effective:{}", base, effective.as_str());
+                        }
                     }
                 }
+                _ => {}
             }
-            _ => {}
-        }
-        base
-    }).collect()
+            base
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -479,19 +519,30 @@ pub fn self_test() -> KernelResult<()> {
     {
         let acl = from_mode(0o755);
         if acl.entries.len() != 3 {
-            serial_println!("[acl]   ERROR: from_mode expected 3 entries, got {}", acl.entries.len());
+            serial_println!(
+                "[acl]   ERROR: from_mode expected 3 entries, got {}",
+                acl.entries.len()
+            );
             return Err(KernelError::InternalError);
         }
 
         // Owner should be rwx (7).
-        let owner = acl.entries.iter().find(|e| e.tag == AclTag::UserObj).unwrap();
+        let owner = acl
+            .entries
+            .iter()
+            .find(|e| e.tag == AclTag::UserObj)
+            .unwrap();
         if owner.perm.0 != 7 {
             serial_println!("[acl]   ERROR: owner perm {:o}, expected 7", owner.perm.0);
             return Err(KernelError::InternalError);
         }
 
         // Group should be r-x (5).
-        let group = acl.entries.iter().find(|e| e.tag == AclTag::GroupObj).unwrap();
+        let group = acl
+            .entries
+            .iter()
+            .find(|e| e.tag == AclTag::GroupObj)
+            .unwrap();
         if group.perm.0 != 5 {
             serial_println!("[acl]   ERROR: group perm {:o}, expected 5", group.perm.0);
             return Err(KernelError::InternalError);
@@ -558,10 +609,10 @@ pub fn self_test() -> KernelResult<()> {
     {
         let test_path = "/tmp/_acl_test_named";
         let acl = build_acl(
-            AclPerm::ALL,     // owner: rwx
-            AclPerm::READ,    // group: r--
-            AclPerm::NONE,    // other: ---
-            &[(2000, AclPerm(6))],  // user:2000 has rw-
+            AclPerm::ALL,          // owner: rwx
+            AclPerm::READ,         // group: r--
+            AclPerm::NONE,         // other: ---
+            &[(2000, AclPerm(6))], // user:2000 has rw-
             &[],
         );
         set_acl(test_path, acl)?;
@@ -647,7 +698,7 @@ pub fn self_test() -> KernelResult<()> {
             AclPerm::NONE,
             AclPerm::NONE,
             &[],
-            &[(500, AclPerm(4))],  // group:500 has r--
+            &[(500, AclPerm(4))], // group:500 has r--
         );
         set_acl(test_path, acl)?;
 
@@ -676,8 +727,14 @@ pub fn self_test() -> KernelResult<()> {
         // Missing USER_OBJ → invalid.
         let bad_acl = Acl {
             entries: Vec::from([
-                AclEntry { tag: AclTag::GroupObj, perm: AclPerm::ALL },
-                AclEntry { tag: AclTag::Other, perm: AclPerm::NONE },
+                AclEntry {
+                    tag: AclTag::GroupObj,
+                    perm: AclPerm::ALL,
+                },
+                AclEntry {
+                    tag: AclTag::Other,
+                    perm: AclPerm::NONE,
+                },
             ]),
         };
         match set_acl("/tmp/_acl_bad", bad_acl) {
@@ -691,10 +748,22 @@ pub fn self_test() -> KernelResult<()> {
         // Named user without mask → invalid.
         let bad_acl2 = Acl {
             entries: Vec::from([
-                AclEntry { tag: AclTag::UserObj, perm: AclPerm::ALL },
-                AclEntry { tag: AclTag::User(100), perm: AclPerm::READ },
-                AclEntry { tag: AclTag::GroupObj, perm: AclPerm::ALL },
-                AclEntry { tag: AclTag::Other, perm: AclPerm::NONE },
+                AclEntry {
+                    tag: AclTag::UserObj,
+                    perm: AclPerm::ALL,
+                },
+                AclEntry {
+                    tag: AclTag::User(100),
+                    perm: AclPerm::READ,
+                },
+                AclEntry {
+                    tag: AclTag::GroupObj,
+                    perm: AclPerm::ALL,
+                },
+                AclEntry {
+                    tag: AclTag::Other,
+                    perm: AclPerm::NONE,
+                },
             ]),
         };
         match set_acl("/tmp/_acl_bad2", bad_acl2) {
@@ -720,7 +789,11 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[acl]   ERROR: no denials counted");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[acl]   stats OK (checks={}, denials={})", st.checks_performed, st.denials);
+        serial_println!(
+            "[acl]   stats OK (checks={}, denials={})",
+            st.checks_performed,
+            st.denials
+        );
     }
 
     // --- Test 9: Format output ---
@@ -749,7 +822,14 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 10: No ACL → allow all ---
     {
-        let result = check_access("/nonexistent/no/acl", 9999, 9999, 0, 0, AccessRequest::WRITE);
+        let result = check_access(
+            "/nonexistent/no/acl",
+            9999,
+            9999,
+            0,
+            0,
+            AccessRequest::WRITE,
+        );
         if result.is_err() {
             serial_println!("[acl]   ERROR: no-ACL path should allow");
             return Err(KernelError::InternalError);

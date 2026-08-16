@@ -195,12 +195,7 @@ fn require_cap(
     if pid == 0 {
         return Ok(()); // Kernel process — implicit authority.
     }
-    if crate::proc::pcb::has_capability_for(
-        pid,
-        resource_type,
-        resource_id,
-        required_rights,
-    ) {
+    if crate::proc::pcb::has_capability_for(pid, resource_type, resource_id, required_rights) {
         Ok(())
     } else {
         Err(KernelError::PermissionDenied)
@@ -230,11 +225,7 @@ pub(crate) fn require_cap_type(
     if pid == 0 {
         return Ok(()); // Kernel process — implicit authority.
     }
-    if crate::proc::pcb::has_capability_type(
-        pid,
-        resource_type,
-        required_rights,
-    ) {
+    if crate::proc::pcb::has_capability_type(pid, resource_type, required_rights) {
         Ok(())
     } else {
         Err(KernelError::PermissionDenied)
@@ -490,7 +481,9 @@ pub fn sys_irq_register(args: &SyscallArgs) -> SyscallResult {
         crate::cap::ResourceType::DeviceIrq,
         irq,
         crate::cap::Rights::WRITE,
-    ).is_err() {
+    )
+    .is_err()
+    {
         // Per-IRQ check failed — try type-level (any DeviceIrq cap).
         if let Err(e) = require_cap_type(
             crate::cap::ResourceType::DeviceIrq,
@@ -609,11 +602,11 @@ pub fn sys_port_read(args: &SyscallArgs) -> SyscallResult {
         crate::cap::ResourceType::PortIo,
         port,
         crate::cap::Rights::READ,
-    ).is_err() {
-        if let Err(e) = require_cap_type(
-            crate::cap::ResourceType::PortIo,
-            crate::cap::Rights::READ,
-        ) {
+    )
+    .is_err()
+    {
+        if let Err(e) = require_cap_type(crate::cap::ResourceType::PortIo, crate::cap::Rights::READ)
+        {
             return SyscallResult::err(e);
         }
     }
@@ -655,11 +648,12 @@ pub fn sys_port_write(args: &SyscallArgs) -> SyscallResult {
         crate::cap::ResourceType::PortIo,
         port,
         crate::cap::Rights::WRITE,
-    ).is_err() {
-        if let Err(e) = require_cap_type(
-            crate::cap::ResourceType::PortIo,
-            crate::cap::Rights::WRITE,
-        ) {
+    )
+    .is_err()
+    {
+        if let Err(e) =
+            require_cap_type(crate::cap::ResourceType::PortIo, crate::cap::Rights::WRITE)
+        {
             return SyscallResult::err(e);
         }
     }
@@ -695,10 +689,7 @@ pub fn sys_dma_alloc(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Capability check: require PortIo capability (driver privilege).
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::PortIo,
-        crate::cap::Rights::READ,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::PortIo, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
 
@@ -741,10 +732,7 @@ pub fn sys_dma_free(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_DMA_DOMAIN_CREATE` — create an IOMMU domain.
 pub fn sys_dma_domain_create(_args: &SyscallArgs) -> SyscallResult {
     // Capability check.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::PortIo,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::PortIo, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -758,10 +746,7 @@ pub fn sys_dma_domain_create(_args: &SyscallArgs) -> SyscallResult {
 pub fn sys_dma_domain_destroy(args: &SyscallArgs) -> SyscallResult {
     let domain_id = args.arg0 as u16;
 
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::PortIo,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::PortIo, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -779,10 +764,7 @@ pub fn sys_dma_map(args: &SyscallArgs) -> SyscallResult {
     let size = args.arg3 as usize;
     let perms_raw = args.arg4;
 
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::PortIo,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::PortIo, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -805,10 +787,7 @@ pub fn sys_dma_unmap(args: &SyscallArgs) -> SyscallResult {
     let bus_addr = args.arg1;
     let size = args.arg2 as usize;
 
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::PortIo,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::PortIo, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -825,10 +804,7 @@ pub fn sys_dma_attach(args: &SyscallArgs) -> SyscallResult {
     let device = args.arg2 as u8;
     let function = args.arg3 as u8;
 
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::PortIo,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::PortIo, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -845,10 +821,7 @@ pub fn sys_dma_detach(args: &SyscallArgs) -> SyscallResult {
     let device = args.arg2 as u8;
     let function = args.arg3 as u8;
 
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::PortIo,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::PortIo, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -871,10 +844,10 @@ pub fn sys_dma_detach(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: virtual address of the mapped region, or negative error.
 pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
-    use crate::mm::frame::{PhysFrame, FRAME_SIZE};
+    use super::number::{MAP_EXEC, MAP_LAZY, MAP_MMIO, MAP_NOCACHE, MAP_READ, MAP_WRITE};
+    use crate::mm::frame::{FRAME_SIZE, PhysFrame};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
     use crate::proc::{pcb, thread};
-    use super::number::{MAP_EXEC, MAP_LAZY, MAP_MMIO, MAP_NOCACHE, MAP_READ, MAP_WRITE};
 
     let vaddr_hint = args.arg0;
     let size = args.arg1;
@@ -888,8 +861,7 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     // mappings are always committed (they must map specific physical
     // addresses), so they bypass this entirely.
     if flags & (MAP_LAZY | MAP_MMIO) == 0 {
-        let sysctl_lazy =
-            crate::sysctl::get(crate::sysctl::PARAM_MM_LAZY_DEFAULT) == Some(1);
+        let sysctl_lazy = crate::sysctl::get(crate::sysctl::PARAM_MM_LAZY_DEFAULT) == Some(1);
         let policy = thread::owner_process(sched::current_task_id())
             .and_then(pcb::get_mmap_commit_policy)
             .unwrap_or_default();
@@ -1008,12 +980,14 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 
             // SAFETY: pml4_phys is valid, phys is a device MMIO address
             // (not managed by our allocator), virt is in user space.
-            if let Err(e) = unsafe {
-                page_table::map_frame(pml4_phys, VirtAddr::new(va), phys, page_flags)
-            } {
+            if let Err(e) =
+                unsafe { page_table::map_frame(pml4_phys, VirtAddr::new(va), phys, page_flags) }
+            {
                 serial_println!(
                     "[mmap] MMIO map failed at va={:#x} pa={:#x}: {:?}",
-                    va, pa, e
+                    va,
+                    pa,
+                    e
                 );
                 // Rollback: unmap frames 0..i (don't free — device memory).
                 for j in 0..i {
@@ -1028,7 +1002,10 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 
         serial_println!(
             "[mmap] MMIO mapped {:#x}..{:#x} → phys {:#x} ({} frames)",
-            base_vaddr, base_vaddr + size_aligned, phys_addr, num_frames
+            base_vaddr,
+            base_vaddr + size_aligned,
+            phys_addr,
+            num_frames
         );
     } else if flags & MAP_LAZY != 0 {
         // Lazy (demand-paged) anonymous mapping: register a VMA but
@@ -1057,7 +1034,8 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
             if let Err(e) = pcb::add_vma(pid, vma) {
                 serial_println!(
                     "[mmap] Lazy VMA registration failed at {:#x}: {:?}",
-                    base_vaddr, e
+                    base_vaddr,
+                    e
                 );
                 return SyscallResult::err(e);
             }
@@ -1065,7 +1043,9 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 
         serial_println!(
             "[mmap] Lazy mapped {:#x}..{:#x} ({} frames, demand-paged)",
-            base_vaddr, base_vaddr + size_aligned, num_frames
+            base_vaddr,
+            base_vaddr + size_aligned,
+            num_frames
         );
     } else {
         // Committed anonymous mapping (default): allocate and map
@@ -1100,7 +1080,8 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
             if let Err(e) = pcb::add_vma(pid, vma) {
                 serial_println!(
                     "[mmap] Committed VMA registration failed at {:#x}: {:?}",
-                    base_vaddr, e
+                    base_vaddr,
+                    e
                 );
                 return SyscallResult::err(e);
             }
@@ -1120,7 +1101,9 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
             pcb::remove_vma(pid, base_vaddr);
             serial_println!(
                 "[mmap] Committed map failed at {:#x} ({} frames): {:?}",
-                base_vaddr, num_frames, e
+                base_vaddr,
+                num_frames,
+                e
             );
             return SyscallResult::err(e);
         }
@@ -1135,7 +1118,9 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 
         serial_println!(
             "[mmap] Committed mapped {:#x}..{:#x} ({} frames)",
-            base_vaddr, base_vaddr + size_aligned, num_frames
+            base_vaddr,
+            base_vaddr + size_aligned,
+            num_frames
         );
     }
 
@@ -1203,7 +1188,9 @@ pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
                     // SAFETY: The frame was allocated by our allocator
                     // (verified by is_allocator_owned), the mapping was
                     // just removed so no references remain.
-                    unsafe { let _ = frame::free_frame(phys); }
+                    unsafe {
+                        let _ = frame::free_frame(phys);
+                    }
                 }
                 unmapped = unmapped.saturating_add(1);
             }
@@ -1234,7 +1221,9 @@ pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
 
     serial_println!(
         "[mmap] Unmapped {} frames at {:#x}..{:#x}",
-        unmapped, vaddr, vaddr + size_aligned
+        unmapped,
+        vaddr,
+        vaddr + size_aligned
     );
 
     SyscallResult::ok(0)
@@ -1346,8 +1335,7 @@ pub(crate) fn alloc_user_mmap_reserve(
     kind: crate::mm::vma::VmaKind,
     flags: crate::mm::page_table::PageFlags,
 ) -> u64 {
-    pcb::reserve_unmapped_area(pid, size, USER_MMAP_BASE, USER_MMAP_END, kind, flags)
-        .unwrap_or(0)
+    pcb::reserve_unmapped_area(pid, size, USER_MMAP_BASE, USER_MMAP_END, kind, flags).unwrap_or(0)
 }
 
 /// Simple bump allocator for the device mmap region (DRM dumb buffers).
@@ -1363,7 +1351,10 @@ pub(crate) fn mmap_alloc_vaddr(size: u64) -> u64 {
     static NEXT_VADDR: AtomicU64 = AtomicU64::new(DEVICE_MMAP_BASE);
 
     let addr = NEXT_VADDR.fetch_add(size, Ordering::Relaxed);
-    if addr.checked_add(size).is_none_or(|end| end > DEVICE_MMAP_END) {
+    if addr
+        .checked_add(size)
+        .is_none_or(|end| end > DEVICE_MMAP_END)
+    {
         // Ran out of device mmap space.
         return 0;
     }
@@ -2073,7 +2064,11 @@ pub fn sys_futex_wait_requeue_pi(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let expected = args.arg1 as u32;
     let pi_addr = args.arg2;
-    let timeout_ns = if args.arg4 != 0 { Some(args.arg3) } else { None };
+    let timeout_ns = if args.arg4 != 0 {
+        Some(args.arg3)
+    } else {
+        None
+    };
 
     // The condvar word is read; the PI mutex word is read and written.
     if let Err(e) = crate::mm::user::validate_user_read(cond_addr, 4) {
@@ -2703,11 +2698,11 @@ pub fn sys_shm_close(args: &SyscallArgs) -> SyscallResult {
 /// netstack forwarders and the ring-3 `netstack` daemon) share one region: the
 /// last reference dropped frees the frames, in any order.
 pub fn sys_shm_map(args: &SyscallArgs) -> SyscallResult {
-    use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+    use super::number::{MAP_READ, MAP_WRITE};
+    use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
     use crate::mm::vma::VmaKind;
     use crate::proc::{pcb, thread};
-    use super::number::{MAP_READ, MAP_WRITE};
 
     let handle = ShmHandle::from_raw(args.arg0);
     let flags = args.arg1;
@@ -2770,7 +2765,9 @@ pub fn sys_shm_map(args: &SyscallArgs) -> SyscallResult {
             if let Ok(phys) = unsafe { page_table::unmap_frame(pml4_phys, VirtAddr::new(va)) } {
                 // SAFETY: refcount-aware; drops the ref_inc we added — the
                 // region still holds its own reference, so this never frees.
-                unsafe { let _ = frame::free_frame(phys); }
+                unsafe {
+                    let _ = frame::free_frame(phys);
+                }
             }
         }
         pcb::remove_vma(pid, base);
@@ -2799,13 +2796,15 @@ pub fn sys_shm_map(args: &SyscallArgs) -> SyscallResult {
 
         // SAFETY: pml4_phys is the caller's page table; phys is now a
         // refcounted live frame; va is a freshly reserved user VA.
-        if let Err(e) = unsafe {
-            page_table::map_frame(pml4_phys, VirtAddr::new(va), phys, page_flags)
-        } {
+        if let Err(e) =
+            unsafe { page_table::map_frame(pml4_phys, VirtAddr::new(va), phys, page_flags) }
+        {
             // Undo this frame's ref_inc (mapping never took), then roll back
             // the earlier frames.
             // SAFETY: refcount-aware; drops the ref we just added.
-            unsafe { let _ = frame::free_frame(phys); }
+            unsafe {
+                let _ = frame::free_frame(phys);
+            }
             rollback(i);
             return SyscallResult::err(e);
         }
@@ -2945,7 +2944,8 @@ pub fn sys_eventfd_read_timeout(args: &SyscallArgs) -> SyscallResult {
     let timeout_ns = args.arg1;
 
     match eventfd::read_timeout(handle, timeout_ns) {
-        Ok(val) => {
+        Ok(val) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(val as i64)
         }
@@ -3138,7 +3138,8 @@ pub fn sys_cp_wait(args: &SyscallArgs) -> SyscallResult {
 
     if buf_cap > 0 {
         // Each CpEventRaw is 24 bytes (3 × u64).
-        let byte_len = buf_cap.checked_mul(core::mem::size_of::<CpEventRaw>())
+        let byte_len = buf_cap
+            .checked_mul(core::mem::size_of::<CpEventRaw>())
             .ok_or(KernelError::InvalidArgument);
         match byte_len {
             Ok(n) => {
@@ -3178,7 +3179,8 @@ pub fn sys_cp_try_wait(args: &SyscallArgs) -> SyscallResult {
     }
 
     if buf_cap > 0 {
-        let byte_len = buf_cap.checked_mul(core::mem::size_of::<CpEventRaw>())
+        let byte_len = buf_cap
+            .checked_mul(core::mem::size_of::<CpEventRaw>())
             .ok_or(KernelError::InvalidArgument);
         match byte_len {
             Ok(n) => {
@@ -3250,7 +3252,11 @@ pub fn sys_process_spawn(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::spawn::{SpawnOptions, spawn_process};
 
     let elf_len = args.arg1 as usize;
-    let name_len = if args.arg2 == 0 { 0 } else { args.arg3 as usize };
+    let name_len = if args.arg2 == 0 {
+        0
+    } else {
+        args.arg3 as usize
+    };
 
     if elf_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -3284,7 +3290,8 @@ pub fn sys_process_spawn(args: &SyscallArgs) -> SyscallResult {
     let options = SpawnOptions::new(name).parent(caller_pid().unwrap_or(0));
 
     match spawn_process(&elf_data, &options) {
-        Ok(result) => {
+        Ok(result) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(result.pid as i64)
         }
@@ -3363,15 +3370,14 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         core::str::from_utf8(&name_bytes).unwrap_or("unnamed")
     };
 
-    let fd_entries =
-        match crate::mm::user::read_user_items::<FdMapEntry>(
-            spawn_args.fd_map_ptr,
-            fd_map_count,
-            FD_MAP_MAX,
-        ) {
-            Ok(e) => e,
-            Err(e) => return SyscallResult::err(e),
-        };
+    let fd_entries = match crate::mm::user::read_user_items::<FdMapEntry>(
+        spawn_args.fd_map_ptr,
+        fd_map_count,
+        FD_MAP_MAX,
+    ) {
+        Ok(e) => e,
+        Err(e) => return SyscallResult::err(e),
+    };
     let fd_pairs: alloc::vec::Vec<(i32, u8, u64)> = fd_entries
         .iter()
         .map(|e| (e.fd, e.handle_type, e.handle))
@@ -3425,7 +3431,8 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         .envp(&envp_slices);
 
     match spawn_process(&elf_data, &options) {
-        Ok(result) => {
+        Ok(result) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(result.pid as i64)
         }
@@ -3478,8 +3485,8 @@ fn parse_packed_strings(data: &[u8], max_count: usize) -> alloc::vec::Vec<&[u8]>
 /// Returns: number of entries written, or negative error.
 /// Entries are consumed (one-shot) — subsequent calls return 0.
 pub fn sys_process_get_initial_fds(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::spawn::FdMapEntry;
     use crate::proc::pcb;
+    use crate::proc::spawn::FdMapEntry;
 
     let out_ptr = args.arg0 as usize;
     let out_cap = args.arg1 as usize;
@@ -3574,8 +3581,8 @@ pub fn sys_process_get_initial_fds(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: number of entries recorded, or negative error.
 pub fn sys_process_set_exec_fds(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::spawn::FdMapEntry;
     use crate::proc::pcb;
+    use crate::proc::spawn::FdMapEntry;
 
     let in_ptr = args.arg0 as usize;
     let count = args.arg1 as usize;
@@ -3631,8 +3638,8 @@ pub fn sys_process_set_exec_fds(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: total bytes needed.  0 if no args were set.
 pub fn sys_process_get_args(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::spawn::SpawnArgsHeader;
     use crate::proc::pcb;
+    use crate::proc::spawn::SpawnArgsHeader;
 
     let out_cap = args.arg1 as usize;
 
@@ -4304,7 +4311,7 @@ pub fn sys_process_id(args: &SyscallArgs) -> SyscallResult {
 /// (init/pid 1, or a process whose parent has already been reaped).
 pub fn sys_process_parent_id(args: &SyscallArgs) -> SyscallResult {
     let _ = args;
-    use crate::proc::{thread, pcb};
+    use crate::proc::{pcb, thread};
 
     let task_id = sched::current_task_id();
     let Some(pid) = thread::owner_process(task_id) else {
@@ -4820,10 +4827,7 @@ pub enum TtyAccessDecision {
 ///
 /// [`pcb::pgrp_is_orphaned`]: crate::proc::pcb::pgrp_is_orphaned
 #[must_use]
-pub fn tty_job_control_decide(
-    pid: crate::proc::pcb::ProcessId,
-    sig: u32,
-) -> TtyAccessDecision {
+pub fn tty_job_control_decide(pid: crate::proc::pcb::ProcessId, sig: u32) -> TtyAccessDecision {
     use crate::proc::pcb;
     use crate::proc::signal::SIGTTIN;
 
@@ -5021,7 +5025,11 @@ pub fn sys_process_count(args: &SyscallArgs) -> SyscallResult {
 
     let n = pcb::count();
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-    let clamped: i64 = if n > i64::MAX as usize { i64::MAX } else { n as i64 };
+    let clamped: i64 = if n > i64::MAX as usize {
+        i64::MAX
+    } else {
+        n as i64
+    };
     SyscallResult::ok(clamped)
 }
 
@@ -5033,7 +5041,7 @@ pub fn sys_process_count(args: &SyscallArgs) -> SyscallResult {
 /// `getuid()`/`getgid()`.  Never fails.
 pub fn sys_process_get_credentials(args: &SyscallArgs) -> SyscallResult {
     let _ = args;
-    use crate::proc::{thread, pcb};
+    use crate::proc::{pcb, thread};
 
     let task_id = sched::current_task_id();
     let (uid, gid) = match thread::owner_process(task_id) {
@@ -5221,8 +5229,7 @@ pub fn sys_cap_query(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::BufferTooSmall);
     }
 
-    let out: alloc::vec::Vec<CapEntryInfo> =
-        entries.iter().map(CapEntryInfo::from_entry).collect();
+    let out: alloc::vec::Vec<CapEntryInfo> = entries.iter().map(CapEntryInfo::from_entry).collect();
 
     // `write_user_items` validates the destination and copies in one pass;
     // it is a no-op for an empty slice, which is the zero-capability case.
@@ -5247,7 +5254,7 @@ pub fn sys_cap_query(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: request ID (positive u64) on success.
 pub fn sys_cap_request(args: &SyscallArgs) -> SyscallResult {
-    use crate::cap::{self, request, Rights};
+    use crate::cap::{self, Rights, request};
     use crate::proc::{pcb, thread};
 
     let resource_type_raw = args.arg0 as u16;
@@ -5306,7 +5313,8 @@ pub fn sys_cap_request(args: &SyscallArgs) -> SyscallResult {
 
     // Submit the request.
     match request::request_capability(pid, &proc_name, resource_type, rights, reason_str) {
-        Ok(id) => {
+        Ok(id) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(id as i64)
         }
@@ -5407,9 +5415,7 @@ pub fn sys_set_exception_handler(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Since this needs to modify the syscall frame, it's handled as a
 /// special case in `syscall_handler_inner` (like exec).
-pub fn sys_exception_return_with_frame(
-    frame: &mut super::entry::SyscallFrame,
-) -> i64 {
+pub fn sys_exception_return_with_frame(frame: &mut super::entry::SyscallFrame) -> i64 {
     use crate::proc::exception::ExceptionContext;
 
     // Copied in rather than read through the user pointer: every field below
@@ -5437,12 +5443,12 @@ pub fn sys_exception_return_with_frame(
     frame.user_rip = ctx.rip;
     frame.user_rsp = ctx.rsp;
     frame.user_rflags = super::entry::sanitize_user_rflags(ctx.rflags);
-    frame.arg0 = ctx.rdi;  // rdi
-    frame.arg1 = ctx.rsi;  // rsi
-    frame.arg2 = ctx.rdx;  // rdx
-    frame.arg3 = ctx.r10;  // r10
-    frame.arg4 = ctx.r8;   // r8
-    frame.arg5 = ctx.r9;   // r9
+    frame.arg0 = ctx.rdi; // rdi
+    frame.arg1 = ctx.rsi; // rsi
+    frame.arg2 = ctx.rdx; // rdx
+    frame.arg3 = ctx.r10; // r10
+    frame.arg4 = ctx.r8; // r8
+    frame.arg5 = ctx.r9; // r9
     frame.rbx = ctx.rbx;
     frame.rbp = ctx.rbp;
     frame.r12 = ctx.r12;
@@ -5485,9 +5491,7 @@ fn caller_process_or_err() -> Result<crate::proc::pcb::ProcessId, KernelError> {
 /// (CVE-2012-0217).  Catching it at registration turns a would-be kernel
 /// escalation into an ordinary `EINVAL`-shaped error at the point the caller
 /// can actually diagnose it.
-pub fn sys_signal_register(
-    args: &super::dispatch::SyscallArgs,
-) -> super::dispatch::SyscallResult {
+pub fn sys_signal_register(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
     let pid = match caller_process_or_err() {
         Ok(p) => p,
@@ -5508,9 +5512,7 @@ pub fn sys_signal_register(
 /// Authority matches `SYS_PROCESS_KILL`: the caller must be the target's
 /// parent, PID 0, the target itself (self-signal), or hold a Process
 /// capability with DELETE rights for the target.
-pub fn sys_signal_send(
-    args: &super::dispatch::SyscallArgs,
-) -> super::dispatch::SyscallResult {
+pub fn sys_signal_send(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     // Default sender class for a process-directed `kill(2)`.
     sys_signal_send_with_code(args, crate::proc::signal::si_code::SI_USER)
 }
@@ -5542,8 +5544,8 @@ pub fn sys_signal_send_with_info(
     si_code: i32,
     value: u64,
 ) -> super::dispatch::SyscallResult {
-    use crate::proc::{pcb, signal, thread};
     use super::dispatch::SyscallResult;
+    use crate::proc::{pcb, signal, thread};
 
     // `arg0` is a signed PID (see SYS_SIGNAL_SEND's docs): the non-positive
     // forms address a process *group*, not a process. Route them to the
@@ -5606,9 +5608,7 @@ pub fn sys_signal_send_with_info(
         value,
     };
     match signal::classify_post_info(target, sig, info) {
-        signal::PostDecision::Deliver | signal::PostDecision::Drop => {
-            SyscallResult::ok(0)
-        }
+        signal::PostDecision::Deliver | signal::PostDecision::Drop => SyscallResult::ok(0),
         signal::PostDecision::Terminate(code) => {
             // No userspace handler (or SIGKILL): terminate like kill().
             if let Err(e) = pcb::set_exit_code(target, code) {
@@ -5617,7 +5617,9 @@ pub fn sys_signal_send_with_info(
             thread::kill_process_threads(target);
             serial_println!(
                 "[signal] Process {} terminated by signal {} (from {})",
-                target, sig, caller
+                target,
+                sig,
+                caller
             );
             SyscallResult::ok(0)
         }
@@ -5680,8 +5682,8 @@ pub fn signal_send_to_group(
     si_code: i32,
     value: u64,
 ) -> super::dispatch::SyscallResult {
-    use crate::proc::{pcb, thread};
     use super::dispatch::{SyscallArgs, SyscallResult};
+    use crate::proc::{pcb, thread};
 
     if pid_signed == -1 {
         // Broadcast not yet modelled.
@@ -5742,16 +5744,18 @@ pub fn signal_send_to_group(
             last_err = r;
         }
     }
-    if any_ok { SyscallResult::ok(0) } else { last_err }
+    if any_ok {
+        SyscallResult::ok(0)
+    } else {
+        last_err
+    }
 }
 
 /// `SYS_SIGNAL_MASK` — set the calling process's blocked-signal mask.
 ///
 /// `arg0`: new blocked mask. `arg1`: out-pointer for the old mask (0 to
 /// discard).
-pub fn sys_signal_mask(
-    args: &super::dispatch::SyscallArgs,
-) -> super::dispatch::SyscallResult {
+pub fn sys_signal_mask(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
     let pid = match caller_process_or_err() {
         Ok(p) => p,
@@ -5763,8 +5767,7 @@ pub fn sys_signal_mask(
     // `write_user_value` re-validates at the moment of the store, which is
     // what actually guards it; this is only about failing early.
     if args.arg1 != 0 {
-        if let Err(e) =
-            crate::mm::user::validate_user_write(args.arg1, core::mem::size_of::<u64>())
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, core::mem::size_of::<u64>())
         {
             return SyscallResult::err(e);
         }
@@ -5781,9 +5784,7 @@ pub fn sys_signal_mask(
 /// `SYS_SIGNAL_PENDING` — query the calling process's pending set.
 ///
 /// `arg0`: out-pointer for the pending mask.
-pub fn sys_signal_pending(
-    args: &super::dispatch::SyscallArgs,
-) -> super::dispatch::SyscallResult {
+pub fn sys_signal_pending(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
     let pid = match caller_process_or_err() {
         Ok(p) => p,
@@ -5815,9 +5816,7 @@ pub fn sys_signal_pending(
 /// cannot serve this purpose.
 ///
 /// Returns 0 once a later `SIGCONT` resumes the process.
-pub fn sys_signal_stop_self(
-    args: &super::dispatch::SyscallArgs,
-) -> super::dispatch::SyscallResult {
+pub fn sys_signal_stop_self(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
 
     // Only the four POSIX stop signals may be reported here.  Anything
@@ -5854,9 +5853,7 @@ pub fn sys_signal_stop_self(
 /// Restores the interrupted CPU state by rewriting the syscall frame
 /// (like `SYS_EXCEPTION_RETURN`). Handled as a special case in
 /// `syscall_handler_inner`. Does not return to the caller.
-pub fn sys_signal_return_with_frame(
-    frame: &mut super::entry::SyscallFrame,
-) -> i64 {
+pub fn sys_signal_return_with_frame(frame: &mut super::entry::SyscallFrame) -> i64 {
     use crate::proc::signal::SignalContext;
 
     // Copied in rather than read field-by-field through the user pointer: the
@@ -6075,7 +6072,8 @@ pub fn deliver_kernel_signal(pid: crate::proc::pcb::ProcessId, sig: u32) {
                 thread::kill_process_threads(pid);
                 serial_println!(
                     "[signal] Process {} terminated by kernel signal {}",
-                    pid, sig
+                    pid,
+                    sig
                 );
             }
         }
@@ -6151,11 +6149,8 @@ pub fn kill_orphaned_pgrp(pgid: crate::proc::pcb::ProcessId) {
 /// — it will be retried on the next return to userspace. This avoids
 /// corrupting memory; a proper alternate signal stack (`sigaltstack`) is
 /// a documented future enhancement.
-pub fn deliver_pending_signal(
-    frame: &mut super::entry::SyscallFrame,
-    ret_val: i64,
-) -> bool {
-    use crate::proc::signal::{self, SignalContext, SIGNAL_CONTEXT_SIZE};
+pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i64) -> bool {
+    use crate::proc::signal::{self, SIGNAL_CONTEXT_SIZE, SignalContext};
 
     // Fast path: nothing pending anywhere.
     if !signal::any_pending() {
@@ -6173,9 +6168,7 @@ pub fn deliver_pending_signal(
     // returns via its own `sa_restorer` → `rt_sigreturn`. The native
     // SEH-style `SignalContext` trampoline path below is for native
     // POSIX-shim processes only.
-    if crate::proc::pcb::get_abi_mode(pid)
-        == Some(crate::proc::pcb::AbiMode::Linux)
-    {
+    if crate::proc::pcb::get_abi_mode(pid) == Some(crate::proc::pcb::AbiMode::Linux) {
         return deliver_linux_signal(frame, ret_val, pid, task_id);
     }
 
@@ -6205,8 +6198,7 @@ pub fn deliver_pending_signal(
                         signal::discard_pending_cont(pid);
                         stop_process_for_signal(pid, sig, Some(task_id));
                     }
-                    signal::DefaultAction::Ignore
-                    | signal::DefaultAction::Continue => {
+                    signal::DefaultAction::Ignore | signal::DefaultAction::Continue => {
                         // Dropped; check the next.
                     }
                 }
@@ -6235,8 +6227,7 @@ pub fn deliver_pending_signal(
     // Validate the whole region [new_rsp, ctx_addr + ctx_size) is a
     // writable user mapping before touching it.
     let region_len = (ctx_addr.wrapping_add(ctx_size)).wrapping_sub(new_rsp);
-    if crate::mm::user::validate_user_write(new_rsp, region_len as usize).is_err()
-    {
+    if crate::mm::user::validate_user_write(new_rsp, region_len as usize).is_err() {
         // Cannot place the frame; re-arm the signal and skip delivery.
         signal::set_pending(pid, sig);
         return false;
@@ -6367,9 +6358,7 @@ fn deliver_linux_signal(
                 // recorded source metadata so the siginfo_t is sender-faithful.
                 // On a stack-placement failure the signal is re-armed (with its
                 // info) inside build_linux_rt_frame and we fall through to false.
-                return linux::build_linux_rt_frame(
-                    frame, ret_val, pid, sig, &act, info,
-                );
+                return linux::build_linux_rt_frame(frame, ret_val, pid, sig, &act, info);
             }
             LinuxDisposition::Ignore => {
                 // Explicit SIG_IGN: drop and check the next signal.
@@ -6383,8 +6372,7 @@ fn deliver_linux_signal(
                     signal::discard_pending_cont(pid);
                     stop_process_for_signal(pid, sig, Some(task_id));
                 }
-                signal::DefaultAction::Ignore
-                | signal::DefaultAction::Continue => {
+                signal::DefaultAction::Ignore | signal::DefaultAction::Continue => {
                     // Dropped; check the next.
                 }
             },
@@ -6403,8 +6391,8 @@ fn deliver_linux_signal(
 ///
 /// Returns: number of threads killed.
 pub fn sys_process_kill(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
-    use crate::proc::{pcb, thread};
     use super::dispatch::SyscallResult;
+    use crate::proc::{pcb, thread};
 
     let target_pid = args.arg0;
     #[allow(clippy::cast_possible_wrap)]
@@ -6463,7 +6451,10 @@ pub fn sys_process_kill(args: &super::dispatch::SyscallArgs) -> super::dispatch:
 
     serial_println!(
         "[proc] Process {} killed by {} ({} threads, exit_code={})",
-        target_pid, caller_pid, killed, exit_code
+        target_pid,
+        caller_pid,
+        killed,
+        exit_code
     );
 
     #[allow(clippy::cast_possible_wrap)]
@@ -6495,15 +6486,21 @@ pub fn sys_process_kill(args: &super::dispatch::SyscallArgs) -> super::dispatch:
 /// On failure: returns a negative error code.  If the failure happens
 /// after the old address space was torn down, the process is in a
 /// broken state and should be killed.
-pub fn sys_process_exec_with_frame(
-    frame: &mut super::entry::SyscallFrame,
-) -> i64 {
+pub fn sys_process_exec_with_frame(frame: &mut super::entry::SyscallFrame) -> i64 {
     use crate::proc::spawn::exec_process;
     use crate::proc::thread;
 
     let elf_len = frame.arg1 as usize;
-    let argv_len = if frame.arg2 == 0 { 0 } else { frame.arg3 as usize };
-    let envp_len = if frame.arg4 == 0 { 0 } else { frame.arg5 as usize };
+    let argv_len = if frame.arg2 == 0 {
+        0
+    } else {
+        frame.arg3 as usize
+    };
+    let envp_len = if frame.arg4 == 0 {
+        0
+    } else {
+        frame.arg5 as usize
+    };
 
     // Validate arguments.
     if elf_len == 0 {
@@ -6570,12 +6567,12 @@ pub fn sys_process_exec_with_frame(
 
             // Zero all saved general-purpose registers — the new binary
             // starts with a clean slate.
-            frame.arg0 = 0;  // rdi
-            frame.arg1 = 0;  // rsi
-            frame.arg2 = 0;  // rdx
-            frame.arg3 = 0;  // r10
-            frame.arg4 = 0;  // r8
-            frame.arg5 = 0;  // r9
+            frame.arg0 = 0; // rdi
+            frame.arg1 = 0; // rsi
+            frame.arg2 = 0; // rdx
+            frame.arg3 = 0; // r10
+            frame.arg4 = 0; // r8
+            frame.arg5 = 0; // r9
             frame.rbx = 0;
             frame.rbp = 0;
             frame.r12 = 0;
@@ -6589,14 +6586,16 @@ pub fn sys_process_exec_with_frame(
 
             serial_println!(
                 "[exec] Process {} exec successful — returning to {:#x}",
-                pid, result.entry_rip
+                pid,
+                result.entry_rip
             );
             0 // Success (returned in RAX).
         }
         Err(e) => {
             serial_println!(
                 "[exec] Process {} exec failed: {:?} — process may be broken",
-                pid, e
+                pid,
+                e
             );
             e.code() as i64
         }
@@ -6636,10 +6635,7 @@ pub fn sys_process_fork_with_frame(frame: &mut super::entry::SyscallFrame) -> i6
             }
         }
         Err(e) => {
-            serial_println!(
-                "[fork] fork_process failed for pid {}: {:?}",
-                parent_pid, e
-            );
+            serial_println!("[fork] fork_process failed for pid {}: {:?}", parent_pid, e);
             e.code() as i64
         }
     }
@@ -7012,7 +7008,8 @@ pub fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
             Ok(buf.len())
         },
     ) {
-        Ok(n) => {
+        Ok(n) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(n as i64)
         }
@@ -7072,10 +7069,7 @@ pub fn sys_log_read(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_READ_FILE` — read an entire file into a buffer.
 pub fn sys_fs_read_file(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires File capability with READ rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::READ,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
 
@@ -7118,10 +7112,7 @@ pub fn sys_fs_read_file(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_WRITE_FILE` — write data to a file (create or overwrite).
 pub fn sys_fs_write_file(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires File capability with WRITE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -7158,10 +7149,7 @@ pub fn sys_fs_write_file(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_DELETE` — delete a file.
 pub fn sys_fs_delete(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires File capability with DELETE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::DELETE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::DELETE) {
         return SyscallResult::err(e);
     }
 
@@ -7187,10 +7175,7 @@ pub fn sys_fs_delete(args: &SyscallArgs) -> SyscallResult {
 /// Packs entries as `FS_DIR_ENTRY_SIZE`-byte records into the buffer.
 pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires File capability with READ rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::READ,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
 
@@ -7291,10 +7276,7 @@ pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_MKDIR` — create a directory.
 pub fn sys_fs_mkdir(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires File capability with CREATE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::CREATE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::CREATE) {
         return SyscallResult::err(e);
     }
 
@@ -7324,10 +7306,7 @@ pub fn sys_fs_mkdir(args: &SyscallArgs) -> SyscallResult {
 /// 2-argument `SYS_FS_MKDIR` ABI unchanged, so already-built binaries that
 /// leave the 3rd arg register undefined keep their 0o755-default behaviour.
 pub fn sys_fs_mkdir_mode(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::CREATE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::CREATE) {
         return SyscallResult::err(e);
     }
 
@@ -7361,10 +7340,7 @@ pub fn sys_fs_mkdir_mode(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_RMDIR` — remove an empty directory.
 pub fn sys_fs_rmdir(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires File capability with DELETE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::DELETE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::DELETE) {
         return SyscallResult::err(e);
     }
 
@@ -7455,10 +7431,7 @@ fn encode_fs_stat_result(meta: &crate::fs::FileMeta) -> [u8; FS_STAT_RESULT_LEN]
 ///
 /// [`KernelError::InvalidAddress`] if `user_dst` is not writable for
 /// [`FS_STAT_RESULT_LEN`] bytes.
-fn write_fs_stat_result(
-    user_dst: u64,
-    meta: &crate::fs::FileMeta,
-) -> Result<(), KernelError> {
+fn write_fs_stat_result(user_dst: u64, meta: &crate::fs::FileMeta) -> Result<(), KernelError> {
     let record = encode_fs_stat_result(meta);
     // SAFETY: `record` is a live stack array of exactly FS_STAT_RESULT_LEN
     // bytes; `copy_to_user` validates the user destination.
@@ -7471,10 +7444,7 @@ fn write_fs_stat_result(
 /// (layout documented on that constant).  Follows symlinks.
 pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires File capability with METADATA rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::METADATA,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
         return SyscallResult::err(e);
     }
 
@@ -7484,9 +7454,7 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    if let Err(e) =
-        crate::mm::user::validate_user_write(args.arg2, FS_STAT_RESULT_LEN)
-    {
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, FS_STAT_RESULT_LEN) {
         return SyscallResult::err(e);
     }
 
@@ -7532,10 +7500,7 @@ pub fn fs_open_kernel_path(
     path: impl AsRef<crate::fs::path::Path>,
     flags_raw: u32,
 ) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::READ,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
     let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
@@ -7555,10 +7520,7 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
     // Capability: require READ for read-only, WRITE for write.
     // We check the broader File capability — specific rights are
     // enforced by the handle flags.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::READ,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
 
@@ -7610,10 +7572,7 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
 /// register undefined) keep their historical 0o644-default create behaviour
 /// with no risk of an undefined register being misread as a mode.
 pub fn sys_fs_open_mode(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::READ,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
 
@@ -7699,7 +7658,8 @@ pub fn sys_fs_read(args: &SyscallArgs) -> SyscallResult {
     match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
         crate::fs::handle::read(handle, buf)
     }) {
-        Ok(n) => {
+        Ok(n) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(n as i64)
         }
@@ -7724,7 +7684,8 @@ pub fn sys_fs_write(args: &SyscallArgs) -> SyscallResult {
     };
 
     match crate::fs::handle::write(handle, &data) {
-        Ok(n) => {
+        Ok(n) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(n as i64)
         }
@@ -7755,7 +7716,8 @@ pub fn sys_fs_seek(args: &SyscallArgs) -> SyscallResult {
     };
 
     match crate::fs::handle::seek(handle, seek_from) {
-        Ok(new_pos) => {
+        Ok(new_pos) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(new_pos as i64)
         }
@@ -7765,10 +7727,7 @@ pub fn sys_fs_seek(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_FS_TRUNCATE` — truncate a file to a given size.
 pub fn sys_fs_truncate(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -7792,10 +7751,7 @@ pub fn sys_fs_truncate(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_FS_RENAME` — rename or move a file or directory.
 pub fn sys_fs_rename(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -7878,18 +7834,15 @@ pub fn sys_fs_mount(args: &SyscallArgs) -> SyscallResult {
     let mut tgt_buf = [0u8; 256];
     let mut fst_buf = [0u8; 64];
 
-    let source = match read_user_str(args.arg0, args.arg1 as usize, 256, &mut src_buf)
-    {
+    let source = match read_user_str(args.arg0, args.arg1 as usize, 256, &mut src_buf) {
         Ok(s) => s,
         Err(e) => return SyscallResult::err(e),
     };
-    let target = match read_user_str(args.arg2, args.arg3 as usize, 256, &mut tgt_buf)
-    {
+    let target = match read_user_str(args.arg2, args.arg3 as usize, 256, &mut tgt_buf) {
         Ok(s) => s,
         Err(e) => return SyscallResult::err(e),
     };
-    let fstype = match read_user_str(args.arg4, args.arg5 as usize, 64, &mut fst_buf)
-    {
+    let fstype = match read_user_str(args.arg4, args.arg5 as usize, 64, &mut fst_buf) {
         Ok(s) => s,
         Err(e) => return SyscallResult::err(e),
     };
@@ -7931,8 +7884,7 @@ pub fn sys_fs_umount(args: &SyscallArgs) -> SyscallResult {
     }
 
     let mut tgt_buf = [0u8; 256];
-    let target = match read_user_str(args.arg0, args.arg1 as usize, 256, &mut tgt_buf)
-    {
+    let target = match read_user_str(args.arg0, args.arg1 as usize, 256, &mut tgt_buf) {
         Ok(s) => s,
         Err(e) => return SyscallResult::err(e),
     };
@@ -7977,9 +7929,7 @@ pub fn sys_fs_format(args: &SyscallArgs) -> SyscallResult {
     let label_opt = if label.is_empty() { None } else { Some(label) };
 
     let result = match fstype {
-        "vfat" | "fat" | "fat32" | "fat16" | "msdos" => {
-            crate::fs::fat::mkfs_fat(device, label_opt)
-        }
+        "vfat" | "fat" | "fat32" | "fat16" | "msdos" => crate::fs::fat::mkfs_fat(device, label_opt),
         // ext4 and other types have no in-kernel formatter yet.
         _ => Err(KernelError::NotSupported),
     };
@@ -8083,9 +8033,7 @@ pub fn sys_fs_fstat(args: &SyscallArgs) -> SyscallResult {
     if args.arg1 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) =
-        crate::mm::user::validate_user_write(args.arg1, FS_STAT_RESULT_LEN)
-    {
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, FS_STAT_RESULT_LEN) {
         return SyscallResult::err(e);
     }
 
@@ -8109,10 +8057,7 @@ pub fn sys_fs_fstat(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_fs_trash(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires File capability with WRITE rights
     // (deleting requires write access to the directory).
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -8139,10 +8084,7 @@ pub fn sys_fs_trash(args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: max number of entries.
 pub fn sys_fs_trash_list(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires File capability with READ rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::READ,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
 
@@ -8189,8 +8131,7 @@ pub fn sys_fs_trash_list(args: &SyscallArgs) -> SyscallResult {
         // not on this copy.
         let mut put = |at: usize, bytes: &[u8], cap: usize| {
             let n = bytes.len().min(cap);
-            if let (Some(dst), Some(src)) =
-                (entry.get_mut(at..at.wrapping_add(n)), bytes.get(..n))
+            if let (Some(dst), Some(src)) = (entry.get_mut(at..at.wrapping_add(n)), bytes.get(..n))
             {
                 dst.copy_from_slice(src);
             }
@@ -8228,10 +8169,7 @@ pub fn sys_fs_trash_list(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: pointer to 256-byte output buffer for restored path.
 pub fn sys_fs_trash_restore(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires File capability with WRITE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -8291,10 +8229,7 @@ pub fn sys_fs_trash_restore(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_TRASH_EMPTY` — permanently delete all items in the recycle bin.
 pub fn sys_fs_trash_empty(_args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires File capability with WRITE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -8315,10 +8250,7 @@ pub fn sys_fs_trash_empty(_args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: event mask.
 /// `arg3`: flags (bit 0 = recursive).
 pub fn sys_fs_watch_create(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::READ,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
 
@@ -8339,7 +8271,8 @@ pub fn sys_fs_watch_create(args: &SyscallArgs) -> SyscallResult {
     let event_mask = crate::fs::notify::FsEventMask(mask);
 
     match crate::fs::notify::create_watch(&path, event_mask, recursive) {
-        Ok(id) => {
+        Ok(id) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(id as i64)
         }
@@ -8499,8 +8432,7 @@ pub fn sys_fs_journal_read(args: &SyscallArgs) -> SyscallResult {
         // zeroed), which is what makes the fields NUL-terminated.
         let mut put = |at: usize, bytes: &[u8], cap: usize| {
             let n = bytes.len().min(cap);
-            if let (Some(dst), Some(src)) =
-                (rec.get_mut(at..at.saturating_add(n)), bytes.get(..n))
+            if let (Some(dst), Some(src)) = (rec.get_mut(at..at.saturating_add(n)), bytes.get(..n))
             {
                 dst.copy_from_slice(src);
             }
@@ -8511,7 +8443,14 @@ pub fn sys_fs_journal_read(args: &SyscallArgs) -> SyscallResult {
         put(17, entry.path.as_bytes(), 255);
         // A non-rename has no source path; the field stays all-zero, which is
         // the empty NUL-terminated string userspace already reads it as.
-        put(273, entry.old_path.as_ref().map_or(b"".as_slice(), |p| p.as_bytes()), 255);
+        put(
+            273,
+            entry
+                .old_path
+                .as_ref()
+                .map_or(b"".as_slice(), |p| p.as_bytes()),
+            255,
+        );
     }
 
     // One copy for the whole batch.  Validating and storing per entry meant a
@@ -8521,8 +8460,7 @@ pub fn sys_fs_journal_read(args: &SyscallArgs) -> SyscallResult {
         // SAFETY: `out` is a live kernel-owned buffer of exactly `out.len()`
         // bytes; `copy_to_user` validates the destination and brackets the
         // store with STAC/CLAC.
-        if let Err(e) =
-            unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, out.len()) }
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, out.len()) }
         {
             return SyscallResult::err(e);
         }
@@ -8553,20 +8491,16 @@ pub fn sys_fs_journal_flush(_args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: pointer to output buffer (FS_META_SIZE = 64 bytes).
 #[allow(clippy::cast_possible_truncation)]
 pub fn sys_fs_metadata(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::METADATA,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
         return SyscallResult::err(e);
     }
 
     if args.arg2 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_write(
-        args.arg2,
-        crate::syscall::number::FS_META_SIZE,
-    ) {
+    if let Err(e) =
+        crate::mm::user::validate_user_write(args.arg2, crate::syscall::number::FS_META_SIZE)
+    {
         return SyscallResult::err(e);
     }
 
@@ -8623,9 +8557,7 @@ pub fn sys_fs_metadata(args: &SyscallArgs) -> SyscallResult {
     // SAFETY: `rec` is a live kernel stack array of exactly `FS_META_SIZE`
     // bytes; `copy_to_user` re-validates the destination and brackets the
     // store with STAC/CLAC.
-    if let Err(e) =
-        unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), args.arg2, rec.len()) }
-    {
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), args.arg2, rec.len()) } {
         return SyscallResult::err(e);
     }
 
@@ -8636,10 +8568,7 @@ pub fn sys_fs_metadata(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: path pointer.  `arg1`: path length.  `arg2`: attribute bits.
 pub fn sys_fs_set_attr(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
     let path = match read_user_path(args.arg0, args.arg1 as usize) {
@@ -8664,10 +8593,7 @@ pub fn sys_fs_set_attr(args: &SyscallArgs) -> SyscallResult {
 /// sentinel against the file's current owner.
 #[allow(clippy::cast_possible_truncation)]
 pub fn sys_fs_set_owner(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
     let path = match read_user_path(args.arg0, args.arg1 as usize) {
@@ -8695,10 +8621,7 @@ pub fn sys_fs_set_owner(args: &SyscallArgs) -> SyscallResult {
 /// `fchmodat2(AT_SYMLINK_NOFOLLOW)` — chmod the link inode itself).
 #[allow(clippy::cast_possible_truncation)]
 pub fn sys_fs_set_perms(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
     let path = match read_user_path(args.arg0, args.arg1 as usize) {
@@ -8724,10 +8647,7 @@ pub fn sys_fs_set_perms(args: &SyscallArgs) -> SyscallResult {
 /// `arg4`: flags (bit 0 = `NO_FOLLOW`, i.e. `lutimes` /
 /// `utimensat(AT_SYMLINK_NOFOLLOW)` — stamp the link inode itself).
 pub fn sys_fs_set_times(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
     let path = match read_user_path(args.arg0, args.arg1 as usize) {
@@ -8755,10 +8675,7 @@ pub fn sys_fs_set_times(args: &SyscallArgs) -> SyscallResult {
 /// `lgetxattr` — read the link inode's own xattrs).
 #[allow(clippy::cast_possible_truncation)]
 pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::METADATA,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
         return SyscallResult::err(e);
     }
     let path = match read_user_path(args.arg0, args.arg1 as usize) {
@@ -8819,10 +8736,7 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
 /// `arg4`: value length.  `arg5`: flags (bit 0 = `NO_FOLLOW`, i.e.
 /// `lsetxattr` — write to the link inode's own xattrs).
 pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
     let path = match read_user_path(args.arg0, args.arg1 as usize) {
@@ -8865,10 +8779,7 @@ pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: key pointer (null-terminated).  `arg3`: flags (bit 0 = `NO_FOLLOW`,
 /// i.e. `lremovexattr` — remove from the link inode's own xattrs).
 pub fn sys_fs_remove_xattr(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
     let path = match read_user_path(args.arg0, args.arg1 as usize) {
@@ -8899,10 +8810,7 @@ pub fn sys_fs_remove_xattr(args: &SyscallArgs) -> SyscallResult {
 /// (bit 0 = `NO_FOLLOW`, i.e. `llistxattr` — list the link inode's own xattrs).
 #[allow(clippy::cast_possible_truncation)]
 pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::METADATA,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
         return SyscallResult::err(e);
     }
     let path = match read_user_path(args.arg0, args.arg1 as usize) {
@@ -8966,9 +8874,9 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
             // SAFETY: `packed` is a live kernel-owned buffer of exactly
             // `packed.len()` bytes; `copy_to_user` re-validates the
             // destination and brackets the store with STAC/CLAC.
-            if let Err(e) = unsafe {
-                crate::mm::user::copy_to_user(packed.as_ptr(), args.arg2, packed.len())
-            } {
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_to_user(packed.as_ptr(), args.arg2, packed.len()) }
+            {
                 return SyscallResult::err(e);
             }
         }
@@ -8988,10 +8896,7 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: pointer to target string.
 /// `arg3`: target string length.
 pub fn sys_fs_symlink(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::CREATE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::CREATE) {
         return SyscallResult::err(e);
     }
 
@@ -9030,10 +8935,7 @@ pub fn sys_fs_symlink(args: &SyscallArgs) -> SyscallResult {
 /// target is truncated.
 #[allow(clippy::cast_possible_wrap)]
 pub fn sys_fs_readlink(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::METADATA,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
         return SyscallResult::err(e);
     }
 
@@ -9085,10 +8987,7 @@ pub fn sys_fs_readlink(args: &SyscallArgs) -> SyscallResult {
 /// symlink, the size is the length of the target path string and the entry
 /// type is `3` (symlink), matching Linux `lstat` behavior.
 pub fn sys_fs_lstat(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::METADATA,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
         return SyscallResult::err(e);
     }
 
@@ -9100,9 +8999,7 @@ pub fn sys_fs_lstat(args: &SyscallArgs) -> SyscallResult {
     if args.arg2 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) =
-        crate::mm::user::validate_user_write(args.arg2, FS_STAT_RESULT_LEN)
-    {
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, FS_STAT_RESULT_LEN) {
         return SyscallResult::err(e);
     }
 
@@ -9125,10 +9022,7 @@ pub fn sys_fs_lstat(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: lock type (0 = shared, 1 = exclusive).
 /// `arg3`: owner ID.
 pub fn sys_fs_flock(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::METADATA,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
         return SyscallResult::err(e);
     }
 
@@ -9189,10 +9083,7 @@ pub fn sys_fs_sync(_args: &SyscallArgs) -> SyscallResult {
 ///         semantics: the symlink inode itself is hard-linked.  Set for
 ///         `linkat(AT_SYMLINK_FOLLOW)`.
 pub fn sys_fs_link(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::CREATE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::CREATE) {
         return SyscallResult::err(e);
     }
 
@@ -9232,10 +9123,7 @@ pub fn sys_fs_link(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: pointer to 64-byte output buffer.
 #[allow(clippy::cast_possible_truncation)]
 pub fn sys_fs_statvfs(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::METADATA,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
         return SyscallResult::err(e);
     }
 
@@ -9247,10 +9135,9 @@ pub fn sys_fs_statvfs(args: &SyscallArgs) -> SyscallResult {
     if args.arg2 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_write(
-        args.arg2,
-        crate::syscall::number::FS_STATVFS_SIZE,
-    ) {
+    if let Err(e) =
+        crate::mm::user::validate_user_write(args.arg2, crate::syscall::number::FS_STATVFS_SIZE)
+    {
         return SyscallResult::err(e);
     }
 
@@ -9284,9 +9171,7 @@ pub fn sys_fs_statvfs(args: &SyscallArgs) -> SyscallResult {
     // SAFETY: `rec` is a live kernel stack array of exactly
     // `FS_STATVFS_SIZE` bytes; `copy_to_user` re-validates the destination
     // and brackets the store with STAC/CLAC.
-    if let Err(e) =
-        unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), args.arg2, rec.len()) }
-    {
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), args.arg2, rec.len()) } {
         return SyscallResult::err(e);
     }
 
@@ -9306,10 +9191,7 @@ pub fn sys_fs_statvfs(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: number of bytes copied on success.
 pub fn sys_fs_copy(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::CREATE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::CREATE) {
         return SyscallResult::err(e);
     }
 
@@ -9346,10 +9228,7 @@ pub fn sys_fs_copy(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: pointer to data buffer.
 /// `arg3`: data length.
 pub fn sys_fs_append(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::File,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -9459,8 +9338,7 @@ pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
     // bytes; `copy_to_user` re-validates the destination — `handle_path` can
     // block, so the check above is not the one that matters — and brackets the
     // store with STAC/CLAC.
-    if let Err(e) = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, out.len()) }
-    {
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, out.len()) } {
         return SyscallResult::err(e);
     }
 
@@ -9520,11 +9398,8 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
     let mut written = 0u32;
 
     // Format: [u8 type][u32 name_len][name bytes][u64 size] per entry.
-    let copied = match crate::mm::user::with_user_out_buf(
-        args.arg3,
-        out_cap,
-        READDIR_BUF_MAX,
-        |out_slice| {
+    let copied =
+        match crate::mm::user::with_user_out_buf(args.arg3, out_cap, READDIR_BUF_MAX, |out_slice| {
             let mut pos = 0usize;
             for entry in &entries {
                 let name_bytes = entry.name.as_bytes();
@@ -9571,11 +9446,10 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
                 written = written.saturating_add(1);
             }
             Ok(pos)
-        },
-    ) {
-        Ok(n) => n,
-        Err(e) => return SyscallResult::err(e),
-    };
+        }) {
+            Ok(n) => n,
+            Err(e) => return SyscallResult::err(e),
+        };
     debug_assert!(copied <= out_cap);
 
     // Pack result: (total << 32) | entries_written.
@@ -9690,10 +9564,7 @@ pub fn sys_fs_seek_hole(args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: remote port.
 pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with WRITE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -9719,7 +9590,8 @@ pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
     if (flags & CONNECT_NONBLOCK) != 0 {
         // Non-blocking connect: return handle immediately in SYN_SENT.
         match crate::net::tcp::connect_start(ns, ip.into(), port) {
-            Ok(handle) => {
+            Ok(handle) =>
+            {
                 #[allow(clippy::cast_possible_wrap)]
                 SyscallResult::ok(handle as i64)
             }
@@ -9728,7 +9600,8 @@ pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
     } else {
         // Blocking connect (original behavior).
         match crate::net::tcp::connect(ns, ip.into(), port) {
-            Ok(handle) => {
+            Ok(handle) =>
+            {
                 #[allow(clippy::cast_possible_wrap)]
                 SyscallResult::ok(handle as i64)
             }
@@ -9744,10 +9617,7 @@ pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: data length.
 pub fn sys_tcp_send(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with WRITE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -9767,7 +9637,8 @@ pub fn sys_tcp_send(args: &SyscallArgs) -> SyscallResult {
     };
 
     match crate::net::tcp::send(handle, &data) {
-        Ok(sent) => {
+        Ok(sent) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(sent as i64)
         }
@@ -9786,10 +9657,7 @@ pub fn sys_tcp_send(args: &SyscallArgs) -> SyscallResult {
 ///       with WouldBlock if no data available).
 pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with READ rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::READ,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
 
@@ -9856,8 +9724,7 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
         // bytes.  `copy_to_user` re-validates the destination, which is the
         // check that matters: the read above blocks for up to five seconds, so
         // a peer thread has ample opportunity to unmap the buffer meanwhile.
-        if let Err(e) =
-            unsafe { crate::mm::user::copy_to_user(data.as_ptr(), args.arg1, copy_len) }
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(data.as_ptr(), args.arg1, copy_len) }
         {
             return SyscallResult::err(e);
         }
@@ -9871,10 +9738,7 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: socket handle.
 pub fn sys_tcp_close(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with WRITE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -9891,10 +9755,7 @@ pub fn sys_tcp_close(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: socket handle.
 pub fn sys_tcp_abort(args: &SyscallArgs) -> SyscallResult {
     // Capability check: same as close.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -9912,10 +9773,7 @@ pub fn sys_tcp_abort(args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: pointer to 6-byte output buffer (4 bytes IP + 2 bytes port).
 pub fn sys_tcp_peer_addr(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with READ rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::READ,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
 
@@ -9965,10 +9823,7 @@ pub fn sys_tcp_peer_addr(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: local port (1–65535).
 pub fn sys_tcp_bind(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with WRITE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -9981,7 +9836,8 @@ pub fn sys_tcp_bind(args: &SyscallArgs) -> SyscallResult {
 
     let ns = crate::sched::current_task_net_ns();
     match crate::net::tcp::bind(ns, port) {
-        Ok(handle) => {
+        Ok(handle) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle as i64)
         }
@@ -9996,10 +9852,7 @@ pub fn sys_tcp_bind(args: &SyscallArgs) -> SyscallResult {
 ///   instead of waiting if no pending connections).
 pub fn sys_tcp_accept(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with READ rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::READ,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
 
@@ -10014,7 +9867,8 @@ pub fn sys_tcp_accept(args: &SyscallArgs) -> SyscallResult {
     };
 
     match result {
-        Ok(conn_handle) => {
+        Ok(conn_handle) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(conn_handle as i64)
         }
@@ -10027,10 +9881,7 @@ pub fn sys_tcp_accept(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: listener handle.
 pub fn sys_tcp_close_listener(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with WRITE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -10047,10 +9898,7 @@ pub fn sys_tcp_close_listener(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: local port.
 pub fn sys_udp_bind(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with WRITE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -10063,7 +9911,8 @@ pub fn sys_udp_bind(args: &SyscallArgs) -> SyscallResult {
 
     let ns = crate::sched::current_task_net_ns();
     match crate::net::udp::bind(ns, port) {
-        Ok(handle) => {
+        Ok(handle) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle as i64)
         }
@@ -10080,10 +9929,7 @@ pub fn sys_udp_bind(args: &SyscallArgs) -> SyscallResult {
 /// `arg4`: data length.
 pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with WRITE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -10135,10 +9981,7 @@ pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
 /// `arg3`: pointer to 6-byte source address output.
 pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with READ rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::READ,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
 
@@ -10228,10 +10071,7 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: socket handle.
 pub fn sys_udp_close(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with WRITE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -10248,10 +10088,7 @@ pub fn sys_udp_close(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Pass ip=0, port=0 to disconnect.
 pub fn sys_udp_connect(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -10281,10 +10118,7 @@ pub fn sys_udp_local_port(args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: multicast group address (u32 in network byte order).
 pub fn sys_udp_mcast_join(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with WRITE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -10302,10 +10136,7 @@ pub fn sys_udp_mcast_join(args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: multicast group address (u32 in network byte order).
 pub fn sys_udp_mcast_leave(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with WRITE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -10343,7 +10174,9 @@ pub fn sys_thread_create(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     } else {
         #[allow(clippy::cast_possible_truncation)]
-        { raw_priority as u8 }
+        {
+            raw_priority as u8
+        }
     };
 
     // Get the calling process's PID.
@@ -10360,7 +10193,8 @@ pub fn sys_thread_create(args: &SyscallArgs) -> SyscallResult {
     };
 
     match thread::spawn_user(pid, b"user-thread", priority, entry_rip, user_rsp) {
-        Ok(new_task_id) => {
+        Ok(new_task_id) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(new_task_id as i64)
         }
@@ -10530,7 +10364,8 @@ pub fn sys_thread_set_priority(args: &SyscallArgs) -> SyscallResult {
 
     #[allow(clippy::cast_possible_truncation)]
     match sched::set_priority(target_task, new_priority as u8) {
-        Some(old) => {
+        Some(old) =>
+        {
             #[allow(clippy::cast_lossless)]
             SyscallResult::ok(old as i64)
         }
@@ -10603,7 +10438,7 @@ pub fn sys_set_fs_base(args: &SyscallArgs) -> SyscallResult {
 /// [`IoRingHeader`]: crate::ipc::io_ring::IoRingHeader
 pub fn sys_io_ring_setup(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::io_ring;
-    use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+    use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
     use crate::mm::vma::VmaKind;
     use crate::proc::pcb;
@@ -10725,7 +10560,8 @@ pub fn sys_io_ring_enter(args: &SyscallArgs) -> SyscallResult {
     let to_submit = args.arg1 as u32;
 
     match io_ring::enter(ring_handle, to_submit) {
-        Ok(processed) => {
+        Ok(processed) =>
+        {
             #[allow(clippy::cast_lossless)]
             SyscallResult::ok(processed as i64)
         }
@@ -10857,10 +10693,7 @@ pub fn sys_sem_wait_timeout(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_service_register(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Service capability with WRITE rights.
     // This prevents untrusted processes from squatting on service names.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Service,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Service, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -10879,7 +10712,8 @@ pub fn sys_service_register(args: &SyscallArgs) -> SyscallResult {
     };
 
     match service::register(&name) {
-        Ok(listener) => {
+        Ok(listener) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(listener.raw() as i64)
         }
@@ -10908,7 +10742,8 @@ pub fn sys_service_connect(args: &SyscallArgs) -> SyscallResult {
     };
 
     match service::connect(&name) {
-        Ok(handle) => {
+        Ok(handle) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -10925,7 +10760,8 @@ pub fn sys_service_accept(args: &SyscallArgs) -> SyscallResult {
     let listener = ServiceListenerHandle::from_raw(args.arg0);
 
     match service::accept(listener) {
-        Ok(handle) => {
+        Ok(handle) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -10942,7 +10778,8 @@ pub fn sys_service_try_accept(args: &SyscallArgs) -> SyscallResult {
     let listener = ServiceListenerHandle::from_raw(args.arg0);
 
     match service::try_accept(listener) {
-        Ok(Some(handle)) => {
+        Ok(Some(handle)) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -10962,7 +10799,8 @@ pub fn sys_service_accept_timeout(args: &SyscallArgs) -> SyscallResult {
     let timeout_ns = args.arg1;
 
     match service::accept_timeout(listener, timeout_ns) {
-        Ok(handle) => {
+        Ok(handle) =>
+        {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -11152,10 +10990,7 @@ pub fn sys_ns_query(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_dns_resolve(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with READ rights
     // (DNS is a network operation).
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::READ,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
 
@@ -11209,10 +11044,7 @@ pub fn sys_dns_resolve(args: &SyscallArgs) -> SyscallResult {
 /// negative error on failure.
 pub fn sys_dns_reverse_resolve(args: &SyscallArgs) -> SyscallResult {
     // Capability check: same as forward DNS.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::READ,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
 
@@ -11243,9 +11075,9 @@ pub fn sys_dns_reverse_resolve(args: &SyscallArgs) -> SyscallResult {
             // `copy_len` bytes.  `copy_to_user` re-validates the destination,
             // which is the check that matters here: `reverse_resolve` waits on
             // a network round-trip, so the validation above is stale by now.
-            if let Err(e) = unsafe {
-                crate::mm::user::copy_to_user(hostname.as_ptr(), args.arg1, copy_len)
-            } {
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_to_user(hostname.as_ptr(), args.arg1, copy_len) }
+            {
                 return SyscallResult::err(e);
             }
             #[allow(clippy::cast_possible_wrap)]
@@ -11304,10 +11136,7 @@ pub fn sys_net_stat(args: &SyscallArgs) -> SyscallResult {
 /// Returns the sequence number on success.
 pub fn sys_icmp_ping(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with WRITE rights.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -11352,10 +11181,7 @@ const RAW_FRAME_MAX: usize = 1522;
 /// index) is reserved and must be 0.
 pub fn sys_net_raw_open(args: &SyscallArgs) -> SyscallResult {
     // Capability gate: raw L2 access is strictly more privileged than a socket.
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::NetRaw,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::NetRaw, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
     if args.arg0 != 0 {
@@ -11434,9 +11260,7 @@ pub fn sys_net_raw_rx(args: &SyscallArgs) -> SyscallResult {
             // SAFETY: `frame` is a live kernel-owned buffer of `n` bytes.
             // `copy_to_user` re-validates the destination and brackets the
             // store with STAC/CLAC.
-            if let Err(e) =
-                unsafe { crate::mm::user::copy_to_user(frame.as_ptr(), args.arg0, n) }
-            {
+            if let Err(e) = unsafe { crate::mm::user::copy_to_user(frame.as_ptr(), args.arg0, n) } {
                 return SyscallResult::err(e);
             }
             SyscallResult::ok(n as i64)
@@ -11469,7 +11293,8 @@ pub fn sys_sched_set_timeslice(args: &SyscallArgs) -> SyscallResult {
     if sched::set_time_slice(level, ticks) {
         serial_println!(
             "[syscall] sched_set_timeslice: level {} = {} ticks",
-            level, ticks
+            level,
+            ticks
         );
         SyscallResult::ok(0)
     } else {
@@ -11505,7 +11330,8 @@ pub fn sys_sched_reconfigure(args: &SyscallArgs) -> SyscallResult {
     if sched::reconfigure_time_slices(base, increment) {
         serial_println!(
             "[syscall] sched_reconfigure: base={}, increment={}",
-            base, increment
+            base,
+            increment
         );
         SyscallResult::ok(0)
     } else {
@@ -11834,8 +11660,7 @@ pub fn sys_tcp_list(args: &SyscallArgs) -> SyscallResult {
     if !out.is_empty() {
         // SAFETY: `out` is a live kernel-owned buffer of exactly `out.len()`
         // bytes.
-        if let Err(e) =
-            unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg0, out.len()) }
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg0, out.len()) }
         {
             return SyscallResult::err(e);
         }
@@ -11886,10 +11711,7 @@ pub fn sys_tcp_listener_list(args: &SyscallArgs) -> SyscallResult {
         }
         // [2] backlog used, [3] backlog max.
         if let Some(dst) = rec.get_mut(2..4) {
-            dst.copy_from_slice(&[
-                listener.backlog_used as u8,
-                listener.backlog_max as u8,
-            ]);
+            dst.copy_from_slice(&[listener.backlog_used as u8, listener.backlog_max as u8]);
         }
     }
 
@@ -11899,8 +11721,7 @@ pub fn sys_tcp_listener_list(args: &SyscallArgs) -> SyscallResult {
         // SAFETY: `out` is a live kernel-owned buffer of exactly `out.len()`
         // bytes; `copy_to_user` validates the destination and brackets the
         // store with STAC/CLAC.
-        if let Err(e) =
-            unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg0, out.len()) }
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg0, out.len()) }
         {
             return SyscallResult::err(e);
         }
@@ -11953,8 +11774,7 @@ pub fn sys_net_if_info(args: &SyscallArgs) -> SyscallResult {
     // SAFETY: `record` is a live kernel stack array of exactly `INFO_SIZE`
     // bytes; `copy_to_user` validates the destination and brackets the store
     // with STAC/CLAC.
-    if let Err(e) =
-        unsafe { crate::mm::user::copy_to_user(record.as_ptr(), args.arg0, INFO_SIZE) }
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(record.as_ptr(), args.arg0, INFO_SIZE) }
     {
         return SyscallResult::err(e);
     }
@@ -12016,8 +11836,26 @@ pub fn sys_net_if_config(args: &SyscallArgs) -> SyscallResult {
 
     // Destructure the fixed-size record by value: no indexing/arithmetic on the
     // hot path, and every field is named per the ABI layout.
-    let [ip0, ip1, ip2, ip3, m0, m1, m2, m3, g0, g1, g2, g3, d0, d1, d2, d3, up_byte, field_mask] =
-        record;
+    let [
+        ip0,
+        ip1,
+        ip2,
+        ip3,
+        m0,
+        m1,
+        m2,
+        m3,
+        g0,
+        g1,
+        g2,
+        g3,
+        d0,
+        d1,
+        d2,
+        d3,
+        up_byte,
+        field_mask,
+    ] = record;
 
     // Reject unknown mask bits so a future ABI extension can't be silently
     // ignored by an old kernel.
@@ -12034,8 +11872,10 @@ pub fn sys_net_if_config(args: &SyscallArgs) -> SyscallResult {
     // Read-modify-write: start from the current config and override only the
     // masked address fields, then apply in one `configure` call (which also
     // syncs netns and sends a gratuitous ARP).
-    let addr_bits =
-        net_if_config_mask::IP | net_if_config_mask::MASK | net_if_config_mask::GATEWAY | net_if_config_mask::DNS;
+    let addr_bits = net_if_config_mask::IP
+        | net_if_config_mask::MASK
+        | net_if_config_mask::GATEWAY
+        | net_if_config_mask::DNS;
     if field_mask & addr_bits != 0 {
         let cur = crate::net::interface::info();
         let ip = if field_mask & net_if_config_mask::IP != 0 {
@@ -12101,7 +11941,24 @@ pub fn sys_net_route_add(args: &SyscallArgs) -> SyscallResult {
     };
 
     // Destructure by value: named fields, no indexing/arithmetic on the path.
-    let [d0, d1, d2, d3, m0, m1, m2, m3, g0, g1, g2, g3, mt0, mt1, mt2, mt3] = record;
+    let [
+        d0,
+        d1,
+        d2,
+        d3,
+        m0,
+        m1,
+        m2,
+        m3,
+        g0,
+        g1,
+        g2,
+        g3,
+        mt0,
+        mt1,
+        mt2,
+        mt3,
+    ] = record;
     let destination = crate::netns::Ipv4Addr([d0, d1, d2, d3]);
     let mask = crate::netns::Ipv4Addr([m0, m1, m2, m3]);
     let gateway = crate::netns::Ipv4Addr([g0, g1, g2, g3]);
@@ -12291,7 +12148,20 @@ pub fn sys_net_fw_add_rule(args: &SyscallArgs) -> SyscallResult {
     };
 
     // Destructure by value: named fields, no indexing on the decode path.
-    let [dir_b, act_b, proto_b, prefix_b, dp0, dp1, pr0, pr1, s0, s1, s2, s3] = record;
+    let [
+        dir_b,
+        act_b,
+        proto_b,
+        prefix_b,
+        dp0,
+        dp1,
+        pr0,
+        pr1,
+        s0,
+        s1,
+        s2,
+        s3,
+    ] = record;
 
     let direction = match dir_b {
         0 => Direction::In,
@@ -12423,8 +12293,7 @@ pub fn sys_arp_table(args: &SyscallArgs) -> SyscallResult {
         // SAFETY: `out` is a live kernel-owned buffer of exactly `out.len()`
         // bytes; `copy_to_user` validates the destination and brackets the
         // store with STAC/CLAC.
-        if let Err(e) =
-            unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg0, out.len()) }
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg0, out.len()) }
         {
             return SyscallResult::err(e);
         }
@@ -12478,9 +12347,7 @@ pub fn sys_dns_cache_stats(args: &SyscallArgs) -> SyscallResult {
     // SAFETY: `buf` is a live kernel stack array of exactly `STATS_SIZE`
     // bytes; `copy_to_user` validates the destination and brackets the store
     // with STAC/CLAC.
-    if let Err(e) =
-        unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), args.arg0, STATS_SIZE) }
-    {
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), args.arg0, STATS_SIZE) } {
         return SyscallResult::err(e);
     }
 
@@ -12617,12 +12484,24 @@ pub fn sys_tcp_info(args: &SyscallArgs) -> SyscallResult {
 
     // [1] flags bitfield.
     let mut flags: u8 = 0;
-    if info.keepalive { flags |= 1; }
-    if info.nagle     { flags |= 2; }
-    if info.ecn_ok    { flags |= 4; }
-    if info.sack_ok   { flags |= 8; }
-    if info.wscale_ok { flags |= 16; }
-    if info.ts_ok     { flags |= 32; }
+    if info.keepalive {
+        flags |= 1;
+    }
+    if info.nagle {
+        flags |= 2;
+    }
+    if info.ecn_ok {
+        flags |= 4;
+    }
+    if info.sack_ok {
+        flags |= 8;
+    }
+    if info.wscale_ok {
+        flags |= 16;
+    }
+    if info.ts_ok {
+        flags |= 32;
+    }
     buf[1] = flags;
 
     // [2..4] effective MSS (u16 LE).
@@ -12684,10 +12563,7 @@ pub fn sys_tcp_shutdown(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns 0 on success.
 pub fn sys_tcp_set_nodelay(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -12706,10 +12582,7 @@ pub fn sys_tcp_set_nodelay(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns 0 on success.
 pub fn sys_tcp_set_keepalive(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -12730,10 +12603,7 @@ pub fn sys_tcp_set_keepalive(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns 0 on success.
 pub fn sys_tcp_set_keepalive_params(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(
-        crate::cap::ResourceType::Socket,
-        crate::cap::Rights::WRITE,
-    ) {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
 
@@ -12744,13 +12614,25 @@ pub fn sys_tcp_set_keepalive_params(args: &SyscallArgs) -> SyscallResult {
     let max_probes = args.arg3 as u8;
 
     // Default keepalive values (matching kernel constants).
-    const DEFAULT_IDLE_NS: u64 = 75_000_000_000;   // 75 seconds
+    const DEFAULT_IDLE_NS: u64 = 75_000_000_000; // 75 seconds
     const DEFAULT_INTERVAL_NS: u64 = 10_000_000_000; // 10 seconds
     const DEFAULT_MAX_PROBES: u8 = 9;
 
-    let idle_ns = if idle_secs == 0 { DEFAULT_IDLE_NS } else { idle_secs.saturating_mul(1_000_000_000) };
-    let interval_ns = if interval_secs == 0 { DEFAULT_INTERVAL_NS } else { interval_secs.saturating_mul(1_000_000_000) };
-    let probes = if max_probes == 0 { DEFAULT_MAX_PROBES } else { max_probes };
+    let idle_ns = if idle_secs == 0 {
+        DEFAULT_IDLE_NS
+    } else {
+        idle_secs.saturating_mul(1_000_000_000)
+    };
+    let interval_ns = if interval_secs == 0 {
+        DEFAULT_INTERVAL_NS
+    } else {
+        interval_secs.saturating_mul(1_000_000_000)
+    };
+    let probes = if max_probes == 0 {
+        DEFAULT_MAX_PROBES
+    } else {
+        max_probes
+    };
 
     match crate::net::tcp::set_keepalive_params(handle, idle_ns, interval_ns, probes) {
         Ok(()) => SyscallResult::ok(0),

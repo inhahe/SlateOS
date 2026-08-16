@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -36,9 +36,9 @@ use crate::error::{KernelError, KernelResult};
 #[derive(Debug, Clone)]
 pub struct CpuStackStats {
     pub cpu_id: u32,
-    pub stack_size: u32,      // Total stack size in bytes
-    pub current_used: u32,    // Current usage
-    pub high_water: u32,      // Maximum ever used
+    pub stack_size: u32,   // Total stack size in bytes
+    pub current_used: u32, // Current usage
+    pub high_water: u32,   // Maximum ever used
     pub overflows: u64,
     pub guard_hits: u64,
     pub samples: u64,
@@ -93,7 +93,9 @@ where
 /// total_used_samples in the billions, plus 1 overflow and 3 guard hits.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         cpus: Vec::new(),
         total_overflows: 0,
@@ -106,11 +108,21 @@ pub fn init_defaults() {
 /// Register a CPU for stack tracking.
 pub fn register_cpu(cpu_id: u32, stack_size: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.cpus.len() >= MAX_CPUS { return Err(KernelError::ResourceExhausted); }
-        if state.cpus.iter().any(|c| c.cpu_id == cpu_id) { return Err(KernelError::AlreadyExists); }
+        if state.cpus.len() >= MAX_CPUS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.cpus.iter().any(|c| c.cpu_id == cpu_id) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.cpus.push(CpuStackStats {
-            cpu_id, stack_size, current_used: 0, high_water: 0,
-            overflows: 0, guard_hits: 0, samples: 0, total_used_samples: 0,
+            cpu_id,
+            stack_size,
+            current_used: 0,
+            high_water: 0,
+            overflows: 0,
+            guard_hits: 0,
+            samples: 0,
+            total_used_samples: 0,
         });
         Ok(())
     })
@@ -119,10 +131,15 @@ pub fn register_cpu(cpu_id: u32, stack_size: u32) -> KernelResult<()> {
 /// Record stack usage sample.
 pub fn record_usage(cpu_id: u32, used: u32) -> KernelResult<()> {
     with_state(|state| {
-        let c = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let c = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         c.current_used = used;
-        if used > c.high_water { c.high_water = used; }
+        if used > c.high_water {
+            c.high_water = used;
+        }
         c.samples += 1;
         c.total_used_samples += used as u64;
         state.total_samples += 1;
@@ -133,7 +150,10 @@ pub fn record_usage(cpu_id: u32, used: u32) -> KernelResult<()> {
 /// Record a stack overflow.
 pub fn record_overflow(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let c = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let c = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         c.overflows += 1;
         state.total_overflows += 1;
@@ -144,7 +164,10 @@ pub fn record_overflow(cpu_id: u32) -> KernelResult<()> {
 /// Record a guard page hit.
 pub fn record_guard_hit(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let c = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let c = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         c.guard_hits += 1;
         state.total_guard_hits += 1;
@@ -161,7 +184,13 @@ pub fn per_cpu() -> Vec<CpuStackStats> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.cpus.len(), s.total_overflows, s.total_guard_hits, s.total_samples, s.ops),
+        Some(s) => (
+            s.cpus.len(),
+            s.total_overflows,
+            s.total_guard_hits,
+            s.total_samples,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -192,7 +221,15 @@ pub fn self_test() {
     // 3: Usage sample — current + high-water + sample counters advance exactly.
     record_usage(0, 8192).expect("usage");
     let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("c3");
-    assert_eq!((c.current_used, c.high_water, c.samples, c.total_used_samples), (8192, 8192, 1, 8192));
+    assert_eq!(
+        (
+            c.current_used,
+            c.high_water,
+            c.samples,
+            c.total_used_samples
+        ),
+        (8192, 8192, 1, 8192)
+    );
     assert_eq!(stats().3, 1); // total_samples
     crate::serial_println!("  [3/8] usage: OK");
 
@@ -204,13 +241,27 @@ pub fn self_test() {
 
     // 5: Overflow — per-CPU and global overflow counters advance.
     record_overflow(0).expect("overflow");
-    assert_eq!(per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("c5").overflows, 1);
+    assert_eq!(
+        per_cpu()
+            .into_iter()
+            .find(|c| c.cpu_id == 0)
+            .expect("c5")
+            .overflows,
+        1
+    );
     assert_eq!(stats().1, 1); // total_overflows
     crate::serial_println!("  [5/8] overflow: OK");
 
     // 6: Guard hit — per-CPU and global guard-hit counters advance.
     record_guard_hit(0).expect("guard");
-    assert_eq!(per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("c6").guard_hits, 1);
+    assert_eq!(
+        per_cpu()
+            .into_iter()
+            .find(|c| c.cpu_id == 0)
+            .expect("c6")
+            .guard_hits,
+        1
+    );
     assert_eq!(stats().2, 1); // total_guard_hits
     crate::serial_println!("  [6/8] guard hit: OK");
 

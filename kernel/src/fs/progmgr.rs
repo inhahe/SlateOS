@@ -37,10 +37,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -921,10 +921,21 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("progmgr::self_test 4: notifications");
     add_notification("test.app", "alert")?;
     add_notification("test.app", "update")?;
-    set_notification_config("test.app", "alert", Some(false), Some("ding.wav"), None, None)?;
+    set_notification_config(
+        "test.app",
+        "alert",
+        Some(false),
+        Some("ding.wav"),
+        None,
+        None,
+    )?;
     let prog = get_program("test.app")?;
     assert_eq!(prog.notifications.len(), 2);
-    let alert = prog.notifications.iter().find(|n| n.name == "alert").expect("alert notif");
+    let alert = prog
+        .notifications
+        .iter()
+        .find(|n| n.name == "alert")
+        .expect("alert notif");
     assert!(!alert.show);
     assert_eq!(alert.sound, "ding.wav");
     remove_notification("test.app", "update")?;

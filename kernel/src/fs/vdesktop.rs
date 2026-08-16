@@ -26,10 +26,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -182,7 +182,10 @@ pub fn remove(id: u32) -> KernelResult<()> {
     if state.desktops.len() <= 1 {
         return Err(KernelError::InvalidArgument);
     }
-    let idx = state.desktops.iter().position(|d| d.id == id)
+    let idx = state
+        .desktops
+        .iter()
+        .position(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
 
     // Collect orphaned windows.
@@ -190,7 +193,9 @@ pub fn remove(id: u32) -> KernelResult<()> {
 
     // Pick the neighbor desktop to receive orphans.
     let neighbor_idx = if idx > 0 { idx - 1 } else { 1 };
-    let neighbor_id = state.desktops.get(neighbor_idx)
+    let neighbor_id = state
+        .desktops
+        .get(neighbor_idx)
         .map(|d| d.id)
         .ok_or(KernelError::InternalError)?;
 
@@ -208,7 +213,9 @@ pub fn remove(id: u32) -> KernelResult<()> {
 
     // If we removed the active desktop, activate the neighbor.
     if was_active {
-        let new_active = state.desktops.get(idx.min(state.desktops.len().saturating_sub(1)));
+        let new_active = state
+            .desktops
+            .get(idx.min(state.desktops.len().saturating_sub(1)));
         if let Some(d) = new_active {
             let new_id = d.id;
             if let Some(d) = state.desktops.iter_mut().find(|d| d.id == new_id) {
@@ -224,7 +231,10 @@ pub fn remove(id: u32) -> KernelResult<()> {
 /// Rename a desktop.
 pub fn rename(id: u32, name: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let d = state.desktops.iter_mut().find(|d| d.id == id)
+    let d = state
+        .desktops
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     d.name = String::from(name);
     Ok(())
@@ -269,7 +279,10 @@ pub fn switch(id: u32) -> KernelResult<()> {
         d.active = false;
     }
     // Activate new.
-    let d = state.desktops.iter_mut().find(|d| d.id == id)
+    let d = state
+        .desktops
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     d.active = true;
     state.current = id;
@@ -320,7 +333,10 @@ pub fn previous() -> KernelResult<()> {
 /// Reorder a desktop to a new position (0-based).
 pub fn reorder(id: u32, new_pos: usize) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let idx = state.desktops.iter().position(|d| d.id == id)
+    let idx = state
+        .desktops
+        .iter()
+        .position(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     let clamped = new_pos.min(state.desktops.len().saturating_sub(1));
     let d = state.desktops.remove(idx);
@@ -335,7 +351,10 @@ pub fn reorder(id: u32, new_pos: usize) -> KernelResult<()> {
 /// Add a window to a desktop.
 pub fn add_window(desktop_id: u32, window_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let d = state.desktops.iter_mut().find(|d| d.id == desktop_id)
+    let d = state
+        .desktops
+        .iter_mut()
+        .find(|d| d.id == desktop_id)
         .ok_or(KernelError::NotFound)?;
     if d.windows.len() >= MAX_WINDOWS_PER_DESKTOP {
         return Err(KernelError::ResourceExhausted);
@@ -349,7 +368,10 @@ pub fn add_window(desktop_id: u32, window_id: u64) -> KernelResult<()> {
 /// Remove a window from a desktop.
 pub fn remove_window(desktop_id: u32, window_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let d = state.desktops.iter_mut().find(|d| d.id == desktop_id)
+    let d = state
+        .desktops
+        .iter_mut()
+        .find(|d| d.id == desktop_id)
         .ok_or(KernelError::NotFound)?;
     d.windows.retain(|&w| w != window_id);
     // Also unpin if pinned.
@@ -374,7 +396,10 @@ pub fn move_window(window_id: u64, from: u32, to: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
 
     // Remove from source.
-    let src = state.desktops.iter_mut().find(|d| d.id == from)
+    let src = state
+        .desktops
+        .iter_mut()
+        .find(|d| d.id == from)
         .ok_or(KernelError::NotFound)?;
     if !src.windows.contains(&window_id) {
         return Err(KernelError::NotFound);
@@ -382,7 +407,10 @@ pub fn move_window(window_id: u64, from: u32, to: u32) -> KernelResult<()> {
     src.windows.retain(|&w| w != window_id);
 
     // Add to destination.
-    let dst = state.desktops.iter_mut().find(|d| d.id == to)
+    let dst = state
+        .desktops
+        .iter_mut()
+        .find(|d| d.id == to)
         .ok_or(KernelError::NotFound)?;
     if dst.windows.len() >= MAX_WINDOWS_PER_DESKTOP {
         return Err(KernelError::ResourceExhausted);
@@ -466,7 +494,10 @@ pub fn pinned_windows() -> Vec<u64> {
 /// Set a per-desktop wallpaper override.
 pub fn set_wallpaper(id: u32, path: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let d = state.desktops.iter_mut().find(|d| d.id == id)
+    let d = state
+        .desktops
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     d.wallpaper = String::from(path);
     Ok(())
@@ -475,7 +506,10 @@ pub fn set_wallpaper(id: u32, path: &str) -> KernelResult<()> {
 /// Clear per-desktop wallpaper (use global).
 pub fn clear_wallpaper(id: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let d = state.desktops.iter_mut().find(|d| d.id == id)
+    let d = state
+        .desktops
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     d.wallpaper.clear();
     Ok(())
@@ -531,7 +565,13 @@ pub fn stats() -> (usize, usize, usize, u64, u64) {
     let dc = state.desktops.len();
     let wc: usize = state.desktops.iter().map(|d| d.windows.len()).sum();
     let pc = state.pinned.len();
-    (dc, wc, pc, SWITCH_COUNT.load(Ordering::Relaxed), MOVE_COUNT.load(Ordering::Relaxed))
+    (
+        dc,
+        wc,
+        pc,
+        SWITCH_COUNT.load(Ordering::Relaxed),
+        MOVE_COUNT.load(Ordering::Relaxed),
+    )
 }
 
 /// Reset statistics counters.
@@ -621,7 +661,10 @@ pub fn self_test() -> KernelResult<()> {
     rename(d1, "Renamed")?;
     assert_eq!(get(d1).map(|d| d.name), Some(String::from("Renamed")));
     set_wallpaper(d1, "/wallpapers/nature.jpg")?;
-    assert_eq!(get(d1).map(|d| d.wallpaper), Some(String::from("/wallpapers/nature.jpg")));
+    assert_eq!(
+        get(d1).map(|d| d.wallpaper),
+        Some(String::from("/wallpapers/nature.jpg"))
+    );
     clear_wallpaper(d1)?;
     assert_eq!(get(d1).map(|d| d.wallpaper), Some(String::new()));
     set_animation(SwitchAnimation::Fade);

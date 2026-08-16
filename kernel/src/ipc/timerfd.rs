@@ -67,15 +67,15 @@
 //! scheduler or any other subsystem while holding it (the clock reads happen
 //! before the lock is taken), so it never participates in a lock-ordering cycle.
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
+use super::waiters::{WaiterSet, wake_all};
 use crate::error::{KernelError, KernelResult};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
-use super::waiters::{wake_all, WaiterSet};
 
 /// `CLOCK_MONOTONIC`.
 pub const CLOCK_MONOTONIC: i32 = 1;
@@ -494,7 +494,10 @@ pub fn gettime(handle: TimerFdHandle) -> Option<(u64, u64)> {
     let now = now_for_clock(cid);
     let table = TIMERFD_TABLE.lock();
     let tfd = table.get(&handle.id())?;
-    Some((remaining(tfd.expiry_ns, tfd.interval_ns, now), tfd.interval_ns))
+    Some((
+        remaining(tfd.expiry_ns, tfd.interval_ns, now),
+        tfd.interval_ns,
+    ))
 }
 
 /// Consume and return the number of expirations since the last read.
@@ -539,8 +542,7 @@ fn current_user_pid() -> u64 {
 ///
 /// Always `false` for `pid == 0` (kernel task — no signal context).
 fn deliverable_signal_pending(pid: u64) -> bool {
-    pid != 0
-        && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
+    pid != 0 && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
 }
 
 /// Park the current task for a blocking timerfd read, interruptibly for user
@@ -667,8 +669,8 @@ pub fn read_expirations_blocking(handle: TimerFdHandle) -> KernelResult<Blocking
 
         // Arm a wakeup `hrtimer` for the armed case; the disarmed case relies on
         // `settime` waking `reader_waiters`.
-        let timer = next_remaining
-            .map(|rem| crate::hrtimer::schedule_ns(rem.max(1), timerfd_wake, task));
+        let timer =
+            next_remaining.map(|rem| crate::hrtimer::schedule_ns(rem.max(1), timerfd_wake, task));
 
         park_for_timerfd(pid, task);
 
@@ -992,8 +994,7 @@ pub fn self_test() -> KernelResult<()> {
 
 /// Number of multi-waiter readers that were woken by `settime` and went on to
 /// consume an expiration.
-static TIMERFD_MULTI_OK: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+static TIMERFD_MULTI_OK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Multi-waiter task: park on a **disarmed** timerfd until it is armed and
 /// fires.

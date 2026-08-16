@@ -59,9 +59,9 @@
 //! until that wiring is in place (mirroring [`crate::audio_alsa`]).
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::audio_mixer::{self, StreamId};
 use crate::error::{KernelError, KernelResult};
@@ -260,7 +260,10 @@ pub fn dup(handle: AlsaPcmHandle) -> KernelResult<AlsaPcmHandle> {
     let pcm = table
         .get_mut(&handle.id())
         .ok_or(KernelError::InvalidHandle)?;
-    pcm.refcount = pcm.refcount.checked_add(1).ok_or(KernelError::InvalidHandle)?;
+    pcm.refcount = pcm
+        .refcount
+        .checked_add(1)
+        .ok_or(KernelError::InvalidHandle)?;
     Ok(handle)
 }
 
@@ -368,12 +371,7 @@ pub fn params(handle: AlsaPcmHandle) -> Option<(u32, u32, u32)> {
 ///   `HW_REFINE`, so a conforming ALSA-lib never reaches this).
 /// - [`KernelError::WouldBlock`] if no mixer slot is free (propagated from
 ///   [`crate::audio_mixer::open_stream`]).
-pub fn hw_params(
-    handle: AlsaPcmHandle,
-    format: u32,
-    rate: u32,
-    channels: u32,
-) -> KernelResult<()> {
+pub fn hw_params(handle: AlsaPcmHandle, format: u32, rate: u32, channels: u32) -> KernelResult<()> {
     if !crate::audio_alsa::mixer_accepts_directly(format, rate, channels) {
         // Confirm the handle exists so a stale fd still reports InvalidHandle
         // rather than masking it as a config error.
@@ -449,7 +447,9 @@ pub fn hw_params(
 pub fn hw_free(handle: AlsaPcmHandle) -> KernelResult<()> {
     let mixer_to_free = {
         let mut table = ALSA_PCM_TABLE.lock();
-        let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+        let pcm = table
+            .get_mut(&handle.id())
+            .ok_or(KernelError::InvalidHandle)?;
         let stream = pcm.mixer_stream.take();
         pcm.format = None;
         pcm.rate = None;
@@ -475,7 +475,9 @@ pub fn hw_free(handle: AlsaPcmHandle) -> KernelResult<()> {
 pub fn prepare(handle: AlsaPcmHandle) -> KernelResult<()> {
     let mixer_to_clear = {
         let mut table = ALSA_PCM_TABLE.lock();
-        let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+        let pcm = table
+            .get_mut(&handle.id())
+            .ok_or(KernelError::InvalidHandle)?;
         if pcm.state == STATE_OPEN {
             return Err(KernelError::InvalidArgument);
         }
@@ -498,7 +500,9 @@ pub fn prepare(handle: AlsaPcmHandle) -> KernelResult<()> {
 ///   (ALSA returns `-EBADFD` here; we surface it as `EINVAL`).
 pub fn start(handle: AlsaPcmHandle) -> KernelResult<()> {
     let mut table = ALSA_PCM_TABLE.lock();
-    let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    let pcm = table
+        .get_mut(&handle.id())
+        .ok_or(KernelError::InvalidHandle)?;
     if pcm.state != STATE_PREPARED {
         return Err(KernelError::InvalidArgument);
     }
@@ -517,7 +521,9 @@ pub fn start(handle: AlsaPcmHandle) -> KernelResult<()> {
 pub fn drop_stream(handle: AlsaPcmHandle) -> KernelResult<()> {
     let mixer_to_clear = {
         let mut table = ALSA_PCM_TABLE.lock();
-        let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+        let pcm = table
+            .get_mut(&handle.id())
+            .ok_or(KernelError::InvalidHandle)?;
         // DROP from OPEN is a no-op success in ALSA; only reconfigured states
         // move to SETUP.
         if pcm.state != STATE_OPEN {
@@ -546,7 +552,9 @@ pub fn drop_stream(handle: AlsaPcmHandle) -> KernelResult<()> {
 /// [`KernelError::InvalidHandle`] if the instance is stale.
 pub fn drain(handle: AlsaPcmHandle) -> KernelResult<()> {
     let mut table = ALSA_PCM_TABLE.lock();
-    let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    let pcm = table
+        .get_mut(&handle.id())
+        .ok_or(KernelError::InvalidHandle)?;
     if pcm.state != STATE_OPEN {
         pcm.state = STATE_SETUP;
     }
@@ -562,7 +570,9 @@ pub fn drain(handle: AlsaPcmHandle) -> KernelResult<()> {
 ///   (pause requires `RUNNING`, resume requires `PAUSED`).
 pub fn pause(handle: AlsaPcmHandle, enable: bool) -> KernelResult<()> {
     let mut table = ALSA_PCM_TABLE.lock();
-    let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    let pcm = table
+        .get_mut(&handle.id())
+        .ok_or(KernelError::InvalidHandle)?;
     match (enable, pcm.state) {
         (true, STATE_RUNNING) => {
             pcm.state = STATE_PAUSED;
@@ -585,7 +595,9 @@ pub fn pause(handle: AlsaPcmHandle, enable: bool) -> KernelResult<()> {
 pub fn reset(handle: AlsaPcmHandle) -> KernelResult<()> {
     let mixer_to_clear = {
         let mut table = ALSA_PCM_TABLE.lock();
-        let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+        let pcm = table
+            .get_mut(&handle.id())
+            .ok_or(KernelError::InvalidHandle)?;
         pcm.frames_written = 0;
         pcm.mixer_stream
     };
@@ -607,7 +619,9 @@ pub fn reset(handle: AlsaPcmHandle) -> KernelResult<()> {
 /// [`KernelError::InvalidHandle`] if the instance is stale.
 pub fn set_sw_params(handle: AlsaPcmHandle, boundary: u64, avail_min: u64) -> KernelResult<()> {
     let mut table = ALSA_PCM_TABLE.lock();
-    let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    let pcm = table
+        .get_mut(&handle.id())
+        .ok_or(KernelError::InvalidHandle)?;
     pcm.boundary = boundary;
     pcm.avail_min = avail_min;
     Ok(())
@@ -655,7 +669,16 @@ pub fn set_buffer_size(handle: AlsaPcmHandle, frames: u64) {
 /// mixer call is made while `ALSA_PCM_TABLE` is held.
 #[must_use]
 pub fn sync_position(handle: AlsaPcmHandle) -> Option<PcmPosition> {
-    let (state, frames_written, boundary, avail_min, mixer_stream, buffer_frames, capture, trigger_time_ns) = {
+    let (
+        state,
+        frames_written,
+        boundary,
+        avail_min,
+        mixer_stream,
+        buffer_frames,
+        capture,
+        trigger_time_ns,
+    ) = {
         let table = ALSA_PCM_TABLE.lock();
         let pcm = table.get(&handle.id())?;
         (
@@ -745,7 +768,9 @@ pub fn write_frames(handle: AlsaPcmHandle, data: &[u8]) -> KernelResult<usize> {
     // Phase 1: validate the transition and fetch the mixer slot under the lock.
     let mixer_id = {
         let mut table = ALSA_PCM_TABLE.lock();
-        let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+        let pcm = table
+            .get_mut(&handle.id())
+            .ok_or(KernelError::InvalidHandle)?;
         if pcm.capture {
             return Err(KernelError::InvalidArgument);
         }
@@ -766,7 +791,9 @@ pub fn write_frames(handle: AlsaPcmHandle, data: &[u8]) -> KernelResult<usize> {
 
     // Phase 3: advance the application pointer.
     if let Some(pcm) = ALSA_PCM_TABLE.lock().get_mut(&handle.id()) {
-        let frames = written.checked_div(audio_mixer::FRAME_SIZE_BYTES).unwrap_or(0) as u64;
+        let frames = written
+            .checked_div(audio_mixer::FRAME_SIZE_BYTES)
+            .unwrap_or(0) as u64;
         pcm.frames_written = pcm.frames_written.saturating_add(frames);
     }
     Ok(written)
@@ -798,7 +825,10 @@ pub fn writable(handle: AlsaPcmHandle) -> bool {
 /// are never readable.
 #[must_use]
 pub fn readable(handle: AlsaPcmHandle) -> bool {
-    ALSA_PCM_TABLE.lock().get(&handle.id()).is_some_and(|p| p.capture)
+    ALSA_PCM_TABLE
+        .lock()
+        .get(&handle.id())
+        .is_some_and(|p| p.capture)
 }
 
 // ---------------------------------------------------------------------------
@@ -850,7 +880,10 @@ pub fn self_test() -> KernelResult<()> {
         hw_params(p, 2, 44100, 2) == Err(KernelError::InvalidArgument),
         "non-native rate rejected"
     );
-    check!(state(p) == Some(STATE_OPEN), "rejected hw_params leaves OPEN");
+    check!(
+        state(p) == Some(STATE_OPEN),
+        "rejected hw_params leaves OPEN"
+    );
     // Native config is accepted: OPEN -> SETUP, mixer slot reserved.
     hw_params(p, 2, 48000, 2)?;
     check!(state(p) == Some(STATE_SETUP), "hw_params -> SETUP");
@@ -858,8 +891,14 @@ pub fn self_test() -> KernelResult<()> {
     // Idempotent repeat: a second HW_PARAMS reuses the already-reserved mixer
     // slot (need_stream == false) rather than opening/leaking another.
     hw_params(p, 2, 48000, 2)?;
-    check!(state(p) == Some(STATE_SETUP), "repeat hw_params stays SETUP");
-    check!(params(p) == Some((2, 48000, 2)), "repeat hw_params keeps params");
+    check!(
+        state(p) == Some(STATE_SETUP),
+        "repeat hw_params stays SETUP"
+    );
+    check!(
+        params(p) == Some((2, 48000, 2)),
+        "repeat hw_params keeps params"
+    );
     // PREPARE -> PREPARED, then a write auto-starts to RUNNING.
     prepare(p)?;
     check!(state(p) == Some(STATE_PREPARED), "prepare -> PREPARED");
@@ -867,7 +906,10 @@ pub fn self_test() -> KernelResult<()> {
     let n = write_frames(p, &frame)?;
     check!(n == 8, "two frames accepted");
     check!(state(p) == Some(STATE_RUNNING), "write auto-starts RUNNING");
-    check!(frames_written(p) == Some(2), "appl ptr advanced by 2 frames");
+    check!(
+        frames_written(p) == Some(2),
+        "appl ptr advanced by 2 frames"
+    );
     check!(writable(p), "running playback is writable");
     check!(!readable(p), "playback is not readable");
     // SW_PARAMS records the boundary + avail_min for SYNC_PTR reporting.
@@ -903,7 +945,10 @@ pub fn self_test() -> KernelResult<()> {
     check!(snap.avail == 1022, "STATUS avail = buffer_frames - delay");
     check!(!snap.capture, "playback snapshot capture flag false");
     // Auto-start left trigger unset; an explicit prepare+start stamps it.
-    check!(snap.trigger_time_ns == 0, "trigger unstamped before explicit start");
+    check!(
+        snap.trigger_time_ns == 0,
+        "trigger unstamped before explicit start"
+    );
     // A pushed application pointer is adopted (the !APPL SYNC_PTR case).
     set_appl_ptr(p, 7);
     check!(frames_written(p) == Some(7), "set_appl_ptr adopted");
@@ -915,7 +960,10 @@ pub fn self_test() -> KernelResult<()> {
     // PAUSE / resume round-trip.
     pause(p, true)?;
     check!(state(p) == Some(STATE_PAUSED), "pause -> PAUSED");
-    check!(pause(p, true) == Err(KernelError::InvalidArgument), "double pause errors");
+    check!(
+        pause(p, true) == Err(KernelError::InvalidArgument),
+        "double pause errors"
+    );
     pause(p, false)?;
     check!(state(p) == Some(STATE_RUNNING), "resume -> RUNNING");
     // DRAIN -> SETUP, then re-prepare and START explicitly.
@@ -938,7 +986,10 @@ pub fn self_test() -> KernelResult<()> {
     check!(state(p) == Some(STATE_OPEN), "hw_free -> OPEN");
     check!(params(p).is_none(), "hw_free clears params");
     // A start from OPEN is illegal; a write without config is illegal.
-    check!(start(p) == Err(KernelError::InvalidArgument), "start from OPEN errors");
+    check!(
+        start(p) == Err(KernelError::InvalidArgument),
+        "start from OPEN errors"
+    );
     check!(
         write_frames(p, &frame) == Err(KernelError::InvalidArgument),
         "write without config errors"
@@ -949,7 +1000,10 @@ pub fn self_test() -> KernelResult<()> {
     // --- capture substream ---------------------------------------------
     let cap = create(true);
     hw_params(cap, 2, 48000, 2)?;
-    check!(state(cap) == Some(STATE_SETUP), "capture hw_params -> SETUP");
+    check!(
+        state(cap) == Some(STATE_SETUP),
+        "capture hw_params -> SETUP"
+    );
     check!(readable(cap), "configured capture is readable");
     check!(!writable(cap), "capture is not writable");
     check!(
@@ -958,7 +1012,10 @@ pub fn self_test() -> KernelResult<()> {
     );
     // READI_FRAMES on a capture substream yields silence (mixer is output-only).
     let mut rbuf = [0xAAu8; 8];
-    check!(read_frames(cap, &mut rbuf) == Ok(8), "capture read produces full buffer");
+    check!(
+        read_frames(cap, &mut rbuf) == Ok(8),
+        "capture read produces full buffer"
+    );
     check!(rbuf == [0u8; 8], "capture read is silence");
     // A read on the (now-stale) playback handle is rejected.
     check!(

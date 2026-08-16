@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -150,7 +150,9 @@ where
 /// recovery partition or installed tool image.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         status: PartitionStatus::Missing,
         tools: Vec::new(),
@@ -184,7 +186,12 @@ pub fn register_partition(size_bytes: u64) -> KernelResult<()> {
 }
 
 /// Add a recovery tool.
-pub fn add_tool(name: &str, tool_type: ToolType, version: &str, size_bytes: u64) -> KernelResult<u32> {
+pub fn add_tool(
+    name: &str,
+    tool_type: ToolType,
+    version: &str,
+    size_bytes: u64,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.tools.len() >= MAX_TOOLS {
             return Err(KernelError::ResourceExhausted);
@@ -196,8 +203,12 @@ pub fn add_tool(name: &str, tool_type: ToolType, version: &str, size_bytes: u64)
         let id = state.next_id;
         state.next_id += 1;
         state.tools.push(RecoveryTool {
-            id, name: String::from(name), tool_type,
-            version: String::from(version), size_bytes, installed_ns: now,
+            id,
+            name: String::from(name),
+            tool_type,
+            version: String::from(version),
+            size_bytes,
+            installed_ns: now,
         });
         state.used_bytes += size_bytes;
         Ok(id)
@@ -222,7 +233,8 @@ pub fn remove_tool(id: u32) -> KernelResult<()> {
 pub fn verify_integrity() -> KernelResult<bool> {
     with_state(|state| {
         state.total_verifications += 1;
-        let ok = state.status != PartitionStatus::Corrupted && state.status != PartitionStatus::Missing;
+        let ok =
+            state.status != PartitionStatus::Corrupted && state.status != PartitionStatus::Missing;
         Ok(ok)
     })
 }
@@ -230,7 +242,10 @@ pub fn verify_integrity() -> KernelResult<bool> {
 /// Simulate running a repair.
 pub fn run_repair(tool_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let _tool = state.tools.iter().find(|t| t.id == tool_id)
+        let _tool = state
+            .tools
+            .iter()
+            .find(|t| t.id == tool_id)
             .ok_or(KernelError::NotFound)?;
         state.total_repairs += 1;
         Ok(())
@@ -258,26 +273,42 @@ pub fn set_status(new_status: PartitionStatus) -> KernelResult<()> {
 
 /// Get partition status.
 pub fn get_status() -> PartitionStatus {
-    STATE.lock().as_ref().map_or(PartitionStatus::Missing, |s| s.status)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(PartitionStatus::Missing, |s| s.status)
 }
 
 /// Get space usage: (total, used, free).
 pub fn space_usage() -> (u64, u64, u64) {
     STATE.lock().as_ref().map_or((0, 0, 0), |s| {
-        (s.partition_size_bytes, s.used_bytes, s.partition_size_bytes.saturating_sub(s.used_bytes))
+        (
+            s.partition_size_bytes,
+            s.used_bytes,
+            s.partition_size_bytes.saturating_sub(s.used_bytes),
+        )
     })
 }
 
 /// List tools.
 pub fn list_tools() -> Vec<RecoveryTool> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.tools.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.tools.clone())
 }
 
 /// Statistics: (tool_count, total_repairs, total_verifications, total_boots, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.tools.len(), s.total_repairs, s.total_verifications, s.total_boots, s.ops),
+        Some(s) => (
+            s.tools.len(),
+            s.total_repairs,
+            s.total_verifications,
+            s.total_boots,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

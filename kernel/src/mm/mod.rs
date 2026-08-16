@@ -30,7 +30,6 @@ pub mod alloc_checkpoint;
 pub mod alloc_lat;
 pub mod alloc_trace;
 pub mod compact;
-pub mod integ_test;
 pub mod compress;
 pub mod cow;
 pub mod dma;
@@ -42,23 +41,24 @@ pub mod frame_owner;
 pub mod heap;
 pub mod heap_profile;
 pub mod hugepage;
+pub mod integ_test;
 pub mod kasan;
 pub mod kasan_rt;
 pub mod kstack;
-pub mod kvspace;
 pub mod kswapd;
+pub mod kvspace;
 pub mod mempool;
 pub mod memtype;
 pub mod migrate_type;
+pub mod oom;
 pub mod page_age;
 pub mod page_cache;
-pub mod oom;
 pub mod page_table;
 pub mod pcid;
-pub mod pt_walk;
 pub mod poison;
 pub mod pressure;
 pub mod protect;
+pub mod pt_walk;
 pub mod quarantine;
 pub mod rawmem;
 pub mod rlimits;
@@ -67,8 +67,8 @@ pub mod scrub;
 pub mod swap;
 pub mod tlb_gather;
 pub mod user;
-pub mod vmalloc;
 pub mod vma;
+pub mod vmalloc;
 pub mod watermark;
 
 // ---------------------------------------------------------------------------
@@ -181,8 +181,11 @@ impl core::fmt::Display for MemoryInfo {
         let swap_total_mb = self.swap_total_bytes / (1024 * 1024);
         let swap_used_mb = self.swap_used_bytes / (1024 * 1024);
 
-        writeln!(f, "Physical:  {} MiB total, {} MiB used, {} MiB free ({} frames)",
-            total_mb, used_mb, free_mb, self.free_frames)?;
+        writeln!(
+            f,
+            "Physical:  {} MiB total, {} MiB used, {} MiB free ({} frames)",
+            total_mb, used_mb, free_mb, self.free_frames
+        )?;
 
         // Buddy allocator fragmentation.
         write!(f, "Buddy:     frag={}%  orders=[", self.fragmentation_pct)?;
@@ -201,27 +204,59 @@ impl core::fmt::Display for MemoryInfo {
         } else {
             0
         };
-        writeln!(f, "PCPU:      hit={}% ({}/{})  refills={}  drains={}",
-            hit_pct, self.pcpu_cache_hits, total_allocs,
-            self.pcpu_refill_ops, self.pcpu_drain_ops)?;
+        writeln!(
+            f,
+            "PCPU:      hit={}% ({}/{})  refills={}  drains={}",
+            hit_pct, self.pcpu_cache_hits, total_allocs, self.pcpu_refill_ops, self.pcpu_drain_ops
+        )?;
 
-        writeln!(f, "Zero pool: {} frames (hits: {}, misses: {})",
-            self.zero_pool_count, self.zero_pool_hits, self.zero_pool_misses)?;
-        writeln!(f, "Heap:      slab={}/{}  large={}  failures={}",
-            self.heap_slab_allocs, self.heap_slab_frees,
-            self.heap_large_allocs, self.heap_alloc_failures)?;
-        writeln!(f, "Swap:      {} MiB / {} MiB ({} device{})",
-            swap_used_mb, swap_total_mb,
+        writeln!(
+            f,
+            "Zero pool: {} frames (hits: {}, misses: {})",
+            self.zero_pool_count, self.zero_pool_hits, self.zero_pool_misses
+        )?;
+        writeln!(
+            f,
+            "Heap:      slab={}/{}  large={}  failures={}",
+            self.heap_slab_allocs,
+            self.heap_slab_frees,
+            self.heap_large_allocs,
+            self.heap_alloc_failures
+        )?;
+        writeln!(
+            f,
+            "Swap:      {} MiB / {} MiB ({} device{})",
+            swap_used_mb,
+            swap_total_mb,
             self.swap_device_count,
-            if self.swap_device_count == 1 { "" } else { "s" })?;
-        writeln!(f, "kswapd:    {} (cycles: {}, reclaimed: {} pages)",
-            if self.kswapd_running { "running" } else { "stopped" },
-            self.kswapd_reclaim_cycles, self.kswapd_total_reclaimed)?;
-        writeln!(f, "OOM:       {} events, {} kills",
-            self.oom_events, self.oom_kills)?;
-        write!(f, "Tracking:  {} user address space{}",
+            if self.swap_device_count == 1 { "" } else { "s" }
+        )?;
+        writeln!(
+            f,
+            "kswapd:    {} (cycles: {}, reclaimed: {} pages)",
+            if self.kswapd_running {
+                "running"
+            } else {
+                "stopped"
+            },
+            self.kswapd_reclaim_cycles,
+            self.kswapd_total_reclaimed
+        )?;
+        writeln!(
+            f,
+            "OOM:       {} events, {} kills",
+            self.oom_events, self.oom_kills
+        )?;
+        write!(
+            f,
+            "Tracking:  {} user address space{}",
             self.tracked_address_spaces,
-            if self.tracked_address_spaces == 1 { "" } else { "s" })
+            if self.tracked_address_spaces == 1 {
+                ""
+            } else {
+                "s"
+            }
+        )
     }
 }
 
@@ -235,9 +270,7 @@ impl core::fmt::Display for MemoryInfo {
 pub fn memory_info() -> MemoryInfo {
     // Physical frame allocator.
     let (total_frames, free_frames, free_bytes) =
-        frame::stats().map_or((0, 0, 0), |s| {
-            (s.total_frames, s.free_frames, s.free_bytes)
-        });
+        frame::stats().map_or((0, 0, 0), |s| (s.total_frames, s.free_frames, s.free_bytes));
     let total_bytes = total_frames * frame::FRAME_SIZE;
     let used_bytes = total_bytes.saturating_sub(free_bytes);
 
@@ -257,10 +290,8 @@ pub fn memory_info() -> MemoryInfo {
     let kswapd_total_reclaimed = kswapd::total_reclaimed();
 
     // Buddy order distribution and fragmentation index.
-    let order_counts = frame::stats().map_or(
-        [0usize; frame::BUDDY_MAX_ORDER + 1],
-        |s| s.order_counts,
-    );
+    let order_counts =
+        frame::stats().map_or([0usize; frame::BUDDY_MAX_ORDER + 1], |s| s.order_counts);
     let fragmentation_pct = compute_fragmentation(&order_counts);
 
     // Per-CPU frame cache diagnostics.
@@ -319,8 +350,8 @@ fn compute_fragmentation(order_counts: &[usize; frame::BUDDY_MAX_ORDER + 1]) -> 
         let frames = (count as u64).saturating_mul(frames_per_block);
         total_frames = total_frames.saturating_add(frames);
         // Weight: order × frames-in-this-order.
-        weighted_order_sum = weighted_order_sum
-            .saturating_add((order as u64).saturating_mul(frames));
+        weighted_order_sum =
+            weighted_order_sum.saturating_add((order as u64).saturating_mul(frames));
     }
 
     if total_frames == 0 {
@@ -336,7 +367,10 @@ fn compute_fragmentation(order_counts: &[usize; frame::BUDDY_MAX_ORDER + 1]) -> 
 
     // Complement: 100 when avg=0, 0 when avg=max_order.
     let frag = 100u64.saturating_sub(
-        avg_order_x100.saturating_mul(100).checked_div(max_order_x100).unwrap_or(0)
+        avg_order_x100
+            .saturating_mul(100)
+            .checked_div(max_order_x100)
+            .unwrap_or(0),
     );
 
     // Clamp to u8 (always in 0..=100).
@@ -402,9 +436,9 @@ pub fn memory_pressure() -> MemoryPressure {
     };
     // Apply non-linear curve: below 70% = mild, 70-90% = moderate, >90% = severe.
     let phys_score = match phys_pct {
-        0..=70 => phys_pct / 2,        // 0-35 range
+        0..=70 => phys_pct / 2,              // 0-35 range
         71..=90 => 35 + (phys_pct - 70) * 2, // 35-75 range
-        _ => 75 + (phys_pct - 90) * 2, // 75-95+ range
+        _ => 75 + (phys_pct - 90) * 2,       // 75-95+ range
     };
     let phys_score = phys_score.min(100);
 
@@ -413,11 +447,11 @@ pub fn memory_pressure() -> MemoryPressure {
 
     // --- Heap failure pressure ---
     // If heap allocation failures are occurring, that's serious pressure.
-    let total_heap_allocs = info.heap_slab_allocs
-        .saturating_add(info.heap_large_allocs);
+    let total_heap_allocs = info.heap_slab_allocs.saturating_add(info.heap_large_allocs);
     let heap_score = if total_heap_allocs > 0 {
         // Failure rate: failures / total_allocs × 100.
-        let failure_rate = info.heap_alloc_failures
+        let failure_rate = info
+            .heap_alloc_failures
             .saturating_mul(1000)
             .checked_div(total_heap_allocs)
             .unwrap_or(0);
@@ -439,7 +473,8 @@ pub fn memory_pressure() -> MemoryPressure {
     let weighted = (u16::from(phys_score) * 40
         + u16::from(frag_score) * 20
         + u16::from(heap_score) * 25
-        + u16::from(swap_score) * 15) / 100;
+        + u16::from(swap_score) * 15)
+        / 100;
     let score = (weighted as u8).min(100);
 
     let level = match score {

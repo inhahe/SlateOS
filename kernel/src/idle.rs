@@ -133,8 +133,7 @@ pub fn stats() -> IdleStats {
 /// Checks CPU support for MONITOR/MWAIT and enables it if available.
 /// Must be called after `cpu::detect_features()`.
 pub fn init() {
-    let has_mwait = cpu::features()
-        .is_some_and(|f| f.mwait);
+    let has_mwait = cpu::features().is_some_and(|f| f.mwait);
 
     if has_mwait {
         MWAIT_ENABLED.store(true, Ordering::Release);
@@ -184,7 +183,8 @@ pub fn clear_resched() {
 #[must_use]
 pub fn resched_pending() -> bool {
     let cpu = smp::current_cpu_index();
-    NEED_RESCHED.get(cpu)
+    NEED_RESCHED
+        .get(cpu)
         .is_some_and(|f| f.load(Ordering::Acquire))
 }
 
@@ -243,7 +243,8 @@ fn idle_mwait() {
     MWAIT_ENTRIES.fetch_add(1, Ordering::Relaxed);
 
     let cpu = smp::current_cpu_index();
-    let monitor_addr = NEED_RESCHED.get(cpu)
+    let monitor_addr = NEED_RESCHED
+        .get(cpu)
         .map_or(core::ptr::null(), |f| f as *const AtomicBool as *const u8);
 
     if monitor_addr.is_null() {
@@ -253,7 +254,10 @@ fn idle_mwait() {
     }
 
     // Check if we already have a pending resched before entering idle.
-    if NEED_RESCHED.get(cpu).is_some_and(|f| f.load(Ordering::Acquire)) {
+    if NEED_RESCHED
+        .get(cpu)
+        .is_some_and(|f| f.load(Ordering::Acquire))
+    {
         RESCHED_WAKES.fetch_add(1, Ordering::Relaxed);
         return;
     }
@@ -283,7 +287,10 @@ fn idle_mwait() {
         // This closes the race window: if signal_resched wrote between
         // our earlier check and the MONITOR setup, MWAIT would wait
         // forever (the write already happened, won't write again).
-        if NEED_RESCHED.get(cpu).is_some_and(|f| f.load(Ordering::Acquire)) {
+        if NEED_RESCHED
+            .get(cpu)
+            .is_some_and(|f| f.load(Ordering::Acquire))
+        {
             RESCHED_WAKES.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -303,7 +310,10 @@ fn idle_mwait() {
     }
 
     // Check if we woke due to resched signal.
-    if NEED_RESCHED.get(cpu).is_some_and(|f| f.load(Ordering::Acquire)) {
+    if NEED_RESCHED
+        .get(cpu)
+        .is_some_and(|f| f.load(Ordering::Acquire))
+    {
         RESCHED_WAKES.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -333,7 +343,10 @@ pub fn self_test() {
     signal_resched(cpu);
     assert!(resched_pending(), "should be pending after signal");
     clear_resched();
-    assert!(!resched_pending(), "should not be pending after second clear");
+    assert!(
+        !resched_pending(),
+        "should not be pending after second clear"
+    );
     crate::serial_println!("[idle]   Signal/clear/pending: OK");
 
     // Test 2: Stats are incrementing.

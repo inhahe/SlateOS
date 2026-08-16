@@ -31,11 +31,11 @@
 
 #![allow(dead_code)]
 
+use crate::fs::path::{Path, PathBuf};
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::fs::path::{Path, PathBuf};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -257,7 +257,10 @@ fn matches_filter(name: &Path, filter: &FileFilter) -> bool {
         return true; // "All Files"
     }
     let ext = name.extension().map_or(&[][..], Path::as_bytes);
-    filter.extensions.iter().any(|f| ext.eq_ignore_ascii_case(f.as_bytes()))
+    filter
+        .extensions
+        .iter()
+        .any(|f| ext.eq_ignore_ascii_case(f.as_bytes()))
 }
 
 // ---------------------------------------------------------------------------
@@ -265,8 +268,11 @@ fn matches_filter(name: &Path, filter: &FileFilter) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Create and open a new file dialog.
-pub fn create_dialog<P: AsRef<Path> + ?Sized>(mode: DialogMode, start_dir: &P,
-                     filters: Vec<FileFilter>) -> KernelResult<u64> {
+pub fn create_dialog<P: AsRef<Path> + ?Sized>(
+    mode: DialogMode,
+    start_dir: &P,
+    filters: Vec<FileFilter>,
+) -> KernelResult<u64> {
     let start_dir = start_dir.as_ref();
     if filters.len() > MAX_FILTERS {
         return Err(KernelError::InvalidArgument);
@@ -281,7 +287,11 @@ pub fn create_dialog<P: AsRef<Path> + ?Sized>(mode: DialogMode, start_dir: &P,
     let id = picker.next_id;
     picker.next_id = picker.next_id.saturating_add(1);
 
-    let dir = if start_dir.is_empty() { Path::new("/") } else { start_dir };
+    let dir = if start_dir.is_empty() {
+        Path::new("/")
+    } else {
+        start_dir
+    };
 
     let state = DialogState {
         id,
@@ -316,7 +326,10 @@ pub fn navigate<P: AsRef<Path> + ?Sized>(id: u64, path: &P) -> KernelResult<()> 
     let path = path.as_ref();
     NAV_OPS.fetch_add(1, Ordering::Relaxed);
     let mut picker = PICKER.lock();
-    let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
+    let dialog = picker
+        .dialogs
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
 
     if !dialog.open {
@@ -329,8 +342,11 @@ pub fn navigate<P: AsRef<Path> + ?Sized>(id: u64, path: &P) -> KernelResult<()> 
     dialog.selection.clear();
 
     // Refresh listing from VFS.
-    dialog.listing = build_listing(path, dialog.show_hidden,
-        dialog.filters.get(dialog.active_filter));
+    dialog.listing = build_listing(
+        path,
+        dialog.show_hidden,
+        dialog.filters.get(dialog.active_filter),
+    );
 
     // Sort listing.
     sort_listing(&mut dialog.listing, dialog.sort_column, dialog.sort_dir);
@@ -341,14 +357,20 @@ pub fn navigate<P: AsRef<Path> + ?Sized>(id: u64, path: &P) -> KernelResult<()> 
 /// Go back in navigation history.
 pub fn go_back(id: u64) -> KernelResult<()> {
     let mut picker = PICKER.lock();
-    let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
+    let dialog = picker
+        .dialogs
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
 
     if let Some(prev) = dialog.history.pop() {
         dialog.current_dir = prev.clone();
         dialog.selection.clear();
-        dialog.listing = build_listing(&prev, dialog.show_hidden,
-            dialog.filters.get(dialog.active_filter));
+        dialog.listing = build_listing(
+            &prev,
+            dialog.show_hidden,
+            dialog.filters.get(dialog.active_filter),
+        );
         sort_listing(&mut dialog.listing, dialog.sort_column, dialog.sort_dir);
         Ok(())
     } else {
@@ -359,7 +381,10 @@ pub fn go_back(id: u64) -> KernelResult<()> {
 /// Navigate up one directory.
 pub fn go_up(id: u64) -> KernelResult<()> {
     let picker = PICKER.lock();
-    let dialog = picker.dialogs.iter().find(|d| d.id == id)
+    let dialog = picker
+        .dialogs
+        .iter()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
 
     let current = dialog.current_dir.clone();
@@ -380,7 +405,10 @@ pub fn go_up(id: u64) -> KernelResult<()> {
 pub fn select<P: AsRef<Path> + ?Sized>(id: u64, path: &P) -> KernelResult<()> {
     let path = path.as_ref();
     let mut picker = PICKER.lock();
-    let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
+    let dialog = picker
+        .dialogs
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
 
     match dialog.mode {
@@ -401,7 +429,10 @@ pub fn select<P: AsRef<Path> + ?Sized>(id: u64, path: &P) -> KernelResult<()> {
 pub fn deselect<P: AsRef<Path> + ?Sized>(id: u64, path: &P) -> KernelResult<()> {
     let path = path.as_ref();
     let mut picker = PICKER.lock();
-    let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
+    let dialog = picker
+        .dialogs
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     dialog.selection.retain(|s| s.as_path() != path);
     Ok(())
@@ -410,7 +441,10 @@ pub fn deselect<P: AsRef<Path> + ?Sized>(id: u64, path: &P) -> KernelResult<()> 
 /// Set the filename in the input field (SaveFile mode).
 pub fn set_filename<P: AsRef<Path> + ?Sized>(id: u64, name: &P) -> KernelResult<()> {
     let mut picker = PICKER.lock();
-    let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
+    let dialog = picker
+        .dialogs
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     dialog.filename = name.as_ref().to_path_buf();
     Ok(())
@@ -419,7 +453,10 @@ pub fn set_filename<P: AsRef<Path> + ?Sized>(id: u64, name: &P) -> KernelResult<
 /// Change the active filter.
 pub fn set_filter(id: u64, filter_idx: usize) -> KernelResult<()> {
     let mut picker = PICKER.lock();
-    let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
+    let dialog = picker
+        .dialogs
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
 
     if filter_idx >= dialog.filters.len() {
@@ -439,7 +476,10 @@ pub fn set_filter(id: u64, filter_idx: usize) -> KernelResult<()> {
 /// Change sort column and direction.
 pub fn set_sort(id: u64, column: SortColumn, dir: SortDirection) -> KernelResult<()> {
     let mut picker = PICKER.lock();
-    let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
+    let dialog = picker
+        .dialogs
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     dialog.sort_column = column;
     dialog.sort_dir = dir;
@@ -450,7 +490,10 @@ pub fn set_sort(id: u64, column: SortColumn, dir: SortDirection) -> KernelResult
 /// Change view mode.
 pub fn set_view_mode(id: u64, mode: ViewMode) -> KernelResult<()> {
     let mut picker = PICKER.lock();
-    let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
+    let dialog = picker
+        .dialogs
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     dialog.view_mode = mode;
     Ok(())
@@ -459,7 +502,10 @@ pub fn set_view_mode(id: u64, mode: ViewMode) -> KernelResult<()> {
 /// Toggle hidden files.
 pub fn toggle_hidden(id: u64) -> KernelResult<bool> {
     let mut picker = PICKER.lock();
-    let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
+    let dialog = picker
+        .dialogs
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     dialog.show_hidden = !dialog.show_hidden;
     let show = dialog.show_hidden;
@@ -475,7 +521,10 @@ pub fn toggle_hidden(id: u64) -> KernelResult<bool> {
 /// Confirm the dialog (OK/Open/Save button).
 pub fn confirm(id: u64) -> KernelResult<DialogResult> {
     let mut picker = PICKER.lock();
-    let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
+    let dialog = picker
+        .dialogs
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
 
     if !dialog.open {
@@ -523,7 +572,10 @@ pub fn confirm(id: u64) -> KernelResult<DialogResult> {
 /// Cancel the dialog.
 pub fn cancel(id: u64) -> KernelResult<()> {
     let mut picker = PICKER.lock();
-    let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
+    let dialog = picker
+        .dialogs
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     dialog.open = false;
     dialog.result = Some(DialogResult::Cancelled);
@@ -533,7 +585,10 @@ pub fn cancel(id: u64) -> KernelResult<()> {
 /// Close and remove a completed dialog.
 pub fn close(id: u64) -> KernelResult<()> {
     let mut picker = PICKER.lock();
-    let idx = picker.dialogs.iter().position(|d| d.id == id)
+    let idx = picker
+        .dialogs
+        .iter()
+        .position(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     picker.dialogs.remove(idx);
     Ok(())
@@ -544,8 +599,7 @@ pub fn close(id: u64) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Build a directory listing from VFS.
-fn build_listing(dir: &Path, show_hidden: bool,
-                 filter: Option<&FileFilter>) -> Vec<ListingItem> {
+fn build_listing(dir: &Path, show_hidden: bool, filter: Option<&FileFilter>) -> Vec<ListingItem> {
     use crate::fs::vfs::Vfs;
 
     let entries = match Vfs::readdir(dir) {
@@ -615,8 +669,11 @@ fn sort_listing(items: &mut [ListingItem], column: SortColumn, dir: SortDirectio
 // ---------------------------------------------------------------------------
 
 /// Add a quick-access bookmark.
-pub fn add_bookmark<P: AsRef<Path> + ?Sized>(label: &str, path: &P, icon: &str)
-    -> KernelResult<()> {
+pub fn add_bookmark<P: AsRef<Path> + ?Sized>(
+    label: &str,
+    path: &P,
+    icon: &str,
+) -> KernelResult<()> {
     let path = path.as_ref();
     if label.is_empty() || path.is_empty() {
         return Err(KernelError::InvalidArgument);
@@ -637,7 +694,10 @@ pub fn add_bookmark<P: AsRef<Path> + ?Sized>(label: &str, path: &P, icon: &str)
 pub fn remove_bookmark<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<()> {
     let path = path.as_ref();
     let mut picker = PICKER.lock();
-    let idx = picker.bookmarks.iter().position(|b| b.path.as_path() == path)
+    let idx = picker
+        .bookmarks
+        .iter()
+        .position(|b| b.path.as_path() == path)
         .ok_or(KernelError::NotFound)?;
     picker.bookmarks.remove(idx);
     Ok(())

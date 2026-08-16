@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -160,25 +160,169 @@ where
 
 /// Common English words used for basic checking.
 const BUILTIN_WORDS: &[&str] = &[
-    "the", "be", "to", "of", "and", "a", "in", "that", "have", "i",
-    "it", "for", "not", "on", "with", "he", "as", "you", "do", "at",
-    "this", "but", "his", "by", "from", "they", "we", "say", "her", "she",
-    "or", "an", "will", "my", "one", "all", "would", "there", "their", "what",
-    "so", "up", "out", "if", "about", "who", "get", "which", "go", "me",
-    "when", "make", "can", "like", "time", "no", "just", "him", "know", "take",
-    "people", "into", "year", "your", "good", "some", "could", "them", "see",
-    "other", "than", "then", "now", "look", "only", "come", "its", "over",
-    "think", "also", "back", "after", "use", "two", "how", "our", "work",
-    "first", "well", "way", "even", "new", "want", "because", "any", "these",
-    "give", "day", "most", "us", "file", "open", "save", "close", "edit",
-    "copy", "paste", "cut", "delete", "undo", "redo", "find", "replace",
-    "print", "help", "exit", "quit", "yes", "no", "ok", "cancel", "apply",
-    "settings", "options", "tools", "view", "window", "menu", "button",
-    "text", "font", "size", "color", "style", "format", "insert", "table",
-    "image", "link", "page", "document", "folder", "directory", "name",
-    "type", "date", "search", "sort", "filter", "select", "clear",
-    "system", "computer", "network", "internet", "email", "message",
-    "error", "warning", "information", "success", "failed", "loading",
+    "the",
+    "be",
+    "to",
+    "of",
+    "and",
+    "a",
+    "in",
+    "that",
+    "have",
+    "i",
+    "it",
+    "for",
+    "not",
+    "on",
+    "with",
+    "he",
+    "as",
+    "you",
+    "do",
+    "at",
+    "this",
+    "but",
+    "his",
+    "by",
+    "from",
+    "they",
+    "we",
+    "say",
+    "her",
+    "she",
+    "or",
+    "an",
+    "will",
+    "my",
+    "one",
+    "all",
+    "would",
+    "there",
+    "their",
+    "what",
+    "so",
+    "up",
+    "out",
+    "if",
+    "about",
+    "who",
+    "get",
+    "which",
+    "go",
+    "me",
+    "when",
+    "make",
+    "can",
+    "like",
+    "time",
+    "no",
+    "just",
+    "him",
+    "know",
+    "take",
+    "people",
+    "into",
+    "year",
+    "your",
+    "good",
+    "some",
+    "could",
+    "them",
+    "see",
+    "other",
+    "than",
+    "then",
+    "now",
+    "look",
+    "only",
+    "come",
+    "its",
+    "over",
+    "think",
+    "also",
+    "back",
+    "after",
+    "use",
+    "two",
+    "how",
+    "our",
+    "work",
+    "first",
+    "well",
+    "way",
+    "even",
+    "new",
+    "want",
+    "because",
+    "any",
+    "these",
+    "give",
+    "day",
+    "most",
+    "us",
+    "file",
+    "open",
+    "save",
+    "close",
+    "edit",
+    "copy",
+    "paste",
+    "cut",
+    "delete",
+    "undo",
+    "redo",
+    "find",
+    "replace",
+    "print",
+    "help",
+    "exit",
+    "quit",
+    "yes",
+    "no",
+    "ok",
+    "cancel",
+    "apply",
+    "settings",
+    "options",
+    "tools",
+    "view",
+    "window",
+    "menu",
+    "button",
+    "text",
+    "font",
+    "size",
+    "color",
+    "style",
+    "format",
+    "insert",
+    "table",
+    "image",
+    "link",
+    "page",
+    "document",
+    "folder",
+    "directory",
+    "name",
+    "type",
+    "date",
+    "search",
+    "sort",
+    "filter",
+    "select",
+    "clear",
+    "system",
+    "computer",
+    "network",
+    "internet",
+    "email",
+    "message",
+    "error",
+    "warning",
+    "information",
+    "success",
+    "failed",
+    "loading",
 ];
 
 // ---------------------------------------------------------------------------
@@ -187,21 +331,21 @@ const BUILTIN_WORDS: &[&str] = &[
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let mut builtin_hashes = Vec::with_capacity(BUILTIN_WORDS.len());
     for w in BUILTIN_WORDS {
         builtin_hashes.push(word_hash(w));
     }
 
-    let dictionaries = alloc::vec![
-        DictionaryInfo {
-            language: String::from("en-US"),
-            word_count: BUILTIN_WORDS.len() as u32,
-            active: true,
-            size_bytes: 4 * 1024 * 1024,
-        },
-    ];
+    let dictionaries = alloc::vec![DictionaryInfo {
+        language: String::from("en-US"),
+        word_count: BUILTIN_WORDS.len() as u32,
+        active: true,
+        size_bytes: 4 * 1024 * 1024,
+    },];
 
     *guard = Some(State {
         config: SpellConfig::default(),
@@ -242,12 +386,20 @@ pub fn check_word(word: &str) -> CheckResult {
     }
 
     // Check personal dictionary.
-    if state.personal_words.iter().any(|w| w.eq_ignore_ascii_case(word)) {
+    if state
+        .personal_words
+        .iter()
+        .any(|w| w.eq_ignore_ascii_case(word))
+    {
         return CheckResult::Personal;
     }
 
     // Check ignored words.
-    if state.ignored_words.iter().any(|w| w.eq_ignore_ascii_case(word)) {
+    if state
+        .ignored_words
+        .iter()
+        .any(|w| w.eq_ignore_ascii_case(word))
+    {
         return CheckResult::Ignored;
     }
 
@@ -273,14 +425,27 @@ pub fn suggest(word: &str) -> Vec<String> {
     let mut results = Vec::new();
 
     // Simple approach: find builtin words that share a prefix.
-    let lower: String = word.chars().map(|c| {
-        if c.is_ascii_uppercase() { (c as u8 + 32) as char } else { c }
-    }).collect();
+    let lower: String = word
+        .chars()
+        .map(|c| {
+            if c.is_ascii_uppercase() {
+                (c as u8 + 32) as char
+            } else {
+                c
+            }
+        })
+        .collect();
 
     for builtin in BUILTIN_WORDS {
-        if results.len() >= max { break; }
+        if results.len() >= max {
+            break;
+        }
         // Check if the word shares at least half its prefix with the builtin.
-        let common = lower.bytes().zip(builtin.bytes()).take_while(|(a, b)| a == b).count();
+        let common = lower
+            .bytes()
+            .zip(builtin.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
         if common >= lower.len() / 2 && common > 0 {
             results.push(String::from(*builtin));
         }
@@ -292,7 +457,11 @@ pub fn suggest(word: &str) -> Vec<String> {
 /// Add a word to the personal dictionary.
 pub fn add_personal(word: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.personal_words.iter().any(|w| w.eq_ignore_ascii_case(word)) {
+        if state
+            .personal_words
+            .iter()
+            .any(|w| w.eq_ignore_ascii_case(word))
+        {
             return Err(KernelError::AlreadyExists);
         }
         if state.personal_words.len() >= MAX_PERSONAL_WORDS {
@@ -306,7 +475,10 @@ pub fn add_personal(word: &str) -> KernelResult<()> {
 /// Remove a word from the personal dictionary.
 pub fn remove_personal(word: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.personal_words.iter().position(|w| w.eq_ignore_ascii_case(word))
+        let pos = state
+            .personal_words
+            .iter()
+            .position(|w| w.eq_ignore_ascii_case(word))
             .ok_or(KernelError::NotFound)?;
         state.personal_words.remove(pos);
         Ok(())
@@ -316,7 +488,11 @@ pub fn remove_personal(word: &str) -> KernelResult<()> {
 /// Add a word to the ignore list.
 pub fn ignore_word(word: &str) -> KernelResult<()> {
     with_state(|state| {
-        if !state.ignored_words.iter().any(|w| w.eq_ignore_ascii_case(word)) {
+        if !state
+            .ignored_words
+            .iter()
+            .any(|w| w.eq_ignore_ascii_case(word))
+        {
             state.ignored_words.push(String::from(word));
         }
         Ok(())
@@ -325,7 +501,10 @@ pub fn ignore_word(word: &str) -> KernelResult<()> {
 
 /// List personal dictionary words.
 pub fn list_personal() -> Vec<String> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.personal_words.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.personal_words.clone())
 }
 
 /// Get config.
@@ -335,17 +514,26 @@ pub fn get_config() -> KernelResult<SpellConfig> {
 
 /// Set enabled.
 pub fn set_enabled(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.enabled = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.enabled = enabled;
+        Ok(())
+    })
 }
 
 /// Set auto-correct.
 pub fn set_auto_correct(on: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.auto_correct = on; Ok(()) })
+    with_state(|state| {
+        state.config.auto_correct = on;
+        Ok(())
+    })
 }
 
 /// List dictionaries.
 pub fn list_dictionaries() -> Vec<DictionaryInfo> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.dictionaries.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.dictionaries.clone())
 }
 
 /// Statistics: (dict_count, personal_count, checks, misspellings, corrections, ops).
@@ -353,8 +541,12 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => (
-            s.dictionaries.len(), s.personal_words.len(),
-            s.total_checks, s.total_misspellings, s.total_corrections, s.ops,
+            s.dictionaries.len(),
+            s.personal_words.len(),
+            s.total_checks,
+            s.total_misspellings,
+            s.total_corrections,
+            s.ops,
         ),
         None => (0, 0, 0, 0, 0, 0),
     }

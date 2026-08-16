@@ -41,29 +41,83 @@ use alloc::vec::Vec;
 /// SHA-256 initial hash values (first 32 bits of fractional parts of
 /// the square roots of the first 8 primes).
 const H0: [u32; 8] = [
-    0x6a09_e667, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a,
-    0x510e_527f, 0x9b05_688c, 0x1f83_d9ab, 0x5be0_cd19,
+    0x6a09_e667,
+    0xbb67_ae85,
+    0x3c6e_f372,
+    0xa54f_f53a,
+    0x510e_527f,
+    0x9b05_688c,
+    0x1f83_d9ab,
+    0x5be0_cd19,
 ];
 
 /// SHA-256 round constants (first 32 bits of fractional parts of
 /// the cube roots of the first 64 primes).
 const K: [u32; 64] = [
-    0x428a_2f98, 0x7137_4491, 0xb5c0_fbcf, 0xe9b5_dba5,
-    0x3956_c25b, 0x59f1_11f1, 0x923f_82a4, 0xab1c_5ed5,
-    0xd807_aa98, 0x1283_5b01, 0x2431_85be, 0x550c_7dc3,
-    0x72be_5d74, 0x80de_b1fe, 0x9bdc_06a7, 0xc19b_f174,
-    0xe49b_69c1, 0xefbe_4786, 0x0fc1_9dc6, 0x240c_a1cc,
-    0x2de9_2c6f, 0x4a74_84aa, 0x5cb0_a9dc, 0x76f9_88da,
-    0x983e_5152, 0xa831_c66d, 0xb003_27c8, 0xbf59_7fc7,
-    0xc6e0_0bf3, 0xd5a7_9147, 0x06ca_6351, 0x1429_2967,
-    0x27b7_0a85, 0x2e1b_2138, 0x4d2c_6dfc, 0x5338_0d13,
-    0x650a_7354, 0x766a_0abb, 0x81c2_c92e, 0x9272_2c85,
-    0xa2bf_e8a1, 0xa81a_664b, 0xc24b_8b70, 0xc76c_51a3,
-    0xd192_e819, 0xd699_0624, 0xf40e_3585, 0x106a_a070,
-    0x19a4_c116, 0x1e37_6c08, 0x2748_774c, 0x34b0_bcb5,
-    0x391c_0cb3, 0x4ed8_aa4a, 0x5b9c_ca4f, 0x682e_6ff3,
-    0x748f_82ee, 0x78a5_636f, 0x84c8_7814, 0x8cc7_0208,
-    0x90be_fffa, 0xa450_6ceb, 0xbef9_a3f7, 0xc671_78f2,
+    0x428a_2f98,
+    0x7137_4491,
+    0xb5c0_fbcf,
+    0xe9b5_dba5,
+    0x3956_c25b,
+    0x59f1_11f1,
+    0x923f_82a4,
+    0xab1c_5ed5,
+    0xd807_aa98,
+    0x1283_5b01,
+    0x2431_85be,
+    0x550c_7dc3,
+    0x72be_5d74,
+    0x80de_b1fe,
+    0x9bdc_06a7,
+    0xc19b_f174,
+    0xe49b_69c1,
+    0xefbe_4786,
+    0x0fc1_9dc6,
+    0x240c_a1cc,
+    0x2de9_2c6f,
+    0x4a74_84aa,
+    0x5cb0_a9dc,
+    0x76f9_88da,
+    0x983e_5152,
+    0xa831_c66d,
+    0xb003_27c8,
+    0xbf59_7fc7,
+    0xc6e0_0bf3,
+    0xd5a7_9147,
+    0x06ca_6351,
+    0x1429_2967,
+    0x27b7_0a85,
+    0x2e1b_2138,
+    0x4d2c_6dfc,
+    0x5338_0d13,
+    0x650a_7354,
+    0x766a_0abb,
+    0x81c2_c92e,
+    0x9272_2c85,
+    0xa2bf_e8a1,
+    0xa81a_664b,
+    0xc24b_8b70,
+    0xc76c_51a3,
+    0xd192_e819,
+    0xd699_0624,
+    0xf40e_3585,
+    0x106a_a070,
+    0x19a4_c116,
+    0x1e37_6c08,
+    0x2748_774c,
+    0x34b0_bcb5,
+    0x391c_0cb3,
+    0x4ed8_aa4a,
+    0x5b9c_ca4f,
+    0x682e_6ff3,
+    0x748f_82ee,
+    0x78a5_636f,
+    0x84c8_7814,
+    0x8cc7_0208,
+    0x90be_fffa,
+    0xa450_6ceb,
+    0xbef9_a3f7,
+    0xc671_78f2,
 ];
 
 /// SHA-256 output size in bytes.
@@ -136,10 +190,8 @@ impl Sha256 {
         // Buffer remaining bytes.
         let remaining = data.len().saturating_sub(offset);
         if remaining > 0 {
-            if let (Some(dest), Some(src)) = (
-                self.buffer.get_mut(..remaining),
-                data.get(offset..),
-            ) {
+            if let (Some(dest), Some(src)) = (self.buffer.get_mut(..remaining), data.get(offset..))
+            {
                 dest.copy_from_slice(src);
             }
             self.buf_len = remaining;
@@ -238,12 +290,8 @@ fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
 
     // Extend to 64 words.
     for i in 16..64 {
-        let s0 = w[i - 15].rotate_right(7)
-            ^ w[i - 15].rotate_right(18)
-            ^ (w[i - 15] >> 3);
-        let s1 = w[i - 2].rotate_right(17)
-            ^ w[i - 2].rotate_right(19)
-            ^ (w[i - 2] >> 10);
+        let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+        let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
         w[i] = w[i - 16]
             .wrapping_add(s0)
             .wrapping_add(w[i - 7])
@@ -264,7 +312,8 @@ fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
     for i in 0..64 {
         let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
         let ch = (e & f) ^ ((!e) & g);
-        let temp1 = h.wrapping_add(s1)
+        let temp1 = h
+            .wrapping_add(s1)
             .wrapping_add(ch)
             .wrapping_add(K[i])
             .wrapping_add(w[i]);
@@ -305,10 +354,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // Expected: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
     let hash = sha256(b"");
     let expected: [u8; 32] = [
-        0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14,
-        0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
-        0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c,
-        0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
+        0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9,
+        0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52,
+        0xb8, 0x55,
     ];
     if hash != expected {
         crate::serial_println!("[crypto]   FAIL: empty string hash mismatch");
@@ -320,10 +368,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // Expected: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
     let hash = sha256(b"abc");
     let expected: [u8; 32] = [
-        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
-        0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
-        0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
-        0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22,
+        0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00,
+        0x15, 0xad,
     ];
     if hash != expected {
         crate::serial_println!("[crypto]   FAIL: 'abc' hash mismatch");
@@ -336,10 +383,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // Expected: 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
     let hash = sha256(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
     let expected: [u8; 32] = [
-        0x24, 0x8d, 0x6a, 0x61, 0xd2, 0x06, 0x38, 0xb8,
-        0xe5, 0xc0, 0x26, 0x93, 0x0c, 0x3e, 0x60, 0x39,
-        0xa3, 0x3c, 0xe4, 0x59, 0x64, 0xff, 0x21, 0x67,
-        0xf6, 0xec, 0xed, 0xd4, 0x19, 0xdb, 0x06, 0xc1,
+        0x24, 0x8d, 0x6a, 0x61, 0xd2, 0x06, 0x38, 0xb8, 0xe5, 0xc0, 0x26, 0x93, 0x0c, 0x3e, 0x60,
+        0x39, 0xa3, 0x3c, 0xe4, 0x59, 0x64, 0xff, 0x21, 0x67, 0xf6, 0xec, 0xed, 0xd4, 0x19, 0xdb,
+        0x06, 0xc1,
     ];
     if hash != expected {
         crate::serial_println!("[crypto]   FAIL: 56-byte message hash mismatch");
@@ -353,10 +399,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     hasher.update(b"c");
     let hash = hasher.finalize();
     let expected: [u8; 32] = [
-        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
-        0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
-        0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
-        0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22,
+        0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00,
+        0x15, 0xad,
     ];
     if hash != expected {
         crate::serial_println!("[crypto]   FAIL: incremental update mismatch");
@@ -460,15 +505,24 @@ pub fn self_test_crc32c() -> Result<(), crate::error::KernelError> {
     // The CRC32C of the ASCII string "123456789" is 0xE3069283.
     let check = crc32c(b"123456789");
     if check != 0xE306_9283 {
-        crate::serial_println!("[crypto]   FAIL: CRC32C(\"123456789\") = {:#010X}, expected 0xE3069283", check);
+        crate::serial_println!(
+            "[crypto]   FAIL: CRC32C(\"123456789\") = {:#010X}, expected 0xE3069283",
+            check
+        );
         return Err(crate::error::KernelError::InternalError);
     }
-    crate::serial_println!("[crypto]   CRC32C(\"123456789\") = {:#010X} (correct)", check);
+    crate::serial_println!(
+        "[crypto]   CRC32C(\"123456789\") = {:#010X} (correct)",
+        check
+    );
 
     // Test vector 2: empty input.
     let empty = crc32c(b"");
     if empty != 0x0000_0000 {
-        crate::serial_println!("[crypto]   FAIL: CRC32C(\"\") = {:#010X}, expected 0x00000000", empty);
+        crate::serial_println!(
+            "[crypto]   FAIL: CRC32C(\"\") = {:#010X}, expected 0x00000000",
+            empty
+        );
         return Err(crate::error::KernelError::InternalError);
     }
     crate::serial_println!("[crypto]   CRC32C(\"\") = {:#010X} (correct)", empty);
@@ -480,7 +534,10 @@ pub fn self_test_crc32c() -> Result<(), crate::error::KernelError> {
     let zeros = [0u8; 32];
     let z_crc = crc32c(&zeros);
     if z_crc != 0x8A91_36AA {
-        crate::serial_println!("[crypto]   FAIL: CRC32C(32 zeros) = {:#010X}, expected 0x8A9136AA", z_crc);
+        crate::serial_println!(
+            "[crypto]   FAIL: CRC32C(32 zeros) = {:#010X}, expected 0x8A9136AA",
+            z_crc
+        );
         return Err(crate::error::KernelError::InternalError);
     }
     crate::serial_println!("[crypto]   CRC32C(32 zeros) = {:#010X} (correct)", z_crc);
@@ -489,7 +546,10 @@ pub fn self_test_crc32c() -> Result<(), crate::error::KernelError> {
     let raw_seed = crc32c_raw(!0u32, b"1234");
     let chained = crc32c_seed(raw_seed, b"56789");
     if chained != 0xE306_9283 {
-        crate::serial_println!("[crypto]   FAIL: chained CRC32C = {:#010X}, expected 0xE3069283", chained);
+        crate::serial_println!(
+            "[crypto]   FAIL: chained CRC32C = {:#010X}, expected 0xE3069283",
+            chained
+        );
         return Err(crate::error::KernelError::InternalError);
     }
     crate::serial_println!("[crypto]   Chained CRC32C = {:#010X} (correct)", chained);
@@ -669,7 +729,8 @@ fn chacha20_block(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [u8; 64] {
     // Nonce (3 words, little-endian).
     for i in 0..3 {
         let off = i * 4;
-        state[13 + i] = u32::from_le_bytes([nonce[off], nonce[off + 1], nonce[off + 2], nonce[off + 3]]);
+        state[13 + i] =
+            u32::from_le_bytes([nonce[off], nonce[off + 1], nonce[off + 2], nonce[off + 3]]);
     }
 
     // Save initial state for final addition.
@@ -678,15 +739,15 @@ fn chacha20_block(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [u8; 64] {
     // 20 rounds (10 double-rounds of column + diagonal quarter-rounds).
     for _ in 0..10 {
         // Column rounds.
-        quarter_round(&mut state, 0, 4,  8, 12);
-        quarter_round(&mut state, 1, 5,  9, 13);
+        quarter_round(&mut state, 0, 4, 8, 12);
+        quarter_round(&mut state, 1, 5, 9, 13);
         quarter_round(&mut state, 2, 6, 10, 14);
         quarter_round(&mut state, 3, 7, 11, 15);
         // Diagonal rounds.
         quarter_round(&mut state, 0, 5, 10, 15);
         quarter_round(&mut state, 1, 6, 11, 12);
-        quarter_round(&mut state, 2, 7,  8, 13);
-        quarter_round(&mut state, 3, 4,  9, 14);
+        quarter_round(&mut state, 2, 7, 8, 13);
+        quarter_round(&mut state, 3, 4, 9, 14);
     }
 
     // Add initial state (modular addition per word).
@@ -698,7 +759,7 @@ fn chacha20_block(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [u8; 64] {
     let mut out = [0u8; 64];
     for i in 0..16 {
         let bytes = state[i].to_le_bytes();
-        out[i * 4]     = bytes[0];
+        out[i * 4] = bytes[0];
         out[i * 4 + 1] = bytes[1];
         out[i * 4 + 2] = bytes[2];
         out[i * 4 + 3] = bytes[3];
@@ -758,22 +819,28 @@ pub fn poly1305(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
     // r[0] = r_bytes[0..4] & 0x0FFF_FFFC
     // r[1] = r_bytes[3..7] >> 2 & 0x0FFF_FFC0 ... etc.
     // Use the simpler approach: load as u128, split into 26-bit limbs, clamp.
-    let t0 = u32::from_le_bytes([key[0],  key[1],  key[2],  key[3]]);
-    let t1 = u32::from_le_bytes([key[4],  key[5],  key[6],  key[7]]);
-    let t2 = u32::from_le_bytes([key[8],  key[9],  key[10], key[11]]);
+    let t0 = u32::from_le_bytes([key[0], key[1], key[2], key[3]]);
+    let t1 = u32::from_le_bytes([key[4], key[5], key[6], key[7]]);
+    let t2 = u32::from_le_bytes([key[8], key[9], key[10], key[11]]);
     let t3 = u32::from_le_bytes([key[12], key[13], key[14], key[15]]);
 
-    r[0] =  t0                       & 0x03FF_FFFF;
+    r[0] = t0 & 0x03FF_FFFF;
     r[1] = ((t0 >> 26) | (t1 << 6)) & 0x03FF_FF03;
-    r[2] = ((t1 >> 20) | (t2 << 12))& 0x03FF_C0FF;
-    r[3] = ((t2 >> 14) | (t3 << 18))& 0x03F0_3FFF;
-    r[4] =  (t3 >> 8)               & 0x000F_FFFF;
+    r[2] = ((t1 >> 20) | (t2 << 12)) & 0x03FF_C0FF;
+    r[3] = ((t2 >> 14) | (t3 << 18)) & 0x03F0_3FFF;
+    r[4] = (t3 >> 8) & 0x000F_FFFF;
 
     // Accumulator (5 × 26-bit limbs, up to 131 bits during computation).
     let mut h = [0u32; 5];
 
     // Pre-compute r * 5 for reduction.
-    let r_5 = [0u32, r[1].wrapping_mul(5), r[2].wrapping_mul(5), r[3].wrapping_mul(5), r[4].wrapping_mul(5)];
+    let r_5 = [
+        0u32,
+        r[1].wrapping_mul(5),
+        r[2].wrapping_mul(5),
+        r[3].wrapping_mul(5),
+        r[4].wrapping_mul(5),
+    ];
 
     // Process message in 16-byte blocks.
     let mut i = 0usize;
@@ -787,16 +854,16 @@ pub fn poly1305(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
         buf[block_len] = 1; // High bit for complete blocks.
 
         // Add block to accumulator (as 26-bit limbs).
-        let bt0 = u32::from_le_bytes([buf[0],  buf[1],  buf[2],  buf[3]]);
-        let bt1 = u32::from_le_bytes([buf[4],  buf[5],  buf[6],  buf[7]]);
-        let bt2 = u32::from_le_bytes([buf[8],  buf[9],  buf[10], buf[11]]);
+        let bt0 = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let bt1 = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        let bt2 = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
         let bt3 = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
         let bt4 = buf[16] as u32;
 
-        h[0] = h[0].wrapping_add(bt0        & 0x03FF_FFFF);
+        h[0] = h[0].wrapping_add(bt0 & 0x03FF_FFFF);
         h[1] = h[1].wrapping_add(((bt0 >> 26) | (bt1 << 6)) & 0x03FF_FFFF);
-        h[2] = h[2].wrapping_add(((bt1 >> 20) | (bt2 << 12))& 0x03FF_FFFF);
-        h[3] = h[3].wrapping_add(((bt2 >> 14) | (bt3 << 18))& 0x03FF_FFFF);
+        h[2] = h[2].wrapping_add(((bt1 >> 20) | (bt2 << 12)) & 0x03FF_FFFF);
+        h[3] = h[3].wrapping_add(((bt2 >> 14) | (bt3 << 18)) & 0x03FF_FFFF);
         h[4] = h[4].wrapping_add((bt3 >> 8) | (bt4 << 24));
 
         // Multiply h by r (mod 2^130 - 5).
@@ -804,22 +871,52 @@ pub fn poly1305(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
         // Using the identity: x * r[j] mod (2^130-5) = x * r[j] for j >= i,
         //                      x * r[j] * 5          for j <  i.
         let mut d = [0u64; 5];
-        d[0] = (h[0] as u64) * (r[0] as u64) + (h[1] as u64) * (r_5[4] as u64) + (h[2] as u64) * (r_5[3] as u64) + (h[3] as u64) * (r_5[2] as u64) + (h[4] as u64) * (r_5[1] as u64);
-        d[1] = (h[0] as u64) * (r[1] as u64) + (h[1] as u64) * (r[0]  as u64)  + (h[2] as u64) * (r_5[4] as u64) + (h[3] as u64) * (r_5[3] as u64) + (h[4] as u64) * (r_5[2] as u64);
-        d[2] = (h[0] as u64) * (r[2] as u64) + (h[1] as u64) * (r[1]  as u64)  + (h[2] as u64) * (r[0]   as u64) + (h[3] as u64) * (r_5[4] as u64) + (h[4] as u64) * (r_5[3] as u64);
-        d[3] = (h[0] as u64) * (r[3] as u64) + (h[1] as u64) * (r[2]  as u64)  + (h[2] as u64) * (r[1]   as u64) + (h[3] as u64) * (r[0]   as u64) + (h[4] as u64) * (r_5[4] as u64);
-        d[4] = (h[0] as u64) * (r[4] as u64) + (h[1] as u64) * (r[3]  as u64)  + (h[2] as u64) * (r[2]   as u64) + (h[3] as u64) * (r[1]   as u64) + (h[4] as u64) * (r[0]   as u64);
+        d[0] = (h[0] as u64) * (r[0] as u64)
+            + (h[1] as u64) * (r_5[4] as u64)
+            + (h[2] as u64) * (r_5[3] as u64)
+            + (h[3] as u64) * (r_5[2] as u64)
+            + (h[4] as u64) * (r_5[1] as u64);
+        d[1] = (h[0] as u64) * (r[1] as u64)
+            + (h[1] as u64) * (r[0] as u64)
+            + (h[2] as u64) * (r_5[4] as u64)
+            + (h[3] as u64) * (r_5[3] as u64)
+            + (h[4] as u64) * (r_5[2] as u64);
+        d[2] = (h[0] as u64) * (r[2] as u64)
+            + (h[1] as u64) * (r[1] as u64)
+            + (h[2] as u64) * (r[0] as u64)
+            + (h[3] as u64) * (r_5[4] as u64)
+            + (h[4] as u64) * (r_5[3] as u64);
+        d[3] = (h[0] as u64) * (r[3] as u64)
+            + (h[1] as u64) * (r[2] as u64)
+            + (h[2] as u64) * (r[1] as u64)
+            + (h[3] as u64) * (r[0] as u64)
+            + (h[4] as u64) * (r_5[4] as u64);
+        d[4] = (h[0] as u64) * (r[4] as u64)
+            + (h[1] as u64) * (r[3] as u64)
+            + (h[2] as u64) * (r[2] as u64)
+            + (h[3] as u64) * (r[1] as u64)
+            + (h[4] as u64) * (r[0] as u64);
 
         // Carry propagation.
         let mut carry: u64;
-        carry = d[0] >> 26; h[0] = (d[0] as u32) & 0x03FF_FFFF; d[1] = d[1].wrapping_add(carry);
-        carry = d[1] >> 26; h[1] = (d[1] as u32) & 0x03FF_FFFF; d[2] = d[2].wrapping_add(carry);
-        carry = d[2] >> 26; h[2] = (d[2] as u32) & 0x03FF_FFFF; d[3] = d[3].wrapping_add(carry);
-        carry = d[3] >> 26; h[3] = (d[3] as u32) & 0x03FF_FFFF; d[4] = d[4].wrapping_add(carry);
-        carry = d[4] >> 26; h[4] = (d[4] as u32) & 0x03FF_FFFF;
+        carry = d[0] >> 26;
+        h[0] = (d[0] as u32) & 0x03FF_FFFF;
+        d[1] = d[1].wrapping_add(carry);
+        carry = d[1] >> 26;
+        h[1] = (d[1] as u32) & 0x03FF_FFFF;
+        d[2] = d[2].wrapping_add(carry);
+        carry = d[2] >> 26;
+        h[2] = (d[2] as u32) & 0x03FF_FFFF;
+        d[3] = d[3].wrapping_add(carry);
+        carry = d[3] >> 26;
+        h[3] = (d[3] as u32) & 0x03FF_FFFF;
+        d[4] = d[4].wrapping_add(carry);
+        carry = d[4] >> 26;
+        h[4] = (d[4] as u32) & 0x03FF_FFFF;
         // Wrap carry back to h[0] multiplied by 5 (2^130 ≡ 5 mod p).
         h[0] = h[0].wrapping_add((carry as u32).wrapping_mul(5));
-        carry = (h[0] >> 26) as u64; h[0] &= 0x03FF_FFFF;
+        carry = (h[0] >> 26) as u64;
+        h[0] &= 0x03FF_FFFF;
         h[1] = h[1].wrapping_add(carry as u32);
 
         i = i.saturating_add(16);
@@ -827,20 +924,37 @@ pub fn poly1305(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
 
     // Final reduction: fully reduce h mod 2^130 - 5.
     let mut carry: u32;
-    carry = h[1] >> 26; h[1] &= 0x03FF_FFFF; h[2] = h[2].wrapping_add(carry);
-    carry = h[2] >> 26; h[2] &= 0x03FF_FFFF; h[3] = h[3].wrapping_add(carry);
-    carry = h[3] >> 26; h[3] &= 0x03FF_FFFF; h[4] = h[4].wrapping_add(carry);
-    carry = h[4] >> 26; h[4] &= 0x03FF_FFFF; h[0] = h[0].wrapping_add(carry.wrapping_mul(5));
-    carry = h[0] >> 26; h[0] &= 0x03FF_FFFF; h[1] = h[1].wrapping_add(carry);
+    carry = h[1] >> 26;
+    h[1] &= 0x03FF_FFFF;
+    h[2] = h[2].wrapping_add(carry);
+    carry = h[2] >> 26;
+    h[2] &= 0x03FF_FFFF;
+    h[3] = h[3].wrapping_add(carry);
+    carry = h[3] >> 26;
+    h[3] &= 0x03FF_FFFF;
+    h[4] = h[4].wrapping_add(carry);
+    carry = h[4] >> 26;
+    h[4] &= 0x03FF_FFFF;
+    h[0] = h[0].wrapping_add(carry.wrapping_mul(5));
+    carry = h[0] >> 26;
+    h[0] &= 0x03FF_FFFF;
+    h[1] = h[1].wrapping_add(carry);
 
     // Compute h + -(2^130-5) = h - p.  If h >= p, the subtraction doesn't
     // borrow, and we use the subtracted value.
     let mut g = [0u32; 5];
     g[0] = h[0].wrapping_add(5);
-    carry = g[0] >> 26; g[0] &= 0x03FF_FFFF;
-    g[1] = h[1].wrapping_add(carry); carry = g[1] >> 26; g[1] &= 0x03FF_FFFF;
-    g[2] = h[2].wrapping_add(carry); carry = g[2] >> 26; g[2] &= 0x03FF_FFFF;
-    g[3] = h[3].wrapping_add(carry); carry = g[3] >> 26; g[3] &= 0x03FF_FFFF;
+    carry = g[0] >> 26;
+    g[0] &= 0x03FF_FFFF;
+    g[1] = h[1].wrapping_add(carry);
+    carry = g[1] >> 26;
+    g[1] &= 0x03FF_FFFF;
+    g[2] = h[2].wrapping_add(carry);
+    carry = g[2] >> 26;
+    g[2] &= 0x03FF_FFFF;
+    g[3] = h[3].wrapping_add(carry);
+    carry = g[3] >> 26;
+    g[3] &= 0x03FF_FFFF;
     g[4] = h[4].wrapping_add(carry).wrapping_sub(1 << 26);
 
     // Select h or g using constant-time mask: if g[4] didn't underflow
@@ -861,13 +975,13 @@ pub fn poly1305(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
     // is error-prone because the carry from word N already contains the
     // upper limb bits that word N+1 also references, causing double-counting.
     #[allow(clippy::cast_possible_truncation)]
-    let h0w = (h[0]      ) | (h[1] << 26);  // bits  0-31
+    let h0w = (h[0]) | (h[1] << 26); // bits  0-31
     #[allow(clippy::cast_possible_truncation)]
-    let h1w = (h[1] >> 6 ) | (h[2] << 20);  // bits 32-63
+    let h1w = (h[1] >> 6) | (h[2] << 20); // bits 32-63
     #[allow(clippy::cast_possible_truncation)]
-    let h2w = (h[2] >> 12) | (h[3] << 14);  // bits 64-95
+    let h2w = (h[2] >> 12) | (h[3] << 14); // bits 64-95
     #[allow(clippy::cast_possible_truncation)]
-    let h3w = (h[3] >> 18) | (h[4] << 8 );  // bits 96-127
+    let h3w = (h[3] >> 18) | (h[4] << 8); // bits 96-127
 
     let mut f: u64;
     f = (h0w as u64).wrapping_add(s[0] as u64);
@@ -916,7 +1030,6 @@ pub fn chacha20_poly1305_encrypt(
 
     // Step 3: Build Poly1305 input: AAD || pad || ciphertext || pad || lengths.
     let mac_input = build_aead_mac_input(aad, plaintext);
-    
 
     poly1305(&otk, &mac_input)
 }
@@ -993,10 +1106,9 @@ pub fn self_test_tls_crypto() -> crate::error::KernelResult<()> {
         let key = [0x0Bu8; 20];
         let data = b"Hi There";
         let expected: [u8; 32] = [
-            0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53,
-            0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b, 0xf1, 0x2b,
-            0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7,
-            0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32, 0xcf, 0xf7,
+            0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53, 0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b,
+            0xf1, 0x2b, 0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7, 0x26, 0xe9, 0x37, 0x6c,
+            0x2e, 0x32, 0xcf, 0xf7,
         ];
         let result = hmac_sha256(&key, data);
         assert!(result == expected, "HMAC-SHA256 test case 1");
@@ -1009,10 +1121,9 @@ pub fn self_test_tls_crypto() -> crate::error::KernelResult<()> {
         let key = b"Jefe";
         let data = b"what do ya want for nothing?";
         let expected: [u8; 32] = [
-            0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e,
-            0x6a, 0x04, 0x24, 0x26, 0x08, 0x95, 0x75, 0xc7,
-            0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83,
-            0x9d, 0xec, 0x58, 0xb9, 0x64, 0xec, 0x38, 0x43,
+            0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24, 0x26, 0x08, 0x95,
+            0x75, 0xc7, 0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9,
+            0x64, 0xec, 0x38, 0x43,
         ];
         let result = hmac_sha256(key, data);
         assert!(result == expected, "HMAC-SHA256 test case 2");
@@ -1023,27 +1134,23 @@ pub fn self_test_tls_crypto() -> crate::error::KernelResult<()> {
     // --- HKDF-SHA256 test vector (RFC 5869 §A.1) ---
     {
         let ikm = [0x0Bu8; 22];
-        let salt: [u8; 13] = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
-                               0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c];
-        let info: [u8; 10] = [0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6,
-                               0xf7, 0xf8, 0xf9];
+        let salt: [u8; 13] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+        ];
+        let info: [u8; 10] = [0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9];
         let expected_prk: [u8; 32] = [
-            0x07, 0x77, 0x09, 0x36, 0x2c, 0x2e, 0x32, 0xdf,
-            0x0d, 0xdc, 0x3f, 0x0d, 0xc4, 0x7b, 0xba, 0x63,
-            0x90, 0xb6, 0xc7, 0x3b, 0xb5, 0x0f, 0x9c, 0x31,
-            0x22, 0xec, 0x84, 0x4a, 0xd7, 0xc2, 0xb3, 0xe5,
+            0x07, 0x77, 0x09, 0x36, 0x2c, 0x2e, 0x32, 0xdf, 0x0d, 0xdc, 0x3f, 0x0d, 0xc4, 0x7b,
+            0xba, 0x63, 0x90, 0xb6, 0xc7, 0x3b, 0xb5, 0x0f, 0x9c, 0x31, 0x22, 0xec, 0x84, 0x4a,
+            0xd7, 0xc2, 0xb3, 0xe5,
         ];
         let prk = hkdf_extract(&salt, &ikm);
         assert!(prk == expected_prk, "HKDF extract");
 
         let okm = hkdf_expand(&prk, &info, 42);
         let expected_okm: [u8; 42] = [
-            0x3c, 0xb2, 0x5f, 0x25, 0xfa, 0xac, 0xd5, 0x7a,
-            0x90, 0x43, 0x4f, 0x64, 0xd0, 0x36, 0x2f, 0x2a,
-            0x2d, 0x2d, 0x0a, 0x90, 0xcf, 0x1a, 0x5a, 0x4c,
-            0x5d, 0xb0, 0x2d, 0x56, 0xec, 0xc4, 0xc5, 0xbf,
-            0x34, 0x00, 0x72, 0x08, 0xd5, 0xb8, 0x87, 0x18,
-            0x58, 0x65,
+            0x3c, 0xb2, 0x5f, 0x25, 0xfa, 0xac, 0xd5, 0x7a, 0x90, 0x43, 0x4f, 0x64, 0xd0, 0x36,
+            0x2f, 0x2a, 0x2d, 0x2d, 0x0a, 0x90, 0xcf, 0x1a, 0x5a, 0x4c, 0x5d, 0xb0, 0x2d, 0x56,
+            0xec, 0xc4, 0xc5, 0xbf, 0x34, 0x00, 0x72, 0x08, 0xd5, 0xb8, 0x87, 0x18, 0x58, 0x65,
         ];
         assert!(okm.len() == 42, "HKDF output length");
         assert!(okm[..] == expected_okm[..], "HKDF expand output");
@@ -1054,14 +1161,12 @@ pub fn self_test_tls_crypto() -> crate::error::KernelResult<()> {
     // --- ChaCha20 test vector (RFC 8439 §2.4.2) ---
     {
         let key: [u8; 32] = [
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-            0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x1f,
         ];
         let nonce: [u8; 12] = [
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4a,
-            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4a, 0x00, 0x00, 0x00, 0x00,
         ];
         // Plaintext: "Ladies and Gentlemen of the class of '99: ..."
         let plaintext = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
@@ -1070,10 +1175,13 @@ pub fn self_test_tls_crypto() -> crate::error::KernelResult<()> {
 
         // First few bytes of expected ciphertext from RFC 8439 §2.4.2.
         let expected_start: [u8; 16] = [
-            0x6e, 0x2e, 0x35, 0x9a, 0x25, 0x68, 0xf9, 0x80,
-            0x41, 0xba, 0x07, 0x28, 0xdd, 0x0d, 0x69, 0x81,
+            0x6e, 0x2e, 0x35, 0x9a, 0x25, 0x68, 0xf9, 0x80, 0x41, 0xba, 0x07, 0x28, 0xdd, 0x0d,
+            0x69, 0x81,
         ];
-        assert!(data[..16] == expected_start[..], "ChaCha20 ciphertext start");
+        assert!(
+            data[..16] == expected_start[..],
+            "ChaCha20 ciphertext start"
+        );
 
         // Decrypt and verify round-trip.
         chacha20_xor(&key, &nonce, 1, &mut data);
@@ -1085,15 +1193,14 @@ pub fn self_test_tls_crypto() -> crate::error::KernelResult<()> {
     // --- Poly1305 test vector (RFC 8439 §2.5.2) ---
     {
         let key: [u8; 32] = [
-            0x85, 0xd6, 0xbe, 0x78, 0x57, 0x55, 0x6d, 0x33,
-            0x7f, 0x44, 0x52, 0xfe, 0x42, 0xd5, 0x06, 0xa8,
-            0x01, 0x03, 0x80, 0x8a, 0xfb, 0x0d, 0xb2, 0xfd,
-            0x4a, 0xbf, 0xf6, 0xaf, 0x41, 0x49, 0xf5, 0x1b,
+            0x85, 0xd6, 0xbe, 0x78, 0x57, 0x55, 0x6d, 0x33, 0x7f, 0x44, 0x52, 0xfe, 0x42, 0xd5,
+            0x06, 0xa8, 0x01, 0x03, 0x80, 0x8a, 0xfb, 0x0d, 0xb2, 0xfd, 0x4a, 0xbf, 0xf6, 0xaf,
+            0x41, 0x49, 0xf5, 0x1b,
         ];
         let msg = b"Cryptographic Forum Research Group";
         let expected: [u8; 16] = [
-            0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6,
-            0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01, 0x27, 0xa9,
+            0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6, 0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01,
+            0x27, 0xa9,
         ];
         let tag = poly1305(&key, msg);
         assert!(tag == expected, "Poly1305 tag");
@@ -1104,23 +1211,20 @@ pub fn self_test_tls_crypto() -> crate::error::KernelResult<()> {
     // --- ChaCha20-Poly1305 AEAD test vector (RFC 8439 §2.8.2) ---
     {
         let key: [u8; 32] = [
-            0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
-            0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f,
-            0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97,
-            0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f,
+            0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d,
+            0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b,
+            0x9c, 0x9d, 0x9e, 0x9f,
         ];
         let nonce: [u8; 12] = [
-            0x07, 0x00, 0x00, 0x00, 0x40, 0x41, 0x42, 0x43,
-            0x44, 0x45, 0x46, 0x47,
+            0x07, 0x00, 0x00, 0x00, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
         ];
         let aad: [u8; 12] = [
-            0x50, 0x51, 0x52, 0x53, 0xc0, 0xc1, 0xc2, 0xc3,
-            0xc4, 0xc5, 0xc6, 0xc7,
+            0x50, 0x51, 0x52, 0x53, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
         ];
         let plaintext = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
         let expected_tag: [u8; 16] = [
-            0x1a, 0xe1, 0x0b, 0x59, 0x4f, 0x09, 0xe2, 0x6a,
-            0x7e, 0x90, 0x2e, 0xcb, 0xd0, 0x60, 0x06, 0x91,
+            0x1a, 0xe1, 0x0b, 0x59, 0x4f, 0x09, 0xe2, 0x6a, 0x7e, 0x90, 0x2e, 0xcb, 0xd0, 0x60,
+            0x06, 0x91,
         ];
 
         // Encrypt.
@@ -1147,22 +1251,19 @@ pub fn self_test_tls_crypto() -> crate::error::KernelResult<()> {
     // --- X25519 test vector (RFC 7748 §6.1) ---
     {
         let alice_sk: [u8; 32] = [
-            0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d,
-            0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66, 0x45,
-            0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a,
-            0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
+            0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2,
+            0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5,
+            0x1d, 0xb9, 0x2c, 0x2a,
         ];
         let bob_pk: [u8; 32] = [
-            0xde, 0x9e, 0xdb, 0x7d, 0x7b, 0x7d, 0xc1, 0xb4,
-            0xd3, 0x5b, 0x61, 0xc2, 0xec, 0xe4, 0x35, 0x37,
-            0x3f, 0x83, 0x43, 0xc8, 0x5b, 0x78, 0x67, 0x4d,
-            0xad, 0xfc, 0x7e, 0x14, 0x6f, 0x88, 0x2b, 0x4f,
+            0xde, 0x9e, 0xdb, 0x7d, 0x7b, 0x7d, 0xc1, 0xb4, 0xd3, 0x5b, 0x61, 0xc2, 0xec, 0xe4,
+            0x35, 0x37, 0x3f, 0x83, 0x43, 0xc8, 0x5b, 0x78, 0x67, 0x4d, 0xad, 0xfc, 0x7e, 0x14,
+            0x6f, 0x88, 0x2b, 0x4f,
         ];
         let expected_shared: [u8; 32] = [
-            0x4a, 0x5d, 0x9d, 0x5b, 0xa4, 0xce, 0x2d, 0xe1,
-            0x72, 0x8e, 0x3b, 0xf4, 0x80, 0x35, 0x0f, 0x25,
-            0xe0, 0x7e, 0x21, 0xc9, 0x47, 0xd1, 0x9e, 0x33,
-            0x76, 0xf0, 0x9b, 0x3c, 0x1e, 0x16, 0x17, 0x42,
+            0x4a, 0x5d, 0x9d, 0x5b, 0xa4, 0xce, 0x2d, 0xe1, 0x72, 0x8e, 0x3b, 0xf4, 0x80, 0x35,
+            0x0f, 0x25, 0xe0, 0x7e, 0x21, 0xc9, 0x47, 0xd1, 0x9e, 0x33, 0x76, 0xf0, 0x9b, 0x3c,
+            0x1e, 0x16, 0x17, 0x42,
         ];
         let shared = x25519(&alice_sk, &bob_pk);
         assert!(shared == expected_shared, "X25519 shared secret");
@@ -1174,16 +1275,14 @@ pub fn self_test_tls_crypto() -> crate::error::KernelResult<()> {
     {
         // Alice's public key = x25519(alice_sk, basepoint)
         let alice_sk: [u8; 32] = [
-            0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d,
-            0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66, 0x45,
-            0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a,
-            0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
+            0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2,
+            0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5,
+            0x1d, 0xb9, 0x2c, 0x2a,
         ];
         let expected_pk: [u8; 32] = [
-            0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54,
-            0x74, 0x8b, 0x7d, 0xdc, 0xb4, 0x3e, 0xf7, 0x5a,
-            0x0d, 0xbf, 0x3a, 0x0d, 0x26, 0x38, 0x1a, 0xf4,
-            0xeb, 0xa4, 0xa9, 0x8e, 0xaa, 0x9b, 0x4e, 0x6a,
+            0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54, 0x74, 0x8b, 0x7d, 0xdc, 0xb4, 0x3e,
+            0xf7, 0x5a, 0x0d, 0xbf, 0x3a, 0x0d, 0x26, 0x38, 0x1a, 0xf4, 0xeb, 0xa4, 0xa9, 0x8e,
+            0xaa, 0x9b, 0x4e, 0x6a,
         ];
         let pk = x25519_base(&alice_sk);
         assert!(pk == expected_pk, "X25519 base point mult");
@@ -1218,11 +1317,11 @@ impl Fe25519 {
     fn from_bytes(s: &[u8; 32]) -> Self {
         let mut h = [0u64; 5];
         // Load 5 limbs at 51-bit boundaries.
-        h[0] =  load_le_u64(s, 0)        & 0x7FFFFFFFFFFFF;
-        h[1] = (load_le_u64(s, 6) >> 3)  & 0x7FFFFFFFFFFFF;
+        h[0] = load_le_u64(s, 0) & 0x7FFFFFFFFFFFF;
+        h[1] = (load_le_u64(s, 6) >> 3) & 0x7FFFFFFFFFFFF;
         h[2] = (load_le_u64(s, 12) >> 6) & 0x7FFFFFFFFFFFF;
         h[3] = (load_le_u64(s, 19) >> 1) & 0x7FFFFFFFFFFFF;
-        h[4] = (load_le_u64(s, 24) >> 12)& 0x7FFFFFFFFFFFF;
+        h[4] = (load_le_u64(s, 24) >> 12) & 0x7FFFFFFFFFFFF;
         Self(h)
     }
 
@@ -1231,12 +1330,24 @@ impl Fe25519 {
         let mut h = self.0;
         // Full carry chain to ensure limbs are < 2^51.
         let mut carry: u64;
-        carry = h[0] >> 51; h[0] &= 0x7FFFFFFFFFFFF; h[1] = h[1].wrapping_add(carry);
-        carry = h[1] >> 51; h[1] &= 0x7FFFFFFFFFFFF; h[2] = h[2].wrapping_add(carry);
-        carry = h[2] >> 51; h[2] &= 0x7FFFFFFFFFFFF; h[3] = h[3].wrapping_add(carry);
-        carry = h[3] >> 51; h[3] &= 0x7FFFFFFFFFFFF; h[4] = h[4].wrapping_add(carry);
-        carry = h[4] >> 51; h[4] &= 0x7FFFFFFFFFFFF; h[0] = h[0].wrapping_add(carry.wrapping_mul(19));
-        carry = h[0] >> 51; h[0] &= 0x7FFFFFFFFFFFF; h[1] = h[1].wrapping_add(carry);
+        carry = h[0] >> 51;
+        h[0] &= 0x7FFFFFFFFFFFF;
+        h[1] = h[1].wrapping_add(carry);
+        carry = h[1] >> 51;
+        h[1] &= 0x7FFFFFFFFFFFF;
+        h[2] = h[2].wrapping_add(carry);
+        carry = h[2] >> 51;
+        h[2] &= 0x7FFFFFFFFFFFF;
+        h[3] = h[3].wrapping_add(carry);
+        carry = h[3] >> 51;
+        h[3] &= 0x7FFFFFFFFFFFF;
+        h[4] = h[4].wrapping_add(carry);
+        carry = h[4] >> 51;
+        h[4] &= 0x7FFFFFFFFFFFF;
+        h[0] = h[0].wrapping_add(carry.wrapping_mul(19));
+        carry = h[0] >> 51;
+        h[0] &= 0x7FFFFFFFFFFFF;
+        h[1] = h[1].wrapping_add(carry);
 
         // Conditional subtract p: if h >= p, subtract p.
         // q = (h[0] + 19) >> 51; propagate; check if h[4] overflows.
@@ -1248,11 +1359,19 @@ impl Fe25519 {
 
         // q is 0 or 1.  If 1, h >= p, subtract p (add 19, propagate).
         h[0] = h[0].wrapping_add(q.wrapping_mul(19));
-        carry = h[0] >> 51; h[0] &= 0x7FFFFFFFFFFFF;
-        h[1] = h[1].wrapping_add(carry); carry = h[1] >> 51; h[1] &= 0x7FFFFFFFFFFFF;
-        h[2] = h[2].wrapping_add(carry); carry = h[2] >> 51; h[2] &= 0x7FFFFFFFFFFFF;
-        h[3] = h[3].wrapping_add(carry); carry = h[3] >> 51; h[3] &= 0x7FFFFFFFFFFFF;
-        h[4] = h[4].wrapping_add(carry);                     h[4] &= 0x7FFFFFFFFFFFF;
+        carry = h[0] >> 51;
+        h[0] &= 0x7FFFFFFFFFFFF;
+        h[1] = h[1].wrapping_add(carry);
+        carry = h[1] >> 51;
+        h[1] &= 0x7FFFFFFFFFFFF;
+        h[2] = h[2].wrapping_add(carry);
+        carry = h[2] >> 51;
+        h[2] &= 0x7FFFFFFFFFFFF;
+        h[3] = h[3].wrapping_add(carry);
+        carry = h[3] >> 51;
+        h[3] &= 0x7FFFFFFFFFFFF;
+        h[4] = h[4].wrapping_add(carry);
+        h[4] &= 0x7FFFFFFFFFFFF;
 
         // Pack 5 × 51-bit limbs into 32 bytes (little-endian).
         // Uses overlapping 8-byte writes at offsets matching from_bytes reads.
@@ -1290,11 +1409,21 @@ impl Fe25519 {
     fn sub(self, rhs: Self) -> Self {
         // 2p in limb form: each limb is 2 * (2^51 - 1) except last is 2*(2^51-19).
         Self([
-            self.0[0].wrapping_add(0xFFFFFFFFFFFDA).wrapping_sub(rhs.0[0]),
-            self.0[1].wrapping_add(0xFFFFFFFFFFFFE).wrapping_sub(rhs.0[1]),
-            self.0[2].wrapping_add(0xFFFFFFFFFFFFE).wrapping_sub(rhs.0[2]),
-            self.0[3].wrapping_add(0xFFFFFFFFFFFFE).wrapping_sub(rhs.0[3]),
-            self.0[4].wrapping_add(0xFFFFFFFFFFFFE).wrapping_sub(rhs.0[4]),
+            self.0[0]
+                .wrapping_add(0xFFFFFFFFFFFDA)
+                .wrapping_sub(rhs.0[0]),
+            self.0[1]
+                .wrapping_add(0xFFFFFFFFFFFFE)
+                .wrapping_sub(rhs.0[1]),
+            self.0[2]
+                .wrapping_add(0xFFFFFFFFFFFFE)
+                .wrapping_sub(rhs.0[2]),
+            self.0[3]
+                .wrapping_add(0xFFFFFFFFFFFFE)
+                .wrapping_sub(rhs.0[3]),
+            self.0[4]
+                .wrapping_add(0xFFFFFFFFFFFFE)
+                .wrapping_sub(rhs.0[4]),
         ])
     }
 
@@ -1313,34 +1442,34 @@ impl Fe25519 {
         // c[i] = Σ a[j] * b[k] where (j+k) mod 5 == i,
         // with b[k]*19 when j+k >= 5 (wrap around, * 2^255 = *19).
         let c0 = (a[0] as u128) * (b[0] as u128)
-               + (a[1] as u128) * (b4_19 as u128)
-               + (a[2] as u128) * (b3_19 as u128)
-               + (a[3] as u128) * (b2_19 as u128)
-               + (a[4] as u128) * (b1_19 as u128);
+            + (a[1] as u128) * (b4_19 as u128)
+            + (a[2] as u128) * (b3_19 as u128)
+            + (a[3] as u128) * (b2_19 as u128)
+            + (a[4] as u128) * (b1_19 as u128);
 
         let c1 = (a[0] as u128) * (b[1] as u128)
-               + (a[1] as u128) * (b[0]  as u128)
-               + (a[2] as u128) * (b4_19 as u128)
-               + (a[3] as u128) * (b3_19 as u128)
-               + (a[4] as u128) * (b2_19 as u128);
+            + (a[1] as u128) * (b[0] as u128)
+            + (a[2] as u128) * (b4_19 as u128)
+            + (a[3] as u128) * (b3_19 as u128)
+            + (a[4] as u128) * (b2_19 as u128);
 
         let c2 = (a[0] as u128) * (b[2] as u128)
-               + (a[1] as u128) * (b[1]  as u128)
-               + (a[2] as u128) * (b[0]  as u128)
-               + (a[3] as u128) * (b4_19 as u128)
-               + (a[4] as u128) * (b3_19 as u128);
+            + (a[1] as u128) * (b[1] as u128)
+            + (a[2] as u128) * (b[0] as u128)
+            + (a[3] as u128) * (b4_19 as u128)
+            + (a[4] as u128) * (b3_19 as u128);
 
         let c3 = (a[0] as u128) * (b[3] as u128)
-               + (a[1] as u128) * (b[2]  as u128)
-               + (a[2] as u128) * (b[1]  as u128)
-               + (a[3] as u128) * (b[0]  as u128)
-               + (a[4] as u128) * (b4_19 as u128);
+            + (a[1] as u128) * (b[2] as u128)
+            + (a[2] as u128) * (b[1] as u128)
+            + (a[3] as u128) * (b[0] as u128)
+            + (a[4] as u128) * (b4_19 as u128);
 
         let c4 = (a[0] as u128) * (b[4] as u128)
-               + (a[1] as u128) * (b[3]  as u128)
-               + (a[2] as u128) * (b[2]  as u128)
-               + (a[3] as u128) * (b[1]  as u128)
-               + (a[4] as u128) * (b[0]  as u128);
+            + (a[1] as u128) * (b[3] as u128)
+            + (a[2] as u128) * (b[2] as u128)
+            + (a[3] as u128) * (b[1] as u128)
+            + (a[4] as u128) * (b[0] as u128);
 
         // Carry propagation.
         fe_carry5(c0, c1, c2, c3, c4)
@@ -1362,24 +1491,24 @@ impl Fe25519 {
         // Cross-terms are doubled (a[i]*a[j] appears twice for i≠j).
         // Wrapped terms (i+j >= 5) use *19 reduction.
         let c0 = (a[0] as u128) * (a[0] as u128)
-               + (a1_2 as u128) * (a4_19 as u128)
-               + (a2_2 as u128) * (a3_19 as u128);
+            + (a1_2 as u128) * (a4_19 as u128)
+            + (a2_2 as u128) * (a3_19 as u128);
 
         let c1 = (a0_2 as u128) * (a[1] as u128)
-               + (a2_2 as u128) * (a4_19 as u128)
-               + (a[3] as u128) * (a3_19 as u128);
+            + (a2_2 as u128) * (a4_19 as u128)
+            + (a[3] as u128) * (a3_19 as u128);
 
         let c2 = (a0_2 as u128) * (a[2] as u128)
-               + (a[1] as u128) * (a[1] as u128)
-               + (a3_2 as u128) * (a4_19 as u128);
+            + (a[1] as u128) * (a[1] as u128)
+            + (a3_2 as u128) * (a4_19 as u128);
 
         let c3 = (a0_2 as u128) * (a[3] as u128)
-               + (a1_2 as u128) * (a[2] as u128)
-               + (a[4] as u128) * (a4_19 as u128);
+            + (a1_2 as u128) * (a[2] as u128)
+            + (a[4] as u128) * (a4_19 as u128);
 
         let c4 = (a0_2 as u128) * (a[4] as u128)
-               + (a1_2 as u128) * (a[3] as u128)
-               + (a[2] as u128) * (a[2] as u128);
+            + (a1_2 as u128) * (a[3] as u128)
+            + (a[2] as u128) * (a[2] as u128);
 
         fe_carry5(c0, c1, c2, c3, c4)
     }
@@ -1389,40 +1518,56 @@ impl Fe25519 {
     /// p-2 = 2^255 - 21 = special form that allows efficient chained squarings.
     fn invert(self) -> Self {
         // Based on the addition chain from djb's ref10 code.
-        let z2 = self.sqr();                          // z^2
-        let z9 = z2.sqr().sqr();                      // z^8
-        let z9 = z9.mul(self);                         // z^9
-        let z11 = z9.mul(z2);                          // z^11
-        let z_5_0 = z11.sqr().mul(z9);                // z^(2^5-1)
+        let z2 = self.sqr(); // z^2
+        let z9 = z2.sqr().sqr(); // z^8
+        let z9 = z9.mul(self); // z^9
+        let z11 = z9.mul(z2); // z^11
+        let z_5_0 = z11.sqr().mul(z9); // z^(2^5-1)
 
         let mut t = z_5_0;
-        for _ in 0..5 { t = t.sqr(); }
-        let z_10_0 = t.mul(z_5_0);                    // z^(2^10-1)
+        for _ in 0..5 {
+            t = t.sqr();
+        }
+        let z_10_0 = t.mul(z_5_0); // z^(2^10-1)
 
         t = z_10_0;
-        for _ in 0..10 { t = t.sqr(); }
-        let z_20_0 = t.mul(z_10_0);                   // z^(2^20-1)
+        for _ in 0..10 {
+            t = t.sqr();
+        }
+        let z_20_0 = t.mul(z_10_0); // z^(2^20-1)
 
         t = z_20_0;
-        for _ in 0..20 { t = t.sqr(); }
-        t = t.mul(z_20_0);                             // z^(2^40-1)
+        for _ in 0..20 {
+            t = t.sqr();
+        }
+        t = t.mul(z_20_0); // z^(2^40-1)
 
-        for _ in 0..10 { t = t.sqr(); }
-        let z_50_0 = t.mul(z_10_0);                   // z^(2^50-1)
+        for _ in 0..10 {
+            t = t.sqr();
+        }
+        let z_50_0 = t.mul(z_10_0); // z^(2^50-1)
 
         t = z_50_0;
-        for _ in 0..50 { t = t.sqr(); }
-        let z_100_0 = t.mul(z_50_0);                  // z^(2^100-1)
+        for _ in 0..50 {
+            t = t.sqr();
+        }
+        let z_100_0 = t.mul(z_50_0); // z^(2^100-1)
 
         t = z_100_0;
-        for _ in 0..100 { t = t.sqr(); }
-        t = t.mul(z_100_0);                            // z^(2^200-1)
+        for _ in 0..100 {
+            t = t.sqr();
+        }
+        t = t.mul(z_100_0); // z^(2^200-1)
 
-        for _ in 0..50 { t = t.sqr(); }
-        t = t.mul(z_50_0);                             // z^(2^250-1)
+        for _ in 0..50 {
+            t = t.sqr();
+        }
+        t = t.mul(z_50_0); // z^(2^250-1)
 
-        for _ in 0..5 { t = t.sqr(); }
-        t.mul(z11)                                      // z^(2^255-21)
+        for _ in 0..5 {
+            t = t.sqr();
+        }
+        t.mul(z11) // z^(2^255-21)
     }
 
     /// Conditional swap: if swap != 0, exchange self and other.
@@ -1507,9 +1652,9 @@ const X25519_BASEPOINT: [u8; 32] = {
 pub fn x25519(scalar: &[u8; 32], point: &[u8; 32]) -> [u8; 32] {
     // Clamp scalar per RFC 7748.
     let mut k = *scalar;
-    k[0]  &= 248;   // Clear bottom 3 bits.
-    k[31] &= 127;   // Clear top bit.
-    k[31] |= 64;    // Set bit 254.
+    k[0] &= 248; // Clear bottom 3 bits.
+    k[31] &= 127; // Clear top bit.
+    k[31] |= 64; // Set bit 254.
 
     let u = Fe25519::from_bytes(point);
 
@@ -1578,36 +1723,100 @@ pub const SHA512_DIGEST_SIZE: usize = 64;
 /// the square roots of the first 8 primes).
 #[allow(clippy::unreadable_literal)]
 const SHA512_H: [u64; 8] = [
-    0x6a09e667f3bcc908, 0xbb67ae8584caa73b,
-    0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
-    0x510e527fade682d1, 0x9b05688c2b3e6c1f,
-    0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
+    0x6a09e667f3bcc908,
+    0xbb67ae8584caa73b,
+    0x3c6ef372fe94f82b,
+    0xa54ff53a5f1d36f1,
+    0x510e527fade682d1,
+    0x9b05688c2b3e6c1f,
+    0x1f83d9abfb41bd6b,
+    0x5be0cd19137e2179,
 ];
 
 /// SHA-512 round constants (first 64 bits of the fractional parts of
 /// the cube roots of the first 80 primes).
 #[allow(clippy::unreadable_literal)]
 const SHA512_K: [u64; 80] = [
-    0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
-    0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
-    0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,
-    0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694,
-    0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,
-    0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5,
-    0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4,
-    0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70,
-    0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df,
-    0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,
-    0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30,
-    0xd192e819d6ef5218, 0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8,
-    0x19a4c116b8d2d0c8, 0x1e376c085141ab53, 0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8,
-    0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373, 0x682e6ff3d6b2b8a3,
-    0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec,
-    0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b,
-    0xca273eceea26619c, 0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178,
-    0x06f067aa72176fba, 0x0a637dc5a2c898a6, 0x113f9804bef90dae, 0x1b710b35131c471b,
-    0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc, 0x431d67c49c100d4c,
-    0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817,
+    0x428a2f98d728ae22,
+    0x7137449123ef65cd,
+    0xb5c0fbcfec4d3b2f,
+    0xe9b5dba58189dbbc,
+    0x3956c25bf348b538,
+    0x59f111f1b605d019,
+    0x923f82a4af194f9b,
+    0xab1c5ed5da6d8118,
+    0xd807aa98a3030242,
+    0x12835b0145706fbe,
+    0x243185be4ee4b28c,
+    0x550c7dc3d5ffb4e2,
+    0x72be5d74f27b896f,
+    0x80deb1fe3b1696b1,
+    0x9bdc06a725c71235,
+    0xc19bf174cf692694,
+    0xe49b69c19ef14ad2,
+    0xefbe4786384f25e3,
+    0x0fc19dc68b8cd5b5,
+    0x240ca1cc77ac9c65,
+    0x2de92c6f592b0275,
+    0x4a7484aa6ea6e483,
+    0x5cb0a9dcbd41fbd4,
+    0x76f988da831153b5,
+    0x983e5152ee66dfab,
+    0xa831c66d2db43210,
+    0xb00327c898fb213f,
+    0xbf597fc7beef0ee4,
+    0xc6e00bf33da88fc2,
+    0xd5a79147930aa725,
+    0x06ca6351e003826f,
+    0x142929670a0e6e70,
+    0x27b70a8546d22ffc,
+    0x2e1b21385c26c926,
+    0x4d2c6dfc5ac42aed,
+    0x53380d139d95b3df,
+    0x650a73548baf63de,
+    0x766a0abb3c77b2a8,
+    0x81c2c92e47edaee6,
+    0x92722c851482353b,
+    0xa2bfe8a14cf10364,
+    0xa81a664bbc423001,
+    0xc24b8b70d0f89791,
+    0xc76c51a30654be30,
+    0xd192e819d6ef5218,
+    0xd69906245565a910,
+    0xf40e35855771202a,
+    0x106aa07032bbd1b8,
+    0x19a4c116b8d2d0c8,
+    0x1e376c085141ab53,
+    0x2748774cdf8eeb99,
+    0x34b0bcb5e19b48a8,
+    0x391c0cb3c5c95a63,
+    0x4ed8aa4ae3418acb,
+    0x5b9cca4f7763e373,
+    0x682e6ff3d6b2b8a3,
+    0x748f82ee5defb2fc,
+    0x78a5636f43172f60,
+    0x84c87814a1f0ab72,
+    0x8cc702081a6439ec,
+    0x90befffa23631e28,
+    0xa4506cebde82bde9,
+    0xbef9a3f7b2c67915,
+    0xc67178f2e372532b,
+    0xca273eceea26619c,
+    0xd186b8c721c0c207,
+    0xeada7dd6cde0eb1e,
+    0xf57d4f7fee6ed178,
+    0x06f067aa72176fba,
+    0x0a637dc5a2c898a6,
+    0x113f9804bef90dae,
+    0x1b710b35131c471b,
+    0x28db77f523047d84,
+    0x32caab7b40c72493,
+    0x3c9ebe0a15c9bebc,
+    0x431d67c49c100d4c,
+    0x4cc5d4becb3e42b6,
+    0x597f299cfc657e2a,
+    0x5fcb6fab3ad6faec,
+    0x6c44198c4a475817,
 ];
 
 /// Incremental SHA-512 hasher.
@@ -1661,7 +1870,8 @@ impl Sha512 {
         let remaining = data.len().saturating_sub(offset);
         if remaining > 0 {
             self.buf[..remaining].copy_from_slice(
-                data.get(offset..offset.wrapping_add(remaining)).unwrap_or(&[]),
+                data.get(offset..offset.wrapping_add(remaining))
+                    .unwrap_or(&[]),
             );
             self.buf_len = remaining;
         }
@@ -1713,8 +1923,14 @@ fn sha512_compress(state: &mut [u64; 8], block: &[u8; 128]) {
     for i in 0..16 {
         let off = i * 8;
         w[i] = u64::from_be_bytes([
-            block[off], block[off + 1], block[off + 2], block[off + 3],
-            block[off + 4], block[off + 5], block[off + 6], block[off + 7],
+            block[off],
+            block[off + 1],
+            block[off + 2],
+            block[off + 3],
+            block[off + 4],
+            block[off + 5],
+            block[off + 6],
+            block[off + 7],
         ]);
     }
 
@@ -1739,7 +1955,10 @@ fn sha512_compress(state: &mut [u64; 8], block: &[u8; 128]) {
             let w_i16 = w[i0]; // w[(i - 16) & 15] == w[i & 15]
             let sigma0 = w_i15.rotate_right(1) ^ w_i15.rotate_right(8) ^ (w_i15 >> 7);
             let sigma1 = w_i2.rotate_right(19) ^ w_i2.rotate_right(61) ^ (w_i2 >> 6);
-            w[i0] = w_i16.wrapping_add(sigma0).wrapping_add(w_i7).wrapping_add(sigma1);
+            w[i0] = w_i16
+                .wrapping_add(sigma0)
+                .wrapping_add(w_i7)
+                .wrapping_add(sigma1);
         }
 
         let wi = w[i & 15];
@@ -1747,7 +1966,8 @@ fn sha512_compress(state: &mut [u64; 8], block: &[u8; 128]) {
         // Compression round (FIPS 180-4 §6.4.2).
         let big_sigma1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
         let ch = (e & f) ^ ((!e) & g);
-        let temp1 = h.wrapping_add(big_sigma1)
+        let temp1 = h
+            .wrapping_add(big_sigma1)
             .wrapping_add(ch)
             .wrapping_add(SHA512_K[i])
             .wrapping_add(wi);
@@ -1811,13 +2031,21 @@ pub const ED25519_SECRET_KEY_SIZE: usize = 32;
 /// Precomputed: 0x52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3
 #[allow(clippy::unreadable_literal)]
 const ED25519_D: Fe25519 = Fe25519([
-    0x34DCA135978A3, 0x1A8283B156EBD, 0x5E7A26001C029, 0x739C663A03CBB, 0x52036CEE2B6FF,
+    0x34DCA135978A3,
+    0x1A8283B156EBD,
+    0x5E7A26001C029,
+    0x739C663A03CBB,
+    0x52036CEE2B6FF,
 ]);
 
 /// 2*d mod p (reserved for optimized point doubling).
 #[allow(clippy::unreadable_literal, dead_code)]
 const ED25519_D2: Fe25519 = Fe25519([
-    0x69B9426B2F159, 0x35050762ADD7A, 0x3CF44C0038052, 0x6738CC7407977, 0x2406D9DC56DFF,
+    0x69B9426B2F159,
+    0x35050762ADD7A,
+    0x3CF44C0038052,
+    0x6738CC7407977,
+    0x2406D9DC56DFF,
 ]);
 
 /// A point in extended coordinates (X, Y, Z, T) on the Ed25519 curve.
@@ -1855,7 +2083,12 @@ impl EdPoint {
         let x = ed_sqrt_ratio(numerator, denominator);
 
         let t = x.mul(y);
-        Self { x, y, z: Fe25519::ONE, t }
+        Self {
+            x,
+            y,
+            z: Fe25519::ONE,
+            t,
+        }
     }
 
     /// Point addition using the unified extended coordinates formula.
@@ -1900,18 +2133,18 @@ impl EdPoint {
     ///   E = (X1+Y1)² - A - B, G = D+B, F = G-C, H = D-B
     ///   X3 = E·F, Y3 = G·H, T3 = E·H, Z3 = F·G
     fn double_point(self) -> Self {
-        let aa = self.x.sqr();             // A = X1²
-        let bb = self.y.sqr();             // B = Y1²
+        let aa = self.x.sqr(); // A = X1²
+        let bb = self.y.sqr(); // B = Y1²
         let zz = self.z.sqr();
-        let cc = zz.add(zz);              // C = 2·Z1²
-        let d = Fe25519::ZERO.sub(aa);    // D = a·A = -A (since a=-1)
+        let cc = zz.add(zz); // C = 2·Z1²
+        let d = Fe25519::ZERO.sub(aa); // D = a·A = -A (since a=-1)
         let e = {
             let s = self.x.add(self.y);
-            s.sqr().sub(aa).sub(bb)        // E = (X1+Y1)² - A - B = 2·X1·Y1
+            s.sqr().sub(aa).sub(bb) // E = (X1+Y1)² - A - B = 2·X1·Y1
         };
-        let g = d.add(bb);                // G = D + B = B - A
-        let f = g.sub(cc);                // F = G - C = (B-A) - 2Z²
-        let h = d.sub(bb);                // H = D - B = -(A+B)
+        let g = d.add(bb); // G = D + B = B - A
+        let f = g.sub(cc); // F = G - C = (B-A) - 2Z²
+        let h = d.sub(bb); // H = D - B = -(A+B)
         Self {
             x: e.mul(f),
             y: g.mul(h),
@@ -2006,7 +2239,12 @@ impl EdPoint {
         }
 
         let t = x.mul(y);
-        Some(Self { x, y, z: Fe25519::ONE, t })
+        Some(Self {
+            x,
+            y,
+            z: Fe25519::ONE,
+            t,
+        })
     }
 }
 
@@ -2022,29 +2260,43 @@ fn fe_pow_2_252_3(z: Fe25519) -> Fe25519 {
     let z_5_0 = z11.sqr().mul(z9);
 
     let mut t = z_5_0;
-    for _ in 0..5 { t = t.sqr(); }
+    for _ in 0..5 {
+        t = t.sqr();
+    }
     let z_10_0 = t.mul(z_5_0);
 
     t = z_10_0;
-    for _ in 0..10 { t = t.sqr(); }
+    for _ in 0..10 {
+        t = t.sqr();
+    }
     let z_20_0 = t.mul(z_10_0);
 
     t = z_20_0;
-    for _ in 0..20 { t = t.sqr(); }
+    for _ in 0..20 {
+        t = t.sqr();
+    }
     t = t.mul(z_20_0);
 
-    for _ in 0..10 { t = t.sqr(); }
+    for _ in 0..10 {
+        t = t.sqr();
+    }
     let z_50_0 = t.mul(z_10_0);
 
     t = z_50_0;
-    for _ in 0..50 { t = t.sqr(); }
+    for _ in 0..50 {
+        t = t.sqr();
+    }
     let z_100_0 = t.mul(z_50_0);
 
     t = z_100_0;
-    for _ in 0..100 { t = t.sqr(); }
+    for _ in 0..100 {
+        t = t.sqr();
+    }
     t = t.mul(z_100_0);
 
-    for _ in 0..50 { t = t.sqr(); }
+    for _ in 0..50 {
+        t = t.sqr();
+    }
     t = t.mul(z_50_0);
 
     t = t.sqr().sqr(); // 2^252
@@ -2058,17 +2310,18 @@ fn fe_sqrt_minus_one() -> Fe25519 {
     let two = Fe25519([2, 0, 0, 0, 0]);
     let mut r = two;
     // Square 252 times to get 2^(2^252).
-    for _ in 0..252 { r = r.sqr(); }
+    for _ in 0..252 {
+        r = r.sqr();
+    }
     // Now r = 2^(2^252).  We need 2^(2^253 - 5) = (2^(2^253)) / (2^5).
     // Actually, let's compute it differently using the pow function.
     // sqrt(-1) mod p is a well-known constant.
     // Value: 0x2b8324804fc1df0b2b4d00993dfbd7a72f431806ad2fe478c4ee1b274a0ea0b0
     // In our limb format:
     Fe25519::from_bytes(&[
-        0xB0, 0xA0, 0x0E, 0x4A, 0x27, 0x1B, 0xEE, 0xC4,
-        0x78, 0xE4, 0x2F, 0xAD, 0x06, 0x18, 0x43, 0x2F,
-        0xA7, 0xD7, 0xFB, 0x3D, 0x99, 0x00, 0x4D, 0x2B,
-        0x0B, 0xDF, 0xC1, 0x4F, 0x80, 0x24, 0x83, 0x2B,
+        0xB0, 0xA0, 0x0E, 0x4A, 0x27, 0x1B, 0xEE, 0xC4, 0x78, 0xE4, 0x2F, 0xAD, 0x06, 0x18, 0x43,
+        0x2F, 0xA7, 0xD7, 0xFB, 0x3D, 0x99, 0x00, 0x4D, 0x2B, 0x0B, 0xDF, 0xC1, 0x4F, 0x80, 0x24,
+        0x83, 0x2B,
     ])
 }
 
@@ -2110,10 +2363,8 @@ fn ed_sqrt_ratio(num: Fe25519, den: Fe25519) -> Fe25519 {
 /// L = 2^252 + 27742317777372353535851937790883648493
 #[allow(clippy::unreadable_literal)]
 const ED25519_L: [u8; 32] = [
-    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
-    0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
 ];
 
 /// Reduce a 64-byte scalar modulo L.
@@ -2137,8 +2388,14 @@ fn sc_reduce(input: &[u8; 64]) -> [u8; 32] {
     for i in 0..8 {
         let off = i * 8;
         val[i] = u64::from_le_bytes([
-            input[off], input[off + 1], input[off + 2], input[off + 3],
-            input[off + 4], input[off + 5], input[off + 6], input[off + 7],
+            input[off],
+            input[off + 1],
+            input[off + 2],
+            input[off + 3],
+            input[off + 4],
+            input[off + 5],
+            input[off + 6],
+            input[off + 7],
         ]);
     }
 
@@ -2196,19 +2453,27 @@ fn sc_reduce_bytes(input: &[u8; 64]) -> [u8; 32] {
 fn gte_shifted(a: &[u8; 64], b: &[u8; 32], shift: usize) -> bool {
     // The effective length of the shifted b is shift + 32 bytes.
     let top = shift.wrapping_add(32);
-    if top > 64 { return false; }
+    if top > 64 {
+        return false;
+    }
 
     // Check that all bytes above the shifted range are zero in a.
     for i in top..64 {
-        if a[i] != 0 { return true; }
+        if a[i] != 0 {
+            return true;
+        }
     }
 
     // Compare from MSB to LSB in the overlapping range.
     for i in (0usize..32).rev() {
         let a_byte = a[i.wrapping_add(shift)];
         let b_byte = b[i];
-        if a_byte > b_byte { return true; }
-        if a_byte < b_byte { return false; }
+        if a_byte > b_byte {
+            return true;
+        }
+        if a_byte < b_byte {
+            return false;
+        }
     }
     // Check lower bytes of a (below shift) — if they exist, a >= b.
     true
@@ -2219,8 +2484,12 @@ fn sub_shifted(a: &mut [u8; 64], b: &[u8; 32], shift: usize) {
     let mut borrow: u16 = 0;
     for i in 0usize..32 {
         let idx = i.wrapping_add(shift);
-        if idx >= 64 { break; }
-        let diff = (a[idx] as u16).wrapping_sub(b[i] as u16).wrapping_sub(borrow);
+        if idx >= 64 {
+            break;
+        }
+        let diff = (a[idx] as u16)
+            .wrapping_sub(b[i] as u16)
+            .wrapping_sub(borrow);
         a[idx] = diff as u8;
         borrow = (diff >> 8) & 1;
     }
@@ -2269,7 +2538,10 @@ pub fn ed25519_keypair(seed: &[u8; 32]) -> Ed25519KeyPair {
     let public_point = base.scalar_mul(&a);
     let public_key = public_point.encode();
 
-    Ed25519KeyPair { secret: *seed, public: public_key }
+    Ed25519KeyPair {
+        secret: *seed,
+        public: public_key,
+    }
 }
 
 /// Compute the Ed25519 public key from a secret seed.
@@ -2444,8 +2716,12 @@ fn sc_muladd(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
 fn sc_is_canonical(s: &[u8; 32]) -> bool {
     // Compare s < L byte by byte from MSB.
     for i in (0..32).rev() {
-        if s[i] < ED25519_L[i] { return true; }
-        if s[i] > ED25519_L[i] { return false; }
+        if s[i] < ED25519_L[i] {
+            return true;
+        }
+        if s[i] > ED25519_L[i] {
+            return false;
+        }
     }
     false // Equal to L is not canonical.
 }
@@ -2489,54 +2765,77 @@ pub fn self_test_ed25519() -> crate::error::KernelResult<()> {
 
         // Basepoint x-coordinate (known value).
         let expected_bx: [u8; 32] = [
-            0x1a, 0xd5, 0x25, 0x8f, 0x60, 0x2d, 0x56, 0xc9,
-            0xb2, 0xa7, 0x25, 0x95, 0x60, 0xc7, 0x2c, 0x69,
-            0x5c, 0xdc, 0xd6, 0xfd, 0x31, 0xe2, 0xa4, 0xc0,
-            0xfe, 0x53, 0x6e, 0xcd, 0xd3, 0x36, 0x69, 0x21,
+            0x1a, 0xd5, 0x25, 0x8f, 0x60, 0x2d, 0x56, 0xc9, 0xb2, 0xa7, 0x25, 0x95, 0x60, 0xc7,
+            0x2c, 0x69, 0x5c, 0xdc, 0xd6, 0xfd, 0x31, 0xe2, 0xa4, 0xc0, 0xfe, 0x53, 0x6e, 0xcd,
+            0xd3, 0x36, 0x69, 0x21,
         ];
         assert_eq!(bp.x.to_bytes(), expected_bx, "Basepoint Bx");
         serial_println!("[crypto]   Basepoint Bx: OK");
 
         // [1]*B == B.
-        let scalar_one: [u8; 32] = { let mut s = [0u8; 32]; s[0] = 1; s };
-        assert_eq!(bp.scalar_mul(&scalar_one).encode(), bp_enc, "[1]*B must equal B");
+        let scalar_one: [u8; 32] = {
+            let mut s = [0u8; 32];
+            s[0] = 1;
+            s
+        };
+        assert_eq!(
+            bp.scalar_mul(&scalar_one).encode(),
+            bp_enc,
+            "[1]*B must equal B"
+        );
         serial_println!("[crypto]   [1]*B == B: OK");
 
         // B+B == [2]*B (both methods agree).
         let two_b_add = bp.add_point(bp).encode();
-        let scalar_two: [u8; 32] = { let mut s = [0u8; 32]; s[0] = 2; s };
+        let scalar_two: [u8; 32] = {
+            let mut s = [0u8; 32];
+            s[0] = 2;
+            s
+        };
         let two_b_scalar = bp.scalar_mul(&scalar_two).encode();
         assert_eq!(two_b_add, two_b_scalar, "B+B must equal [2]*B");
 
         // [2]*B matches known reference value.
         let two_b_expected: [u8; 32] = [
-            0xc9, 0xa3, 0xf8, 0x6a, 0xae, 0x46, 0x5f, 0x0e,
-            0x56, 0x51, 0x38, 0x64, 0x51, 0x0f, 0x39, 0x97,
-            0x56, 0x1f, 0xa2, 0xc9, 0xe8, 0x5e, 0xa2, 0x1d,
-            0xc2, 0x29, 0x23, 0x09, 0xf3, 0xcd, 0x60, 0x22,
+            0xc9, 0xa3, 0xf8, 0x6a, 0xae, 0x46, 0x5f, 0x0e, 0x56, 0x51, 0x38, 0x64, 0x51, 0x0f,
+            0x39, 0x97, 0x56, 0x1f, 0xa2, 0xc9, 0xe8, 0x5e, 0xa2, 0x1d, 0xc2, 0x29, 0x23, 0x09,
+            0xf3, 0xcd, 0x60, 0x22,
         ];
         assert_eq!(two_b_scalar, two_b_expected, "[2]*B absolute value");
         serial_println!("[crypto]   [2]*B: OK");
 
         // [4]*B consistency: [2]*B + [2]*B == [4]*B.
         let two_b_pt = bp.add_point(bp);
-        let scalar_four: [u8; 32] = { let mut s = [0u8; 32]; s[0] = 4; s };
-        assert_eq!(two_b_pt.add_point(two_b_pt).encode(),
-                   bp.scalar_mul(&scalar_four).encode(), "[4]*B consistency");
+        let scalar_four: [u8; 32] = {
+            let mut s = [0u8; 32];
+            s[0] = 4;
+            s
+        };
+        assert_eq!(
+            two_b_pt.add_point(two_b_pt).encode(),
+            bp.scalar_mul(&scalar_four).encode(),
+            "[4]*B consistency"
+        );
         serial_println!("[crypto]   [4]*B: OK");
 
         // [8]*B on curve.
-        let scalar_eight: [u8; 32] = { let mut s = [0u8; 32]; s[0] = 8; s };
+        let scalar_eight: [u8; 32] = {
+            let mut s = [0u8; 32];
+            s[0] = 8;
+            s
+        };
         let eight_enc = bp.scalar_mul(&scalar_eight).encode();
-        assert!(EdPoint::decode(&eight_enc).is_some(), "[8]*B must be on curve");
+        assert!(
+            EdPoint::decode(&eight_enc).is_some(),
+            "[8]*B must be on curve"
+        );
         serial_println!("[crypto]   [8]*B on curve: OK");
 
         // [L-1]*B == -B (verifies large scalar multiplication).
         let l_minus_1: [u8; 32] = [
-            0xec, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
-            0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+            0xec, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9,
+            0xde, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x10,
         ];
         let neg_b = bp.scalar_mul(&l_minus_1).encode();
         let mut expected_neg_b = bp_enc;
@@ -2548,17 +2847,15 @@ pub fn self_test_ed25519() -> crate::error::KernelResult<()> {
     // Test 3: Ed25519 key generation — RFC 8032 §7.1 test vector 1.
     {
         let seed: [u8; 32] = [
-            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
-            0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
-            0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
-            0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60,
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
+            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
+            0x1c, 0xae, 0x7f, 0x60,
         ];
         // Correct public key from RFC 8032 §7.1 TEST 1.
         let expected_pub: [u8; 32] = [
-            0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7,
-            0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a,
-            0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25,
-            0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a,
+            0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64,
+            0x07, 0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68,
+            0xf7, 0x07, 0x51, 0x1a,
         ];
 
         let kp = ed25519_keypair(&seed);
@@ -2568,13 +2865,10 @@ pub fn self_test_ed25519() -> crate::error::KernelResult<()> {
         // Sign empty message (RFC 8032 §7.1 TEST 1).
         let sig = ed25519_sign(&seed, b"");
         let expected_sig: [u8; 64] = [
-            0xe5, 0x56, 0x43, 0x00, 0xc3, 0x60, 0xac, 0x72,
-            0x90, 0x86, 0xe2, 0xcc, 0x80, 0x6e, 0x82, 0x8a,
-            0x84, 0x87, 0x7f, 0x1e, 0xb8, 0xe5, 0xd9, 0x74,
-            0xd8, 0x73, 0xe0, 0x65, 0x22, 0x49, 0x01, 0x55,
-            0x5f, 0xb8, 0x82, 0x15, 0x90, 0xa3, 0x3b, 0xac,
-            0xc6, 0x1e, 0x39, 0x70, 0x1c, 0xf9, 0xb4, 0x6b,
-            0xd2, 0x5b, 0xf5, 0xf0, 0x59, 0x5b, 0xbe, 0x24,
+            0xe5, 0x56, 0x43, 0x00, 0xc3, 0x60, 0xac, 0x72, 0x90, 0x86, 0xe2, 0xcc, 0x80, 0x6e,
+            0x82, 0x8a, 0x84, 0x87, 0x7f, 0x1e, 0xb8, 0xe5, 0xd9, 0x74, 0xd8, 0x73, 0xe0, 0x65,
+            0x22, 0x49, 0x01, 0x55, 0x5f, 0xb8, 0x82, 0x15, 0x90, 0xa3, 0x3b, 0xac, 0xc6, 0x1e,
+            0x39, 0x70, 0x1c, 0xf9, 0xb4, 0x6b, 0xd2, 0x5b, 0xf5, 0xf0, 0x59, 0x5b, 0xbe, 0x24,
             0x65, 0x51, 0x41, 0x43, 0x8e, 0x7a, 0x10, 0x0b,
         ];
         assert_eq!(sig, expected_sig, "Ed25519 TV1 signature");
@@ -2588,16 +2882,14 @@ pub fn self_test_ed25519() -> crate::error::KernelResult<()> {
     // Test 4: Ed25519 test vector 2 (1-byte message: 0x72).
     {
         let seed: [u8; 32] = [
-            0x4c, 0xcd, 0x08, 0x9b, 0x28, 0xff, 0x96, 0xda,
-            0x9d, 0xb6, 0xc3, 0x46, 0xec, 0x11, 0x4e, 0x0f,
-            0x5b, 0x8a, 0x31, 0x9f, 0x35, 0xab, 0xa6, 0x24,
-            0xda, 0x8c, 0xf6, 0xed, 0x4f, 0xb8, 0xa6, 0xfb,
+            0x4c, 0xcd, 0x08, 0x9b, 0x28, 0xff, 0x96, 0xda, 0x9d, 0xb6, 0xc3, 0x46, 0xec, 0x11,
+            0x4e, 0x0f, 0x5b, 0x8a, 0x31, 0x9f, 0x35, 0xab, 0xa6, 0x24, 0xda, 0x8c, 0xf6, 0xed,
+            0x4f, 0xb8, 0xa6, 0xfb,
         ];
         let expected_pub: [u8; 32] = [
-            0x3d, 0x40, 0x17, 0xc3, 0xe8, 0x43, 0x89, 0x5a,
-            0x92, 0xb7, 0x0a, 0xa7, 0x4d, 0x1b, 0x7e, 0xbc,
-            0x9c, 0x98, 0x2c, 0xcf, 0x2e, 0xc4, 0x96, 0x8c,
-            0xc0, 0xcd, 0x55, 0xf1, 0x2a, 0xf4, 0x66, 0x0c,
+            0x3d, 0x40, 0x17, 0xc3, 0xe8, 0x43, 0x89, 0x5a, 0x92, 0xb7, 0x0a, 0xa7, 0x4d, 0x1b,
+            0x7e, 0xbc, 0x9c, 0x98, 0x2c, 0xcf, 0x2e, 0xc4, 0x96, 0x8c, 0xc0, 0xcd, 0x55, 0xf1,
+            0x2a, 0xf4, 0x66, 0x0c,
         ];
 
         let kp = ed25519_keypair(&seed);
@@ -2605,11 +2897,17 @@ pub fn self_test_ed25519() -> crate::error::KernelResult<()> {
         serial_println!("[crypto]   Ed25519 keygen TV2: OK");
 
         let sig = ed25519_sign(&seed, &[0x72]);
-        assert!(ed25519_verify(&kp.public, &[0x72], &sig), "Ed25519 TV2 sign+verify");
+        assert!(
+            ed25519_verify(&kp.public, &[0x72], &sig),
+            "Ed25519 TV2 sign+verify"
+        );
         serial_println!("[crypto]   Ed25519 sign+verify TV2: OK");
 
         // Verify with wrong message fails.
-        assert!(!ed25519_verify(&kp.public, &[0x73], &sig), "Ed25519 TV2 reject");
+        assert!(
+            !ed25519_verify(&kp.public, &[0x73], &sig),
+            "Ed25519 TV2 reject"
+        );
         serial_println!("[crypto]   Ed25519 verify reject: OK");
     }
 
@@ -2619,8 +2917,10 @@ pub fn self_test_ed25519() -> crate::error::KernelResult<()> {
         input[0] = 0xFF;
         input[31] = 0xFF;
         let reduced = sc_reduce(&input);
-        assert!(sc_is_canonical(&reduced) || reduced == [0u8; 32],
-            "sc_reduce must produce canonical scalar");
+        assert!(
+            sc_is_canonical(&reduced) || reduced == [0u8; 32],
+            "sc_reduce must produce canonical scalar"
+        );
         serial_println!("[crypto]   Scalar reduction: OK");
     }
 

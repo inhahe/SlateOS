@@ -21,11 +21,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -114,16 +114,35 @@ where
 }
 
 fn recalculate_totals(state: &mut State) {
-    state.total_ram = state.regions.iter()
+    state.total_ram = state
+        .regions
+        .iter()
         .filter(|r| r.region_type == RegionType::Usable)
         .map(|r| r.size)
         .sum();
-    state.total_reserved = state.regions.iter()
-        .filter(|r| matches!(r.region_type, RegionType::Reserved | RegionType::AcpiNvs | RegionType::BadMemory))
+    state.total_reserved = state
+        .regions
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.region_type,
+                RegionType::Reserved | RegionType::AcpiNvs | RegionType::BadMemory
+            )
+        })
         .map(|r| r.size)
         .sum();
-    state.total_kernel = state.regions.iter()
-        .filter(|r| matches!(r.region_type, RegionType::KernelCode | RegionType::KernelData | RegionType::KernelHeap | RegionType::PageTables))
+    state.total_kernel = state
+        .regions
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.region_type,
+                RegionType::KernelCode
+                    | RegionType::KernelData
+                    | RegionType::KernelHeap
+                    | RegionType::PageTables
+            )
+        })
         .map(|r| r.size)
         .sum();
 }
@@ -149,7 +168,9 @@ fn recalculate_totals(state: &mut State) {
 /// data: the numbers looked authoritative but were never measured.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         regions: Vec::new(),
         total_ram: 0,
@@ -189,14 +210,18 @@ pub fn populate_from_memmap(entries: &[&crate::limine::MemmapEntry]) {
     use crate::limine::memmap_type;
     let mut regions: Vec<MemRegion> = Vec::new();
     for e in entries {
-        if regions.len() >= MAX_REGIONS { break; }
+        if regions.len() >= MAX_REGIONS {
+            break;
+        }
         let (region_type, desc) = match e.type_ {
             memmap_type::USABLE => (RegionType::Usable, "Usable RAM"),
             memmap_type::RESERVED => (RegionType::Reserved, "Reserved"),
             memmap_type::ACPI_RECLAIMABLE => (RegionType::AcpiReclaimable, "ACPI reclaimable"),
             memmap_type::ACPI_NVS => (RegionType::AcpiNvs, "ACPI NVS"),
             memmap_type::BAD_MEMORY => (RegionType::BadMemory, "Bad memory"),
-            memmap_type::BOOTLOADER_RECLAIMABLE => (RegionType::BootloaderData, "Bootloader reclaimable"),
+            memmap_type::BOOTLOADER_RECLAIMABLE => {
+                (RegionType::BootloaderData, "Bootloader reclaimable")
+            }
             memmap_type::EXECUTABLE_AND_MODULES => (RegionType::KernelCode, "Kernel + modules"),
             memmap_type::FRAMEBUFFER => (RegionType::Framebuffer, "Framebuffer"),
             _ => (RegionType::Reserved, "Unknown"),
@@ -212,13 +237,21 @@ pub fn populate_from_memmap(entries: &[&crate::limine::MemmapEntry]) {
 }
 
 /// Add a memory region.
-pub fn add_region(start: u64, size: u64, region_type: RegionType, description: &str) -> KernelResult<()> {
+pub fn add_region(
+    start: u64,
+    size: u64,
+    region_type: RegionType,
+    description: &str,
+) -> KernelResult<()> {
     with_state(|state| {
         if state.regions.len() >= MAX_REGIONS {
             return Err(KernelError::ResourceExhausted);
         }
         state.regions.push(MemRegion {
-            start, size, region_type, description: String::from(description),
+            start,
+            size,
+            region_type,
+            description: String::from(description),
         });
         recalculate_totals(state);
         Ok(())
@@ -237,7 +270,11 @@ pub fn list_regions() -> Vec<MemRegion> {
 /// List regions of a specific type.
 pub fn list_type(region_type: RegionType) -> Vec<MemRegion> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.regions.iter().filter(|r| r.region_type == region_type).cloned().collect()
+        s.regions
+            .iter()
+            .filter(|r| r.region_type == region_type)
+            .cloned()
+            .collect()
     })
 }
 
@@ -259,9 +296,17 @@ pub fn total_kernel() -> u64 {
 /// Format bytes as human-readable.
 pub fn format_size(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
-        format!("{}.{} GiB", bytes / 1_073_741_824, (bytes % 1_073_741_824) / 107_374_182)
+        format!(
+            "{}.{} GiB",
+            bytes / 1_073_741_824,
+            (bytes % 1_073_741_824) / 107_374_182
+        )
     } else if bytes >= 1_048_576 {
-        format!("{}.{} MiB", bytes / 1_048_576, (bytes % 1_048_576) / 104_857)
+        format!(
+            "{}.{} MiB",
+            bytes / 1_048_576,
+            (bytes % 1_048_576) / 104_857
+        )
     } else if bytes >= 1024 {
         format!("{} KiB", bytes / 1024)
     } else {
@@ -273,7 +318,14 @@ pub fn format_size(bytes: u64) -> String {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.regions.len(), s.total_ram, s.total_reserved, s.total_kernel, s.total_queries, s.ops),
+        Some(s) => (
+            s.regions.len(),
+            s.total_ram,
+            s.total_reserved,
+            s.total_kernel,
+            s.total_queries,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -284,26 +336,45 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("memlayout::self_test() — running tests...");
-    use crate::limine::{memmap_type, MemmapEntry};
+    use crate::limine::{MemmapEntry, memmap_type};
 
     // Snapshot the LIVE region table first. This self_test is reachable from
     // the kshell `memlayout` command at any time, and the real Limine-derived
     // map is already installed by boot — the synthetic fixtures below must NOT
     // leak into /proc/memlayout or wipe the real map, so we restore the
     // snapshot at the end.
-    let saved: Option<Vec<MemRegion>> =
-        STATE.lock().as_ref().map(|s| s.regions.clone());
+    let saved: Option<Vec<MemRegion>> = STATE.lock().as_ref().map(|s| s.regions.clone());
 
     // Install a synthetic memory map through the real populate path. Two usable
     // blocks (1 MiB + 1 GiB), one reserved page, one kernel+modules page.
     let entries_owned = [
-        MemmapEntry { base: 0x0000_0000, length: 0x0010_0000, type_: memmap_type::USABLE },
-        MemmapEntry { base: 0x0010_0000, length: 0x0000_1000, type_: memmap_type::RESERVED },
-        MemmapEntry { base: 0x0020_0000, length: 0x4000_0000, type_: memmap_type::USABLE },
-        MemmapEntry { base: 0xFEE0_0000, length: 0x0000_1000, type_: memmap_type::EXECUTABLE_AND_MODULES },
+        MemmapEntry {
+            base: 0x0000_0000,
+            length: 0x0010_0000,
+            type_: memmap_type::USABLE,
+        },
+        MemmapEntry {
+            base: 0x0010_0000,
+            length: 0x0000_1000,
+            type_: memmap_type::RESERVED,
+        },
+        MemmapEntry {
+            base: 0x0020_0000,
+            length: 0x4000_0000,
+            type_: memmap_type::USABLE,
+        },
+        MemmapEntry {
+            base: 0xFEE0_0000,
+            length: 0x0000_1000,
+            type_: memmap_type::EXECUTABLE_AND_MODULES,
+        },
     ];
-    let entries: [&MemmapEntry; 4] =
-        [&entries_owned[0], &entries_owned[1], &entries_owned[2], &entries_owned[3]];
+    let entries: [&MemmapEntry; 4] = [
+        &entries_owned[0],
+        &entries_owned[1],
+        &entries_owned[2],
+        &entries_owned[3],
+    ];
     populate_from_memmap(&entries);
 
     // 1: Region count matches the installed map exactly.
@@ -357,7 +428,9 @@ pub fn self_test() {
     // into the live /proc/memlayout table.
     match saved {
         Some(regions) => install_regions(regions),
-        None => { *STATE.lock() = None; }
+        None => {
+            *STATE.lock() = None;
+        }
     }
     crate::serial_println!("memlayout::self_test() — all 8 tests passed");
 }

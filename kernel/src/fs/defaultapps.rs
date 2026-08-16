@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -98,16 +98,44 @@ impl AppCategory {
     /// MIME types handled by this category.
     pub fn mime_types(self) -> &'static [&'static str] {
         match self {
-            Self::WebBrowser => &["text/html", "application/xhtml+xml", "x-scheme-handler/http", "x-scheme-handler/https"],
+            Self::WebBrowser => &[
+                "text/html",
+                "application/xhtml+xml",
+                "x-scheme-handler/http",
+                "x-scheme-handler/https",
+            ],
             Self::EmailClient => &["x-scheme-handler/mailto", "message/rfc822"],
             Self::FileManager => &["inode/directory"],
-            Self::TextEditor => &["text/plain", "text/x-csrc", "text/x-python", "application/json"],
+            Self::TextEditor => &[
+                "text/plain",
+                "text/x-csrc",
+                "text/x-python",
+                "application/json",
+            ],
             Self::Terminal => &["x-scheme-handler/terminal"],
-            Self::ImageViewer => &["image/png", "image/jpeg", "image/gif", "image/bmp", "image/svg+xml", "image/webp"],
+            Self::ImageViewer => &[
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/bmp",
+                "image/svg+xml",
+                "image/webp",
+            ],
             Self::VideoPlayer => &["video/mp4", "video/x-matroska", "video/webm", "video/avi"],
-            Self::MusicPlayer => &["audio/mpeg", "audio/ogg", "audio/flac", "audio/wav", "audio/aac"],
+            Self::MusicPlayer => &[
+                "audio/mpeg",
+                "audio/ogg",
+                "audio/flac",
+                "audio/wav",
+                "audio/aac",
+            ],
             Self::PdfViewer => &["application/pdf"],
-            Self::ArchiveManager => &["application/zip", "application/x-tar", "application/gzip", "application/x-7z-compressed"],
+            Self::ArchiveManager => &[
+                "application/zip",
+                "application/x-tar",
+                "application/gzip",
+                "application/x-7z-compressed",
+            ],
             Self::Calculator => &[],
             Self::Calendar => &["text/calendar"],
             Self::Maps => &["x-scheme-handler/geo"],
@@ -210,16 +238,56 @@ pub fn init_defaults() {
     }
 
     let category_defaults = alloc::vec![
-        CategoryDefault { category: AppCategory::WebBrowser, app_id: String::from("webbrowser"), uid: 0 },
-        CategoryDefault { category: AppCategory::EmailClient, app_id: String::from("emailclient"), uid: 0 },
-        CategoryDefault { category: AppCategory::FileManager, app_id: String::from("filemanager"), uid: 0 },
-        CategoryDefault { category: AppCategory::TextEditor, app_id: String::from("textedit"), uid: 0 },
-        CategoryDefault { category: AppCategory::Terminal, app_id: String::from("terminal"), uid: 0 },
-        CategoryDefault { category: AppCategory::ImageViewer, app_id: String::from("imageviewer"), uid: 0 },
-        CategoryDefault { category: AppCategory::VideoPlayer, app_id: String::from("videoplayer"), uid: 0 },
-        CategoryDefault { category: AppCategory::MusicPlayer, app_id: String::from("musicplayer"), uid: 0 },
-        CategoryDefault { category: AppCategory::PdfViewer, app_id: String::from("pdfviewer"), uid: 0 },
-        CategoryDefault { category: AppCategory::ArchiveManager, app_id: String::from("archivemgr"), uid: 0 },
+        CategoryDefault {
+            category: AppCategory::WebBrowser,
+            app_id: String::from("webbrowser"),
+            uid: 0
+        },
+        CategoryDefault {
+            category: AppCategory::EmailClient,
+            app_id: String::from("emailclient"),
+            uid: 0
+        },
+        CategoryDefault {
+            category: AppCategory::FileManager,
+            app_id: String::from("filemanager"),
+            uid: 0
+        },
+        CategoryDefault {
+            category: AppCategory::TextEditor,
+            app_id: String::from("textedit"),
+            uid: 0
+        },
+        CategoryDefault {
+            category: AppCategory::Terminal,
+            app_id: String::from("terminal"),
+            uid: 0
+        },
+        CategoryDefault {
+            category: AppCategory::ImageViewer,
+            app_id: String::from("imageviewer"),
+            uid: 0
+        },
+        CategoryDefault {
+            category: AppCategory::VideoPlayer,
+            app_id: String::from("videoplayer"),
+            uid: 0
+        },
+        CategoryDefault {
+            category: AppCategory::MusicPlayer,
+            app_id: String::from("musicplayer"),
+            uid: 0
+        },
+        CategoryDefault {
+            category: AppCategory::PdfViewer,
+            app_id: String::from("pdfviewer"),
+            uid: 0
+        },
+        CategoryDefault {
+            category: AppCategory::ArchiveManager,
+            app_id: String::from("archivemgr"),
+            uid: 0
+        },
     ];
 
     *guard = Some(DefaultAppsState {
@@ -242,7 +310,9 @@ pub fn default_for_type(content_type: &str, uid: u32) -> Option<String> {
 
     // User override first.
     if uid != 0 {
-        if let Some(m) = state.defaults.iter()
+        if let Some(m) = state
+            .defaults
+            .iter()
             .find(|d| d.content_type == content_type && d.uid == uid)
         {
             return Some(m.app_id.clone());
@@ -250,7 +320,9 @@ pub fn default_for_type(content_type: &str, uid: u32) -> Option<String> {
     }
 
     // System default.
-    state.defaults.iter()
+    state
+        .defaults
+        .iter()
         .find(|d| d.content_type == content_type && d.uid == 0)
         .map(|d| d.app_id.clone())
 }
@@ -262,7 +334,9 @@ pub fn set_default(content_type: &str, app_id: &str, uid: u32) -> KernelResult<(
     }
     with_state(|state| {
         // Update existing mapping.
-        if let Some(existing) = state.defaults.iter_mut()
+        if let Some(existing) = state
+            .defaults
+            .iter_mut()
             .find(|d| d.content_type == content_type && d.uid == uid)
         {
             existing.app_id = String::from(app_id);
@@ -286,7 +360,9 @@ pub fn set_default(content_type: &str, app_id: &str, uid: u32) -> KernelResult<(
 /// Remove a default mapping.
 pub fn remove_default(content_type: &str, uid: u32) -> KernelResult<()> {
     with_state(|state| {
-        if let Some(pos) = state.defaults.iter()
+        if let Some(pos) = state
+            .defaults
+            .iter()
             .position(|d| d.content_type == content_type && d.uid == uid)
         {
             state.defaults.remove(pos);
@@ -301,7 +377,8 @@ pub fn remove_default(content_type: &str, uid: u32) -> KernelResult<()> {
 pub fn list_defaults(uid: u32) -> Vec<DefaultMapping> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.defaults.iter()
+        s.defaults
+            .iter()
             .filter(|d| d.uid == uid || d.uid == 0)
             .cloned()
             .collect()
@@ -319,14 +396,18 @@ pub fn category_default(category: AppCategory, uid: u32) -> Option<String> {
 
     // User override first.
     if uid != 0 {
-        if let Some(cd) = state.category_defaults.iter()
+        if let Some(cd) = state
+            .category_defaults
+            .iter()
             .find(|c| c.category == category && c.uid == uid)
         {
             return Some(cd.app_id.clone());
         }
     }
 
-    state.category_defaults.iter()
+    state
+        .category_defaults
+        .iter()
         .find(|c| c.category == category && c.uid == 0)
         .map(|c| c.app_id.clone())
 }
@@ -340,7 +421,9 @@ pub fn set_category_default(category: AppCategory, app_id: &str, uid: u32) -> Ke
     }
     with_state(|state| {
         // Update category default.
-        if let Some(existing) = state.category_defaults.iter_mut()
+        if let Some(existing) = state
+            .category_defaults
+            .iter_mut()
             .find(|c| c.category == category && c.uid == uid)
         {
             existing.app_id = String::from(app_id);
@@ -358,7 +441,9 @@ pub fn set_category_default(category: AppCategory, app_id: &str, uid: u32) -> Ke
         // Also update associated MIME type mappings.
         for mime in category.mime_types() {
             let mime_str = *mime;
-            if let Some(existing) = state.defaults.iter_mut()
+            if let Some(existing) = state
+                .defaults
+                .iter_mut()
                 .find(|d| d.content_type == mime_str && d.uid == uid)
             {
                 existing.app_id = String::from(app_id);
@@ -380,7 +465,8 @@ pub fn set_category_default(category: AppCategory, app_id: &str, uid: u32) -> Ke
 pub fn list_category_defaults(uid: u32) -> Vec<CategoryDefault> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.category_defaults.iter()
+        s.category_defaults
+            .iter()
             .filter(|c| c.uid == uid || c.uid == 0)
             .cloned()
             .collect()
@@ -394,11 +480,20 @@ pub fn list_category_defaults(uid: u32) -> Vec<CategoryDefault> {
 /// Find which category a MIME type belongs to.
 pub fn category_for_type(content_type: &str) -> Option<AppCategory> {
     let categories = [
-        AppCategory::WebBrowser, AppCategory::EmailClient, AppCategory::FileManager,
-        AppCategory::TextEditor, AppCategory::Terminal, AppCategory::ImageViewer,
-        AppCategory::VideoPlayer, AppCategory::MusicPlayer, AppCategory::PdfViewer,
-        AppCategory::ArchiveManager, AppCategory::Calculator, AppCategory::Calendar,
-        AppCategory::Maps, AppCategory::SystemMonitor,
+        AppCategory::WebBrowser,
+        AppCategory::EmailClient,
+        AppCategory::FileManager,
+        AppCategory::TextEditor,
+        AppCategory::Terminal,
+        AppCategory::ImageViewer,
+        AppCategory::VideoPlayer,
+        AppCategory::MusicPlayer,
+        AppCategory::PdfViewer,
+        AppCategory::ArchiveManager,
+        AppCategory::Calculator,
+        AppCategory::Calendar,
+        AppCategory::Maps,
+        AppCategory::SystemMonitor,
     ];
     for cat in &categories {
         if cat.mime_types().contains(&content_type) {
@@ -413,7 +508,8 @@ pub fn search(query: &str) -> Vec<DefaultMapping> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
         let q = query;
-        s.defaults.iter()
+        s.defaults
+            .iter()
             .filter(|d| d.content_type.contains(q) || d.app_id.contains(q))
             .cloned()
             .collect()
@@ -430,7 +526,12 @@ pub fn stats() -> (usize, usize, usize, u64) {
     match guard.as_ref() {
         Some(s) => {
             let overrides = s.defaults.iter().filter(|d| d.user_override).count();
-            (s.defaults.len(), s.category_defaults.len(), overrides, s.ops)
+            (
+                s.defaults.len(),
+                s.category_defaults.len(),
+                overrides,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0),
     }
@@ -508,9 +609,18 @@ pub fn self_test() {
 
     // Test 7: category for type.
     {
-        assert_eq!(category_for_type("text/html"), Some(AppCategory::WebBrowser));
-        assert_eq!(category_for_type("image/png"), Some(AppCategory::ImageViewer));
-        assert_eq!(category_for_type("application/pdf"), Some(AppCategory::PdfViewer));
+        assert_eq!(
+            category_for_type("text/html"),
+            Some(AppCategory::WebBrowser)
+        );
+        assert_eq!(
+            category_for_type("image/png"),
+            Some(AppCategory::ImageViewer)
+        );
+        assert_eq!(
+            category_for_type("application/pdf"),
+            Some(AppCategory::PdfViewer)
+        );
         assert_eq!(category_for_type("unknown/type"), None);
     }
     serial_println!("[defaultapps]  7/11 category for type OK");

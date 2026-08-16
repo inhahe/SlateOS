@@ -201,7 +201,9 @@ pub fn record<P: AsRef<Path>>(path: P, access_type: AccessType, source: &str) {
     // New entry — evict oldest if at capacity.
     if recent.len() >= MAX_ENTRIES {
         // Find and remove oldest.
-        if let Some(oldest_idx) = recent.iter().enumerate()
+        if let Some(oldest_idx) = recent
+            .iter()
+            .enumerate()
             .min_by_key(|(_, e)| e.timestamp_ns)
             .map(|(i, _)| i)
         {
@@ -233,7 +235,8 @@ pub fn query(filter: &RecentFilter) -> Vec<RecentEntry> {
 
     let recent = RECENT.lock();
 
-    let mut results: Vec<RecentEntry> = recent.iter()
+    let mut results: Vec<RecentEntry> = recent
+        .iter()
         .filter(|e| {
             // Age filter.
             if retention > 0 && now.saturating_sub(e.timestamp_ns) > retention {
@@ -276,7 +279,10 @@ pub fn query(filter: &RecentFilter) -> Vec<RecentEntry> {
 
 /// Get the N most recently accessed files (convenience wrapper).
 pub fn most_recent(n: usize) -> Vec<RecentEntry> {
-    query(&RecentFilter { limit: n, ..Default::default() })
+    query(&RecentFilter {
+        limit: n,
+        ..Default::default()
+    })
 }
 
 /// Get total number of tracked entries.

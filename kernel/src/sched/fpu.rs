@@ -135,7 +135,7 @@ fn strategy() -> SaveStrategy {
 /// See Intel SDM Vol. 1, Table 10-2 "Layout of the FXSAVE Area".
 /// These offsets are shared between FXSAVE and XSAVE (the first 512
 /// bytes of the XSAVE area are the legacy region, identical to FXSAVE).
-const FCW_OFFSET: usize = 0;    // x87 FPU Control Word (16 bits)
+const FCW_OFFSET: usize = 0; // x87 FPU Control Word (16 bits)
 const MXCSR_OFFSET: usize = 24; // MXCSR register (32 bits)
 
 /// Default x87 FPU Control Word.
@@ -190,7 +190,9 @@ impl FpuState {
     /// hardware state after FNINIT + LDMXCSR(0x1F80).
     #[must_use]
     pub fn new_default() -> Self {
-        let mut state = Self { data: [0u8; MAX_XSAVE_AREA as usize] };
+        let mut state = Self {
+            data: [0u8; MAX_XSAVE_AREA as usize],
+        };
 
         // Set FCW at offset 0 (16-bit little-endian).
         let fcw_bytes = DEFAULT_FCW.to_le_bytes();
@@ -266,18 +268,24 @@ pub fn init_bsp() {
     configure_fpu_cr_bits();
 
     // Verify FXSAVE support via cached CPU features.
-    let features = crate::cpu::features()
-        .expect("CPU features must be detected before FPU init");
-    assert!(features.fxsr, "CPU does not support FXSAVE/FXRSTOR (impossible on x86_64)");
+    let features = crate::cpu::features().expect("CPU features must be detected before FPU init");
+    assert!(
+        features.fxsr,
+        "CPU does not support FXSAVE/FXRSTOR (impossible on x86_64)"
+    );
 
     // Initialize x87 FPU to known state.
     // SAFETY: We've verified the FPU hardware is present and enabled.
-    unsafe { asm!("fninit", options(nomem, nostack)); }
+    unsafe {
+        asm!("fninit", options(nomem, nostack));
+    }
 
     // Set MXCSR to default (all exceptions masked).
     let default_mxcsr: u32 = DEFAULT_MXCSR;
     // SAFETY: MXCSR is a valid SSE control register, we're setting a safe value.
-    unsafe { asm!("ldmxcsr [{}]", in(reg) &default_mxcsr, options(nostack)); }
+    unsafe {
+        asm!("ldmxcsr [{}]", in(reg) &default_mxcsr, options(nostack));
+    }
 
     // Try to enable XSAVE.
     if features.xsave {
@@ -392,12 +400,16 @@ pub unsafe fn init_ap() {
 
     // Initialize x87 FPU to known state.
     // SAFETY: CR0/CR4 are now configured for FPU/SSE.
-    unsafe { asm!("fninit", options(nomem, nostack)); }
+    unsafe {
+        asm!("fninit", options(nomem, nostack));
+    }
 
     // Set MXCSR to default.
     let default_mxcsr: u32 = DEFAULT_MXCSR;
     // SAFETY: SSE is now enabled via CR4.OSFXSR.
-    unsafe { asm!("ldmxcsr [{}]", in(reg) &default_mxcsr, options(nostack)); }
+    unsafe {
+        asm!("ldmxcsr [{}]", in(reg) &default_mxcsr, options(nostack));
+    }
 
     // If the BSP enabled XSAVE, replicate on this AP.
     if strategy() != SaveStrategy::Fxsave {
@@ -624,7 +636,11 @@ pub unsafe fn restore(state: *const FpuState) {
 /// 4. (If AVX) Test YMM register round-trip.
 pub fn self_test() {
     serial_println!("[fpu] Running FPU/SSE self-test...");
-    serial_println!("[fpu]   Strategy: {}, area: {}B", strategy_name(), xsave_area_size());
+    serial_println!(
+        "[fpu]   Strategy: {}, area: {}B",
+        strategy_name(),
+        xsave_area_size()
+    );
 
     // Test 1: Default state has correct control values.
     let state = FpuState::new_default();
@@ -637,12 +653,18 @@ pub fn self_test() {
     ]);
     assert!(fcw == DEFAULT_FCW, "FPU self-test: bad default FCW");
     assert!(mxcsr == DEFAULT_MXCSR, "FPU self-test: bad default MXCSR");
-    serial_println!("[fpu]   Default state FCW={:#06x} MXCSR={:#010x}: OK", fcw, mxcsr);
+    serial_println!(
+        "[fpu]   Default state FCW={:#06x} MXCSR={:#010x}: OK",
+        fcw,
+        mxcsr
+    );
 
     // Test 2: Save current FPU state, verify it round-trips.
     let mut saved = FpuState::new_default();
     // SAFETY: saved is properly aligned and sized.
-    unsafe { save(&raw mut saved); }
+    unsafe {
+        save(&raw mut saved);
+    }
 
     // Verify the saved MXCSR is sane (all exceptions masked).
     let saved_mxcsr = u32::from_le_bytes([
@@ -662,9 +684,7 @@ pub fn self_test() {
     test_xmm_round_trip();
 
     // Test 4: If XSAVE + AVX, test YMM round-trip.
-    if strategy() != SaveStrategy::Fxsave
-        && ACTIVE_XCR0.load(Ordering::Relaxed) & XCR0_AVX != 0
-    {
+    if strategy() != SaveStrategy::Fxsave && ACTIVE_XCR0.load(Ordering::Relaxed) & XCR0_AVX != 0 {
         test_ymm_round_trip();
     }
 
@@ -705,10 +725,7 @@ fn test_xmm_round_trip() {
         );
     }
 
-    assert!(
-        readback == pattern,
-        "FPU self-test: XMM0 round-trip failed"
-    );
+    assert!(readback == pattern, "FPU self-test: XMM0 round-trip failed");
     serial_println!("[fpu]   XMM0 save/restore round-trip: OK");
 }
 
@@ -783,10 +800,8 @@ const STRESS_ITERATIONS: u32 = 50;
 ///
 /// - `STRESS_ERRORS`: incremented if any task detects XMM corruption.
 /// - `STRESS_DONE`: incremented when a task finishes all iterations.
-static STRESS_ERRORS: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
-static STRESS_DONE: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+static STRESS_ERRORS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static STRESS_DONE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Entry point for FPU stress test tasks.
 ///
@@ -846,7 +861,9 @@ extern "C" fn stress_test_entry(task_arg: u64) {
             if STRESS_ERRORS.load(Ordering::Relaxed) == 1 {
                 crate::serial_println!(
                     "[fpu] CORRUPTION in task arg={}: expected {:#034x}, got {:#034x}",
-                    task_arg, pattern, readback
+                    task_arg,
+                    pattern,
+                    readback
                 );
             }
             break;
@@ -906,20 +923,19 @@ pub fn stress_test() {
     if done < target {
         serial_println!(
             "[fpu]   WARNING: only {}/{} tasks completed (timeout)",
-            done, target
+            done,
+            target
         );
     }
 
     if errors == 0 {
         serial_println!(
             "[fpu]   {} tasks x {} yields, no XMM corruption detected: OK",
-            STRESS_TASK_COUNT, STRESS_ITERATIONS
+            STRESS_TASK_COUNT,
+            STRESS_ITERATIONS
         );
     } else {
-        serial_println!(
-            "[fpu]   FAIL: {} XMM corruption(s) detected!",
-            errors
-        );
+        serial_println!("[fpu]   FAIL: {} XMM corruption(s) detected!", errors);
     }
 
     // Clean up any remaining tasks.
@@ -930,6 +946,9 @@ pub fn stress_test() {
     }
     super::reap_dead_tasks();
 
-    assert!(errors == 0, "FPU stress test: XMM state leaked between tasks");
+    assert!(
+        errors == 0,
+        "FPU stress test: XMM state leaked between tasks"
+    );
     serial_println!("[fpu] Multi-task FPU isolation stress test PASSED");
 }

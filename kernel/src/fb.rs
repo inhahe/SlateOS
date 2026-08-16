@@ -109,7 +109,11 @@ pub fn init() {
             CURSOR_Y.store((height / 2) as i16, Ordering::Release);
         }
 
-        crate::serial_println!("[fb] Graphics primitives initialized ({}x{} px)", width, height);
+        crate::serial_println!(
+            "[fb] Graphics primitives initialized ({}x{} px)",
+            width,
+            height
+        );
     } else {
         crate::serial_println!("[fb] WARNING: framebuffer not available, graphics disabled");
     }
@@ -123,7 +127,10 @@ pub fn is_initialized() -> bool {
 
 /// Return framebuffer dimensions (width, height) or (0, 0) if not initialized.
 pub fn dimensions() -> (u32, u32) {
-    (FB_WIDTH.load(Ordering::Acquire), FB_HEIGHT.load(Ordering::Acquire))
+    (
+        FB_WIDTH.load(Ordering::Acquire),
+        FB_HEIGHT.load(Ordering::Acquire),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -439,7 +446,10 @@ pub fn hide_cursor() {
 
 /// Get the current cursor position.
 pub fn cursor_pos() -> (i16, i16) {
-    (CURSOR_X.load(Ordering::Relaxed), CURSOR_Y.load(Ordering::Relaxed))
+    (
+        CURSOR_X.load(Ordering::Relaxed),
+        CURSOR_Y.load(Ordering::Relaxed),
+    )
 }
 
 /// Draw (or erase) the cursor using XOR blitting.
@@ -470,8 +480,7 @@ fn draw_cursor_xor() {
                 continue;
             }
 
-            let offset = u64::from(py as u32) * u64::from(pitch)
-                + u64::from(px as u32) * 4;
+            let offset = u64::from(py as u32) * u64::from(pitch) + u64::from(px as u32) * 4;
             let addr = (fb + offset) as *mut u32;
 
             // SAFETY: Bounds checked above.
@@ -530,8 +539,8 @@ pub fn blit(src: &[u32], src_w: u32, dst_x: i32, dst_y: i32, w: u32, h: u32) {
                 continue; // Transparent.
             }
 
-            let offset = u64::from(screen_y as u32) * u64::from(pitch)
-                + u64::from(screen_x as u32) * 4;
+            let offset =
+                u64::from(screen_y as u32) * u64::from(pitch) + u64::from(screen_x as u32) * 4;
             // SAFETY: Bounds checked above.
             unsafe {
                 ptr::write_volatile((fb + offset) as *mut u32, pixel | 0xFF00_0000);

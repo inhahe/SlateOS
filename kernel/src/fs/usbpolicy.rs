@@ -19,10 +19,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -145,12 +145,41 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         rules: alloc::vec![
-            PolicyRule { id: 1, name: String::from("Allow HID"), vendor_id: None, product_id: None, class: Some(UsbClass::HumanInterface), decision: Decision::Allow, enabled: true, hit_count: 0 },
-            PolicyRule { id: 2, name: String::from("Allow Audio"), vendor_id: None, product_id: None, class: Some(UsbClass::Audio), decision: Decision::Allow, enabled: true, hit_count: 0 },
-            PolicyRule { id: 3, name: String::from("Storage ask"), vendor_id: None, product_id: None, class: Some(UsbClass::Storage), decision: Decision::AskUser, enabled: true, hit_count: 0 },
+            PolicyRule {
+                id: 1,
+                name: String::from("Allow HID"),
+                vendor_id: None,
+                product_id: None,
+                class: Some(UsbClass::HumanInterface),
+                decision: Decision::Allow,
+                enabled: true,
+                hit_count: 0
+            },
+            PolicyRule {
+                id: 2,
+                name: String::from("Allow Audio"),
+                vendor_id: None,
+                product_id: None,
+                class: Some(UsbClass::Audio),
+                decision: Decision::Allow,
+                enabled: true,
+                hit_count: 0
+            },
+            PolicyRule {
+                id: 3,
+                name: String::from("Storage ask"),
+                vendor_id: None,
+                product_id: None,
+                class: Some(UsbClass::Storage),
+                decision: Decision::AskUser,
+                enabled: true,
+                hit_count: 0
+            },
         ],
         log: Vec::new(),
         next_id: 4,
@@ -168,7 +197,9 @@ pub fn check_device(vid: u16, pid: u16, class: UsbClass, name: &str) -> KernelRe
         let now = crate::hpet::elapsed_ns();
         // Check rules in order (first match wins).
         for rule in &mut state.rules {
-            if !rule.enabled { continue; }
+            if !rule.enabled {
+                continue;
+            }
             let vid_match = rule.vendor_id.is_none_or(|v| v == vid);
             let pid_match = rule.product_id.is_none_or(|p| p == pid);
             let class_match = rule.class.is_none_or(|c| c == class);
@@ -181,34 +212,56 @@ pub fn check_device(vid: u16, pid: u16, class: UsbClass, name: &str) -> KernelRe
                     Decision::Deny => state.total_denied += 1,
                     Decision::AskUser => {}
                 }
-                if state.log.len() >= MAX_LOG { state.log.remove(0); }
+                if state.log.len() >= MAX_LOG {
+                    state.log.remove(0);
+                }
                 state.log.push(UsbEvent {
-                    vendor_id: vid, product_id: pid, class,
-                    device_name: String::from(name), decision,
-                    rule_id: Some(rule_id), timestamp_ns: now,
+                    vendor_id: vid,
+                    product_id: pid,
+                    class,
+                    device_name: String::from(name),
+                    decision,
+                    rule_id: Some(rule_id),
+                    timestamp_ns: now,
                 });
                 return Ok(decision);
             }
         }
         // Default decision.
-        let decision = if state.block_unknown { Decision::Deny } else { state.default_decision };
+        let decision = if state.block_unknown {
+            Decision::Deny
+        } else {
+            state.default_decision
+        };
         match decision {
             Decision::Allow | Decision::ReadOnly => state.total_allowed += 1,
             Decision::Deny => state.total_denied += 1,
             Decision::AskUser => {}
         }
-        if state.log.len() >= MAX_LOG { state.log.remove(0); }
+        if state.log.len() >= MAX_LOG {
+            state.log.remove(0);
+        }
         state.log.push(UsbEvent {
-            vendor_id: vid, product_id: pid, class,
-            device_name: String::from(name), decision,
-            rule_id: None, timestamp_ns: now,
+            vendor_id: vid,
+            product_id: pid,
+            class,
+            device_name: String::from(name),
+            decision,
+            rule_id: None,
+            timestamp_ns: now,
         });
         Ok(decision)
     })
 }
 
 /// Add a policy rule.
-pub fn add_rule(name: &str, vid: Option<u16>, pid: Option<u16>, class: Option<UsbClass>, decision: Decision) -> KernelResult<u32> {
+pub fn add_rule(
+    name: &str,
+    vid: Option<u16>,
+    pid: Option<u16>,
+    class: Option<UsbClass>,
+    decision: Decision,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.rules.len() >= MAX_RULES {
             return Err(KernelError::ResourceExhausted);
@@ -216,9 +269,14 @@ pub fn add_rule(name: &str, vid: Option<u16>, pid: Option<u16>, class: Option<Us
         let id = state.next_id;
         state.next_id += 1;
         state.rules.push(PolicyRule {
-            id, name: String::from(name),
-            vendor_id: vid, product_id: pid, class,
-            decision, enabled: true, hit_count: 0,
+            id,
+            name: String::from(name),
+            vendor_id: vid,
+            product_id: pid,
+            class,
+            decision,
+            enabled: true,
+            hit_count: 0,
         });
         Ok(id)
     })
@@ -229,7 +287,9 @@ pub fn remove_rule(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.rules.len();
         state.rules.retain(|r| r.id != id);
-        if state.rules.len() == before { return Err(KernelError::NotFound); }
+        if state.rules.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -252,7 +312,10 @@ pub fn set_block_unknown(block: bool) -> KernelResult<()> {
 
 /// List rules.
 pub fn list_rules() -> Vec<PolicyRule> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.rules.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.rules.clone())
 }
 
 /// Get event log.
@@ -269,7 +332,13 @@ pub fn get_log(max: usize) -> Vec<UsbEvent> {
 pub fn stats() -> (usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.rules.len(), s.log.len(), s.total_allowed, s.total_denied, s.ops),
+        Some(s) => (
+            s.rules.len(),
+            s.log.len(),
+            s.total_allowed,
+            s.total_denied,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -287,7 +356,8 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] defaults: OK");
 
     // 2: HID device allowed.
-    let d = check_device(0x046D, 0xC52B, UsbClass::HumanInterface, "Logitech Mouse").expect("check1");
+    let d =
+        check_device(0x046D, 0xC52B, UsbClass::HumanInterface, "Logitech Mouse").expect("check1");
     assert_eq!(d, Decision::Allow);
     crate::serial_println!("  [2/8] hid allowed: OK");
 

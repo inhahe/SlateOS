@@ -25,10 +25,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -255,7 +255,9 @@ static CHANGE_COUNT: AtomicU64 = AtomicU64::new(0);
 // ---------------------------------------------------------------------------
 
 /// Get the current config.
-pub fn config() -> KeyboardConfig { STATE.lock().config.clone() }
+pub fn config() -> KeyboardConfig {
+    STATE.lock().config.clone()
+}
 
 /// Apply a repeat preset.
 pub fn set_preset(preset: RepeatPreset) {
@@ -284,10 +286,14 @@ pub fn set_repeat_rate(ms: u32) {
 }
 
 /// Get repeat delay.
-pub fn repeat_delay_ms() -> u32 { STATE.lock().config.repeat_delay_ms }
+pub fn repeat_delay_ms() -> u32 {
+    STATE.lock().config.repeat_delay_ms
+}
 
 /// Get repeat rate.
-pub fn repeat_rate_ms() -> u32 { STATE.lock().config.repeat_rate_ms }
+pub fn repeat_rate_ms() -> u32 {
+    STATE.lock().config.repeat_rate_ms
+}
 
 /// Check if a key should generate a repeat event.
 ///
@@ -298,18 +304,34 @@ pub fn should_repeat(keycode: u16, held_ms: u64) -> bool {
 
     // Check per-key override.
     if let Some(ovr) = state.overrides.iter().find(|o| o.keycode == keycode) {
-        if ovr.no_repeat { return false; }
-        let delay = if ovr.delay_ms > 0 { ovr.delay_ms } else { state.config.repeat_delay_ms };
-        let rate = if ovr.rate_ms > 0 { ovr.rate_ms } else { state.config.repeat_rate_ms };
-        if held_ms < delay as u64 { return false; }
+        if ovr.no_repeat {
+            return false;
+        }
+        let delay = if ovr.delay_ms > 0 {
+            ovr.delay_ms
+        } else {
+            state.config.repeat_delay_ms
+        };
+        let rate = if ovr.rate_ms > 0 {
+            ovr.rate_ms
+        } else {
+            state.config.repeat_rate_ms
+        };
+        if held_ms < delay as u64 {
+            return false;
+        }
         let since_first = held_ms - delay as u64;
         return since_first.is_multiple_of(rate as u64);
     }
 
     let delay = state.config.repeat_delay_ms as u64;
     let rate = state.config.repeat_rate_ms as u64;
-    if held_ms < delay { return false; }
-    if rate == 0 { return false; }
+    if held_ms < delay {
+        return false;
+    }
+    if rate == 0 {
+        return false;
+    }
     let since_first = held_ms - delay;
     since_first.is_multiple_of(rate)
 }
@@ -319,14 +341,24 @@ pub fn should_repeat(keycode: u16, held_ms: u64) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Add a per-key repeat override.
-pub fn add_override(keycode: u16, delay_ms: u32, rate_ms: u32, no_repeat: bool) -> KernelResult<()> {
+pub fn add_override(
+    keycode: u16,
+    delay_ms: u32,
+    rate_ms: u32,
+    no_repeat: bool,
+) -> KernelResult<()> {
     let mut state = STATE.lock();
     // Replace existing.
     state.overrides.retain(|o| o.keycode != keycode);
     if state.overrides.len() >= MAX_OVERRIDES {
         return Err(KernelError::ResourceExhausted);
     }
-    state.overrides.push(KeyOverride { keycode, delay_ms, rate_ms, no_repeat });
+    state.overrides.push(KeyOverride {
+        keycode,
+        delay_ms,
+        rate_ms,
+        no_repeat,
+    });
     CHANGE_COUNT.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
@@ -450,7 +482,9 @@ pub fn remove_profile(name: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
     let len = state.profiles.len();
     state.profiles.retain(|p| p.name != name);
-    if state.profiles.len() == len { return Err(KernelError::NotFound); }
+    if state.profiles.len() == len {
+        return Err(KernelError::NotFound);
+    }
     Ok(())
 }
 
@@ -458,8 +492,13 @@ pub fn remove_profile(name: &str) -> KernelResult<()> {
 pub fn activate_profile(name: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
     // Deactivate all.
-    for p in &mut state.profiles { p.active = false; }
-    let prof = state.profiles.iter_mut().find(|p| p.name == name)
+    for p in &mut state.profiles {
+        p.active = false;
+    }
+    let prof = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.name == name)
         .ok_or(KernelError::NotFound)?;
     prof.active = true;
     let delay = prof.repeat_delay_ms;
@@ -484,7 +523,9 @@ pub fn list_profiles() -> Vec<KeyboardProfile> {
 /// Initialize default profiles.
 pub fn init_defaults() {
     let mut state = STATE.lock();
-    if !state.profiles.is_empty() { return; }
+    if !state.profiles.is_empty() {
+        return;
+    }
 
     state.profiles.push(KeyboardProfile {
         name: String::from("Normal"),
@@ -516,10 +557,16 @@ pub fn init_defaults() {
 /// Returns (profile_count, override_count, changes).
 pub fn stats() -> (usize, usize, u64) {
     let state = STATE.lock();
-    (state.profiles.len(), state.overrides.len(), CHANGE_COUNT.load(Ordering::Relaxed))
+    (
+        state.profiles.len(),
+        state.overrides.len(),
+        CHANGE_COUNT.load(Ordering::Relaxed),
+    )
 }
 
-pub fn reset_stats() { CHANGE_COUNT.store(0, Ordering::Relaxed); }
+pub fn reset_stats() {
+    CHANGE_COUNT.store(0, Ordering::Relaxed);
+}
 
 pub fn clear_all() {
     let mut state = STATE.lock();
@@ -566,8 +613,8 @@ pub fn self_test() -> KernelResult<()> {
     set_repeat_delay(500);
     set_repeat_rate(50);
     assert!(!should_repeat(0x1E, 200)); // Before delay.
-    assert!(should_repeat(0x1E, 500));  // At delay.
-    assert!(should_repeat(0x1E, 550));  // First repeat.
+    assert!(should_repeat(0x1E, 500)); // At delay.
+    assert!(should_repeat(0x1E, 550)); // First repeat.
 
     // Test 5: Per-key overrides.
     serial_println!("  kbsettings::self_test 5: key overrides");

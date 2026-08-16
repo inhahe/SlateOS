@@ -45,9 +45,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::eventlog::{self, EventFilter, Severity};
@@ -349,9 +349,7 @@ pub fn flush() -> KernelResult<usize> {
     let min_sev = state.config.min_persist_severity;
 
     // Query new events since last flush.
-    let filter = EventFilter::all()
-        .after(after_seq)
-        .min_severity(min_sev);
+    let filter = EventFilter::all().after(after_seq).min_severity(min_sev);
     let result = eventlog::query(&filter, 1024);
 
     if result.events.is_empty() {
@@ -382,10 +380,14 @@ pub fn flush() -> KernelResult<usize> {
                 for ev in &result.events {
                     let line = event_to_json_line(ev);
                     #[allow(clippy::arithmetic_side_effects)]
-                    { cursor.current_size += line.len() as u64; }
+                    {
+                        cursor.current_size += line.len() as u64;
+                    }
                     batch.push_str(&line);
                     #[allow(clippy::arithmetic_side_effects)]
-                    { total_flushed += 1; }
+                    {
+                        total_flushed += 1;
+                    }
                 }
 
                 // Append batch to file.
@@ -404,7 +406,9 @@ pub fn flush() -> KernelResult<usize> {
                 if cursor.current_size >= max_file_size {
                     let (orig, comp) = rotate_file(&log_dir, "combined", max_rotated, compression);
                     #[allow(clippy::arithmetic_side_effects)]
-                    { cursor.rotation_count += 1; }
+                    {
+                        cursor.rotation_count += 1;
+                    }
                     cursor.current_size = 0;
                     if orig > 0 {
                         #[allow(clippy::arithmetic_side_effects)]
@@ -437,10 +441,14 @@ pub fn flush() -> KernelResult<usize> {
                 for ev in &ns_result.events {
                     let line = event_to_json_line(ev);
                     #[allow(clippy::arithmetic_side_effects)]
-                    { cursor.current_size += line.len() as u64; }
+                    {
+                        cursor.current_size += line.len() as u64;
+                    }
                     batch.push_str(&line);
                     #[allow(clippy::arithmetic_side_effects)]
-                    { total_flushed += 1; }
+                    {
+                        total_flushed += 1;
+                    }
                 }
 
                 if !batch.is_empty() {
@@ -456,9 +464,12 @@ pub fn flush() -> KernelResult<usize> {
 
                 // Check if rotation is needed.
                 if cursor.current_size >= max_file_size {
-                    let (orig, comp) = rotate_file(&log_dir, &cursor.name, max_rotated, compression);
+                    let (orig, comp) =
+                        rotate_file(&log_dir, &cursor.name, max_rotated, compression);
                     #[allow(clippy::arithmetic_side_effects)]
-                    { cursor.rotation_count += 1; }
+                    {
+                        cursor.rotation_count += 1;
+                    }
                     cursor.current_size = 0;
                     if orig > 0 {
                         #[allow(clippy::arithmetic_side_effects)]
@@ -484,7 +495,9 @@ pub fn flush() -> KernelResult<usize> {
 
     state.global_last_flushed = result.newest_seq;
     #[allow(clippy::arithmetic_side_effects)]
-    { state.total_flushes += 1; }
+    {
+        state.total_flushes += 1;
+    }
 
     Ok(total_flushed)
 }
@@ -496,9 +509,12 @@ pub fn flush() -> KernelResult<usize> {
 ///
 /// Returns (original_bytes, compressed_bytes) if compression was performed,
 /// or (0, 0) if no compression.
-fn rotate_file(log_dir: &str, name: &str, max_rotated: u32, compression: LogCompression)
-    -> (u64, u64)
-{
+fn rotate_file(
+    log_dir: &str,
+    name: &str,
+    max_rotated: u32,
+    compression: LogCompression,
+) -> (u64, u64) {
     use alloc::format;
 
     let ext = compression.extension();
@@ -533,7 +549,9 @@ fn rotate_file(log_dir: &str, name: &str, max_rotated: u32, compression: LogComp
         }
 
         #[allow(clippy::arithmetic_side_effects)]
-        { i -= 1; }
+        {
+            i -= 1;
+        }
     }
 
     // Rename current file to .1 (initially uncompressed).
@@ -613,7 +631,13 @@ pub fn prune() -> usize {
 
     match mode {
         RotationMode::Combined => {
-            collect_log_files(&log_dir, "combined", max_rotated, &mut files, &mut total_used);
+            collect_log_files(
+                &log_dir,
+                "combined",
+                max_rotated,
+                &mut files,
+                &mut total_used,
+            );
         }
         RotationMode::PerNamespace => {
             for ns in eventlog::NAMESPACE_ROOTS {
@@ -631,14 +655,18 @@ pub fn prune() -> usize {
             let _ = crate::fs::Vfs::remove(&path);
             total_used = total_used.saturating_sub(size);
             #[allow(clippy::arithmetic_side_effects)]
-            { pruned += 1; }
+            {
+                pruned += 1;
+            }
         } else {
             break;
         }
     }
 
     #[allow(clippy::arithmetic_side_effects)]
-    { state.total_pruned += pruned as u64; }
+    {
+        state.total_pruned += pruned as u64;
+    }
 
     pruned
 }
@@ -660,7 +688,9 @@ fn collect_log_files(
     let current = format!("{}/{}.jsonl", log_dir, name);
     if let Ok(meta) = crate::fs::Vfs::stat(&current) {
         #[allow(clippy::arithmetic_side_effects)]
-        { *total += meta.size; }
+        {
+            *total += meta.size;
+        }
         files.push((current, meta.size));
     }
 
@@ -671,7 +701,9 @@ fn collect_log_files(
             let path = format!("{}/{}.{}.jsonl{}", log_dir, name, i, ext);
             if let Ok(meta) = crate::fs::Vfs::stat(&path) {
                 #[allow(clippy::arithmetic_side_effects)]
-                { *total += meta.size; }
+                {
+                    *total += meta.size;
+                }
                 files.push((path, meta.size));
                 found = true;
                 break;
@@ -681,7 +713,9 @@ fn collect_log_files(
             let path = format!("{}/{}.{}.jsonl", log_dir, name, i);
             if let Ok(meta) = crate::fs::Vfs::stat(&path) {
                 #[allow(clippy::arithmetic_side_effects)]
-                { *total += meta.size; }
+                {
+                    *total += meta.size;
+                }
                 files.push((path, meta.size));
             }
         }
@@ -788,9 +822,19 @@ pub struct RotationStats {
 /// Get rotation statistics.
 pub fn stats() -> RotationStats {
     let state = STATE.lock();
-    let cursors: Vec<_> = state.cursors.iter().map(|c| {
-        (c.name.clone(), c.events_flushed, c.total_bytes_written, c.rotation_count, c.current_size)
-    }).collect();
+    let cursors: Vec<_> = state
+        .cursors
+        .iter()
+        .map(|c| {
+            (
+                c.name.clone(),
+                c.events_flushed,
+                c.total_bytes_written,
+                c.rotation_count,
+                c.current_size,
+            )
+        })
+        .collect();
 
     RotationStats {
         enabled: state.config.enabled,
@@ -819,30 +863,72 @@ pub fn procfs_content() -> String {
     out.push_str("Event Log Persistence\n");
     out.push_str("=====================\n");
     out.push_str(&alloc::format!("Enabled:       {}\n", st.enabled));
-    out.push_str(&alloc::format!("Mode:          {}\n", match st.mode {
-        RotationMode::Combined => "combined",
-        RotationMode::PerNamespace => "per-namespace",
-    }));
+    out.push_str(&alloc::format!(
+        "Mode:          {}\n",
+        match st.mode {
+            RotationMode::Combined => "combined",
+            RotationMode::PerNamespace => "per-namespace",
+        }
+    ));
     out.push_str(&alloc::format!("Log dir:       {}\n", st.log_dir));
-    out.push_str(&alloc::format!("Min severity:  {}\n", st.min_persist_severity.as_str()));
-    out.push_str(&alloc::format!("Max file size: {} MiB\n", st.max_file_size / (1024 * 1024)));
+    out.push_str(&alloc::format!(
+        "Min severity:  {}\n",
+        st.min_persist_severity.as_str()
+    ));
+    out.push_str(&alloc::format!(
+        "Max file size: {} MiB\n",
+        st.max_file_size / (1024 * 1024)
+    ));
     out.push_str(&alloc::format!("Max rotated:   {}\n", st.max_rotated_files));
-    out.push_str(&alloc::format!("Max total:     {} MiB\n", st.max_total_storage / (1024 * 1024)));
-    out.push_str(&alloc::format!("Compression:   {}\n", st.compression.label()));
+    out.push_str(&alloc::format!(
+        "Max total:     {} MiB\n",
+        st.max_total_storage / (1024 * 1024)
+    ));
+    out.push_str(&alloc::format!(
+        "Compression:   {}\n",
+        st.compression.label()
+    ));
     out.push_str(&alloc::format!("Total flushes: {}\n", st.total_flushes));
-    out.push_str(&alloc::format!("Total written: {} bytes\n", st.total_bytes_written));
-    out.push_str(&alloc::format!("Total pruned:  {} files\n", st.total_pruned));
-    out.push_str(&alloc::format!("Files compressed: {}\n", st.files_compressed));
-    out.push_str(&alloc::format!("Bytes saved:   {} bytes\n", st.bytes_saved_by_compression));
-    out.push_str(&alloc::format!("Last seq:      {}\n", st.global_last_flushed_seq));
+    out.push_str(&alloc::format!(
+        "Total written: {} bytes\n",
+        st.total_bytes_written
+    ));
+    out.push_str(&alloc::format!(
+        "Total pruned:  {} files\n",
+        st.total_pruned
+    ));
+    out.push_str(&alloc::format!(
+        "Files compressed: {}\n",
+        st.files_compressed
+    ));
+    out.push_str(&alloc::format!(
+        "Bytes saved:   {} bytes\n",
+        st.bytes_saved_by_compression
+    ));
+    out.push_str(&alloc::format!(
+        "Last seq:      {}\n",
+        st.global_last_flushed_seq
+    ));
 
     if !st.cursors.is_empty() {
         out.push_str("\nPer-Namespace:\n");
-        out.push_str(&alloc::format!("  {:12} {:>8} {:>12} {:>6} {:>10}\n",
-            "Namespace", "Events", "Bytes", "Rots", "CurSize"));
+        out.push_str(&alloc::format!(
+            "  {:12} {:>8} {:>12} {:>6} {:>10}\n",
+            "Namespace",
+            "Events",
+            "Bytes",
+            "Rots",
+            "CurSize"
+        ));
         for (name, events, bytes, rots, cur_size) in &st.cursors {
-            out.push_str(&alloc::format!("  {:12} {:>8} {:>12} {:>6} {:>10}\n",
-                name, events, bytes, rots, cur_size));
+            out.push_str(&alloc::format!(
+                "  {:12} {:>8} {:>12} {:>6} {:>10}\n",
+                name,
+                events,
+                bytes,
+                rots,
+                cur_size
+            ));
         }
     }
 
@@ -902,14 +988,20 @@ pub fn self_test() -> KernelResult<()> {
     // Test 3: Verify stats updated.
     let st = stats();
     if st.total_flushes != 1 {
-        crate::serial_println!("[logpersist]   FAIL: expected 1 flush, got {}", st.total_flushes);
+        crate::serial_println!(
+            "[logpersist]   FAIL: expected 1 flush, got {}",
+            st.total_flushes
+        );
         return Err(KernelError::InternalError);
     }
     if st.total_bytes_written == 0 {
         crate::serial_println!("[logpersist]   FAIL: total_bytes_written is 0");
         return Err(KernelError::InternalError);
     }
-    crate::serial_println!("[logpersist]   3. Stats: OK (bytes={})", st.total_bytes_written);
+    crate::serial_println!(
+        "[logpersist]   3. Stats: OK (bytes={})",
+        st.total_bytes_written
+    );
 
     // Test 4: Event to JSON serialization.
     EventBuilder::new("network.dhcp", Severity::Notice)
@@ -918,10 +1010,7 @@ pub fn self_test() -> KernelResult<()> {
         .service("dhcpd")
         .kv("ip", "10.0.2.15")
         .emit();
-    let result = eventlog::query(
-        &EventFilter::all().namespace("network.dhcp"),
-        1,
-    );
+    let result = eventlog::query(&EventFilter::all().namespace("network.dhcp"), 1);
     if let Some(ev) = result.events.first() {
         let json = event_to_json_line(ev);
         if !json.contains("\"sev\":\"notice\"") {
@@ -958,8 +1047,11 @@ pub fn self_test() -> KernelResult<()> {
     {
         let state = STATE.lock();
         if state.cursors.len() != eventlog::NAMESPACE_ROOTS.len() {
-            crate::serial_println!("[logpersist]   FAIL: expected {} cursors, got {}",
-                eventlog::NAMESPACE_ROOTS.len(), state.cursors.len());
+            crate::serial_println!(
+                "[logpersist]   FAIL: expected {} cursors, got {}",
+                eventlog::NAMESPACE_ROOTS.len(),
+                state.cursors.len()
+            );
             return Err(KernelError::InternalError);
         }
     }

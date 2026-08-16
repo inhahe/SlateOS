@@ -385,7 +385,9 @@ pub fn delete<P: AsRef<Path>>(paths: &[P], opts: &BatchOptions) -> KernelResult<
 
     serial_println!(
         "[batch] Delete {} files: {} ok, {} failed",
-        paths.len(), result.succeeded, result.failed,
+        paths.len(),
+        result.succeeded,
+        result.failed,
     );
 
     Ok(result)
@@ -443,10 +445,9 @@ fn apply_rename_pattern(name: &Path, pattern: &[u8], replacement: &[u8]) -> Opti
 
     // Extension replacement: *.ext1 → *.ext2.  Both `*.` prefixes are dropped
     // and the leading `.` kept, so the suffix compared is `.ext1`.
-    if let (Some(old_ext), Some(new_ext)) = (
-        pattern.strip_prefix(b"*"),
-        replacement.strip_prefix(b"*"),
-    ) {
+    if let (Some(old_ext), Some(new_ext)) =
+        (pattern.strip_prefix(b"*"), replacement.strip_prefix(b"*"))
+    {
         if old_ext.starts_with(b".") && new_ext.starts_with(b".") {
             if let Some(base) = name.strip_suffix(old_ext) {
                 let mut out = PathBuf::from(base);
@@ -457,10 +458,9 @@ fn apply_rename_pattern(name: &Path, pattern: &[u8], replacement: &[u8]) -> Opti
     }
 
     // Prefix replacement: old_* → new_*.
-    if let (Some(old_prefix), Some(new_prefix)) = (
-        pattern.strip_suffix(b"*"),
-        replacement.strip_suffix(b"*"),
-    ) {
+    if let (Some(old_prefix), Some(new_prefix)) =
+        (pattern.strip_suffix(b"*"), replacement.strip_suffix(b"*"))
+    {
         if let Some(suffix) = name.strip_prefix(old_prefix) {
             let mut out = PathBuf::from(new_prefix);
             out.extend_bytes(suffix);
@@ -490,7 +490,8 @@ fn find_unique_name(path: &Path) -> PathBuf {
     // `extension()` measures from the same final component, so this offset is
     // in range by construction; `len - (ext + 1)` accounts for the dot.
     let stem_len = path.extension().map_or(name.len(), |e| {
-        name.len().saturating_sub(e.as_bytes().len().saturating_add(1))
+        name.len()
+            .saturating_sub(e.as_bytes().len().saturating_add(1))
     });
     let (stem, ext) = name.split_at(stem_len.min(name.len()));
 
@@ -553,7 +554,11 @@ fn test_glob_match() {
     // Case-sensitive filesystem: `A.TXT` and `a.txt` are two different files.
     assert!(!m("*.txt", "HELLO.TXT"));
     // A pattern is bytes, so it matches a name that is not text.
-    assert!(crate::fs::vfs::glob_match(b"re\xffport.txt".as_slice(), "*.txt", false));
+    assert!(crate::fs::vfs::glob_match(
+        b"re\xffport.txt".as_slice(),
+        "*.txt",
+        false
+    ));
     serial_println!("[batch]   glob match: ok");
 }
 
@@ -561,7 +566,10 @@ fn test_rename_pattern() {
     let ap = |name: &[u8], pat: &str, rep: &str| {
         apply_rename_pattern(Path::new(name), pat.as_bytes(), rep.as_bytes())
     };
-    assert_eq!(ap(b"doc.txt", "*.txt", "*.bak"), Some(PathBuf::from("doc.bak")));
+    assert_eq!(
+        ap(b"doc.txt", "*.txt", "*.bak"),
+        Some(PathBuf::from("doc.bak"))
+    );
     assert_eq!(
         ap(b"old_data.csv", "old_*", "new_*"),
         Some(PathBuf::from("new_data.csv"))
@@ -576,11 +584,7 @@ fn test_rename_pattern() {
     );
     // ...including when the undecodable byte is in the pattern.
     assert_eq!(
-        apply_rename_pattern(
-            Path::new(b"re\xffport.txt".as_slice()),
-            b"re\xff*",
-            b"ok_*",
-        ),
+        apply_rename_pattern(Path::new(b"re\xffport.txt".as_slice()), b"re\xff*", b"ok_*",),
         Some(PathBuf::from("ok_port.txt"))
     );
 
@@ -601,9 +605,18 @@ fn test_batch_rename() {
     assert_eq!(result.succeeded, 2, "should rename 2 .txt files");
 
     // .txt files should be gone, .bak files should exist.
-    assert!(Vfs::metadata("/tmp/batch_ren/a.bak").is_ok(), "a.bak should exist");
-    assert!(Vfs::metadata("/tmp/batch_ren/b.bak").is_ok(), "b.bak should exist");
-    assert!(Vfs::metadata("/tmp/batch_ren/c.log").is_ok(), "c.log untouched");
+    assert!(
+        Vfs::metadata("/tmp/batch_ren/a.bak").is_ok(),
+        "a.bak should exist"
+    );
+    assert!(
+        Vfs::metadata("/tmp/batch_ren/b.bak").is_ok(),
+        "b.bak should exist"
+    );
+    assert!(
+        Vfs::metadata("/tmp/batch_ren/c.log").is_ok(),
+        "c.log untouched"
+    );
 
     let _ = Vfs::remove("/tmp/batch_ren/a.bak");
     let _ = Vfs::remove("/tmp/batch_ren/b.bak");
@@ -647,7 +660,10 @@ fn test_batch_move() {
     let result = move_files(&paths, "/tmp/batch_mvd", &opts).expect("move");
     assert_eq!(result.succeeded, 1);
 
-    assert!(Vfs::metadata("/tmp/batch_mvs/m.txt").is_err(), "source should be gone");
+    assert!(
+        Vfs::metadata("/tmp/batch_mvs/m.txt").is_err(),
+        "source should be gone"
+    );
     let data = Vfs::read_file("/tmp/batch_mvd/m.txt").expect("read");
     assert_eq!(&data, b"move me");
 
@@ -737,7 +753,10 @@ fn test_unique_name() {
 
 fn test_stats() {
     let (renames, copies, moves, deletes) = stats();
-    assert!(renames > 0 || copies > 0 || moves > 0 || deletes > 0, "should have operations");
+    assert!(
+        renames > 0 || copies > 0 || moves > 0 || deletes > 0,
+        "should have operations"
+    );
 
     serial_println!("[batch]   stats: ok");
 }

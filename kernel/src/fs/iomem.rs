@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -94,7 +94,9 @@ where
 /// 15M) — plus global totals of 76,000,000 reads / 125,600,000 writes.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         regions: Vec::new(),
         total_reads: 0,
@@ -104,13 +106,28 @@ pub fn init_defaults() {
 }
 
 /// Register an MMIO region.
-pub fn register(name: &str, base: u64, size: u64, cacheable: bool, prefetchable: bool) -> KernelResult<()> {
+pub fn register(
+    name: &str,
+    base: u64,
+    size: u64,
+    cacheable: bool,
+    prefetchable: bool,
+) -> KernelResult<()> {
     with_state(|state| {
-        if state.regions.len() >= MAX_REGIONS { return Err(KernelError::ResourceExhausted); }
-        if state.regions.iter().any(|r| r.base == base) { return Err(KernelError::AlreadyExists); }
+        if state.regions.len() >= MAX_REGIONS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.regions.iter().any(|r| r.base == base) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.regions.push(MmioRegion {
-            name: String::from(name), base, size, reads: 0, writes: 0,
-            cacheable, prefetchable,
+            name: String::from(name),
+            base,
+            size,
+            reads: 0,
+            writes: 0,
+            cacheable,
+            prefetchable,
         });
         Ok(())
     })
@@ -119,7 +136,10 @@ pub fn register(name: &str, base: u64, size: u64, cacheable: bool, prefetchable:
 /// Unregister an MMIO region.
 pub fn unregister(base: u64) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.regions.iter().position(|r| r.base == base)
+        let idx = state
+            .regions
+            .iter()
+            .position(|r| r.base == base)
             .ok_or(KernelError::NotFound)?;
         state.regions.remove(idx);
         Ok(())
@@ -129,7 +149,10 @@ pub fn unregister(base: u64) -> KernelResult<()> {
 /// Record a read access.
 pub fn record_read(base: u64) -> KernelResult<()> {
     with_state(|state| {
-        let r = state.regions.iter_mut().find(|r| r.base == base)
+        let r = state
+            .regions
+            .iter_mut()
+            .find(|r| r.base == base)
             .ok_or(KernelError::NotFound)?;
         r.reads += 1;
         state.total_reads += 1;
@@ -140,7 +163,10 @@ pub fn record_read(base: u64) -> KernelResult<()> {
 /// Record a write access.
 pub fn record_write(base: u64) -> KernelResult<()> {
     with_state(|state| {
-        let r = state.regions.iter_mut().find(|r| r.base == base)
+        let r = state
+            .regions
+            .iter_mut()
+            .find(|r| r.base == base)
             .ok_or(KernelError::NotFound)?;
         r.writes += 1;
         state.total_writes += 1;
@@ -150,7 +176,10 @@ pub fn record_write(base: u64) -> KernelResult<()> {
 
 /// List all regions.
 pub fn regions() -> Vec<MmioRegion> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.regions.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.regions.clone())
 }
 
 /// Statistics: (region_count, total_reads, total_writes, ops).
@@ -182,7 +211,10 @@ pub fn self_test() {
     // 2: Register — region appears zeroed with its attributes; a second region
     //    at the same base is AlreadyExists.
     register("TEST", 0x1000_0000, 0x1000, false, false).expect("register");
-    let r = regions().into_iter().find(|r| r.base == 0x1000_0000).expect("find");
+    let r = regions()
+        .into_iter()
+        .find(|r| r.base == 0x1000_0000)
+        .expect("find");
     assert_eq!((r.size, r.reads, r.writes), (0x1000, 0, 0));
     assert!(!r.cacheable && !r.prefetchable);
     assert_eq!(regions().len(), 1);
@@ -191,14 +223,20 @@ pub fn self_test() {
 
     // 3: Read — per-region reads and the global total advance.
     record_read(0x1000_0000).expect("read");
-    let r = regions().into_iter().find(|r| r.base == 0x1000_0000).expect("p3");
+    let r = regions()
+        .into_iter()
+        .find(|r| r.base == 0x1000_0000)
+        .expect("p3");
     assert_eq!(r.reads, 1);
     assert_eq!(stats().1, 1); // total_reads
     crate::serial_println!("  [3/8] read: OK");
 
     // 4: Write — per-region writes and the global total advance.
     record_write(0x1000_0000).expect("write");
-    let r = regions().into_iter().find(|r| r.base == 0x1000_0000).expect("p4");
+    let r = regions()
+        .into_iter()
+        .find(|r| r.base == 0x1000_0000)
+        .expect("p4");
     assert_eq!(r.writes, 1);
     assert_eq!(stats().2, 1); // total_writes
     crate::serial_println!("  [4/8] write: OK");
@@ -217,10 +255,18 @@ pub fn self_test() {
     // 7: Attributes + multiple accesses — a prefetchable region accrues exactly
     //    the reads it receives (no fabricated baseline).
     register("FB", 0x2000_0000, 0x1000_0000, false, true).expect("register_fb");
-    let r = regions().into_iter().find(|r| r.base == 0x2000_0000).expect("fb");
+    let r = regions()
+        .into_iter()
+        .find(|r| r.base == 0x2000_0000)
+        .expect("fb");
     assert!(r.prefetchable && !r.cacheable);
-    for _ in 0..100 { record_read(0x2000_0000).expect("fb_read"); }
-    let r = regions().into_iter().find(|r| r.base == 0x2000_0000).expect("fb2");
+    for _ in 0..100 {
+        record_read(0x2000_0000).expect("fb_read");
+    }
+    let r = regions()
+        .into_iter()
+        .find(|r| r.base == 0x2000_0000)
+        .expect("fb2");
     assert_eq!(r.reads, 100);
     crate::serial_println!("  [7/8] multi access: OK");
 

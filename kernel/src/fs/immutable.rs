@@ -41,11 +41,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -329,7 +329,9 @@ pub fn list_flagged() -> Vec<(String, FlagBits)> {
 /// List files with a specific flag set.
 pub fn list_with_flag(flag: FlagBits) -> Vec<String> {
     let table = TABLE.lock();
-    table.entries.iter()
+    table
+        .entries
+        .iter()
         .filter(|(_, f)| **f & flag != 0)
         .map(|(p, _)| p.clone())
         .collect()
@@ -399,18 +401,18 @@ pub fn self_test() -> KernelResult<()> {
     // Test 3: append-only allows appends but blocks overwrites.
     {
         replace_flags("/test/log.txt", FileFlags::APPEND_ONLY)?;
-        assert!(check_write("/test/log.txt", true).is_ok());    // Append OK.
-        assert!(check_write("/test/log.txt", false).is_err());  // Overwrite blocked.
-        assert!(check_truncate("/test/log.txt").is_err());       // Truncate blocked.
-        assert!(check_delete("/test/log.txt").is_ok());          // Delete OK (not NO_DELETE).
+        assert!(check_write("/test/log.txt", true).is_ok()); // Append OK.
+        assert!(check_write("/test/log.txt", false).is_err()); // Overwrite blocked.
+        assert!(check_truncate("/test/log.txt").is_err()); // Truncate blocked.
+        assert!(check_delete("/test/log.txt").is_ok()); // Delete OK (not NO_DELETE).
         serial_println!("[immutable] test 3 passed: append-only semantics");
     }
 
     // Test 4: no-delete blocks delete but allows writes.
     {
         replace_flags("/test/important.txt", FileFlags::NO_DELETE)?;
-        assert!(check_write("/test/important.txt", false).is_ok());  // Write OK.
-        assert!(check_delete("/test/important.txt").is_err());        // Delete blocked.
+        assert!(check_write("/test/important.txt", false).is_ok()); // Write OK.
+        assert!(check_delete("/test/important.txt").is_err()); // Delete blocked.
         serial_println!("[immutable] test 4 passed: no-delete semantics");
     }
 
@@ -420,7 +422,7 @@ pub fn self_test() -> KernelResult<()> {
         let flags = get_flags("/test/important.txt");
         assert_eq!(flags, FileFlags::NO_DELETE | FileFlags::APPEND_ONLY);
         assert!(check_write("/test/important.txt", false).is_err()); // Overwrite blocked.
-        assert!(check_delete("/test/important.txt").is_err());        // Delete blocked.
+        assert!(check_delete("/test/important.txt").is_err()); // Delete blocked.
         serial_println!("[immutable] test 5 passed: combined flags");
     }
 

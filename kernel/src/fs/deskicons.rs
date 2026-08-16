@@ -225,11 +225,7 @@ pub fn load(desktop_path: impl AsRef<Path>, screen_w: u32, screen_h: u32) -> Ker
     let mut icons = Vec::new();
 
     // Add special icons first.
-    let specials = alloc::vec![
-        SpecialIcon::Computer,
-        SpecialIcon::Trash,
-        SpecialIcon::Home,
-    ];
+    let specials = alloc::vec![SpecialIcon::Computer, SpecialIcon::Trash, SpecialIcon::Home,];
 
     for (idx, special) in specials.iter().enumerate() {
         let (x, y) = grid_position(&grid, idx, screen_w);
@@ -300,7 +296,9 @@ pub fn update_position(name: impl AsRef<Path>, x: u32, y: u32) -> KernelResult<(
     let mut layout_opt = LAYOUT.lock();
     let layout = layout_opt.as_mut().ok_or(KernelError::NotFound)?;
 
-    let icon = layout.icons.iter_mut()
+    let icon = layout
+        .icons
+        .iter_mut()
         .find(|i| i.name.as_path() == name)
         .ok_or(KernelError::NotFound)?;
 
@@ -360,7 +358,10 @@ pub fn auto_arrange(sort: SortBy) -> KernelResult<()> {
                     // that would say how to fold a byte >= 0x80 - and the old
                     // `str::to_lowercase` could not be applied to such a name
                     // at all.
-                    SortBy::Name => a.name.as_bytes().to_ascii_lowercase()
+                    SortBy::Name => a
+                        .name
+                        .as_bytes()
+                        .to_ascii_lowercase()
                         .cmp(&b.name.as_bytes().to_ascii_lowercase()),
                     SortBy::Type => {
                         let ext_a = a.name.extension().map(Path::as_bytes).unwrap_or(b"");
@@ -401,7 +402,9 @@ pub fn select(name: impl AsRef<Path>, exclusive: bool) -> KernelResult<()> {
         }
     }
 
-    let icon = layout.icons.iter_mut()
+    let icon = layout
+        .icons
+        .iter_mut()
         .find(|i| i.name.as_path() == name)
         .ok_or(KernelError::NotFound)?;
     icon.selected = true;
@@ -422,7 +425,9 @@ pub fn deselect_all() -> KernelResult<()> {
 pub fn selected_paths() -> Vec<PathBuf> {
     let layout_opt = LAYOUT.lock();
     match layout_opt.as_ref() {
-        Some(layout) => layout.icons.iter()
+        Some(layout) => layout
+            .icons
+            .iter()
             .filter(|i| i.selected)
             .map(|i| i.path.clone())
             .collect(),
@@ -443,7 +448,11 @@ pub fn refresh() -> KernelResult<()> {
     let (path, screen_w, screen_h) = {
         let layout_opt = LAYOUT.lock();
         let layout = layout_opt.as_ref().ok_or(KernelError::NotFound)?;
-        (layout.desktop_path.clone(), layout.screen_w, layout.screen_h)
+        (
+            layout.desktop_path.clone(),
+            layout.screen_w,
+            layout.screen_h,
+        )
     };
     load(&path, screen_w, screen_h)
 }
@@ -480,7 +489,11 @@ fn grid_position(grid: &GridConfig, index: usize, screen_w: u32) -> (u32, u32) {
     let cols = if screen_w > grid.start_x.saturating_mul(2) {
         let usable = screen_w.saturating_sub(grid.start_x.saturating_mul(2));
         let col_w = grid.cell_w.saturating_add(grid.pad_x);
-        if col_w == 0 { 1 } else { (usable / col_w).max(1) }
+        if col_w == 0 {
+            1
+        } else {
+            (usable / col_w).max(1)
+        }
     } else {
         1
     };
@@ -616,7 +629,10 @@ pub fn self_test() -> KernelResult<()> {
         set_mode(LayoutMode::FreePlacement)?;
         let layout = get_layout();
         assert!(layout.is_some());
-        assert_eq!(layout.as_ref().map(|l| l.mode), Some(LayoutMode::FreePlacement));
+        assert_eq!(
+            layout.as_ref().map(|l| l.mode),
+            Some(LayoutMode::FreePlacement)
+        );
 
         set_mode(LayoutMode::SnapToGrid)?;
         serial_println!("[deskicons] test 7 passed: layout mode");

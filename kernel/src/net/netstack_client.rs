@@ -335,7 +335,11 @@ impl NetstackConn {
     /// Same as [`send`](Self::send).
     pub fn send_on(&mut self, conn_id: u32, buf: &[u8], nonblock: bool) -> KernelResult<i32> {
         let ring = self.attach_ring()?;
-        let send_aux = if nonblock { netipc::ring::SEND_NONBLOCK } else { 0 };
+        let send_aux = if nonblock {
+            netipc::ring::SEND_NONBLOCK
+        } else {
+            0
+        };
         let mut total: i32 = 0;
         let mut off = 0usize;
         while off < buf.len() {
@@ -441,7 +445,11 @@ impl NetstackConn {
         let want = buf.len().min(RCV_CAP as usize);
         let want_u32 = u32::try_from(want).map_err(|_| KernelError::InternalError)?;
         let ud = self.next_ud();
-        let mut aux = if nonblock { netipc::ring::RECV_NONBLOCK } else { 0 };
+        let mut aux = if nonblock {
+            netipc::ring::RECV_NONBLOCK
+        } else {
+            0
+        };
         if peek {
             aux |= netipc::ring::RECV_PEEK;
         }
@@ -667,7 +675,11 @@ impl NetstackConn {
         let cap = hdr_len.saturating_add(room);
         let cap_u32 = u32::try_from(cap).map_err(|_| KernelError::InternalError)?;
         let ud = self.next_ud();
-        let aux = if nonblock { netipc::ring::RECV_NONBLOCK } else { 0 };
+        let aux = if nonblock {
+            netipc::ring::RECV_NONBLOCK
+        } else {
+            0
+        };
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_UDP_RECV,
             conn_id: self.conn_id,
@@ -915,7 +927,10 @@ impl NetstackConn {
                     return Err(KernelError::InternalError);
                 }
                 let [a0, a1, a2, a3, p0, p1] = buf;
-                Ok(LocalEndpoint::V4([a0, a1, a2, a3], u16::from_be_bytes([p0, p1])))
+                Ok(LocalEndpoint::V4(
+                    [a0, a1, a2, a3],
+                    u16::from_be_bytes([p0, p1]),
+                ))
             }
             18 => {
                 let mut buf = [0u8; 18];
@@ -1368,7 +1383,21 @@ pub fn self_test_udp6_loopback() -> KernelResult<Option<()>> {
     // Inline EUI-64 link-local (RFC 4291 App. A), matching the daemon's
     // `icmpv6::link_local_from_mac(mac)` used to seed `me.ip6`.
     let ll: [u8; 16] = [
-        0xFE, 0x80, 0, 0, 0, 0, 0, 0, mac[0] ^ 0x02, mac[1], mac[2], 0xFF, 0xFE, mac[3], mac[4],
+        0xFE,
+        0x80,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        mac[0] ^ 0x02,
+        mac[1],
+        mac[2],
+        0xFF,
+        0xFE,
+        mac[3],
+        mac[4],
         mac[5],
     ];
 
@@ -1494,7 +1523,21 @@ pub fn self_test_udp_connect() -> KernelResult<Option<()>> {
     // Inline EUI-64 link-local (RFC 4291 App. A), matching the daemon's
     // `icmpv6::link_local_from_mac(mac)` used to seed `me.ip6`.
     let ll: [u8; 16] = [
-        0xFE, 0x80, 0, 0, 0, 0, 0, 0, mac[0] ^ 0x02, mac[1], mac[2], 0xFF, 0xFE, mac[3], mac[4],
+        0xFE,
+        0x80,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        mac[0] ^ 0x02,
+        mac[1],
+        mac[2],
+        0xFF,
+        0xFE,
+        mac[3],
+        mac[4],
         mac[5],
     ];
 
@@ -1551,7 +1594,10 @@ pub fn self_test_udp_connect() -> KernelResult<Option<()>> {
             Ok((n, family, ip16, port)) => {
                 let len = usize::try_from(n).unwrap_or(0).min(resp.len());
                 let dg = resp.get(..len).unwrap_or(&[]);
-                if family == netipc::ring::UDP_AF_INET6 && ip16 == ll && port == PORT && dg == PAYLOAD
+                if family == netipc::ring::UDP_AF_INET6
+                    && ip16 == ll
+                    && port == PORT
+                    && dg == PAYLOAD
                 {
                     got = true;
                     break;
@@ -2363,7 +2409,9 @@ fn recv_exact(conn: &mut NetstackConn, conn_id: u32, expect: &[u8]) -> KernelRes
             // pumps then give up.
             continue;
         }
-        let added = usize::try_from(n).unwrap_or(0).min(cap.saturating_sub(filled));
+        let added = usize::try_from(n)
+            .unwrap_or(0)
+            .min(cap.saturating_sub(filled));
         filled = filled.saturating_add(added);
     }
     if filled != expect.len() {

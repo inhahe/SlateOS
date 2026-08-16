@@ -43,9 +43,9 @@ use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 
+use super::DrmDevice;
 use super::DrmObjectId;
 use super::mode::DrmMode;
-use super::DrmDevice;
 
 // ---------------------------------------------------------------------------
 // Atomic state
@@ -165,10 +165,7 @@ pub fn atomic_check(dev: &DrmDevice, state: &AtomicState) -> KernelResult<()> {
     for cs in &state.crtc_changes {
         // CRTC must exist.
         if !dev.crtcs().iter().any(|c| c.id == cs.id) {
-            serial_println!(
-                "[drm-atomic] check FAIL: CRTC {} not found",
-                cs.id
-            );
+            serial_println!("[drm-atomic] check FAIL: CRTC {} not found", cs.id);
             return Err(KernelError::NotFound);
         }
 
@@ -193,10 +190,7 @@ pub fn atomic_check(dev: &DrmDevice, state: &AtomicState) -> KernelResult<()> {
         let plane = match plane {
             Some(p) => p,
             None => {
-                serial_println!(
-                    "[drm-atomic] check FAIL: plane {} not found",
-                    ps.id
-                );
+                serial_println!("[drm-atomic] check FAIL: plane {} not found", ps.id);
                 return Err(KernelError::NotFound);
             }
         };
@@ -265,10 +259,7 @@ pub fn atomic_check(dev: &DrmDevice, state: &AtomicState) -> KernelResult<()> {
     for cs in &state.connector_changes {
         // Connector must exist.
         if !dev.connectors().iter().any(|c| c.id == cs.id) {
-            serial_println!(
-                "[drm-atomic] check FAIL: connector {} not found",
-                cs.id
-            );
+            serial_println!("[drm-atomic] check FAIL: connector {} not found", cs.id);
             return Err(KernelError::NotFound);
         }
 
@@ -292,8 +283,8 @@ pub fn atomic_check(dev: &DrmDevice, state: &AtomicState) -> KernelResult<()> {
                     let has_compatible_encoder = conn.possible_encoders.iter().any(|enc_id| {
                         dev.encoders().iter().any(|e| {
                             #[allow(clippy::arithmetic_side_effects)]
-                            let compat = e.id == *enc_id
-                                && (e.possible_crtcs & (1u32 << c.index)) != 0;
+                            let compat =
+                                e.id == *enc_id && (e.possible_crtcs & (1u32 << c.index)) != 0;
                             compat
                         })
                     });
@@ -502,7 +493,9 @@ pub(crate) fn self_test() -> KernelResult<()> {
 
     // Test 3: check with valid CRTC change.
     super::with_primary(|dev| {
-        let crtc_id = dev.crtcs().first()
+        let crtc_id = dev
+            .crtcs()
+            .first()
             .map(|c| c.id)
             .ok_or(KernelError::InternalError)?;
 
@@ -565,7 +558,9 @@ pub(crate) fn self_test() -> KernelResult<()> {
 
     // Test 6: check with zero-size mode → InvalidArgument.
     super::with_primary(|dev| {
-        let crtc_id = dev.crtcs().first()
+        let crtc_id = dev
+            .crtcs()
+            .first()
             .map(|c| c.id)
             .ok_or(KernelError::InternalError)?;
 
@@ -589,13 +584,13 @@ pub(crate) fn self_test() -> KernelResult<()> {
 
     // Test 7: test_only commit applies no changes.
     super::with_primary_mut(|dev| {
-        let crtc_id = dev.crtcs().first()
+        let crtc_id = dev
+            .crtcs()
+            .first()
             .map(|c| c.id)
             .ok_or(KernelError::InternalError)?;
 
-        let was_active = dev.crtcs().first()
-            .map(|c| c.active)
-            .unwrap_or(false);
+        let was_active = dev.crtcs().first().map(|c| c.active).unwrap_or(false);
 
         let mut state = AtomicState::new();
         state.test_only = true;
@@ -607,9 +602,7 @@ pub(crate) fn self_test() -> KernelResult<()> {
         atomic_commit(dev, &state)?;
 
         // State should NOT have changed (test_only).
-        let still_active = dev.crtcs().first()
-            .map(|c| c.active)
-            .unwrap_or(false);
+        let still_active = dev.crtcs().first().map(|c| c.active).unwrap_or(false);
         if still_active != was_active {
             serial_println!("[drm-atomic]   FAIL: test_only changed state");
             return Err(KernelError::InternalError);
@@ -620,7 +613,9 @@ pub(crate) fn self_test() -> KernelResult<()> {
 
     // Test 8: real commit updates CRTC state.
     super::with_primary_mut(|dev| {
-        let crtc_id = dev.crtcs().first()
+        let crtc_id = dev
+            .crtcs()
+            .first()
             .map(|c| c.id)
             .ok_or(KernelError::InternalError)?;
 
@@ -633,9 +628,7 @@ pub(crate) fn self_test() -> KernelResult<()> {
         });
         atomic_commit(dev, &state)?;
 
-        let active = dev.crtcs().first()
-            .map(|c| c.active)
-            .unwrap_or(true);
+        let active = dev.crtcs().first().map(|c| c.active).unwrap_or(true);
         if active {
             serial_println!("[drm-atomic]   FAIL: CRTC still active after deactivation");
             return Err(KernelError::InternalError);
@@ -650,9 +643,7 @@ pub(crate) fn self_test() -> KernelResult<()> {
         });
         atomic_commit(dev, &state2)?;
 
-        let active2 = dev.crtcs().first()
-            .map(|c| c.active)
-            .unwrap_or(false);
+        let active2 = dev.crtcs().first().map(|c| c.active).unwrap_or(false);
         if !active2 {
             serial_println!("[drm-atomic]   FAIL: CRTC not active after reactivation");
             return Err(KernelError::InternalError);

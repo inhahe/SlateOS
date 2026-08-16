@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -115,7 +115,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         macros: Vec::new(),
         next_id: 1,
@@ -225,7 +227,10 @@ pub fn create_macro(name: &str, events: Vec<MacroEvent>) -> KernelResult<u32> {
 /// Play a macro (returns event count).
 pub fn play(id: u32) -> KernelResult<usize> {
     with_state(|state| {
-        let mac = state.macros.iter_mut().find(|m| m.id == id)
+        let mac = state
+            .macros
+            .iter_mut()
+            .find(|m| m.id == id)
             .ok_or(KernelError::NotFound)?;
         if !mac.enabled {
             return Err(KernelError::NotSupported);
@@ -240,7 +245,10 @@ pub fn play(id: u32) -> KernelResult<usize> {
 /// Set hotkey for a macro.
 pub fn set_hotkey(id: u32, hotkey: &str) -> KernelResult<()> {
     with_state(|state| {
-        let mac = state.macros.iter_mut().find(|m| m.id == id)
+        let mac = state
+            .macros
+            .iter_mut()
+            .find(|m| m.id == id)
             .ok_or(KernelError::NotFound)?;
         mac.hotkey = Some(String::from(hotkey));
         Ok(())
@@ -250,7 +258,10 @@ pub fn set_hotkey(id: u32, hotkey: &str) -> KernelResult<()> {
 /// Set repeat count.
 pub fn set_repeat(id: u32, count: u32) -> KernelResult<()> {
     with_state(|state| {
-        let mac = state.macros.iter_mut().find(|m| m.id == id)
+        let mac = state
+            .macros
+            .iter_mut()
+            .find(|m| m.id == id)
             .ok_or(KernelError::NotFound)?;
         mac.repeat_count = count.max(1);
         Ok(())
@@ -260,7 +271,10 @@ pub fn set_repeat(id: u32, count: u32) -> KernelResult<()> {
 /// Enable/disable a macro.
 pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let mac = state.macros.iter_mut().find(|m| m.id == id)
+        let mac = state
+            .macros
+            .iter_mut()
+            .find(|m| m.id == id)
             .ok_or(KernelError::NotFound)?;
         mac.enabled = enabled;
         Ok(())
@@ -272,7 +286,9 @@ pub fn delete_macro(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.macros.len();
         state.macros.retain(|m| m.id != id);
-        if state.macros.len() == before { return Err(KernelError::NotFound); }
+        if state.macros.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -284,12 +300,18 @@ pub fn is_recording() -> bool {
 
 /// Get a macro by id.
 pub fn get_macro(id: u32) -> Option<Macro> {
-    STATE.lock().as_ref().and_then(|s| s.macros.iter().find(|m| m.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.macros.iter().find(|m| m.id == id).cloned())
 }
 
 /// List all macros.
 pub fn list_macros() -> Vec<Macro> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.macros.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.macros.clone())
 }
 
 /// Statistics: (macro_count, total_plays, total_recorded, ops).
@@ -343,9 +365,11 @@ pub fn self_test() {
     crate::serial_println!("  [5/8] hotkey/repeat: OK");
 
     // 6: Create directly.
-    let id2 = create_macro("quick", alloc::vec![
-        MacroEvent::TypeText(String::from("world")),
-    ]).expect("create");
+    let id2 = create_macro(
+        "quick",
+        alloc::vec![MacroEvent::TypeText(String::from("world")),],
+    )
+    .expect("create");
     assert_eq!(list_macros().len(), 2);
     crate::serial_println!("  [6/8] create: OK");
 

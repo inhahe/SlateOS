@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -36,10 +36,10 @@ use crate::error::{KernelError, KernelResult};
 /// Workqueue type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WqType {
-    Bound,       // Per-CPU bound.
-    Unbound,     // System-wide.
-    Highpri,     // High priority.
-    Ordered,     // Serialized execution.
+    Bound,   // Per-CPU bound.
+    Unbound, // System-wide.
+    Highpri, // High priority.
+    Ordered, // Serialized execution.
 }
 
 impl WqType {
@@ -122,7 +122,9 @@ where
 /// functions as work items flow.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         queues: Vec::new(),
         next_id: 1,
@@ -136,14 +138,27 @@ pub fn init_defaults() {
 /// Register a workqueue.
 pub fn register(name: &str, wq_type: WqType, workers: u32) -> KernelResult<u32> {
     with_state(|state| {
-        if state.queues.len() >= MAX_WORKQUEUES { return Err(KernelError::ResourceExhausted); }
-        if state.queues.iter().any(|q| q.name == name) { return Err(KernelError::AlreadyExists); }
+        if state.queues.len() >= MAX_WORKQUEUES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.queues.iter().any(|q| q.name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
         let id = state.next_id;
         state.next_id += 1;
         state.queues.push(Workqueue {
-            id, name: String::from(name), wq_type, pending: 0, active: 0,
-            completed: 0, cancelled: 0, max_pending: 0, avg_latency_us: 0,
-            max_latency_us: 0, workers, cpu_affinity: None,
+            id,
+            name: String::from(name),
+            wq_type,
+            pending: 0,
+            active: 0,
+            completed: 0,
+            cancelled: 0,
+            max_pending: 0,
+            avg_latency_us: 0,
+            max_latency_us: 0,
+            workers,
+            cpu_affinity: None,
         });
         Ok(id)
     })
@@ -152,9 +167,15 @@ pub fn register(name: &str, wq_type: WqType, workers: u32) -> KernelResult<u32> 
 /// Record an enqueue.
 pub fn enqueue(wq_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let q = state.queues.iter_mut().find(|q| q.id == wq_id).ok_or(KernelError::NotFound)?;
+        let q = state
+            .queues
+            .iter_mut()
+            .find(|q| q.id == wq_id)
+            .ok_or(KernelError::NotFound)?;
         q.pending += 1;
-        if q.pending > q.max_pending { q.max_pending = q.pending; }
+        if q.pending > q.max_pending {
+            q.max_pending = q.pending;
+        }
         state.total_enqueued += 1;
         Ok(())
     })
@@ -163,8 +184,14 @@ pub fn enqueue(wq_id: u32) -> KernelResult<()> {
 /// Record a work item starting execution.
 pub fn activate(wq_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let q = state.queues.iter_mut().find(|q| q.id == wq_id).ok_or(KernelError::NotFound)?;
-        if q.pending > 0 { q.pending -= 1; }
+        let q = state
+            .queues
+            .iter_mut()
+            .find(|q| q.id == wq_id)
+            .ok_or(KernelError::NotFound)?;
+        if q.pending > 0 {
+            q.pending -= 1;
+        }
         q.active += 1;
         Ok(())
     })
@@ -173,11 +200,19 @@ pub fn activate(wq_id: u32) -> KernelResult<()> {
 /// Record completion with latency.
 pub fn complete(wq_id: u32, latency_us: u64) -> KernelResult<()> {
     with_state(|state| {
-        let q = state.queues.iter_mut().find(|q| q.id == wq_id).ok_or(KernelError::NotFound)?;
-        if q.active > 0 { q.active -= 1; }
+        let q = state
+            .queues
+            .iter_mut()
+            .find(|q| q.id == wq_id)
+            .ok_or(KernelError::NotFound)?;
+        if q.active > 0 {
+            q.active -= 1;
+        }
         q.completed += 1;
         // Update latency stats.
-        if latency_us > q.max_latency_us { q.max_latency_us = latency_us; }
+        if latency_us > q.max_latency_us {
+            q.max_latency_us = latency_us;
+        }
         let total = q.completed;
         if total > 0 {
             q.avg_latency_us = (q.avg_latency_us * (total - 1) + latency_us) / total;
@@ -190,8 +225,14 @@ pub fn complete(wq_id: u32, latency_us: u64) -> KernelResult<()> {
 /// Cancel a pending item.
 pub fn cancel(wq_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let q = state.queues.iter_mut().find(|q| q.id == wq_id).ok_or(KernelError::NotFound)?;
-        if q.pending == 0 { return Err(KernelError::NotFound); }
+        let q = state
+            .queues
+            .iter_mut()
+            .find(|q| q.id == wq_id)
+            .ok_or(KernelError::NotFound)?;
+        if q.pending == 0 {
+            return Err(KernelError::NotFound);
+        }
         q.pending -= 1;
         q.cancelled += 1;
         state.total_cancelled += 1;
@@ -201,19 +242,31 @@ pub fn cancel(wq_id: u32) -> KernelResult<()> {
 
 /// List workqueues.
 pub fn list() -> Vec<Workqueue> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.queues.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.queues.clone())
 }
 
 /// Get workqueue by name.
 pub fn get(name: &str) -> Option<Workqueue> {
-    STATE.lock().as_ref().and_then(|s| s.queues.iter().find(|q| q.name == name).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.queues.iter().find(|q| q.name == name).cloned())
 }
 
 /// Statistics: (wq_count, total_enqueued, total_completed, total_cancelled, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.queues.len(), s.total_enqueued, s.total_completed, s.total_cancelled, s.ops),
+        Some(s) => (
+            s.queues.len(),
+            s.total_enqueued,
+            s.total_completed,
+            s.total_cancelled,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

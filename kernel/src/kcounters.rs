@@ -160,16 +160,14 @@ pub fn count() -> usize {
 #[macro_export]
 macro_rules! define_counter {
     ($name:ident, $desc:ident, $group:expr, $cname:expr) => {
-        pub static $name: core::sync::atomic::AtomicU64 =
-            core::sync::atomic::AtomicU64::new(0);
+        pub static $name: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
         #[doc(hidden)]
-        pub static $desc: $crate::kcounters::CounterDesc =
-            $crate::kcounters::CounterDesc {
-                group: $group,
-                name: $cname,
-                value: &$name,
-            };
+        pub static $desc: $crate::kcounters::CounterDesc = $crate::kcounters::CounterDesc {
+            group: $group,
+            name: $cname,
+            value: &$name,
+        };
     };
 }
 
@@ -203,48 +201,144 @@ pub fn builtin_snapshot() -> alloc::vec::Vec<CounterSnapshot> {
 
     // --- Memory subsystem ---
     let mem = crate::mm::memory_info();
-    result.push(CounterSnapshot { group: "mm", name: "total_frames", value: mem.total_frames as u64 });
-    result.push(CounterSnapshot { group: "mm", name: "free_frames", value: mem.free_frames as u64 });
-    result.push(CounterSnapshot { group: "mm", name: "fragmentation_pct", value: mem.fragmentation_pct as u64 });
-    result.push(CounterSnapshot { group: "mm", name: "pcpu_cache_hits", value: mem.pcpu_cache_hits });
-    result.push(CounterSnapshot { group: "mm", name: "pcpu_cache_misses", value: mem.pcpu_cache_misses });
-    result.push(CounterSnapshot { group: "mm", name: "heap_slab_allocs", value: mem.heap_slab_allocs });
-    result.push(CounterSnapshot { group: "mm", name: "heap_slab_frees", value: mem.heap_slab_frees });
-    result.push(CounterSnapshot { group: "mm", name: "heap_large_allocs", value: mem.heap_large_allocs });
-    result.push(CounterSnapshot { group: "mm", name: "oom_events", value: mem.oom_events });
+    result.push(CounterSnapshot {
+        group: "mm",
+        name: "total_frames",
+        value: mem.total_frames as u64,
+    });
+    result.push(CounterSnapshot {
+        group: "mm",
+        name: "free_frames",
+        value: mem.free_frames as u64,
+    });
+    result.push(CounterSnapshot {
+        group: "mm",
+        name: "fragmentation_pct",
+        value: mem.fragmentation_pct as u64,
+    });
+    result.push(CounterSnapshot {
+        group: "mm",
+        name: "pcpu_cache_hits",
+        value: mem.pcpu_cache_hits,
+    });
+    result.push(CounterSnapshot {
+        group: "mm",
+        name: "pcpu_cache_misses",
+        value: mem.pcpu_cache_misses,
+    });
+    result.push(CounterSnapshot {
+        group: "mm",
+        name: "heap_slab_allocs",
+        value: mem.heap_slab_allocs,
+    });
+    result.push(CounterSnapshot {
+        group: "mm",
+        name: "heap_slab_frees",
+        value: mem.heap_slab_frees,
+    });
+    result.push(CounterSnapshot {
+        group: "mm",
+        name: "heap_large_allocs",
+        value: mem.heap_large_allocs,
+    });
+    result.push(CounterSnapshot {
+        group: "mm",
+        name: "oom_events",
+        value: mem.oom_events,
+    });
 
     // --- Scheduler subsystem ---
     let sched = crate::sched::sched_stats();
-    result.push(CounterSnapshot { group: "sched", name: "ctx_switches", value: sched.total_ctx_switches });
-    result.push(CounterSnapshot { group: "sched", name: "work_steals", value: sched.total_work_steals });
-    result.push(CounterSnapshot { group: "sched", name: "tasks_spawned", value: sched.total_tasks_spawned });
-    result.push(CounterSnapshot { group: "sched", name: "tasks_exited", value: sched.total_tasks_exited });
-    result.push(CounterSnapshot { group: "sched", name: "load_avg_x100", value: sched.load_avg_x100 });
+    result.push(CounterSnapshot {
+        group: "sched",
+        name: "ctx_switches",
+        value: sched.total_ctx_switches,
+    });
+    result.push(CounterSnapshot {
+        group: "sched",
+        name: "work_steals",
+        value: sched.total_work_steals,
+    });
+    result.push(CounterSnapshot {
+        group: "sched",
+        name: "tasks_spawned",
+        value: sched.total_tasks_spawned,
+    });
+    result.push(CounterSnapshot {
+        group: "sched",
+        name: "tasks_exited",
+        value: sched.total_tasks_exited,
+    });
+    result.push(CounterSnapshot {
+        group: "sched",
+        name: "load_avg_x100",
+        value: sched.load_avg_x100,
+    });
 
     // --- Interrupt subsystem ---
     let irq_counts = crate::idt::vector_counts();
     let total_irqs: u64 = irq_counts.iter().sum();
-    result.push(CounterSnapshot { group: "irq", name: "total_interrupts", value: total_irqs });
-    result.push(CounterSnapshot { group: "irq", name: "timer_irqs", value: irq_counts[32] });
-    result.push(CounterSnapshot { group: "irq", name: "storms_detected", value: u64::from(crate::irq_storm::total_storms()) });
+    result.push(CounterSnapshot {
+        group: "irq",
+        name: "total_interrupts",
+        value: total_irqs,
+    });
+    result.push(CounterSnapshot {
+        group: "irq",
+        name: "timer_irqs",
+        value: irq_counts[32],
+    });
+    result.push(CounterSnapshot {
+        group: "irq",
+        name: "storms_detected",
+        value: u64::from(crate::irq_storm::total_storms()),
+    });
 
     // --- Softirq ---
     let softirq = crate::softirq::stats();
-    result.push(CounterSnapshot { group: "softirq", name: "total_runs", value: u64::from(softirq.total_runs) });
-    result.push(CounterSnapshot { group: "softirq", name: "total_handlers", value: u64::from(softirq.total_handlers) });
-    result.push(CounterSnapshot { group: "softirq", name: "reentry_prevented", value: u64::from(softirq.reentry_prevented) });
+    result.push(CounterSnapshot {
+        group: "softirq",
+        name: "total_runs",
+        value: u64::from(softirq.total_runs),
+    });
+    result.push(CounterSnapshot {
+        group: "softirq",
+        name: "total_handlers",
+        value: u64::from(softirq.total_handlers),
+    });
+    result.push(CounterSnapshot {
+        group: "softirq",
+        name: "reentry_prevented",
+        value: u64::from(softirq.reentry_prevented),
+    });
 
     // --- Syscall latency ---
     let slat = crate::sclatency::stats();
-    result.push(CounterSnapshot { group: "syscall", name: "total_calls", value: slat.total_calls });
-    result.push(CounterSnapshot { group: "syscall", name: "mean_ns", value: slat.mean_ns });
+    result.push(CounterSnapshot {
+        group: "syscall",
+        name: "total_calls",
+        value: slat.total_calls,
+    });
+    result.push(CounterSnapshot {
+        group: "syscall",
+        name: "mean_ns",
+        value: slat.mean_ns,
+    });
     // Exported so a monitoring consumer can tell "the histogram is empty" from
     // "the histogram could not measure": non-zero means that many calls have
     // no known duration and are absent from every bucket.
-    result.push(CounterSnapshot { group: "syscall", name: "latency_unbucketed", value: slat.uncalibrated });
+    result.push(CounterSnapshot {
+        group: "syscall",
+        name: "latency_unbucketed",
+        value: slat.uncalibrated,
+    });
 
     // --- Process accounting ---
-    result.push(CounterSnapshot { group: "pacct", name: "exits_recorded", value: crate::pacct::total_recorded() });
+    result.push(CounterSnapshot {
+        group: "pacct",
+        name: "exits_recorded",
+        value: crate::pacct::total_recorded(),
+    });
 
     result
 }

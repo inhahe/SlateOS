@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -98,7 +98,9 @@ where
 /// totals (35M charges, 33.3M uncharges, 7 OOM kills).)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         cgroups: Vec::new(),
         next_id: 1,
@@ -112,13 +114,23 @@ pub fn init_defaults() {
 /// Create a cgroup.
 pub fn create(name: &str, limit_pages: u64) -> KernelResult<u32> {
     with_state(|state| {
-        if state.cgroups.len() >= MAX_CGROUPS { return Err(KernelError::ResourceExhausted); }
+        if state.cgroups.len() >= MAX_CGROUPS {
+            return Err(KernelError::ResourceExhausted);
+        }
         let id = state.next_id;
         state.next_id += 1;
         state.cgroups.push(CgroupMemStats {
-            cg_id: id, name: String::from(name), limit_pages,
-            usage_pages: 0, rss_pages: 0, cache_pages: 0, swap_pages: 0,
-            charges: 0, uncharges: 0, oom_kills: 0, high_events: 0,
+            cg_id: id,
+            name: String::from(name),
+            limit_pages,
+            usage_pages: 0,
+            rss_pages: 0,
+            cache_pages: 0,
+            swap_pages: 0,
+            charges: 0,
+            uncharges: 0,
+            oom_kills: 0,
+            high_events: 0,
         });
         Ok(id)
     })
@@ -127,7 +139,10 @@ pub fn create(name: &str, limit_pages: u64) -> KernelResult<u32> {
 /// Remove a cgroup.
 pub fn remove(cg_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.cgroups.iter().position(|c| c.cg_id == cg_id)
+        let idx = state
+            .cgroups
+            .iter()
+            .position(|c| c.cg_id == cg_id)
             .ok_or(KernelError::NotFound)?;
         state.cgroups.remove(idx);
         Ok(())
@@ -137,10 +152,17 @@ pub fn remove(cg_id: u32) -> KernelResult<()> {
 /// Charge pages to a cgroup.
 pub fn record_charge(cg_id: u32, pages: u64, is_cache: bool) -> KernelResult<()> {
     with_state(|state| {
-        let c = state.cgroups.iter_mut().find(|c| c.cg_id == cg_id)
+        let c = state
+            .cgroups
+            .iter_mut()
+            .find(|c| c.cg_id == cg_id)
             .ok_or(KernelError::NotFound)?;
         c.usage_pages += pages;
-        if is_cache { c.cache_pages += pages; } else { c.rss_pages += pages; }
+        if is_cache {
+            c.cache_pages += pages;
+        } else {
+            c.rss_pages += pages;
+        }
         c.charges += 1;
         if c.usage_pages > c.limit_pages {
             c.high_events += 1;
@@ -153,11 +175,17 @@ pub fn record_charge(cg_id: u32, pages: u64, is_cache: bool) -> KernelResult<()>
 /// Uncharge pages from a cgroup.
 pub fn record_uncharge(cg_id: u32, pages: u64, is_cache: bool) -> KernelResult<()> {
     with_state(|state| {
-        let c = state.cgroups.iter_mut().find(|c| c.cg_id == cg_id)
+        let c = state
+            .cgroups
+            .iter_mut()
+            .find(|c| c.cg_id == cg_id)
             .ok_or(KernelError::NotFound)?;
         c.usage_pages = c.usage_pages.saturating_sub(pages);
-        if is_cache { c.cache_pages = c.cache_pages.saturating_sub(pages); }
-        else { c.rss_pages = c.rss_pages.saturating_sub(pages); }
+        if is_cache {
+            c.cache_pages = c.cache_pages.saturating_sub(pages);
+        } else {
+            c.rss_pages = c.rss_pages.saturating_sub(pages);
+        }
         c.uncharges += 1;
         state.total_uncharges += 1;
         Ok(())
@@ -167,7 +195,10 @@ pub fn record_uncharge(cg_id: u32, pages: u64, is_cache: bool) -> KernelResult<(
 /// Record an OOM kill in a cgroup.
 pub fn record_oom(cg_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let c = state.cgroups.iter_mut().find(|c| c.cg_id == cg_id)
+        let c = state
+            .cgroups
+            .iter_mut()
+            .find(|c| c.cg_id == cg_id)
             .ok_or(KernelError::NotFound)?;
         c.oom_kills += 1;
         state.total_oom_kills += 1;
@@ -177,14 +208,23 @@ pub fn record_oom(cg_id: u32) -> KernelResult<()> {
 
 /// Per-cgroup stats.
 pub fn per_cgroup() -> Vec<CgroupMemStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.cgroups.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.cgroups.clone())
 }
 
 /// Statistics: (cgroup_count, total_charges, total_uncharges, total_oom_kills, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.cgroups.len(), s.total_charges, s.total_uncharges, s.total_oom_kills, s.ops),
+        Some(s) => (
+            s.cgroups.len(),
+            s.total_charges,
+            s.total_uncharges,
+            s.total_oom_kills,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -215,7 +255,10 @@ pub fn self_test() {
 
     // 3: Charge RSS — usage and rss tracked, cache untouched.
     record_charge(id, 100, false).expect("charge_rss");
-    let c = per_cgroup().into_iter().find(|c| c.cg_id == id).expect("cg");
+    let c = per_cgroup()
+        .into_iter()
+        .find(|c| c.cg_id == id)
+        .expect("cg");
     assert_eq!(c.usage_pages, 100);
     assert_eq!(c.rss_pages, 100);
     assert_eq!(c.cache_pages, 0);
@@ -223,14 +266,20 @@ pub fn self_test() {
 
     // 4: Charge cache — separate bucket, usage is the sum.
     record_charge(id, 50, true).expect("charge_cache");
-    let c = per_cgroup().into_iter().find(|c| c.cg_id == id).expect("cg");
+    let c = per_cgroup()
+        .into_iter()
+        .find(|c| c.cg_id == id)
+        .expect("cg");
     assert_eq!(c.cache_pages, 50);
     assert_eq!(c.usage_pages, 150);
     crate::serial_println!("  [4/8] charge cache: OK");
 
     // 5: Uncharge RSS — usage and rss drop, cache unaffected.
     record_uncharge(id, 30, false).expect("uncharge");
-    let c = per_cgroup().into_iter().find(|c| c.cg_id == id).expect("cg");
+    let c = per_cgroup()
+        .into_iter()
+        .find(|c| c.cg_id == id)
+        .expect("cg");
     assert_eq!(c.rss_pages, 70);
     assert_eq!(c.cache_pages, 50);
     assert_eq!(c.usage_pages, 120);
@@ -239,10 +288,20 @@ pub fn self_test() {
     // 6: High-event detection when usage exceeds the page limit.
     let id2 = create("small_cg", 10).expect("create2");
     record_charge(id2, 25, false).expect("charge over limit");
-    let c = per_cgroup().into_iter().find(|c| c.cg_id == id2).expect("cg2");
+    let c = per_cgroup()
+        .into_iter()
+        .find(|c| c.cg_id == id2)
+        .expect("cg2");
     assert_eq!(c.high_events, 1);
     record_oom(id2).expect("oom");
-    assert_eq!(per_cgroup().into_iter().find(|c| c.cg_id == id2).expect("cg2").oom_kills, 1);
+    assert_eq!(
+        per_cgroup()
+            .into_iter()
+            .find(|c| c.cg_id == id2)
+            .expect("cg2")
+            .oom_kills,
+        1
+    );
     crate::serial_println!("  [6/8] high event + oom: OK");
 
     // 7: Remove — gone, and double-remove errors.

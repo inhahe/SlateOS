@@ -24,11 +24,11 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
-use alloc::string::String;
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Root directory under which named-volume backing directories are created.
 pub const VOLUMES_ROOT: &str = "/var/lib/slate/volumes";
@@ -51,7 +51,9 @@ struct VolumeTable {
 
 impl VolumeTable {
     const fn new() -> Self {
-        Self { volumes: Vec::new() }
+        Self {
+            volumes: Vec::new(),
+        }
     }
 
     fn position(&self, name: &str) -> Option<usize> {
@@ -121,7 +123,9 @@ pub fn create(name: &str) -> KernelResult<PathBuf> {
             if table.volumes.len() >= MAX_VOLUMES {
                 return Err(KernelError::ResourceExhausted);
             }
-            table.volumes.push(Volume { name: String::from(name) });
+            table.volumes.push(Volume {
+                name: String::from(name),
+            });
         }
     }
     // Materialize the backing directory outside the registry lock (VFS has its
@@ -164,7 +168,12 @@ pub fn path_of(name: &str) -> Option<PathBuf> {
 /// List all registered volume names (in registration order).
 #[must_use]
 pub fn list() -> Vec<String> {
-    TABLE.lock().volumes.iter().map(|v| v.name.clone()).collect()
+    TABLE
+        .lock()
+        .volumes
+        .iter()
+        .map(|v| v.name.clone())
+        .collect()
 }
 
 /// The number of registered volumes.
@@ -291,15 +300,27 @@ pub fn self_test() {
 
     // Name validation.
     assert!(validate_name("data").is_ok(), "simple name must validate");
-    assert!(validate_name("my-vol_1.2").is_ok(), "docker-ish name must validate");
+    assert!(
+        validate_name("my-vol_1.2").is_ok(),
+        "docker-ish name must validate"
+    );
     assert!(validate_name("").is_err(), "empty name must be rejected");
     assert!(validate_name(".").is_err(), "'.' must be rejected");
     assert!(validate_name("..").is_err(), "'..' must be rejected");
-    assert!(validate_name("a/b").is_err(), "name with '/' must be rejected");
+    assert!(
+        validate_name("a/b").is_err(),
+        "name with '/' must be rejected"
+    );
     let too_long = "x".repeat(MAX_VOLUME_NAME_LEN + 1);
-    assert!(validate_name(&too_long).is_err(), "over-long name must be rejected");
+    assert!(
+        validate_name(&too_long).is_err(),
+        "over-long name must be rejected"
+    );
     let max_ok = "x".repeat(MAX_VOLUME_NAME_LEN);
-    assert!(validate_name(&max_ok).is_ok(), "max-length name must validate");
+    assert!(
+        validate_name(&max_ok).is_ok(),
+        "max-length name must validate"
+    );
     serial_println!("[volume]   name validation: OK");
 
     // Backing path derivation.
@@ -324,34 +345,48 @@ pub fn self_test() {
         Some(p1.as_path()),
         "path_of must return the backing path of a registered volume",
     );
-    assert!(path_of("st-vol-missing").is_none(), "path_of unknown volume is None");
+    assert!(
+        path_of("st-vol-missing").is_none(),
+        "path_of unknown volume is None"
+    );
     // The backing directory must actually exist on the VFS.
     assert!(
         crate::fs::vfs::Vfs::exists(&p1),
         "create must materialize the backing directory",
     );
     let names = list();
-    assert!(names.iter().any(|n| n == "st-vol-a"), "list must include the volume");
+    assert!(
+        names.iter().any(|n| n == "st-vol-a"),
+        "list must include the volume"
+    );
     serial_println!("[volume]   create/list/exists/path_of: OK");
 
     // ensure() is create-on-demand.
     let p2 = ensure("st-vol-b").expect("ensure st-vol-b");
     assert!(exists("st-vol-b"), "ensure must create the volume");
-    assert!(crate::fs::vfs::Vfs::exists(&p2), "ensure must materialize the dir");
+    assert!(
+        crate::fs::vfs::Vfs::exists(&p2),
+        "ensure must materialize the dir"
+    );
     serial_println!("[volume]   ensure (create-on-demand): OK");
 
     // backing_size(): sums regular-file bytes across the backing tree, including
     // a nested subdir; unknown volume is 0; a freshly-created empty volume is 0.
     {
         use crate::fs::vfs::Vfs;
-        assert_eq!(backing_size("st-vol-missing"), 0, "unknown volume sizes to 0");
+        assert_eq!(
+            backing_size("st-vol-missing"),
+            0,
+            "unknown volume sizes to 0"
+        );
         assert_eq!(backing_size("st-vol-b"), 0, "empty volume sizes to 0");
         // Write 3 + 5 bytes at two depths and confirm the total is 8.
         Vfs::write_file(p2.join("a.txt"), b"AAA").expect("write a");
         Vfs::mkdir(p2.join("sub")).expect("mkdir sub");
         Vfs::write_file(p2.join("sub/b.txt"), b"BBBBB").expect("write b");
         assert_eq!(
-            backing_size("st-vol-b"), 8,
+            backing_size("st-vol-b"),
+            8,
             "backing_size must sum nested regular-file bytes",
         );
     }
@@ -364,7 +399,10 @@ pub fn self_test() {
         !crate::fs::vfs::Vfs::exists(&p1),
         "remove must delete the backing directory",
     );
-    assert!(remove("st-vol-a").is_err(), "removing a gone volume must error");
+    assert!(
+        remove("st-vol-a").is_err(),
+        "removing a gone volume must error"
+    );
     serial_println!("[volume]   remove (unregister + delete data): OK");
 
     // Clean up the second volume and confirm the registry returns to baseline.

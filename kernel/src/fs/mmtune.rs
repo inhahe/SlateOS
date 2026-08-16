@@ -25,10 +25,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -226,38 +226,124 @@ pub fn create_profile(
 }
 
 fn defaults_for(id: u64, name: &str, workload: WorkloadType, alloc_model: AllocModel) -> MmConfig {
-    let (reclaim, overcommit, oc_ratio, huge, compact, swappiness,
-         dirty_r, dirty_bg, dirty_exp, cache_press, min_free, zram, zram_pct,
-         zero_free, numa_il) = match workload {
+    let (
+        reclaim,
+        overcommit,
+        oc_ratio,
+        huge,
+        compact,
+        swappiness,
+        dirty_r,
+        dirty_bg,
+        dirty_exp,
+        cache_press,
+        min_free,
+        zram,
+        zram_pct,
+        zero_free,
+        numa_il,
+    ) = match workload {
         WorkloadType::Desktop => (
-            ReclaimStrategy::MultiGenLru, OvercommitMode::Never, 0,
-            HugePageMode::Transparent, CompactLevel::Light,
-            60, 20, 10, 3000, 100, 32768, true, 25, false, false,
+            ReclaimStrategy::MultiGenLru,
+            OvercommitMode::Never,
+            0,
+            HugePageMode::Transparent,
+            CompactLevel::Light,
+            60,
+            20,
+            10,
+            3000,
+            100,
+            32768,
+            true,
+            25,
+            false,
+            false,
         ),
         WorkloadType::Server => (
-            ReclaimStrategy::MultiGenLru, OvercommitMode::Never, 0,
-            HugePageMode::MadviseOnly, CompactLevel::Background,
-            10, 40, 10, 500, 50, 65536, false, 0, false, true,
+            ReclaimStrategy::MultiGenLru,
+            OvercommitMode::Never,
+            0,
+            HugePageMode::MadviseOnly,
+            CompactLevel::Background,
+            10,
+            40,
+            10,
+            500,
+            50,
+            65536,
+            false,
+            0,
+            false,
+            true,
         ),
         WorkloadType::Gaming => (
-            ReclaimStrategy::WorkingSet, OvercommitMode::Never, 0,
-            HugePageMode::Transparent, CompactLevel::Aggressive,
-            10, 30, 15, 3000, 100, 65536, true, 50, false, false,
+            ReclaimStrategy::WorkingSet,
+            OvercommitMode::Never,
+            0,
+            HugePageMode::Transparent,
+            CompactLevel::Aggressive,
+            10,
+            30,
+            15,
+            3000,
+            100,
+            65536,
+            true,
+            50,
+            false,
+            false,
         ),
         WorkloadType::Development => (
-            ReclaimStrategy::MultiGenLru, OvercommitMode::Heuristic, 50,
-            HugePageMode::Transparent, CompactLevel::Light,
-            80, 20, 10, 3000, 100, 32768, true, 30, false, false,
+            ReclaimStrategy::MultiGenLru,
+            OvercommitMode::Heuristic,
+            50,
+            HugePageMode::Transparent,
+            CompactLevel::Light,
+            80,
+            20,
+            10,
+            3000,
+            100,
+            32768,
+            true,
+            30,
+            false,
+            false,
         ),
         WorkloadType::LowMemory => (
-            ReclaimStrategy::Clock, OvercommitMode::Never, 0,
-            HugePageMode::Disabled, CompactLevel::Off,
-            100, 10, 5, 1000, 200, 16384, true, 50, false, false,
+            ReclaimStrategy::Clock,
+            OvercommitMode::Never,
+            0,
+            HugePageMode::Disabled,
+            CompactLevel::Off,
+            100,
+            10,
+            5,
+            1000,
+            200,
+            16384,
+            true,
+            50,
+            false,
+            false,
         ),
         WorkloadType::VmHost => (
-            ReclaimStrategy::Lru, OvercommitMode::Heuristic, 80,
-            HugePageMode::Always, CompactLevel::Background,
-            30, 40, 20, 500, 50, 131072, false, 0, false, true,
+            ReclaimStrategy::Lru,
+            OvercommitMode::Heuristic,
+            80,
+            HugePageMode::Always,
+            CompactLevel::Background,
+            30,
+            40,
+            20,
+            500,
+            50,
+            131072,
+            false,
+            0,
+            false,
+            true,
         ),
     };
 
@@ -294,7 +380,10 @@ fn defaults_for(id: u64, name: &str, workload: WorkloadType, alloc_model: AllocM
 /// Remove a profile (built-in and active are protected).
 pub fn remove_profile(profile_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     if p.builtin || p.active {
         return Err(KernelError::PermissionDenied);
@@ -308,7 +397,12 @@ pub fn remove_profile(profile_id: u64) -> KernelResult<()> {
 
 /// Get a profile by ID.
 pub fn get_profile(profile_id: u64) -> KernelResult<MmConfig> {
-    STATE.lock().profiles.iter().find(|p| p.id == profile_id).cloned()
+    STATE
+        .lock()
+        .profiles
+        .iter()
+        .find(|p| p.id == profile_id)
+        .cloned()
         .ok_or(KernelError::NotFound)
 }
 
@@ -319,7 +413,12 @@ pub fn list_profiles() -> Vec<MmConfig> {
 
 /// Get the active profile.
 pub fn active_profile() -> KernelResult<MmConfig> {
-    STATE.lock().profiles.iter().find(|p| p.active).cloned()
+    STATE
+        .lock()
+        .profiles
+        .iter()
+        .find(|p| p.active)
+        .cloned()
         .ok_or(KernelError::NotFound)
 }
 
@@ -344,7 +443,10 @@ pub fn apply_profile(profile_id: u64) -> KernelResult<()> {
 /// Set overcommit mode.
 pub fn set_overcommit(profile_id: u64, mode: OvercommitMode) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.overcommit = mode;
     state.changes += 1;
@@ -354,7 +456,10 @@ pub fn set_overcommit(profile_id: u64, mode: OvercommitMode) -> KernelResult<()>
 /// Set overcommit ratio.
 pub fn set_overcommit_ratio(profile_id: u64, ratio: u8) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.overcommit_ratio = ratio.min(100);
     state.changes += 1;
@@ -364,7 +469,10 @@ pub fn set_overcommit_ratio(profile_id: u64, ratio: u8) -> KernelResult<()> {
 /// Set huge page mode.
 pub fn set_huge_pages(profile_id: u64, mode: HugePageMode) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.huge_pages = mode;
     state.changes += 1;
@@ -374,7 +482,10 @@ pub fn set_huge_pages(profile_id: u64, mode: HugePageMode) -> KernelResult<()> {
 /// Set compaction level.
 pub fn set_compact_level(profile_id: u64, level: CompactLevel) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.compact_level = level;
     state.changes += 1;
@@ -384,7 +495,10 @@ pub fn set_compact_level(profile_id: u64, level: CompactLevel) -> KernelResult<(
 /// Set swappiness (0-200).
 pub fn set_swappiness(profile_id: u64, val: u16) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.swappiness = val.min(200);
     state.changes += 1;
@@ -394,7 +508,10 @@ pub fn set_swappiness(profile_id: u64, val: u16) -> KernelResult<()> {
 /// Set dirty ratio.
 pub fn set_dirty_ratio(profile_id: u64, ratio: u8) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.dirty_ratio = ratio.clamp(1, 90);
     state.changes += 1;
@@ -404,7 +521,10 @@ pub fn set_dirty_ratio(profile_id: u64, ratio: u8) -> KernelResult<()> {
 /// Set background dirty ratio.
 pub fn set_dirty_bg_ratio(profile_id: u64, ratio: u8) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.dirty_bg_ratio = ratio.clamp(1, 50);
     state.changes += 1;
@@ -414,7 +534,10 @@ pub fn set_dirty_bg_ratio(profile_id: u64, ratio: u8) -> KernelResult<()> {
 /// Set VFS cache pressure.
 pub fn set_cache_pressure(profile_id: u64, val: u16) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.vfs_cache_pressure = val.min(1000);
     state.changes += 1;
@@ -424,7 +547,10 @@ pub fn set_cache_pressure(profile_id: u64, val: u16) -> KernelResult<()> {
 /// Set ZRAM enabled.
 pub fn set_zram_enabled(profile_id: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.zram_enabled = enabled;
     state.changes += 1;
@@ -434,7 +560,10 @@ pub fn set_zram_enabled(profile_id: u64, enabled: bool) -> KernelResult<()> {
 /// Set zero-on-free.
 pub fn set_zero_on_free(profile_id: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.zero_on_free = enabled;
     state.changes += 1;
@@ -444,7 +573,10 @@ pub fn set_zero_on_free(profile_id: u64, enabled: bool) -> KernelResult<()> {
 /// Set reclaim strategy.
 pub fn set_reclaim(profile_id: u64, strategy: ReclaimStrategy) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.reclaim = strategy;
     state.changes += 1;
@@ -454,7 +586,10 @@ pub fn set_reclaim(profile_id: u64, strategy: ReclaimStrategy) -> KernelResult<(
 /// Set min free kibibytes.
 pub fn set_min_free(profile_id: u64, kib: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.min_free_kib = kib.clamp(1024, 1_048_576);
     state.changes += 1;
@@ -471,7 +606,9 @@ pub fn tradeoffs(profile_id: u64) -> KernelResult<TradeoffInfo> {
     if !state.profiles.iter().any(|p| p.id == profile_id) {
         return Err(KernelError::NotFound);
     }
-    state.tradeoffs.iter()
+    state
+        .tradeoffs
+        .iter()
         .find(|(pid, _)| *pid == profile_id)
         .map(|(_, info)| info.clone())
         .ok_or(KernelError::NotFound)
@@ -486,9 +623,15 @@ pub fn list_tradeoffs() -> Vec<(u64, TradeoffInfo)> {
 // Init / stats
 // ---------------------------------------------------------------------------
 
-fn add_builtin(state: &mut State, name: &str, workload: WorkloadType, alloc_model: AllocModel,
-    active: bool, advantages: &[&str], disadvantages: &[&str])
-{
+fn add_builtin(
+    state: &mut State,
+    name: &str,
+    workload: WorkloadType,
+    alloc_model: AllocModel,
+    active: bool,
+    advantages: &[&str],
+    disadvantages: &[&str],
+) {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let mut cfg = defaults_for(id, name, workload, alloc_model);
     cfg.builtin = true;
@@ -510,69 +653,123 @@ pub fn init_defaults() {
         return;
     }
 
-    add_builtin(&mut state, "Desktop (Default)", WorkloadType::Desktop,
-        AllocModel::SlabBuddy, true,
-        &["Balanced memory usage and performance",
-          "Transparent huge pages reduce TLB misses",
-          "MGLRU provides good page aging accuracy",
-          "ZRAM extends effective memory with compression",
-          "Committed memory prevents OOM surprises"],
-        &["Slightly higher memory overhead than minimal config",
-          "Compaction can cause brief latency spikes"]);
+    add_builtin(
+        &mut state,
+        "Desktop (Default)",
+        WorkloadType::Desktop,
+        AllocModel::SlabBuddy,
+        true,
+        &[
+            "Balanced memory usage and performance",
+            "Transparent huge pages reduce TLB misses",
+            "MGLRU provides good page aging accuracy",
+            "ZRAM extends effective memory with compression",
+            "Committed memory prevents OOM surprises",
+        ],
+        &[
+            "Slightly higher memory overhead than minimal config",
+            "Compaction can cause brief latency spikes",
+        ],
+    );
 
-    add_builtin(&mut state, "Server / Database", WorkloadType::Server,
-        AllocModel::SlabBuddy, false,
-        &["High dirty ratios improve write throughput",
-          "Low swappiness keeps working set in RAM",
-          "Background compaction maintains contiguous regions",
-          "NUMA interleave reduces hotspot contention",
-          "Large min_free reserve prevents allocation stalls"],
-        &["Higher memory overhead for reserves",
-          "Madvise-only huge pages require application support",
-          "Low swappiness may cause OOM under memory pressure"]);
+    add_builtin(
+        &mut state,
+        "Server / Database",
+        WorkloadType::Server,
+        AllocModel::SlabBuddy,
+        false,
+        &[
+            "High dirty ratios improve write throughput",
+            "Low swappiness keeps working set in RAM",
+            "Background compaction maintains contiguous regions",
+            "NUMA interleave reduces hotspot contention",
+            "Large min_free reserve prevents allocation stalls",
+        ],
+        &[
+            "Higher memory overhead for reserves",
+            "Madvise-only huge pages require application support",
+            "Low swappiness may cause OOM under memory pressure",
+        ],
+    );
 
-    add_builtin(&mut state, "Gaming", WorkloadType::Gaming,
-        AllocModel::SlabBuddy, false,
-        &["Working set tracking minimises page faults",
-          "Aggressive compaction reduces allocation latency",
-          "Transparent huge pages for game memory",
-          "High ZRAM ratio for background process compression",
-          "Very low swappiness keeps game in RAM"],
-        &["High memory consumption",
-          "Aggressive compaction uses CPU cycles",
-          "Background apps may be heavily compressed"]);
+    add_builtin(
+        &mut state,
+        "Gaming",
+        WorkloadType::Gaming,
+        AllocModel::SlabBuddy,
+        false,
+        &[
+            "Working set tracking minimises page faults",
+            "Aggressive compaction reduces allocation latency",
+            "Transparent huge pages for game memory",
+            "High ZRAM ratio for background process compression",
+            "Very low swappiness keeps game in RAM",
+        ],
+        &[
+            "High memory consumption",
+            "Aggressive compaction uses CPU cycles",
+            "Background apps may be heavily compressed",
+        ],
+    );
 
-    add_builtin(&mut state, "Development", WorkloadType::Development,
-        AllocModel::SlabBuddy, false,
-        &["Heuristic overcommit allows fork-heavy workflows",
-          "Higher swappiness helps with many open projects",
-          "MGLRU handles diverse allocation patterns well",
-          "ZRAM compression for build caches"],
-        &["Overcommit may lead to OOM under extreme load",
-          "Higher swappiness may swap out active data"]);
+    add_builtin(
+        &mut state,
+        "Development",
+        WorkloadType::Development,
+        AllocModel::SlabBuddy,
+        false,
+        &[
+            "Heuristic overcommit allows fork-heavy workflows",
+            "Higher swappiness helps with many open projects",
+            "MGLRU handles diverse allocation patterns well",
+            "ZRAM compression for build caches",
+        ],
+        &[
+            "Overcommit may lead to OOM under extreme load",
+            "Higher swappiness may swap out active data",
+        ],
+    );
 
-    add_builtin(&mut state, "Low Memory / Embedded", WorkloadType::LowMemory,
-        AllocModel::Bitmap, false,
-        &["Minimal allocator overhead",
-          "Maximum swap usage frees physical RAM",
-          "No huge page overhead",
-          "High ZRAM compression ratio",
-          "Aggressive VFS cache reclaim"],
-        &["Slower allocation (bitmap scan)",
-          "No huge page benefits (more TLB misses)",
-          "Heavy swapping hurts responsiveness",
-          "Requires recompile for allocator change"]);
+    add_builtin(
+        &mut state,
+        "Low Memory / Embedded",
+        WorkloadType::LowMemory,
+        AllocModel::Bitmap,
+        false,
+        &[
+            "Minimal allocator overhead",
+            "Maximum swap usage frees physical RAM",
+            "No huge page overhead",
+            "High ZRAM compression ratio",
+            "Aggressive VFS cache reclaim",
+        ],
+        &[
+            "Slower allocation (bitmap scan)",
+            "No huge page benefits (more TLB misses)",
+            "Heavy swapping hurts responsiveness",
+            "Requires recompile for allocator change",
+        ],
+    );
 
-    add_builtin(&mut state, "VM Host", WorkloadType::VmHost,
-        AllocModel::ZoneBased, false,
-        &["Zone-based allocation isolates VM memory",
-          "Always-on huge pages for VM backing",
-          "NUMA interleave for balanced VM placement",
-          "Background compaction for huge page availability",
-          "Large reserves prevent host-level OOM"],
-        &["High memory overhead for huge page reserves",
-          "Zone-based allocator requires recompile",
-          "Overcommit risk if VMs oversubscribed"]);
+    add_builtin(
+        &mut state,
+        "VM Host",
+        WorkloadType::VmHost,
+        AllocModel::ZoneBased,
+        false,
+        &[
+            "Zone-based allocation isolates VM memory",
+            "Always-on huge pages for VM backing",
+            "NUMA interleave for balanced VM placement",
+            "Background compaction for huge page availability",
+            "Large reserves prevent host-level OOM",
+        ],
+        &[
+            "High memory overhead for huge page reserves",
+            "Zone-based allocator requires recompile",
+            "Overcommit risk if VMs oversubscribed",
+        ],
+    );
 
     state.changes += 1;
 }

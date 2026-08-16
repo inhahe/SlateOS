@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -209,25 +209,25 @@ where
 /// rather than being misclassified.
 fn pci_class_to_device_class(class: u8, subclass: u8) -> DeviceClass {
     match class {
-        0x01 => DeviceClass::Storage,        // Mass storage controller.
-        0x02 => DeviceClass::Network,        // Network controller.
-        0x03 => DeviceClass::Display,        // Display controller.
+        0x01 => DeviceClass::Storage, // Mass storage controller.
+        0x02 => DeviceClass::Network, // Network controller.
+        0x03 => DeviceClass::Display, // Display controller.
         0x04 => match subclass {
             0x01 | 0x03 => DeviceClass::Audio, // Multimedia audio / audio device.
-            _ => DeviceClass::Multimedia,    // Video & other multimedia.
+            _ => DeviceClass::Multimedia,      // Video & other multimedia.
         },
-        0x05 => DeviceClass::Memory,         // Memory controller.
-        0x06 => DeviceClass::Bridge,         // Bridge device.
-        0x07 => DeviceClass::Communication,  // Communication controller.
-        0x09 => DeviceClass::Input,          // Input device controller.
-        0x0b => DeviceClass::Processor,      // Processor.
+        0x05 => DeviceClass::Memory,        // Memory controller.
+        0x06 => DeviceClass::Bridge,        // Bridge device.
+        0x07 => DeviceClass::Communication, // Communication controller.
+        0x09 => DeviceClass::Input,         // Input device controller.
+        0x0b => DeviceClass::Processor,     // Processor.
         0x0c => match subclass {
             0x03 => DeviceClass::Usb,        // USB controller.
             _ => DeviceClass::Communication, // Other serial-bus controllers.
         },
         0x0d => match subclass {
-            0x11 => DeviceClass::Bluetooth,  // Bluetooth controller.
-            _ => DeviceClass::Network,       // Wireless controllers (Wi-Fi, etc.).
+            0x11 => DeviceClass::Bluetooth, // Bluetooth controller.
+            _ => DeviceClass::Network,      // Wireless controllers (Wi-Fi, etc.).
         },
         _ => DeviceClass::Other,
     }
@@ -268,11 +268,12 @@ pub fn init_defaults() {
             break;
         }
         let name = crate::pciids::describe(pd.vendor_id, pd.device_id, pd.class, pd.subclass);
-        let vendor_name = crate::pciids::vendor_name(pd.vendor_id)
-            .unwrap_or("Unknown vendor");
+        let vendor_name = crate::pciids::vendor_name(pd.vendor_id).unwrap_or("Unknown vendor");
         let bus_address = alloc::format!(
             "{:02x}:{:02x}.{}",
-            pd.address.bus, pd.address.device, pd.address.function,
+            pd.address.bus,
+            pd.address.device,
+            pd.address.function,
         );
         devices.push(HwDevice {
             id: next_id,
@@ -349,7 +350,10 @@ pub fn register_device(
 /// Bind a driver to a device.
 pub fn bind_driver(device_id: u32, driver: &str, version: &str) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         dev.driver = String::from(driver);
         dev.driver_version = String::from(version);
@@ -361,7 +365,10 @@ pub fn bind_driver(device_id: u32, driver: &str, version: &str) -> KernelResult<
 /// Unbind the driver from a device.
 pub fn unbind_driver(device_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         dev.driver = String::new();
         dev.driver_version = String::new();
@@ -373,7 +380,10 @@ pub fn unbind_driver(device_id: u32) -> KernelResult<()> {
 /// Remove a device (hot-unplug).
 pub fn remove_device(device_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.devices.iter().position(|d| d.id == device_id)
+        let pos = state
+            .devices
+            .iter()
+            .position(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         state.devices.remove(pos);
         state.hotplug_events += 1;
@@ -384,11 +394,18 @@ pub fn remove_device(device_id: u32) -> KernelResult<()> {
 /// Enable or disable a device.
 pub fn set_enabled(device_id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         dev.enabled = enabled;
         dev.status = if enabled {
-            if dev.driver.is_empty() { DeviceStatus::NoDriver } else { DeviceStatus::Ok }
+            if dev.driver.is_empty() {
+                DeviceStatus::NoDriver
+            } else {
+                DeviceStatus::Ok
+            }
         } else {
             DeviceStatus::Disabled
         };
@@ -399,7 +416,10 @@ pub fn set_enabled(device_id: u32, enabled: bool) -> KernelResult<()> {
 /// Get device info.
 pub fn get_device(device_id: u32) -> KernelResult<HwDevice> {
     with_state(|state| {
-        state.devices.iter().find(|d| d.id == device_id)
+        state
+            .devices
+            .iter()
+            .find(|d| d.id == device_id)
             .cloned()
             .ok_or(KernelError::NotFound)
     })
@@ -418,7 +438,12 @@ pub fn list_devices() -> Vec<HwDevice> {
 pub fn devices_by_class(class: DeviceClass) -> Vec<HwDevice> {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => s.devices.iter().filter(|d| d.class == class).cloned().collect(),
+        Some(s) => s
+            .devices
+            .iter()
+            .filter(|d| d.class == class)
+            .cloned()
+            .collect(),
         None => Vec::new(),
     }
 }
@@ -436,7 +461,11 @@ pub fn devices_by_bus(bus: BusType) -> Vec<HwDevice> {
 pub fn devices_needing_driver() -> usize {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => s.devices.iter().filter(|d| d.status == DeviceStatus::NoDriver).count(),
+        Some(s) => s
+            .devices
+            .iter()
+            .filter(|d| d.status == DeviceStatus::NoDriver)
+            .count(),
         None => 0,
     }
 }
@@ -446,8 +475,16 @@ pub fn stats() -> (usize, usize, usize, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let ok = s.devices.iter().filter(|d| d.status == DeviceStatus::Ok).count();
-            let no_drv = s.devices.iter().filter(|d| d.status == DeviceStatus::NoDriver).count();
+            let ok = s
+                .devices
+                .iter()
+                .filter(|d| d.status == DeviceStatus::Ok)
+                .count();
+            let no_drv = s
+                .devices
+                .iter()
+                .filter(|d| d.status == DeviceStatus::NoDriver)
+                .count();
             (s.devices.len(), ok, no_drv, s.hotplug_events, s.ops)
         }
         None => (0, 0, 0, 0, 0),
@@ -488,21 +525,39 @@ pub fn self_test() {
     assert_eq!(pci_class_to_device_class(0x02, 0x00), DeviceClass::Network);
     assert_eq!(pci_class_to_device_class(0x03, 0x00), DeviceClass::Display);
     assert_eq!(pci_class_to_device_class(0x04, 0x03), DeviceClass::Audio);
-    assert_eq!(pci_class_to_device_class(0x04, 0x00), DeviceClass::Multimedia);
+    assert_eq!(
+        pci_class_to_device_class(0x04, 0x00),
+        DeviceClass::Multimedia
+    );
     assert_eq!(pci_class_to_device_class(0x0c, 0x03), DeviceClass::Usb);
-    assert_eq!(pci_class_to_device_class(0x0d, 0x11), DeviceClass::Bluetooth);
+    assert_eq!(
+        pci_class_to_device_class(0x0d, 0x11),
+        DeviceClass::Bluetooth
+    );
     assert_eq!(pci_class_to_device_class(0xff, 0x00), DeviceClass::Other);
     crate::serial_println!("  [2/11] PCI class mapping: OK");
 
     // Switch to a controlled empty state for the behavioural tests below, so
     // their exact counts are independent of the host PCI topology.
-    *STATE.lock() = Some(State { devices: Vec::new(), next_id: 1, hotplug_events: 0, ops: 0 });
+    *STATE.lock() = Some(State {
+        devices: Vec::new(),
+        next_id: 1,
+        hotplug_events: 0,
+        ops: 0,
+    });
 
     // Test 3: Register a hot-plugged device — starts with NoDriver status.
     let id = register_device(
-        "USB Flash Drive", BusType::Usb, DeviceClass::Storage,
-        0x0781, 0x5567, "SanDisk", "2-1.3", true,
-    ).expect("register");
+        "USB Flash Drive",
+        BusType::Usb,
+        DeviceClass::Storage,
+        0x0781,
+        0x5567,
+        "SanDisk",
+        "2-1.3",
+        true,
+    )
+    .expect("register");
     assert!(id > 0);
     let dev = get_device(id).expect("get device");
     assert_eq!(dev.status, DeviceStatus::NoDriver);

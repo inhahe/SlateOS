@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -117,7 +117,9 @@ where
 /// exited.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         threads: Vec::new(),
         next_id: 1,
@@ -130,14 +132,21 @@ pub fn init_defaults() {
 /// Register a kernel thread.
 pub fn register(name: &str, cpu: u32) -> KernelResult<u32> {
     with_state(|state| {
-        if state.threads.len() >= MAX_KTHREADS { return Err(KernelError::ResourceExhausted); }
+        if state.threads.len() >= MAX_KTHREADS {
+            return Err(KernelError::ResourceExhausted);
+        }
         let now = crate::hpet::elapsed_ns();
         let id = state.next_id;
         state.next_id += 1;
         state.total_created += 1;
         state.threads.push(KernelThread {
-            id, name: String::from(name), cpu, state: KthreadState::Running,
-            cpu_time_ns: 0, wakeups: 0, created_ns: now,
+            id,
+            name: String::from(name),
+            cpu,
+            state: KthreadState::Running,
+            cpu_time_ns: 0,
+            wakeups: 0,
+            created_ns: now,
         });
         Ok(id)
     })
@@ -146,7 +155,10 @@ pub fn register(name: &str, cpu: u32) -> KernelResult<u32> {
 /// Unregister (exit) a kernel thread.
 pub fn unregister(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.threads.iter().position(|t| t.id == id)
+        let idx = state
+            .threads
+            .iter()
+            .position(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         state.threads.remove(idx);
         state.total_exited += 1;
@@ -157,10 +169,15 @@ pub fn unregister(id: u32) -> KernelResult<()> {
 /// Set thread state.
 pub fn set_state(id: u32, new_state: KthreadState) -> KernelResult<()> {
     with_state(|state| {
-        let t = state.threads.iter_mut().find(|t| t.id == id)
+        let t = state
+            .threads
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         t.state = new_state;
-        if new_state == KthreadState::Running { t.wakeups += 1; }
+        if new_state == KthreadState::Running {
+            t.wakeups += 1;
+        }
         Ok(())
     })
 }
@@ -168,7 +185,10 @@ pub fn set_state(id: u32, new_state: KthreadState) -> KernelResult<()> {
 /// Record CPU time.
 pub fn record_cpu_time(id: u32, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let t = state.threads.iter_mut().find(|t| t.id == id)
+        let t = state
+            .threads
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         t.cpu_time_ns += ns;
         Ok(())
@@ -177,7 +197,10 @@ pub fn record_cpu_time(id: u32, ns: u64) -> KernelResult<()> {
 
 /// List all kernel threads.
 pub fn list() -> Vec<KernelThread> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.threads.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.threads.clone())
 }
 
 /// Threads on a specific CPU.
@@ -231,12 +254,22 @@ pub fn self_test() {
 
     // 4: Wakeup counting — a transition to Running increments wakeups.
     set_state(id, KthreadState::Running).expect("wake");
-    assert_eq!(list().into_iter().find(|t| t.id == id).expect("f4").wakeups, 1);
+    assert_eq!(
+        list().into_iter().find(|t| t.id == id).expect("f4").wakeups,
+        1
+    );
     crate::serial_println!("  [4/8] wakeups: OK");
 
     // 5: CPU time accumulates exactly.
     record_cpu_time(id, 50_000).expect("cpu_time");
-    assert_eq!(list().into_iter().find(|t| t.id == id).expect("f5").cpu_time_ns, 50_000);
+    assert_eq!(
+        list()
+            .into_iter()
+            .find(|t| t.id == id)
+            .expect("f5")
+            .cpu_time_ns,
+        50_000
+    );
     crate::serial_println!("  [5/8] cpu time: OK");
 
     // 6: on_cpu filters by CPU. Register a second thread on a different CPU.
@@ -256,9 +289,9 @@ pub fn self_test() {
 
     // 8: Final stats reflect only the real activity above.
     let (threads, created, exited, ops) = stats();
-    assert_eq!(threads, 1);   // id2 still tracked
-    assert_eq!(created, 2);   // two registers
-    assert_eq!(exited, 1);    // one unregister
+    assert_eq!(threads, 1); // id2 still tracked
+    assert_eq!(created, 2); // two registers
+    assert_eq!(exited, 1); // one unregister
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

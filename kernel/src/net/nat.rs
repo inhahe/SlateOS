@@ -26,12 +26,12 @@
 //! - Maximum 256 concurrent NAT mappings
 //! - No port forwarding / DNAT (future work)
 
-use alloc::vec::Vec;
 use crate::sync::Mutex;
+use alloc::vec::Vec;
 
+use super::interface::Ipv4Addr;
 use crate::error::{KernelError, KernelResult};
 use crate::netns::NetNsId;
-use super::interface::Ipv4Addr;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -200,15 +200,19 @@ pub fn translate_outgoing(
     }
 
     // Check for existing mapping (reuse if same 5-tuple).
-    let existing = table.entries.iter().find(|entry| {
-        entry.active
-            && entry.proto == proto
-            && entry.ns_id == ns_id
-            && entry.orig_src_ip == src_ip
-            && entry.orig_src_port == src_port
-            && entry.dst_ip == dst_ip
-            && entry.dst_port == dst_port
-    }).map(|e| e.nat_port);
+    let existing = table
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.active
+                && entry.proto == proto
+                && entry.ns_id == ns_id
+                && entry.orig_src_ip == src_ip
+                && entry.orig_src_port == src_port
+                && entry.dst_ip == dst_ip
+                && entry.dst_port == dst_port
+        })
+        .map(|e| e.nat_port);
 
     if let Some(port) = existing {
         table.translations_out = table.translations_out.wrapping_add(1);
@@ -401,7 +405,7 @@ static PORT_FORWARDS: Mutex<[PortForward; MAX_PORT_FORWARDS]> = Mutex::new(
         container_ip: Ipv4Addr::UNSPECIFIED,
         container_port: 0,
         ns_id: 0,
-    }; MAX_PORT_FORWARDS]
+    }; MAX_PORT_FORWARDS],
 );
 
 /// Port-forward lookup result.
@@ -430,15 +434,17 @@ pub fn add_port_forward(
     let mut rules = PORT_FORWARDS.lock();
 
     // Check for duplicates.
-    let exists = rules.iter().any(|r| {
-        r.active && r.proto == proto && r.host_port == host_port
-    });
+    let exists = rules
+        .iter()
+        .any(|r| r.active && r.proto == proto && r.host_port == host_port);
     if exists {
         return Err(KernelError::InvalidArgument);
     }
 
     // Find free slot.
-    let slot = rules.iter().position(|r| !r.active)
+    let slot = rules
+        .iter()
+        .position(|r| !r.active)
         .ok_or(KernelError::OutOfMemory)?;
 
     rules[slot] = PortForward {
@@ -452,7 +458,11 @@ pub fn add_port_forward(
 
     crate::serial_println!(
         "[nat] Port forward: {:?} :{} → {}:{} (ns={})",
-        proto, host_port, container_ip, container_port, ns_id
+        proto,
+        host_port,
+        container_ip,
+        container_port,
+        ns_id
     );
 
     Ok(())
@@ -461,9 +471,10 @@ pub fn add_port_forward(
 /// Remove a port-forwarding rule.
 pub fn remove_port_forward(proto: NatProto, host_port: u16) -> KernelResult<()> {
     let mut rules = PORT_FORWARDS.lock();
-    let slot = rules.iter().position(|r| {
-        r.active && r.proto == proto && r.host_port == host_port
-    }).ok_or(KernelError::NotFound)?;
+    let slot = rules
+        .iter()
+        .position(|r| r.active && r.proto == proto && r.host_port == host_port)
+        .ok_or(KernelError::NotFound)?;
     rules[slot].active = false;
     Ok(())
 }
@@ -485,13 +496,14 @@ pub fn flush_port_forwards(ns_id: NetNsId) {
 /// Returns the container target if a rule exists for (proto, host_port).
 pub fn lookup_port_forward(proto: NatProto, host_port: u16) -> Option<PortForwardTarget> {
     let rules = PORT_FORWARDS.lock();
-    rules.iter().find(|r| {
-        r.active && r.proto == proto && r.host_port == host_port
-    }).map(|r| PortForwardTarget {
-        container_ip: r.container_ip,
-        container_port: r.container_port,
-        ns_id: r.ns_id,
-    })
+    rules
+        .iter()
+        .find(|r| r.active && r.proto == proto && r.host_port == host_port)
+        .map(|r| PortForwardTarget {
+            container_ip: r.container_ip,
+            container_port: r.container_port,
+            ns_id: r.ns_id,
+        })
 }
 
 /// List all active port-forwarding rules (for diagnostics).
@@ -532,9 +544,10 @@ fn alloc_port(table: &mut NatTable, proto: NatProto) -> Option<u16> {
         };
 
         // Check for collision with existing entries of the same protocol.
-        let in_use = table.entries.iter().any(|e| {
-            e.active && e.proto == proto && e.nat_port == candidate
-        });
+        let in_use = table
+            .entries
+            .iter()
+            .any(|e| e.active && e.proto == proto && e.nat_port == candidate);
 
         if !in_use {
             return Some(candidate);
@@ -594,8 +607,10 @@ pub fn self_test() -> KernelResult<()> {
         );
         assert!(result.is_some(), "non-root should get NAT port");
         let nat_port = result.unwrap();
-        assert!(nat_port >= NAT_PORT_START && nat_port <= NAT_PORT_END,
-            "NAT port should be in ephemeral range");
+        assert!(
+            nat_port >= NAT_PORT_START && nat_port <= NAT_PORT_END,
+            "NAT port should be in ephemeral range"
+        );
 
         // Same 5-tuple reuses the same port.
         let result2 = translate_outgoing(
@@ -622,15 +637,12 @@ pub fn self_test() -> KernelResult<()> {
             5000,
             Ipv4Addr::new(93, 184, 216, 34),
             80,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Simulate reply from 93.184.216.34:80 → host:nat_port.
-        let mapping = translate_incoming(
-            NatProto::Tcp,
-            nat_port,
-            Ipv4Addr::new(93, 184, 216, 34),
-            80,
-        );
+        let mapping =
+            translate_incoming(NatProto::Tcp, nat_port, Ipv4Addr::new(93, 184, 216, 34), 80);
         assert!(mapping.is_some(), "reverse lookup should find entry");
         let m = mapping.unwrap();
         assert_eq!(m.orig_src_ip, Ipv4Addr::new(10, 88, 0, 2));
@@ -644,7 +656,12 @@ pub fn self_test() -> KernelResult<()> {
     {
         let nat_port = {
             let table = NAT.lock();
-            table.entries.iter().find(|e| e.active).map(|e| e.nat_port).unwrap()
+            table
+                .entries
+                .iter()
+                .find(|e| e.active)
+                .map(|e| e.nat_port)
+                .unwrap()
         };
         let mapping = translate_incoming(
             NatProto::Tcp,
@@ -683,12 +700,7 @@ pub fn self_test() -> KernelResult<()> {
         assert!(result.is_some(), "UDP NAT should work");
 
         let nat_port = result.unwrap();
-        let mapping = translate_incoming(
-            NatProto::Udp,
-            nat_port,
-            Ipv4Addr::new(8, 8, 8, 8),
-            53,
-        );
+        let mapping = translate_incoming(NatProto::Udp, nat_port, Ipv4Addr::new(8, 8, 8, 8), 53);
         assert!(mapping.is_some(), "UDP reverse should work");
         assert_eq!(mapping.unwrap().ns_id, ns);
 
@@ -712,23 +724,11 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 9: Port forwarding — add rule.
     {
-        let result = add_port_forward(
-            NatProto::Tcp,
-            8080,
-            Ipv4Addr::new(10, 88, 0, 5),
-            80,
-            99,
-        );
+        let result = add_port_forward(NatProto::Tcp, 8080, Ipv4Addr::new(10, 88, 0, 5), 80, 99);
         assert!(result.is_ok(), "should add port forward");
 
         // Duplicate should fail.
-        let dup = add_port_forward(
-            NatProto::Tcp,
-            8080,
-            Ipv4Addr::new(10, 88, 0, 6),
-            80,
-            100,
-        );
+        let dup = add_port_forward(NatProto::Tcp, 8080, Ipv4Addr::new(10, 88, 0, 6), 80, 100);
         assert!(dup.is_err(), "duplicate host_port should fail");
 
         passed = passed.wrapping_add(1);

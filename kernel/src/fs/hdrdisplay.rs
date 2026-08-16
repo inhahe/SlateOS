@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -157,17 +157,23 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let display = HdrDisplay {
-        id: 1, name: String::from("Primary Display"),
+        id: 1,
+        name: String::from("Primary Display"),
         supported_standards: alloc::vec![HdrStandard::Hdr10, HdrStandard::Hlg],
         active_standard: HdrStandard::None,
         hdr_enabled: false,
-        peak_nits: 400, max_cll: 400, max_fall: 200,
+        peak_nits: 400,
+        max_cll: 400,
+        max_fall: 200,
         color_space: ColorSpace::Srgb,
         tone_mapping: ToneMapping::Auto,
-        bit_depth: 8, sdr_boost: 50,
+        bit_depth: 8,
+        sdr_boost: 50,
     };
 
     *guard = Some(State {
@@ -179,7 +185,11 @@ pub fn init_defaults() {
 }
 
 /// Register HDR display.
-pub fn register_display(name: &str, peak_nits: u32, standards: Vec<HdrStandard>) -> KernelResult<u32> {
+pub fn register_display(
+    name: &str,
+    peak_nits: u32,
+    standards: Vec<HdrStandard>,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.displays.len() >= MAX_DISPLAYS {
             return Err(KernelError::ResourceExhausted);
@@ -187,14 +197,18 @@ pub fn register_display(name: &str, peak_nits: u32, standards: Vec<HdrStandard>)
         let id = state.next_id;
         state.next_id += 1;
         state.displays.push(HdrDisplay {
-            id, name: String::from(name),
+            id,
+            name: String::from(name),
             supported_standards: standards,
             active_standard: HdrStandard::None,
             hdr_enabled: false,
-            peak_nits, max_cll: peak_nits, max_fall: peak_nits / 2,
+            peak_nits,
+            max_cll: peak_nits,
+            max_fall: peak_nits / 2,
             color_space: ColorSpace::Srgb,
             tone_mapping: ToneMapping::Auto,
-            bit_depth: 10, sdr_boost: 50,
+            bit_depth: 10,
+            sdr_boost: 50,
         });
         Ok(id)
     })
@@ -203,7 +217,10 @@ pub fn register_display(name: &str, peak_nits: u32, standards: Vec<HdrStandard>)
 /// Enable HDR on a display.
 pub fn enable_hdr(display_id: u32, standard: HdrStandard) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         if !d.supported_standards.contains(&standard) {
             return Err(KernelError::InvalidArgument);
@@ -220,7 +237,10 @@ pub fn enable_hdr(display_id: u32, standard: HdrStandard) -> KernelResult<()> {
 /// Disable HDR on a display.
 pub fn disable_hdr(display_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         d.hdr_enabled = false;
         d.active_standard = HdrStandard::None;
@@ -234,7 +254,10 @@ pub fn disable_hdr(display_id: u32) -> KernelResult<()> {
 /// Set tone mapping algorithm.
 pub fn set_tone_mapping(display_id: u32, tm: ToneMapping) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         d.tone_mapping = tm;
         Ok(())
@@ -244,7 +267,10 @@ pub fn set_tone_mapping(display_id: u32, tm: ToneMapping) -> KernelResult<()> {
 /// Set SDR content brightness boost (0-100).
 pub fn set_sdr_boost(display_id: u32, boost: u32) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         d.sdr_boost = boost.min(100);
         Ok(())
@@ -254,7 +280,10 @@ pub fn set_sdr_boost(display_id: u32, boost: u32) -> KernelResult<()> {
 /// Set color space.
 pub fn set_color_space(display_id: u32, cs: ColorSpace) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         d.color_space = cs;
         Ok(())
@@ -263,13 +292,21 @@ pub fn set_color_space(display_id: u32, cs: ColorSpace) -> KernelResult<()> {
 
 /// List all displays.
 pub fn list_displays() -> Vec<HdrDisplay> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.displays.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.displays.clone())
 }
 
 /// Get HDR capabilities for a display.
 pub fn get_display(id: u32) -> KernelResult<HdrDisplay> {
     with_state(|state| {
-        state.displays.iter().find(|d| d.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .displays
+            .iter()
+            .find(|d| d.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -332,8 +369,16 @@ pub fn self_test() {
     crate::serial_println!("  [6/8] disable HDR: OK");
 
     // 7: Register HDR monitor.
-    let d2 = register_display("4K HDR Monitor", 1000,
-        alloc::vec![HdrStandard::Hdr10, HdrStandard::Hdr10Plus, HdrStandard::DolbyVision]).expect("reg");
+    let d2 = register_display(
+        "4K HDR Monitor",
+        1000,
+        alloc::vec![
+            HdrStandard::Hdr10,
+            HdrStandard::Hdr10Plus,
+            HdrStandard::DolbyVision
+        ],
+    )
+    .expect("reg");
     enable_hdr(d2, HdrStandard::DolbyVision).expect("enable_dv");
     let d = get_display(d2).expect("get5");
     assert_eq!(d.active_standard, HdrStandard::DolbyVision);

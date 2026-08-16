@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -44,15 +44,28 @@ pub struct Modifiers {
 
 impl Modifiers {
     pub fn none() -> Self {
-        Self { ctrl: false, alt: false, shift: false, super_key: false }
+        Self {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            super_key: false,
+        }
     }
 
     pub fn label(self) -> String {
         let mut parts = Vec::new();
-        if self.ctrl { parts.push("Ctrl"); }
-        if self.alt { parts.push("Alt"); }
-        if self.shift { parts.push("Shift"); }
-        if self.super_key { parts.push("Super"); }
+        if self.ctrl {
+            parts.push("Ctrl");
+        }
+        if self.alt {
+            parts.push("Alt");
+        }
+        if self.shift {
+            parts.push("Shift");
+        }
+        if self.super_key {
+            parts.push("Super");
+        }
         if parts.is_empty() {
             String::from("(none)")
         } else {
@@ -136,27 +149,107 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let defaults = alloc::vec![
-        Shortcut { id: 1, modifiers: Modifiers { ctrl: true, alt: false, shift: false, super_key: false },
-            key: String::from("C"), action: String::from("copy"), description: String::from("Copy selection"),
-            category: ShortcutCategory::Application, enabled: true, user_defined: false, use_count: 0 },
-        Shortcut { id: 2, modifiers: Modifiers { ctrl: true, alt: false, shift: false, super_key: false },
-            key: String::from("V"), action: String::from("paste"), description: String::from("Paste clipboard"),
-            category: ShortcutCategory::Application, enabled: true, user_defined: false, use_count: 0 },
-        Shortcut { id: 3, modifiers: Modifiers { ctrl: true, alt: false, shift: false, super_key: false },
-            key: String::from("Z"), action: String::from("undo"), description: String::from("Undo"),
-            category: ShortcutCategory::Application, enabled: true, user_defined: false, use_count: 0 },
-        Shortcut { id: 4, modifiers: Modifiers { ctrl: false, alt: true, shift: false, super_key: false },
-            key: String::from("Tab"), action: String::from("switch_window"), description: String::from("Switch window"),
-            category: ShortcutCategory::WindowManagement, enabled: true, user_defined: false, use_count: 0 },
-        Shortcut { id: 5, modifiers: Modifiers { ctrl: false, alt: false, shift: false, super_key: true },
-            key: String::from("L"), action: String::from("lock_screen"), description: String::from("Lock screen"),
-            category: ShortcutCategory::System, enabled: true, user_defined: false, use_count: 0 },
-        Shortcut { id: 6, modifiers: Modifiers { ctrl: false, alt: false, shift: false, super_key: false },
-            key: String::from("PrintScreen"), action: String::from("screenshot"), description: String::from("Take screenshot"),
-            category: ShortcutCategory::System, enabled: true, user_defined: false, use_count: 0 },
+        Shortcut {
+            id: 1,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: false,
+                shift: false,
+                super_key: false
+            },
+            key: String::from("C"),
+            action: String::from("copy"),
+            description: String::from("Copy selection"),
+            category: ShortcutCategory::Application,
+            enabled: true,
+            user_defined: false,
+            use_count: 0
+        },
+        Shortcut {
+            id: 2,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: false,
+                shift: false,
+                super_key: false
+            },
+            key: String::from("V"),
+            action: String::from("paste"),
+            description: String::from("Paste clipboard"),
+            category: ShortcutCategory::Application,
+            enabled: true,
+            user_defined: false,
+            use_count: 0
+        },
+        Shortcut {
+            id: 3,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: false,
+                shift: false,
+                super_key: false
+            },
+            key: String::from("Z"),
+            action: String::from("undo"),
+            description: String::from("Undo"),
+            category: ShortcutCategory::Application,
+            enabled: true,
+            user_defined: false,
+            use_count: 0
+        },
+        Shortcut {
+            id: 4,
+            modifiers: Modifiers {
+                ctrl: false,
+                alt: true,
+                shift: false,
+                super_key: false
+            },
+            key: String::from("Tab"),
+            action: String::from("switch_window"),
+            description: String::from("Switch window"),
+            category: ShortcutCategory::WindowManagement,
+            enabled: true,
+            user_defined: false,
+            use_count: 0
+        },
+        Shortcut {
+            id: 5,
+            modifiers: Modifiers {
+                ctrl: false,
+                alt: false,
+                shift: false,
+                super_key: true
+            },
+            key: String::from("L"),
+            action: String::from("lock_screen"),
+            description: String::from("Lock screen"),
+            category: ShortcutCategory::System,
+            enabled: true,
+            user_defined: false,
+            use_count: 0
+        },
+        Shortcut {
+            id: 6,
+            modifiers: Modifiers {
+                ctrl: false,
+                alt: false,
+                shift: false,
+                super_key: false
+            },
+            key: String::from("PrintScreen"),
+            action: String::from("screenshot"),
+            description: String::from("Take screenshot"),
+            category: ShortcutCategory::System,
+            enabled: true,
+            user_defined: false,
+            use_count: 0
+        },
     ];
 
     *guard = Some(State {
@@ -169,24 +262,37 @@ pub fn init_defaults() {
 }
 
 /// Bind a new shortcut.
-pub fn bind(modifiers: Modifiers, key: &str, action: &str, description: &str, category: ShortcutCategory) -> KernelResult<u32> {
+pub fn bind(
+    modifiers: Modifiers,
+    key: &str,
+    action: &str,
+    description: &str,
+    category: ShortcutCategory,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.shortcuts.len() >= MAX_SHORTCUTS {
             return Err(KernelError::ResourceExhausted);
         }
         // Check for conflict.
-        if state.shortcuts.iter().any(|s| s.modifiers == modifiers && s.key == key && s.enabled) {
+        if state
+            .shortcuts
+            .iter()
+            .any(|s| s.modifiers == modifiers && s.key == key && s.enabled)
+        {
             return Err(KernelError::AlreadyExists);
         }
         let id = state.next_id;
         state.next_id += 1;
         state.total_binds += 1;
         state.shortcuts.push(Shortcut {
-            id, modifiers,
+            id,
+            modifiers,
             key: String::from(key),
             action: String::from(action),
             description: String::from(description),
-            category, enabled: true, user_defined: true,
+            category,
+            enabled: true,
+            user_defined: true,
             use_count: 0,
         });
         Ok(id)
@@ -196,7 +302,10 @@ pub fn bind(modifiers: Modifiers, key: &str, action: &str, description: &str, ca
 /// Unbind (remove) a shortcut.
 pub fn unbind(shortcut_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.shortcuts.iter().position(|s| s.id == shortcut_id)
+        let pos = state
+            .shortcuts
+            .iter()
+            .position(|s| s.id == shortcut_id)
             .ok_or(KernelError::NotFound)?;
         state.shortcuts.remove(pos);
         Ok(())
@@ -206,7 +315,8 @@ pub fn unbind(shortcut_id: u32) -> KernelResult<()> {
 /// Lookup a shortcut by key combination.
 pub fn lookup(modifiers: Modifiers, key: &str) -> Option<String> {
     STATE.lock().as_ref().and_then(|s| {
-        s.shortcuts.iter()
+        s.shortcuts
+            .iter()
             .find(|sc| sc.modifiers == modifiers && sc.key == key && sc.enabled)
             .map(|sc| sc.action.clone())
     })
@@ -215,7 +325,10 @@ pub fn lookup(modifiers: Modifiers, key: &str) -> Option<String> {
 /// Trigger a shortcut (increments use count).
 pub fn trigger(shortcut_id: u32) -> KernelResult<String> {
     with_state(|state| {
-        let sc = state.shortcuts.iter_mut().find(|s| s.id == shortcut_id)
+        let sc = state
+            .shortcuts
+            .iter_mut()
+            .find(|s| s.id == shortcut_id)
             .ok_or(KernelError::NotFound)?;
         sc.use_count += 1;
         state.total_triggers += 1;
@@ -226,7 +339,10 @@ pub fn trigger(shortcut_id: u32) -> KernelResult<String> {
 /// Enable/disable a shortcut.
 pub fn set_enabled(shortcut_id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let sc = state.shortcuts.iter_mut().find(|s| s.id == shortcut_id)
+        let sc = state
+            .shortcuts
+            .iter_mut()
+            .find(|s| s.id == shortcut_id)
             .ok_or(KernelError::NotFound)?;
         sc.enabled = enabled;
         Ok(())
@@ -236,19 +352,31 @@ pub fn set_enabled(shortcut_id: u32, enabled: bool) -> KernelResult<()> {
 /// List shortcuts by category.
 pub fn list_by_category(category: ShortcutCategory) -> Vec<Shortcut> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.shortcuts.iter().filter(|sc| sc.category == category).cloned().collect()
+        s.shortcuts
+            .iter()
+            .filter(|sc| sc.category == category)
+            .cloned()
+            .collect()
     })
 }
 
 /// List all shortcuts.
 pub fn list_shortcuts() -> Vec<Shortcut> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.shortcuts.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.shortcuts.clone())
 }
 
 /// Get a shortcut.
 pub fn get_shortcut(id: u32) -> KernelResult<Shortcut> {
     with_state(|state| {
-        state.shortcuts.iter().find(|s| s.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .shortcuts
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -275,22 +403,47 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] default shortcuts: OK");
 
     // 2: Lookup by key.
-    let action = lookup(Modifiers { ctrl: true, alt: false, shift: false, super_key: false }, "C");
+    let action = lookup(
+        Modifiers {
+            ctrl: true,
+            alt: false,
+            shift: false,
+            super_key: false,
+        },
+        "C",
+    );
     assert_eq!(action, Some(String::from("copy")));
     crate::serial_println!("  [2/8] lookup: OK");
 
     // 3: Bind new shortcut.
     let id = bind(
-        Modifiers { ctrl: true, alt: true, shift: false, super_key: false },
-        "T", "open_terminal", "Open terminal", ShortcutCategory::Custom,
-    ).expect("bind");
+        Modifiers {
+            ctrl: true,
+            alt: true,
+            shift: false,
+            super_key: false,
+        },
+        "T",
+        "open_terminal",
+        "Open terminal",
+        ShortcutCategory::Custom,
+    )
+    .expect("bind");
     assert_eq!(list_shortcuts().len(), 7);
     crate::serial_println!("  [3/8] bind: OK");
 
     // 4: Conflict rejected.
     let result = bind(
-        Modifiers { ctrl: true, alt: true, shift: false, super_key: false },
-        "T", "other_action", "Conflict", ShortcutCategory::Custom,
+        Modifiers {
+            ctrl: true,
+            alt: true,
+            shift: false,
+            super_key: false,
+        },
+        "T",
+        "other_action",
+        "Conflict",
+        ShortcutCategory::Custom,
     );
     assert!(result.is_err());
     crate::serial_println!("  [4/8] conflict: OK");
@@ -304,7 +457,15 @@ pub fn self_test() {
 
     // 6: Disable.
     set_enabled(id, false).expect("disable");
-    let found = lookup(Modifiers { ctrl: true, alt: true, shift: false, super_key: false }, "T");
+    let found = lookup(
+        Modifiers {
+            ctrl: true,
+            alt: true,
+            shift: false,
+            super_key: false,
+        },
+        "T",
+    );
     assert!(found.is_none()); // disabled shortcuts not found
     crate::serial_println!("  [6/8] disable: OK");
 

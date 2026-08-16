@@ -33,8 +33,8 @@
 //! - Linux `mm/failslab.c` — slab allocation failure injection
 //! - Linux `Documentation/fault-injection/` — usage guide
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Injection modes
@@ -257,10 +257,10 @@ pub fn self_test() {
     // Test 2: arm_fail_next(3) fails exactly 3 times.
     arm_fail_next(3);
     assert!(is_active());
-    assert!(should_fail_alloc());  // Fail 1.
-    assert!(should_fail_alloc());  // Fail 2.
-    assert!(should_fail_alloc());  // Fail 3 (last, disarms).
-    assert!(!is_active());         // Now disarmed.
+    assert!(should_fail_alloc()); // Fail 1.
+    assert!(should_fail_alloc()); // Fail 2.
+    assert!(should_fail_alloc()); // Fail 3 (last, disarms).
+    assert!(!is_active()); // Now disarmed.
     assert!(!should_fail_alloc()); // No more failures.
     serial_println!("[fault_inject]   arm_fail_next(3): OK");
 
@@ -268,7 +268,7 @@ pub fn self_test() {
     arm_fail_after(3);
     assert!(!should_fail_alloc()); // Success 1 (counter: 3→2).
     assert!(!should_fail_alloc()); // Success 2 (counter: 2→1).
-    assert!(should_fail_alloc());  // Fail (counter reached 1, disarm).
+    assert!(should_fail_alloc()); // Fail (counter reached 1, disarm).
     assert!(!is_active());
     serial_println!("[fault_inject]   arm_fail_after(3): OK");
 
@@ -284,8 +284,12 @@ pub fn self_test() {
     let s = stats();
     assert!(s.total_injected >= 4, "should have 4+ injections");
     assert!(s.sessions >= 3, "should have 3+ sessions");
-    serial_println!("[fault_inject]   Stats: injected={}, sessions={}, calls={}",
-        s.total_injected, s.sessions, s.total_calls);
+    serial_println!(
+        "[fault_inject]   Stats: injected={}, sessions={}, calls={}",
+        s.total_injected,
+        s.sessions,
+        s.total_calls
+    );
 
     serial_println!("[fault_inject] Self-test PASSED");
 }

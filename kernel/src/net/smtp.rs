@@ -26,9 +26,9 @@
 //! - No MIME multipart or attachments.
 //! - Single recipient per message.
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use alloc::format;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -239,9 +239,13 @@ fn smtp_command(session: &SmtpSession, cmd: &str) -> KernelResult<SmtpReply> {
     // Keep reading until we get the final line (space after code).
     let mut retries = 0u8;
     while reply.continued && retries < 5 {
-        for _ in 0..REPLY_TIMEOUT_POLLS { super::poll(); }
+        for _ in 0..REPLY_TIMEOUT_POLLS {
+            super::poll();
+        }
         let more = super::tcp::read_up_to(session.handle, MAX_REPLY_SIZE)?;
-        if more.is_empty() { break; }
+        if more.is_empty() {
+            break;
+        }
         reply_data.extend_from_slice(&more);
         reply = parse_reply(&reply_data).ok_or(KernelError::InvalidArgument)?;
         retries = retries.saturating_add(1);
@@ -266,9 +270,13 @@ fn smtp_send_data(session: &SmtpSession, data: &str) -> KernelResult<SmtpReply> 
     // Handle multi-line reply continuation (same as smtp_command).
     let mut retries = 0u8;
     while reply.continued && retries < 5 {
-        for _ in 0..REPLY_TIMEOUT_POLLS { super::poll(); }
+        for _ in 0..REPLY_TIMEOUT_POLLS {
+            super::poll();
+        }
         let more = super::tcp::read_up_to(session.handle, MAX_REPLY_SIZE)?;
-        if more.is_empty() { break; }
+        if more.is_empty() {
+            break;
+        }
         reply_data.extend_from_slice(&more);
         reply = parse_reply(&reply_data).ok_or(KernelError::InvalidArgument)?;
         retries = retries.saturating_add(1);
@@ -521,18 +529,34 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 2: Reply classification ---
     {
-        let r250 = SmtpReply { code: 250, message: String::from("OK"), continued: false };
+        let r250 = SmtpReply {
+            code: 250,
+            message: String::from("OK"),
+            continued: false,
+        };
         assert!(r250.is_success(), "250 success");
         assert!(!r250.is_intermediate(), "not intermediate");
 
-        let r354 = SmtpReply { code: 354, message: String::new(), continued: false };
+        let r354 = SmtpReply {
+            code: 354,
+            message: String::new(),
+            continued: false,
+        };
         assert!(r354.is_intermediate(), "354 intermediate");
         assert!(!r354.is_success(), "not success");
 
-        let r450 = SmtpReply { code: 450, message: String::new(), continued: false };
+        let r450 = SmtpReply {
+            code: 450,
+            message: String::new(),
+            continued: false,
+        };
         assert!(r450.is_transient_error(), "450 transient");
 
-        let r550 = SmtpReply { code: 550, message: String::new(), continued: false };
+        let r550 = SmtpReply {
+            code: 550,
+            message: String::new(),
+            continued: false,
+        };
         assert!(r550.is_permanent_error(), "550 permanent");
 
         passed = passed.saturating_add(1);
@@ -589,7 +613,8 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 6: Multi-line reply ---
     {
-        let data = b"250-mail.example.com Hello\r\n250-SIZE 52428800\r\n250 ENHANCEDSTATUSCODES\r\n";
+        let data =
+            b"250-mail.example.com Hello\r\n250-SIZE 52428800\r\n250 ENHANCEDSTATUSCODES\r\n";
         let reply = parse_reply(data);
         assert!(reply.is_some(), "multi-line parse");
         let r = reply.unwrap();

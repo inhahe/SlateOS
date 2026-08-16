@@ -40,8 +40,8 @@
 // commands; many helpers may not have call sites in production paths yet.
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -133,7 +133,11 @@ pub struct RipSample {
 
 impl RipSample {
     pub const fn empty() -> Self {
-        Self { rip: 0, cpu: 0, class: 0 }
+        Self {
+            rip: 0,
+            cpu: 0,
+            class: 0,
+        }
     }
 
     pub fn is_valid(&self) -> bool {
@@ -152,9 +156,7 @@ impl RipSample {
 struct SampleRing(core::cell::UnsafeCell<[RipSample; RING_SIZE]>);
 unsafe impl Sync for SampleRing {}
 
-static RING: SampleRing = SampleRing(core::cell::UnsafeCell::new(
-    [RipSample::empty(); RING_SIZE]
-));
+static RING: SampleRing = SampleRing(core::cell::UnsafeCell::new([RipSample::empty(); RING_SIZE]));
 
 /// Write position.
 static WRITE_POS: AtomicU32 = AtomicU32::new(0);
@@ -164,8 +166,14 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Per-class counters (bucket histogram).
 static BUCKET_COUNTS: [AtomicU64; NUM_BUCKETS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 /// Total samples taken.
@@ -223,7 +231,9 @@ pub fn record_last_rip(rip: u64, cpu: usize) {
 /// Read the last interrupted RIP recorded on `cpu` (0 if never sampled).
 #[must_use]
 pub fn last_rip(cpu: usize) -> u64 {
-    LAST_RIP.get(cpu).map_or(0, |slot| slot.load(Ordering::Relaxed))
+    LAST_RIP
+        .get(cpu)
+        .map_or(0, |slot| slot.load(Ordering::Relaxed))
 }
 
 /// Record the RBP (frame pointer) a timer interrupt preempted on `cpu`.
@@ -240,7 +250,9 @@ pub fn record_last_rbp(rbp: u64, cpu: usize) {
 /// Read the last interrupted RBP recorded on `cpu` (0 if never sampled).
 #[must_use]
 pub fn last_rbp(cpu: usize) -> u64 {
-    LAST_RBP.get(cpu).map_or(0, |slot| slot.load(Ordering::Relaxed))
+    LAST_RBP
+        .get(cpu)
+        .map_or(0, |slot| slot.load(Ordering::Relaxed))
 }
 
 // ---------------------------------------------------------------------------
@@ -550,11 +562,19 @@ pub fn self_test() {
         let delta = s.total_samples.saturating_sub(baseline.total_samples);
         // APs may contribute extra samples between baseline and final check,
         // so we assert >= rather than ==.  Our 5 must be present.
-        assert!(delta >= 5, "expected at least 5 manually-recorded samples, got {}", delta);
+        assert!(
+            delta >= 5,
+            "expected at least 5 manually-recorded samples, got {}",
+            delta
+        );
         // Kernel text: at least 3 new (APs in kernel text can add more).
         let kt_delta = s.bucket_counts[AddrClass::KernelText as usize]
             .saturating_sub(baseline.bucket_counts[AddrClass::KernelText as usize]);
-        assert!(kt_delta >= 3, "expected at least 3 kernel_text samples, got {}", kt_delta);
+        assert!(
+            kt_delta >= 3,
+            "expected at least 3 kernel_text samples, got {}",
+            kt_delta
+        );
         // User code: exactly 1 new (APs don't run in userspace during boot).
         let uc_delta = s.bucket_counts[AddrClass::UserCode as usize]
             .saturating_sub(baseline.bucket_counts[AddrClass::UserCode as usize]);
@@ -562,7 +582,11 @@ pub fn self_test() {
         // HHDM: at least 1 new (APs with HHDM addresses can add more).
         let hh_delta = s.bucket_counts[AddrClass::Hhdm as usize]
             .saturating_sub(baseline.bucket_counts[AddrClass::Hhdm as usize]);
-        assert!(hh_delta >= 1, "expected at least 1 hhdm sample, got {}", hh_delta);
+        assert!(
+            hh_delta >= 1,
+            "expected at least 1 hhdm sample, got {}",
+            hh_delta
+        );
 
         // Disable while still in no-interrupt context so no spurious
         // samples can arrive before we inspect the ring buffer.
@@ -583,20 +607,33 @@ pub fn self_test() {
     assert!(has_hhdm, "HHDM sample should be in recent");
     assert!(has_user, "User sample should be in recent");
     assert!(has_kernel, "Kernel sample should be in recent");
-    serial_println!("[rip_sample]   Recent: OK ({} entries, test samples present)", n);
+    serial_println!(
+        "[rip_sample]   Recent: OK ({} entries, test samples present)",
+        n
+    );
 
     // Test 5: Hottest RIP.
     // Our test recorded 0xffffffff80001000 twice, which should be the
     // hottest unless APs hammered a single address more.  Just verify
     // hottest_rip() returns something reasonable.
     let hot = hottest_rip();
-    assert!(hot.is_some(), "hottest_rip should return Some after recording");
+    assert!(
+        hot.is_some(),
+        "hottest_rip should return Some after recording"
+    );
     let (rip, count) = hot.unwrap();
     assert!(count >= 1, "hottest should have at least 1 sample");
-    serial_println!("[rip_sample]   Hottest: OK ({:#x} seen {} times)", rip, count);
+    serial_println!(
+        "[rip_sample]   Hottest: OK ({:#x} seen {} times)",
+        rip,
+        count
+    );
 
     // Test 6: Address classification.
-    assert_eq!(AddrClass::classify(0xffffffff80100000), AddrClass::KernelText);
+    assert_eq!(
+        AddrClass::classify(0xffffffff80100000),
+        AddrClass::KernelText
+    );
     assert_eq!(AddrClass::classify(0x00007fff12345678), AddrClass::UserCode);
     assert_eq!(AddrClass::classify(0xffff800012345678), AddrClass::Hhdm);
     serial_println!("[rip_sample]   Classification: OK");

@@ -227,10 +227,22 @@ pub fn detect() {
     };
 
     serial_println!("[cet] Control-flow Enforcement Technology detection:");
-    serial_println!("[cet]   Shadow Stacks (SHSTK): {}",
-        if features.cet_ss { "supported" } else { "not supported" });
-    serial_println!("[cet]   Indirect Branch Tracking (IBT): {}",
-        if features.cet_ibt { "supported" } else { "not supported" });
+    serial_println!(
+        "[cet]   Shadow Stacks (SHSTK): {}",
+        if features.cet_ss {
+            "supported"
+        } else {
+            "not supported"
+        }
+    );
+    serial_println!(
+        "[cet]   Indirect Branch Tracking (IBT): {}",
+        if features.cet_ibt {
+            "supported"
+        } else {
+            "not supported"
+        }
+    );
 
     if !features.cet_ss && !features.cet_ibt {
         serial_println!("[cet]   Hardware does not support CET — skipping enablement");
@@ -272,20 +284,29 @@ pub unsafe fn enable_supervisor_shstk(shadow_stack_top: u64) {
     let cr4 = read_cr4();
     if cr4 & CR4_CET == 0 {
         // SAFETY: Adding CET bit to CR4; caller guarantees prerequisites.
-        unsafe { write_cr4(cr4 | CR4_CET); }
+        unsafe {
+            write_cr4(cr4 | CR4_CET);
+        }
     }
 
     // Set the ring-0 shadow stack pointer.
     // SAFETY: Caller guarantees shadow_stack_top is valid.
-    unsafe { wrmsr(MSR_IA32_PL0_SSP, shadow_stack_top); }
+    unsafe {
+        wrmsr(MSR_IA32_PL0_SSP, shadow_stack_top);
+    }
 
     // Configure supervisor CET: enable shadow stacks.
     let s_cet = CET_SH_STK_EN | CET_WR_SHSTK_EN;
     // SAFETY: MSR address and value are correct for enabling SHSTK.
-    unsafe { wrmsr(MSR_IA32_S_CET, s_cet); }
+    unsafe {
+        wrmsr(MSR_IA32_S_CET, s_cet);
+    }
 
     SHSTK_ENABLED.store(true, Ordering::Release);
-    serial_println!("[cet] Supervisor shadow stacks ENABLED (SSP={:#x})", shadow_stack_top);
+    serial_println!(
+        "[cet] Supervisor shadow stacks ENABLED (SSP={:#x})",
+        shadow_stack_top
+    );
 }
 
 /// Enable supervisor-mode IBT (indirect branch tracking).
@@ -300,14 +321,18 @@ pub unsafe fn enable_supervisor_ibt() {
     let cr4 = read_cr4();
     if cr4 & CR4_CET == 0 {
         // SAFETY: Adding CET bit to CR4; caller guarantees prerequisites.
-        unsafe { write_cr4(cr4 | CR4_CET); }
+        unsafe {
+            write_cr4(cr4 | CR4_CET);
+        }
     }
 
     // Read current S_CET and add ENDBR enforcement.
     // SAFETY: MSR_IA32_S_CET is a valid MSR when CET is supported.
     let current = unsafe { rdmsr(MSR_IA32_S_CET) };
     // SAFETY: Adding ENDBR_EN bit; caller guarantees kernel has ENDBR64.
-    unsafe { wrmsr(MSR_IA32_S_CET, current | CET_ENDBR_EN); }
+    unsafe {
+        wrmsr(MSR_IA32_S_CET, current | CET_ENDBR_EN);
+    }
 
     IBT_ENABLED.store(true, Ordering::Release);
     serial_println!("[cet] Supervisor IBT ENABLED");
@@ -323,11 +348,15 @@ pub unsafe fn enable_supervisor_ibt() {
 pub unsafe fn disable_supervisor() {
     // Clear S_CET configuration.
     // SAFETY: Zeroing S_CET disables all CET enforcement.
-    unsafe { wrmsr(MSR_IA32_S_CET, 0); }
+    unsafe {
+        wrmsr(MSR_IA32_S_CET, 0);
+    }
     // Clear CR4.CET.
     let cr4 = read_cr4();
     // SAFETY: Removing CET bit from CR4.
-    unsafe { write_cr4(cr4 & !CR4_CET); }
+    unsafe {
+        write_cr4(cr4 & !CR4_CET);
+    }
 
     SHSTK_ENABLED.store(false, Ordering::Release);
     IBT_ENABLED.store(false, Ordering::Release);
@@ -399,8 +428,10 @@ pub fn handle_cp_exception(rip: u64, error_code: u64) {
     serial_println!("[cet] #CP EXCEPTION at RIP={:#x}", rip);
     serial_println!("[cet]   Error code: {:#x} → {:?}", error_code, cpec);
     serial_println!("[cet]   Description: {}", cpec.description());
-    serial_println!("[cet]   Total #CP exceptions: {}",
-        CP_EXCEPTION_COUNT.load(Ordering::Relaxed));
+    serial_println!(
+        "[cet]   Total #CP exceptions: {}",
+        CP_EXCEPTION_COUNT.load(Ordering::Relaxed)
+    );
 
     // In a production kernel, we would:
     // - For user-mode #CP: deliver SEH exception to the process
@@ -503,8 +534,16 @@ pub fn self_test() {
 
     // Test 1: Status query works.
     let s = status();
-    serial_println!("[cet]   Status: SHSTK hw={}, IBT hw={}", s.hw_shstk, s.hw_ibt);
-    serial_println!("[cet]   Active: SHSTK={}, IBT={}", s.supervisor_shstk, s.supervisor_ibt);
+    serial_println!(
+        "[cet]   Status: SHSTK hw={}, IBT hw={}",
+        s.hw_shstk,
+        s.hw_ibt
+    );
+    serial_println!(
+        "[cet]   Active: SHSTK={}, IBT={}",
+        s.supervisor_shstk,
+        s.supervisor_ibt
+    );
     // On QEMU TCG, both should be false.
     // On real CET hardware, hw_shstk and hw_ibt may be true.
     // Either way, the status query must not panic.

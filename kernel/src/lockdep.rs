@@ -297,8 +297,11 @@ static RECURSIVE_REPORTS: AtomicU32 = AtomicU32::new(0);
 /// Call during boot after SMP init (needs `current_cpu_index()`).
 pub fn init() {
     ENABLED.store(true, Ordering::Release);
-    serial_println!("[lockdep] Lock order validator enabled (max {} classes, {} edges)",
-        MAX_CLASSES, MAX_EDGES);
+    serial_println!(
+        "[lockdep] Lock order validator enabled (max {} classes, {} edges)",
+        MAX_CLASSES,
+        MAX_EDGES
+    );
 }
 
 /// Disable lock order checking (e.g., during shutdown or panic).
@@ -354,7 +357,9 @@ pub fn lock_acquire(lock_addr: usize, name: &[u8]) {
     let class_idx = find_or_register_class(lock_addr, name);
     let Some(class_idx) = class_idx else {
         // SAFETY: Restoring re-entrancy guard for this CPU.
-        unsafe { IN_LOCKDEP[cpu] = false; }
+        unsafe {
+            IN_LOCKDEP[cpu] = false;
+        }
         return; // Table full — silently skip.
     };
 
@@ -401,7 +406,9 @@ pub fn lock_acquire(lock_addr: usize, name: &[u8]) {
     }
 
     // SAFETY: Restoring re-entrancy guard for this CPU.
-    unsafe { IN_LOCKDEP[cpu] = false; }
+    unsafe {
+        IN_LOCKDEP[cpu] = false;
+    }
 }
 
 /// Notify lockdep that a lock has been released.
@@ -428,7 +435,9 @@ pub fn lock_release(lock_addr: usize) {
     let class_idx = find_class(lock_addr);
     let Some(class_idx) = class_idx else {
         // SAFETY: Only this CPU accesses its IN_LOCKDEP slot (interrupts disabled).
-        unsafe { IN_LOCKDEP[cpu] = false; }
+        unsafe {
+            IN_LOCKDEP[cpu] = false;
+        }
         return; // Unknown lock — nothing to do.
     };
 
@@ -447,14 +456,18 @@ pub fn lock_release(lock_addr: usize) {
             }
             held.depth -= 1;
             // SAFETY: Restoring re-entrancy guard for this CPU.
-            unsafe { IN_LOCKDEP[cpu] = false; }
+            unsafe {
+                IN_LOCKDEP[cpu] = false;
+            }
             return;
         }
     }
     // Lock not found in held stack — benign (might have been acquired
     // before lockdep was enabled, or table was full at acquire time).
     // SAFETY: Restoring re-entrancy guard for this CPU.
-    unsafe { IN_LOCKDEP[cpu] = false; }
+    unsafe {
+        IN_LOCKDEP[cpu] = false;
+    }
 }
 
 /// Return the number of violations detected so far.
@@ -613,7 +626,10 @@ pub fn dump_held_locks(cpu: usize) {
         // SAFETY: class_idx < count ≤ number of registered classes; the
         // CLASSES array is append-only so this slot is fully initialized.
         let (name, name_len) = unsafe {
-            (CLASSES[class_idx].name, CLASSES[class_idx].name_len as usize)
+            (
+                CLASSES[class_idx].name,
+                CLASSES[class_idx].name_len as usize,
+            )
         };
         let n = name.get(..name_len.min(16)).unwrap_or(b"");
         serial_println!(
@@ -749,14 +765,13 @@ fn report_violation(held_class: u16, acquired_class: u16, cpu: usize) {
     );
     serial_println!(
         "[lockdep]   Holding lock {:?} (class {}), acquiring lock {:?} (class {})",
-        held_name, held_class, acq_name, acquired_class
+        held_name,
+        held_class,
+        acq_name,
+        acquired_class
     );
-    serial_println!(
-        "[lockdep]   But the reverse order was observed previously."
-    );
-    serial_println!(
-        "[lockdep]   This means a deadlock is possible under different scheduling."
-    );
+    serial_println!("[lockdep]   But the reverse order was observed previously.");
+    serial_println!("[lockdep]   This means a deadlock is possible under different scheduling.");
 }
 
 /// Report a recursive acquisition of the same lock instance on one CPU.
@@ -781,7 +796,9 @@ fn report_recursive(class_idx: u16, cpu: usize) {
         "[lockdep] *** SELF-DEADLOCK *** CPU {} is re-acquiring lock {:?} (class {}) \
          it already holds. This non-reentrant spinlock will now spin forever — the \
          acquire is a recursive self-deadlock (fix the call path).",
-        cpu, name, class_idx
+        cpu,
+        name,
+        class_idx
     );
     dump_held_locks(cpu);
 }
@@ -917,13 +934,20 @@ pub fn self_test() {
     lock_acquire(lock_a, b"test-A");
     lock_acquire(lock_a, b"test-A"); // recursive → should report + count.
     let v7 = VIOLATIONS.load(Ordering::Relaxed);
-    assert_eq!(v7, v6 + 1, "recursive same-class acquire should count one violation");
+    assert_eq!(
+        v7,
+        v6 + 1,
+        "recursive same-class acquire should count one violation"
+    );
     // Held stack now has [A, A]; two releases clear it.
     lock_release(lock_a);
     lock_release(lock_a);
     // SAFETY: same CPU, after releases.
     let held_rec = unsafe { HELD[cpu].depth };
-    assert_eq!(held_rec, 0, "held stack empty after recursive-test releases");
+    assert_eq!(
+        held_rec, 0,
+        "held stack empty after recursive-test releases"
+    );
     serial_println!("[lockdep]   Recursive self-deadlock detection: OK");
 
     // Test 8: the class hash index agrees with an exhaustive scan. Run a second
@@ -1029,10 +1053,15 @@ pub fn verify_class_index(when: &str) {
         assert!(c1.is_some(), "colliding registration failed");
         assert_ne!(c1, first, "colliding addresses collapsed into one class");
         assert_eq!(hash_lookup(addr), c1, "colliding class not found by probe");
-        assert_eq!(hash_lookup(FRESH), first, "probe run broke the earlier entry");
+        assert_eq!(
+            hash_lookup(FRESH),
+            first,
+            "probe run broke the earlier entry"
+        );
         serial_println!(
             "[lockdep]   class hash ({}): OK ({} classes verified vs scan, bucket collision handled)",
-            when, checked
+            when,
+            checked
         );
     } else {
         // Not a silent pass: if no collider was found the collision path went
@@ -1040,7 +1069,8 @@ pub fn verify_class_index(when: &str) {
         serial_println!(
             "[lockdep]   class hash ({}): OK ({} classes verified vs scan) — WARNING no \
              colliding address found in 100k candidates, probe path UNTESTED",
-            when, checked
+            when,
+            checked
         );
     }
 }

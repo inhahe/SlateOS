@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -93,7 +93,7 @@ struct State {
     gestures: Vec<GestureBinding>,
     next_device_id: u32,
     next_gesture_id: u32,
-    sensitivity: u32,        // 1-100.
+    sensitivity: u32, // 1-100.
     palm_rejection: bool,
     touch_sound: bool,
     touch_vibration: bool,
@@ -123,16 +123,54 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         gestures: alloc::vec![
-            GestureBinding { id: 1, gesture: GestureType::Tap, action: String::from("click"), enabled: true, trigger_count: 0 },
-            GestureBinding { id: 2, gesture: GestureType::DoubleTap, action: String::from("double_click"), enabled: true, trigger_count: 0 },
-            GestureBinding { id: 3, gesture: GestureType::LongPress, action: String::from("right_click"), enabled: true, trigger_count: 0 },
-            GestureBinding { id: 4, gesture: GestureType::Pinch, action: String::from("zoom"), enabled: true, trigger_count: 0 },
-            GestureBinding { id: 5, gesture: GestureType::Swipe, action: String::from("scroll"), enabled: true, trigger_count: 0 },
-            GestureBinding { id: 6, gesture: GestureType::EdgeSwipe, action: String::from("show_panel"), enabled: true, trigger_count: 0 },
+            GestureBinding {
+                id: 1,
+                gesture: GestureType::Tap,
+                action: String::from("click"),
+                enabled: true,
+                trigger_count: 0
+            },
+            GestureBinding {
+                id: 2,
+                gesture: GestureType::DoubleTap,
+                action: String::from("double_click"),
+                enabled: true,
+                trigger_count: 0
+            },
+            GestureBinding {
+                id: 3,
+                gesture: GestureType::LongPress,
+                action: String::from("right_click"),
+                enabled: true,
+                trigger_count: 0
+            },
+            GestureBinding {
+                id: 4,
+                gesture: GestureType::Pinch,
+                action: String::from("zoom"),
+                enabled: true,
+                trigger_count: 0
+            },
+            GestureBinding {
+                id: 5,
+                gesture: GestureType::Swipe,
+                action: String::from("scroll"),
+                enabled: true,
+                trigger_count: 0
+            },
+            GestureBinding {
+                id: 6,
+                gesture: GestureType::EdgeSwipe,
+                action: String::from("show_panel"),
+                enabled: true,
+                trigger_count: 0
+            },
         ],
         next_device_id: 1,
         next_gesture_id: 7,
@@ -156,8 +194,11 @@ pub fn add_device(name: &str, max_touches: u8) -> KernelResult<u32> {
         let id = state.next_device_id;
         state.next_device_id += 1;
         state.devices.push(TouchDevice {
-            id, name: String::from(name), max_touches,
-            calibrated: false, enabled: true,
+            id,
+            name: String::from(name),
+            max_touches,
+            calibrated: false,
+            enabled: true,
         });
         Ok(id)
     })
@@ -168,7 +209,9 @@ pub fn remove_device(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.devices.len();
         state.devices.retain(|d| d.id != id);
-        if state.devices.len() == before { return Err(KernelError::NotFound); }
+        if state.devices.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -176,7 +219,10 @@ pub fn remove_device(id: u32) -> KernelResult<()> {
 /// Calibrate a device.
 pub fn calibrate(device_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         dev.calibrated = true;
         state.calibrations += 1;
@@ -232,8 +278,11 @@ pub fn set_gesture(gesture: GestureType, action: &str) -> KernelResult<u32> {
             let id = state.next_gesture_id;
             state.next_gesture_id += 1;
             state.gestures.push(GestureBinding {
-                id, gesture, action: String::from(action),
-                enabled: true, trigger_count: 0,
+                id,
+                gesture,
+                action: String::from(action),
+                enabled: true,
+                trigger_count: 0,
             });
             Ok(id)
         }
@@ -243,7 +292,10 @@ pub fn set_gesture(gesture: GestureType, action: &str) -> KernelResult<u32> {
 /// Enable/disable a gesture.
 pub fn set_gesture_enabled(gesture: GestureType, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let g = state.gestures.iter_mut().find(|g| g.gesture == gesture)
+        let g = state
+            .gestures
+            .iter_mut()
+            .find(|g| g.gesture == gesture)
             .ok_or(KernelError::NotFound)?;
         g.enabled = enabled;
         Ok(())
@@ -261,7 +313,11 @@ pub fn record_touch() -> KernelResult<()> {
 /// Record a gesture trigger.
 pub fn trigger_gesture(gesture: GestureType) -> KernelResult<Option<String>> {
     with_state(|state| {
-        if let Some(g) = state.gestures.iter_mut().find(|g| g.gesture == gesture && g.enabled) {
+        if let Some(g) = state
+            .gestures
+            .iter_mut()
+            .find(|g| g.gesture == gesture && g.enabled)
+        {
             g.trigger_count += 1;
             state.total_gestures += 1;
             Ok(Some(g.action.clone()))
@@ -273,12 +329,18 @@ pub fn trigger_gesture(gesture: GestureType) -> KernelResult<Option<String>> {
 
 /// List devices.
 pub fn list_devices() -> Vec<TouchDevice> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// List gesture bindings.
 pub fn list_gestures() -> Vec<GestureBinding> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.gestures.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.gestures.clone())
 }
 
 /// Get current sensitivity.
@@ -290,7 +352,14 @@ pub fn get_sensitivity() -> u32 {
 pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.gestures.len(), s.total_touches, s.total_gestures, s.calibrations, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.gestures.len(),
+            s.total_touches,
+            s.total_gestures,
+            s.calibrations,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }

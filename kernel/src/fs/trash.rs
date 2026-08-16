@@ -203,8 +203,7 @@ pub fn restore(trash_name: impl AsRef<Path>) -> KernelResult<PathBuf> {
 
     // Look up the original path from the index.
     let index = index_load();
-    let original = index_lookup(&index, trash_name)
-        .ok_or(KernelError::NotFound)?;
+    let original = index_lookup(&index, trash_name).ok_or(KernelError::NotFound)?;
 
     // Move the file back to its original location.
     Vfs::rename(&trash_path, &original)?;
@@ -314,7 +313,8 @@ pub fn auto_prune() -> KernelResult<usize> {
 
     crate::serial_println!(
         "[trash] Disk usage {}% >= {}% threshold, starting auto-prune",
-        usage, AUTO_PRUNE_THRESHOLD
+        usage,
+        AUTO_PRUNE_THRESHOLD
     );
 
     // Get all trash items.
@@ -349,7 +349,10 @@ pub fn auto_prune() -> KernelResult<usize> {
                 "[trash] Auto-pruned '{}' ({} bytes, was: {})",
                 item.trash_name.display(),
                 item.size,
-                item.original_path.as_deref().unwrap_or(Path::new("<unknown>")).display()
+                item.original_path
+                    .as_deref()
+                    .unwrap_or(Path::new("<unknown>"))
+                    .display()
             );
         }
     }
@@ -358,7 +361,8 @@ pub fn auto_prune() -> KernelResult<usize> {
         let final_usage = Vfs::statvfs("/").map_or(0, |i| i.usage_percent());
         crate::serial_println!(
             "[trash] Auto-prune complete: {} items deleted, disk usage now {}%",
-            pruned, final_usage
+            pruned,
+            final_usage
         );
     }
 
@@ -423,7 +427,10 @@ fn unique_trash_name(name: &Path) -> KernelResult<PathBuf> {
         let truncated_base = base.get(..max_base.min(base.len())).unwrap_or(base);
 
         let mut candidate = PathBuf::with_capacity(
-            truncated_base.len().saturating_add(suffix_len).saturating_add(ext.len()),
+            truncated_base
+                .len()
+                .saturating_add(suffix_len)
+                .saturating_add(ext.len()),
         );
         candidate.extend_bytes(truncated_base);
         candidate.extend_bytes(b"_");
@@ -523,7 +530,9 @@ fn index_name_matches(escaped_name: &[u8], trash_name: &Path) -> bool {
 fn index_lookup(index_content: &[u8], trash_name: &Path) -> Option<PathBuf> {
     for line in index_content.split(|&b| b == b'\n') {
         // Each record: "ESCAPED_TRASH_NAME=ESCAPED_ORIGINAL_PATH"
-        let Some((name, original)) = index_split(line) else { continue };
+        let Some((name, original)) = index_split(line) else {
+            continue;
+        };
         if index_name_matches(name, trash_name) {
             // A record whose value will not decode is corrupt; reporting
             // `None` is better than handing back a path that names a
@@ -647,7 +656,9 @@ pub fn self_test() -> KernelResult<()> {
     // List trash — should contain our file.
     let items = list()?;
     crate::serial_println!("[trash]   Trash contains {} item(s)", items.len());
-    let found = items.iter().find(|i| i.trash_name.eq_ignore_ascii_case("TRTEST.TXT"));
+    let found = items
+        .iter()
+        .find(|i| i.trash_name.eq_ignore_ascii_case("TRTEST.TXT"));
     if found.is_none() {
         crate::serial_println!("[trash]   FAIL: TRTEST.TXT not found in trash listing");
         return Err(KernelError::InternalError);
@@ -655,7 +666,9 @@ pub fn self_test() -> KernelResult<()> {
     let item = found.expect("checked above");
     crate::serial_println!(
         "[trash]   Found: '{}' from '{:?}' ({} bytes) ✓",
-        item.trash_name.display(), item.original_path, item.size
+        item.trash_name.display(),
+        item.original_path,
+        item.size
     );
 
     // Verify the index records the original path.
@@ -747,7 +760,10 @@ pub fn self_test() -> KernelResult<()> {
             crate::serial_println!("[trash]   FAIL: index is not pure ASCII after escaping");
             return Err(KernelError::InternalError);
         }
-        let records = index.split(|&b| b == b'\n').filter(|l| !l.is_empty()).count();
+        let records = index
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .count();
         if records != 2 {
             crate::serial_println!(
                 "[trash]   FAIL: index has {} records, expected 2 (record split?)",

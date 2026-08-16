@@ -34,14 +34,14 @@
 //!
 //! `PIPES` → `SCHED` (write/read may call `sched::wake()`).
 
-use alloc::collections::BTreeMap;
-use alloc::vec;
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::sched;
 use crate::serial_println;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::collections::BTreeMap;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -158,7 +158,7 @@ impl PipeEnd {
 // have several tasks parked on it at once: `dup()` and process spawn hand the
 // same end to multiple processes, and `wait_readable` (the `tee` primitive)
 // parks on the read end without consuming, alongside a real reader.
-use super::waiters::{wake_all, WaiterSet};
+use super::waiters::{WaiterSet, wake_all};
 
 /// A kernel pipe: a ring buffer with reader/writer state.
 struct Pipe {
@@ -235,8 +235,7 @@ impl Pipe {
 
         // First chunk: from write_pos to end of buffer (or to_write).
         let first = to_write.min(cap - write_pos);
-        self.buf[write_pos..write_pos + first]
-            .copy_from_slice(&data[..first]);
+        self.buf[write_pos..write_pos + first].copy_from_slice(&data[..first]);
 
         // Second chunk: wrap around to start of buffer.
         let second = to_write - first;
@@ -266,8 +265,7 @@ impl Pipe {
         // Second chunk: wrap around to start of buffer.
         let second = to_read - first;
         if second > 0 {
-            out[first..first + second]
-                .copy_from_slice(&self.buf[..second]);
+            out[first..first + second].copy_from_slice(&self.buf[..second]);
         }
 
         self.head = (self.head + to_read) % cap;
@@ -336,8 +334,7 @@ fn current_user_pid() -> u64 {
 ///
 /// Always `false` for `pid == 0` (kernel task — no signal context).
 fn deliverable_signal_pending(pid: u64) -> bool {
-    pid != 0
-        && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
+    pid != 0 && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
 }
 
 /// Park the current task for a pipe wait, interruptibly for user processes.
@@ -773,12 +770,10 @@ pub fn read_timeout(handle: PipeHandle, buf: &mut [u8], timeout_ns: u64) -> Kern
     loop {
         {
             let mut table = PIPES.lock();
-            let pipe = table
-                .get_mut(&handle.pipe_id())
-                .ok_or_else(|| {
-                    crate::hrtimer::cancel(timer_handle);
-                    KernelError::InvalidHandle
-                })?;
+            let pipe = table.get_mut(&handle.pipe_id()).ok_or_else(|| {
+                crate::hrtimer::cancel(timer_handle);
+                KernelError::InvalidHandle
+            })?;
 
             // Deregister first — every path below returns or re-registers.
             // The timer wake in particular does not clear our entry.
@@ -886,12 +881,10 @@ pub fn write_timeout(handle: PipeHandle, data: &[u8], timeout_ns: u64) -> Kernel
     loop {
         {
             let mut table = PIPES.lock();
-            let pipe = table
-                .get_mut(&handle.pipe_id())
-                .ok_or_else(|| {
-                    crate::hrtimer::cancel(timer_handle);
-                    KernelError::InvalidHandle
-                })?;
+            let pipe = table.get_mut(&handle.pipe_id()).ok_or_else(|| {
+                crate::hrtimer::cancel(timer_handle);
+                KernelError::InvalidHandle
+            })?;
 
             // Deregister first — every path below returns or re-registers.
             // The timer wake in particular does not clear our entry.
@@ -1336,9 +1329,7 @@ fn test_capacity_roundtrip() -> KernelResult<()> {
     let (rh, wh) = create();
 
     // (1) Default capacity, observable from either end.
-    if capacity(rh)? != DEFAULT_BUFFER_CAPACITY
-        || capacity(wh)? != DEFAULT_BUFFER_CAPACITY
-    {
+    if capacity(rh)? != DEFAULT_BUFFER_CAPACITY || capacity(wh)? != DEFAULT_BUFFER_CAPACITY {
         serial_println!("[pipe]   FAIL: default capacity wrong");
         close(rh);
         close(wh);
@@ -1351,9 +1342,7 @@ fn test_capacity_roundtrip() -> KernelResult<()> {
     let payload = b"capacity-roundtrip-payload";
     write(wh, payload)?;
     let grown = set_capacity(wh, MAX_PIPE_BUFFER_CAPACITY)?;
-    if grown != MAX_PIPE_BUFFER_CAPACITY
-        || capacity(rh)? != MAX_PIPE_BUFFER_CAPACITY
-    {
+    if grown != MAX_PIPE_BUFFER_CAPACITY || capacity(rh)? != MAX_PIPE_BUFFER_CAPACITY {
         serial_println!("[pipe]   FAIL: grow returned {}", grown);
         close(rh);
         close(wh);
@@ -1494,7 +1483,10 @@ fn test_dup_refcount() -> KernelResult<()> {
     close(wh2);
     let n = read(rh, &mut buf)?;
     if n != 0 {
-        serial_println!("[pipe]   FAIL: expected EOF after final writer close: n={}", n);
+        serial_println!(
+            "[pipe]   FAIL: expected EOF after final writer close: n={}",
+            n
+        );
         close(rh);
         return Err(KernelError::InternalError);
     }
@@ -1621,7 +1613,10 @@ fn test_reader_close_broken_pipe() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         Err(e) => {
-            serial_println!("[pipe]   FAIL: wrong error {:?} (expected ChannelClosed)", e);
+            serial_println!(
+                "[pipe]   FAIL: wrong error {:?} (expected ChannelClosed)",
+                e
+            );
             close(wh);
             return Err(KernelError::InternalError);
         }
@@ -1665,8 +1660,7 @@ fn test_nonblocking() -> KernelResult<()> {
 }
 
 /// Counter for blocking test verification.
-static PIPE_TEST_RESULT: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+static PIPE_TEST_RESULT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Task for the blocking read test.
 ///
@@ -1679,10 +1673,7 @@ extern "C" fn pipe_reader_task(read_handle_raw: u64) {
         && n > 0
         && let Some(&byte) = buf.first()
     {
-        PIPE_TEST_RESULT.store(
-            u32::from(byte),
-            core::sync::atomic::Ordering::SeqCst,
-        );
+        PIPE_TEST_RESULT.store(u32::from(byte), core::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -1720,12 +1711,10 @@ fn test_blocking_roundtrip() -> KernelResult<()> {
 }
 
 /// Number of multi-waiter readers that successfully read one byte.
-static PIPE_MULTI_DATA_OK: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+static PIPE_MULTI_DATA_OK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Number of multi-waiter readers that observed EOF (`Ok(0)`).
-static PIPE_MULTI_EOF_OK: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+static PIPE_MULTI_EOF_OK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Multi-waiter task: park on the read end until exactly one byte arrives.
 ///
@@ -1817,10 +1806,7 @@ fn test_multi_waiter_wake() -> KernelResult<()> {
     let eof_ok = PIPE_MULTI_EOF_OK.load(SeqCst);
     close(rh2);
     if eof_ok != 2 {
-        serial_println!(
-            "[pipe]   FAIL: {} of 2 parked readers woke on EOF",
-            eof_ok
-        );
+        serial_println!("[pipe]   FAIL: {} of 2 parked readers woke on EOF", eof_ok);
         return Err(KernelError::InternalError);
     }
 

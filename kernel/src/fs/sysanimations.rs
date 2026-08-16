@@ -24,9 +24,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -134,18 +134,78 @@ where
 
 fn default_animations() -> Vec<AnimationConfig> {
     alloc::vec![
-        AnimationConfig { animation_type: AnimationType::WindowOpen, duration_ms: 200, easing: EasingCurve::EaseOut, enabled: true },
-        AnimationConfig { animation_type: AnimationType::WindowClose, duration_ms: 150, easing: EasingCurve::EaseIn, enabled: true },
-        AnimationConfig { animation_type: AnimationType::WindowMinimize, duration_ms: 250, easing: EasingCurve::EaseInOut, enabled: true },
-        AnimationConfig { animation_type: AnimationType::WindowMaximize, duration_ms: 200, easing: EasingCurve::EaseOut, enabled: true },
-        AnimationConfig { animation_type: AnimationType::WindowSnap, duration_ms: 150, easing: EasingCurve::EaseOut, enabled: true },
-        AnimationConfig { animation_type: AnimationType::MenuOpen, duration_ms: 100, easing: EasingCurve::EaseOut, enabled: true },
-        AnimationConfig { animation_type: AnimationType::MenuClose, duration_ms: 80, easing: EasingCurve::EaseIn, enabled: true },
-        AnimationConfig { animation_type: AnimationType::TooltipFade, duration_ms: 150, easing: EasingCurve::Linear, enabled: true },
-        AnimationConfig { animation_type: AnimationType::ScrollSmooth, duration_ms: 120, easing: EasingCurve::EaseOut, enabled: true },
-        AnimationConfig { animation_type: AnimationType::TaskbarSlide, duration_ms: 200, easing: EasingCurve::EaseInOut, enabled: true },
-        AnimationConfig { animation_type: AnimationType::NotificationSlide, duration_ms: 300, easing: EasingCurve::Spring, enabled: true },
-        AnimationConfig { animation_type: AnimationType::DesktopSwitch, duration_ms: 250, easing: EasingCurve::EaseInOut, enabled: true },
+        AnimationConfig {
+            animation_type: AnimationType::WindowOpen,
+            duration_ms: 200,
+            easing: EasingCurve::EaseOut,
+            enabled: true
+        },
+        AnimationConfig {
+            animation_type: AnimationType::WindowClose,
+            duration_ms: 150,
+            easing: EasingCurve::EaseIn,
+            enabled: true
+        },
+        AnimationConfig {
+            animation_type: AnimationType::WindowMinimize,
+            duration_ms: 250,
+            easing: EasingCurve::EaseInOut,
+            enabled: true
+        },
+        AnimationConfig {
+            animation_type: AnimationType::WindowMaximize,
+            duration_ms: 200,
+            easing: EasingCurve::EaseOut,
+            enabled: true
+        },
+        AnimationConfig {
+            animation_type: AnimationType::WindowSnap,
+            duration_ms: 150,
+            easing: EasingCurve::EaseOut,
+            enabled: true
+        },
+        AnimationConfig {
+            animation_type: AnimationType::MenuOpen,
+            duration_ms: 100,
+            easing: EasingCurve::EaseOut,
+            enabled: true
+        },
+        AnimationConfig {
+            animation_type: AnimationType::MenuClose,
+            duration_ms: 80,
+            easing: EasingCurve::EaseIn,
+            enabled: true
+        },
+        AnimationConfig {
+            animation_type: AnimationType::TooltipFade,
+            duration_ms: 150,
+            easing: EasingCurve::Linear,
+            enabled: true
+        },
+        AnimationConfig {
+            animation_type: AnimationType::ScrollSmooth,
+            duration_ms: 120,
+            easing: EasingCurve::EaseOut,
+            enabled: true
+        },
+        AnimationConfig {
+            animation_type: AnimationType::TaskbarSlide,
+            duration_ms: 200,
+            easing: EasingCurve::EaseInOut,
+            enabled: true
+        },
+        AnimationConfig {
+            animation_type: AnimationType::NotificationSlide,
+            duration_ms: 300,
+            easing: EasingCurve::Spring,
+            enabled: true
+        },
+        AnimationConfig {
+            animation_type: AnimationType::DesktopSwitch,
+            duration_ms: 250,
+            easing: EasingCurve::EaseInOut,
+            enabled: true
+        },
     ]
 }
 
@@ -155,7 +215,9 @@ fn default_animations() -> Vec<AnimationConfig> {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         animations: default_animations(),
         global_enabled: true,
@@ -196,7 +258,10 @@ pub fn set_reduce_motion(enabled: bool) -> KernelResult<()> {
 /// Set duration for a specific animation.
 pub fn set_duration(anim_type: AnimationType, duration_ms: u32) -> KernelResult<()> {
     with_state(|state| {
-        let anim = state.animations.iter_mut().find(|a| a.animation_type == anim_type)
+        let anim = state
+            .animations
+            .iter_mut()
+            .find(|a| a.animation_type == anim_type)
             .ok_or(KernelError::NotFound)?;
         anim.duration_ms = duration_ms.clamp(0, 5000);
         state.total_changes += 1;
@@ -207,7 +272,10 @@ pub fn set_duration(anim_type: AnimationType, duration_ms: u32) -> KernelResult<
 /// Set easing curve for a specific animation.
 pub fn set_easing(anim_type: AnimationType, easing: EasingCurve) -> KernelResult<()> {
     with_state(|state| {
-        let anim = state.animations.iter_mut().find(|a| a.animation_type == anim_type)
+        let anim = state
+            .animations
+            .iter_mut()
+            .find(|a| a.animation_type == anim_type)
             .ok_or(KernelError::NotFound)?;
         anim.easing = easing;
         state.total_changes += 1;
@@ -218,7 +286,10 @@ pub fn set_easing(anim_type: AnimationType, easing: EasingCurve) -> KernelResult
 /// Enable/disable a specific animation.
 pub fn set_animation_enabled(anim_type: AnimationType, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let anim = state.animations.iter_mut().find(|a| a.animation_type == anim_type)
+        let anim = state
+            .animations
+            .iter_mut()
+            .find(|a| a.animation_type == anim_type)
             .ok_or(KernelError::NotFound)?;
         anim.enabled = enabled;
         state.total_changes += 1;
@@ -233,17 +304,28 @@ pub fn effective_duration(anim_type: AnimationType) -> u32 {
         Some(s) => s,
         None => return 0,
     };
-    if !state.global_enabled || state.reduce_motion { return 0; }
-    state.animations.iter().find(|a| a.animation_type == anim_type)
+    if !state.global_enabled || state.reduce_motion {
+        return 0;
+    }
+    state
+        .animations
+        .iter()
+        .find(|a| a.animation_type == anim_type)
         .map_or(0, |a| {
-            if !a.enabled { 0 }
-            else { a.duration_ms * state.speed_percent / 100 }
+            if !a.enabled {
+                0
+            } else {
+                a.duration_ms * state.speed_percent / 100
+            }
         })
 }
 
 /// List all animation configs.
 pub fn list_animations() -> Vec<AnimationConfig> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.animations.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.animations.clone())
 }
 
 /// Get global state: (enabled, speed_percent, reduce_motion).
@@ -307,7 +389,10 @@ pub fn self_test() {
     // 6: Custom easing.
     set_easing(AnimationType::WindowSnap, EasingCurve::Spring).expect("ease");
     let anims = list_animations();
-    let snap = anims.iter().find(|a| a.animation_type == AnimationType::WindowSnap).unwrap();
+    let snap = anims
+        .iter()
+        .find(|a| a.animation_type == AnimationType::WindowSnap)
+        .unwrap();
     assert_eq!(snap.easing, EasingCurve::Spring);
     crate::serial_println!("  [6/8] custom easing: OK");
 

@@ -139,7 +139,8 @@ fn count_used_bits(bitmap: &[u8], total_bits: u32) -> u32 {
 fn bitmap_bit_set(bitmap: &[u8], bit: u32) -> bool {
     let byte_idx = (bit / 8) as usize;
     let bit_pos = bit % 8;
-    bitmap.get(byte_idx)
+    bitmap
+        .get(byte_idx)
         .map(|&b| b & (1 << bit_pos) != 0)
         .unwrap_or(false)
 }
@@ -197,10 +198,7 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
     let sb = driver.superblock();
     report.info(format!(
         "Phase 1: Superblock OK — {} blocks, {} inodes, {}B block size, {} groups",
-        sb.block_count,
-        sb.raw.s_inodes_count,
-        sb.block_size,
-        sb.group_count,
+        sb.block_count, sb.raw.s_inodes_count, sb.block_size, sb.group_count,
     ));
 
     if sb.volume_name.is_empty() {
@@ -213,7 +211,9 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
     let blocks_per_group = sb.raw.s_blocks_per_group;
 
     // --- Phase 2: Group descriptor vs bitmap consistency ---
-    report.info(String::from("Phase 2: Checking group descriptors vs bitmaps..."));
+    report.info(String::from(
+        "Phase 2: Checking group descriptors vs bitmaps...",
+    ));
 
     let group_descs = driver.group_descs();
     let mut total_free_blocks_bitmap: u64 = 0;
@@ -232,9 +232,9 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
         // --- Block bitmap ---
         let blocks_in_group = if g == sb.group_count.saturating_sub(1) {
             // Last group may have fewer blocks.
-            let remaining = sb.block_count.saturating_sub(
-                u64::from(g).saturating_mul(u64::from(blocks_per_group))
-            );
+            let remaining = sb
+                .block_count
+                .saturating_sub(u64::from(g).saturating_mul(u64::from(blocks_per_group)));
             remaining.min(u64::from(blocks_per_group)) as u32
         } else {
             blocks_per_group
@@ -246,10 +246,8 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
                 let free = blocks_in_group.saturating_sub(used);
                 let stored_free = gd_free_blocks(gd, sb.is_64bit);
 
-                total_free_blocks_bitmap =
-                    total_free_blocks_bitmap.saturating_add(u64::from(free));
-                total_free_blocks_gd =
-                    total_free_blocks_gd.saturating_add(u64::from(stored_free));
+                total_free_blocks_bitmap = total_free_blocks_bitmap.saturating_add(u64::from(free));
+                total_free_blocks_gd = total_free_blocks_gd.saturating_add(u64::from(stored_free));
 
                 if free != stored_free {
                     report.error(format!(
@@ -260,18 +258,13 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
                 }
             }
             Err(e) => {
-                report.error(format!(
-                    "  Group {}: cannot read block bitmap: {:?}",
-                    g, e
-                ));
+                report.error(format!("  Group {}: cannot read block bitmap: {:?}", g, e));
             }
         }
 
         // --- Inode bitmap ---
         let inodes_in_group = if g == sb.group_count.saturating_sub(1) {
-            let remaining = total_inodes.saturating_sub(
-                g.saturating_mul(inodes_per_group)
-            );
+            let remaining = total_inodes.saturating_sub(g.saturating_mul(inodes_per_group));
             remaining.min(inodes_per_group)
         } else {
             inodes_per_group
@@ -283,10 +276,8 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
                 let free = inodes_in_group.saturating_sub(used);
                 let stored_free = gd_free_inodes(gd, sb.is_64bit);
 
-                total_free_inodes_bitmap =
-                    total_free_inodes_bitmap.saturating_add(u64::from(free));
-                total_free_inodes_gd =
-                    total_free_inodes_gd.saturating_add(u64::from(stored_free));
+                total_free_inodes_bitmap = total_free_inodes_bitmap.saturating_add(u64::from(free));
+                total_free_inodes_gd = total_free_inodes_gd.saturating_add(u64::from(stored_free));
 
                 if free != stored_free {
                     report.error(format!(
@@ -297,10 +288,7 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
                 }
             }
             Err(e) => {
-                report.error(format!(
-                    "  Group {}: cannot read inode bitmap: {:?}",
-                    g, e
-                ));
+                report.error(format!("  Group {}: cannot read inode bitmap: {:?}", g, e));
             }
         }
     }
@@ -337,7 +325,8 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
     for (g, gd) in group_descs.iter().enumerate() {
         let g = g as u32;
         let inodes_in_group = if g == sb.group_count.saturating_sub(1) {
-            total_inodes.saturating_sub(g.saturating_mul(inodes_per_group))
+            total_inodes
+                .saturating_sub(g.saturating_mul(inodes_per_group))
                 .min(inodes_per_group)
         } else {
             inodes_per_group
@@ -346,7 +335,8 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
         if let Ok(bitmap) = balloc::read_inode_bitmap(driver.reader(), sb, gd) {
             for bit in 0..inodes_in_group {
                 if bitmap_bit_set(&bitmap, bit) {
-                    let inode_nr = g.saturating_mul(inodes_per_group)
+                    let inode_nr = g
+                        .saturating_mul(inodes_per_group)
                         .saturating_add(bit)
                         .saturating_add(1); // inodes are 1-based
                     if let Some(slot) = inode_allocated.get_mut(inode_nr as usize) {
@@ -370,9 +360,7 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
             Err(e) => {
                 // Special inodes (1-10) may not all be readable.
                 if ino > 10 {
-                    report.error(format!(
-                        "  Inode {}: cannot read: {:?}", ino, e
-                    ));
+                    report.error(format!("  Inode {}: cannot read: {:?}", ino, e));
                 }
                 continue;
             }
@@ -400,7 +388,8 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
         if inode.i_links_count == 0 && inode.i_mode != 0 {
             report.warn(format!(
                 "  Inode {} ({}): allocated but i_links_count=0 (orphan?)",
-                ino, inode_type_name(inode.i_mode)
+                ino,
+                inode_type_name(inode.i_mode)
             ));
         }
     }
@@ -411,7 +400,9 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
     ));
 
     // --- Phase 4: Directory tree walk (link count verification) ---
-    report.info(String::from("Phase 4: Walking directory tree (link counts)..."));
+    report.info(String::from(
+        "Phase 4: Walking directory tree (link counts)...",
+    ));
 
     // ref_count[inode] = number of directory entries pointing to it.
     let mut ref_count: BTreeMap<u32, u32> = BTreeMap::new();
@@ -423,8 +414,11 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
     dir_stack.push((root_inode_nr, PathBuf::from("/")));
 
     // Count root's self-reference (. entry).
-    *ref_count.entry(root_inode_nr).or_insert(0) =
-        ref_count.get(&root_inode_nr).copied().unwrap_or(0).saturating_add(1);
+    *ref_count.entry(root_inode_nr).or_insert(0) = ref_count
+        .get(&root_inode_nr)
+        .copied()
+        .unwrap_or(0)
+        .saturating_add(1);
 
     while let Some((dir_ino, dir_path)) = dir_stack.pop() {
         let dir_inode = match driver.read_inode(dir_ino) {
@@ -446,14 +440,20 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
         for (child_ino, file_type, name) in &entries {
             if name.as_path() == Path::new(".") || name.as_path() == Path::new("..") {
                 // "." and ".." contribute to link counts.
-                *ref_count.entry(*child_ino).or_insert(0) =
-                    ref_count.get(child_ino).copied().unwrap_or(0).saturating_add(1);
+                *ref_count.entry(*child_ino).or_insert(0) = ref_count
+                    .get(child_ino)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(1);
                 continue;
             }
 
             // Count reference to child.
-            *ref_count.entry(*child_ino).or_insert(0) =
-                ref_count.get(child_ino).copied().unwrap_or(0).saturating_add(1);
+            *ref_count.entry(*child_ino).or_insert(0) = ref_count
+                .get(child_ino)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1);
 
             // If child is a directory, add to stack for traversal.
             // File type byte: 2 = EXT4_FT_DIR.
@@ -468,7 +468,9 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
         // Safety: limit traversal depth to prevent infinite loops from
         // circular directory references.
         if dir_stack.len() > 10000 {
-            report.warn(String::from("  Directory tree too deep (>10000 pending) — stopping walk"));
+            report.warn(String::from(
+                "  Directory tree too deep (>10000 pending) — stopping walk",
+            ));
             break;
         }
     }
@@ -490,7 +492,10 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
             if ino > 10 {
                 report.error(format!(
                     "  Inode {} ({}): links_count={} but {} directory references found",
-                    ino, inode_type_name(inode.i_mode), stored, refs
+                    ino,
+                    inode_type_name(inode.i_mode),
+                    stored,
+                    refs
                 ));
                 link_mismatches = link_mismatches.saturating_add(1);
             }
@@ -655,9 +660,7 @@ fn test_gd_free_counts() -> KernelResult<()> {
     gd.bg_free_blocks_count_hi = 0x0005;
     let count = gd_free_blocks(&gd, true);
     if count != 0x0005_1234 {
-        crate::serial_println!(
-            "[ext4-fsck]   FAIL: gd_free_blocks 64-bit = {:#x}", count
-        );
+        crate::serial_println!("[ext4-fsck]   FAIL: gd_free_blocks 64-bit = {:#x}", count);
         return Err(KernelError::InternalError);
     }
 
@@ -666,9 +669,7 @@ fn test_gd_free_counts() -> KernelResult<()> {
     gd.bg_free_inodes_count_hi = 0x0012;
     let count = gd_free_inodes(&gd, true);
     if count != 0x0012_ABCD {
-        crate::serial_println!(
-            "[ext4-fsck]   FAIL: gd_free_inodes 64-bit = {:#x}", count
-        );
+        crate::serial_println!("[ext4-fsck]   FAIL: gd_free_inodes 64-bit = {:#x}", count);
         return Err(KernelError::InternalError);
     }
 
@@ -728,7 +729,9 @@ fn test_inode_type_name() -> KernelResult<()> {
         if name != expected {
             crate::serial_println!(
                 "[ext4-fsck]   FAIL: inode_type_name({:#x}) = '{}', expected '{}'",
-                mode, name, expected
+                mode,
+                name,
+                expected
             );
             return Err(KernelError::InternalError);
         }
@@ -758,13 +761,15 @@ fn test_report_construction() -> KernelResult<()> {
     if report.errors != 1 || report.warnings != 1 {
         crate::serial_println!(
             "[ext4-fsck]   FAIL: errors={}, warnings={}",
-            report.errors, report.warnings
+            report.errors,
+            report.warnings
         );
         return Err(KernelError::InternalError);
     }
     if report.messages.len() != 3 {
         crate::serial_println!(
-            "[ext4-fsck]   FAIL: messages count = {}", report.messages.len()
+            "[ext4-fsck]   FAIL: messages count = {}",
+            report.messages.len()
         );
         return Err(KernelError::InternalError);
     }
@@ -775,7 +780,8 @@ fn test_report_construction() -> KernelResult<()> {
     }
     if report.errors != 101 {
         crate::serial_println!(
-            "[ext4-fsck]   FAIL: errors after 100 more = {}", report.errors
+            "[ext4-fsck]   FAIL: errors after 100 more = {}",
+            report.errors
         );
         return Err(KernelError::InternalError);
     }

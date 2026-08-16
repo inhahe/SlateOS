@@ -160,7 +160,9 @@ pub fn advise(path: &str, advice: AccessAdvice) {
     // Insert new entry.
     if table.len() >= MAX_ENTRIES {
         // Evict oldest entry (LRU).
-        if let Some(oldest_idx) = table.iter().enumerate()
+        if let Some(oldest_idx) = table
+            .iter()
+            .enumerate()
             .min_by_key(|(_, e)| e.timestamp_ns)
             .map(|(i, _)| i)
         {
@@ -219,7 +221,11 @@ pub fn prefetch(path: &str, offset: u64, len: u64) -> KernelResult<PrefetchResul
         })
     } else {
         // Prefetch specific range.
-        let read_len = if len > 1024 * 1024 { 1024 * 1024 } else { len as usize }; // Cap at 1 MiB.
+        let read_len = if len > 1024 * 1024 {
+            1024 * 1024
+        } else {
+            len as usize
+        }; // Cap at 1 MiB.
         let data = Vfs::read_at(path, offset, read_len)?;
         let bytes = data.len() as u64;
         PREFETCH_BYTES.fetch_add(bytes, Ordering::Relaxed);
@@ -266,11 +272,23 @@ pub fn self_test() -> KernelResult<()> {
 }
 
 fn test_advice_parse() {
-    assert_eq!(AccessAdvice::from_name("normal"), Some(AccessAdvice::Normal));
-    assert_eq!(AccessAdvice::from_name("seq"), Some(AccessAdvice::Sequential));
+    assert_eq!(
+        AccessAdvice::from_name("normal"),
+        Some(AccessAdvice::Normal)
+    );
+    assert_eq!(
+        AccessAdvice::from_name("seq"),
+        Some(AccessAdvice::Sequential)
+    );
     assert_eq!(AccessAdvice::from_name("rand"), Some(AccessAdvice::Random));
-    assert_eq!(AccessAdvice::from_name("willneed"), Some(AccessAdvice::WillNeed));
-    assert_eq!(AccessAdvice::from_name("dontneed"), Some(AccessAdvice::DontNeed));
+    assert_eq!(
+        AccessAdvice::from_name("willneed"),
+        Some(AccessAdvice::WillNeed)
+    );
+    assert_eq!(
+        AccessAdvice::from_name("dontneed"),
+        Some(AccessAdvice::DontNeed)
+    );
     assert_eq!(AccessAdvice::from_name("bogus"), None);
     serial_println!("[prefetch]   advice_parse: ok");
 }

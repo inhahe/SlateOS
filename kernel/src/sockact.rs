@@ -34,10 +34,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -231,9 +231,14 @@ pub fn register(service_id: u32, spec: SocketSpec) -> KernelResult<u32> {
         last_activity_ns: 0,
     });
 
-    crate::syslog!("service.sockact", Info,
+    crate::syslog!(
+        "service.sockact",
+        Info,
         "Socket activation registered: service '{}' (id={}), entry={}",
-        info.name, service_id, id);
+        info.name,
+        service_id,
+        id
+    );
 
     Ok(id)
 }
@@ -241,13 +246,20 @@ pub fn register(service_id: u32, spec: SocketSpec) -> KernelResult<u32> {
 /// Unregister a socket activation entry.
 pub fn unregister(entry_id: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let idx = state.entries.iter().position(|e| e.id == entry_id)
+    let idx = state
+        .entries
+        .iter()
+        .position(|e| e.id == entry_id)
         .ok_or(KernelError::NotFound)?;
     let entry = state.entries.remove(idx);
 
-    crate::syslog!("service.sockact", Info,
+    crate::syslog!(
+        "service.sockact",
+        Info,
         "Socket activation unregistered: service '{}', entry={}",
-        entry.service_name, entry_id);
+        entry.service_name,
+        entry_id
+    );
 
     Ok(())
 }
@@ -261,7 +273,10 @@ pub fn unregister(entry_id: u32) -> KernelResult<()> {
 /// `Ok(false)` if the service is already running.
 pub fn trigger(entry_id: u32) -> KernelResult<bool> {
     let mut state = STATE.lock();
-    let entry = state.entries.iter_mut().find(|e| e.id == entry_id)
+    let entry = state
+        .entries
+        .iter_mut()
+        .find(|e| e.id == entry_id)
         .ok_or(KernelError::NotFound)?;
 
     match entry.state {
@@ -295,16 +310,24 @@ pub fn trigger(entry_id: u32) -> KernelResult<bool> {
     entry.last_activation_ns = now;
     entry.last_activity_ns = now;
     #[allow(clippy::arithmetic_side_effects)]
-    { entry.activation_count += 1; }
+    {
+        entry.activation_count += 1;
+    }
     #[allow(clippy::arithmetic_side_effects)]
-    { state.total_activations += 1; }
+    {
+        state.total_activations += 1;
+    }
 
     // Drop the lock before calling servicemgr (avoids potential deadlock).
     drop(state);
 
-    crate::syslog!("service.sockact", Info,
+    crate::syslog!(
+        "service.sockact",
+        Info,
         "Socket activation triggered for service '{}' (id={})",
-        svc_name, svc_id);
+        svc_name,
+        svc_id
+    );
 
     // Start the service.
     match crate::fs::servicemgr::start_service(svc_id) {
@@ -316,10 +339,17 @@ pub fn trigger(entry_id: u32) -> KernelResult<bool> {
                 entry.state = ActivationState::Failed;
             }
             #[allow(clippy::arithmetic_side_effects)]
-            { state.total_failed += 1; }
+            {
+                state.total_failed += 1;
+            }
 
-            crate::syslog!("service.sockact", Error,
-                "Socket activation failed for '{}': {:?}", svc_name, e);
+            crate::syslog!(
+                "service.sockact",
+                Error,
+                "Socket activation failed for '{}': {:?}",
+                svc_name,
+                e
+            );
             Err(e)
         }
     }
@@ -344,18 +374,26 @@ pub fn claim(service_id: u32) -> u32 {
             total_pending = total_pending.saturating_add(entry.pending_connections);
             entry.pending_connections = 0;
             #[allow(clippy::arithmetic_side_effects)]
-            { claims += 1; }
+            {
+                claims += 1;
+            }
         }
     }
 
     // Deferred update — entries borrow released.
     #[allow(clippy::arithmetic_side_effects)]
-    { state.total_claims += claims; }
+    {
+        state.total_claims += claims;
+    }
 
     if total_pending > 0 {
-        crate::syslog!("service.sockact", Info,
+        crate::syslog!(
+            "service.sockact",
+            Info,
             "Service id={} claimed {} pending connections",
-            service_id, total_pending);
+            service_id,
+            total_pending
+        );
     }
 
     total_pending
@@ -374,7 +412,10 @@ pub fn release(service_id: u32) {
 /// Enable or disable a socket activation entry.
 pub fn set_enabled(entry_id: u32, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let entry = state.entries.iter_mut().find(|e| e.id == entry_id)
+    let entry = state
+        .entries
+        .iter_mut()
+        .find(|e| e.id == entry_id)
         .ok_or(KernelError::NotFound)?;
 
     if enabled {
@@ -391,7 +432,10 @@ pub fn set_enabled(entry_id: u32, enabled: bool) -> KernelResult<()> {
 /// Configure idle stop: auto-stop the service after idle_timeout_ns of no activity.
 pub fn set_idle_stop(entry_id: u32, enabled: bool, timeout_ns: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let entry = state.entries.iter_mut().find(|e| e.id == entry_id)
+    let entry = state
+        .entries
+        .iter_mut()
+        .find(|e| e.id == entry_id)
         .ok_or(KernelError::NotFound)?;
 
     entry.idle_stop = enabled;
@@ -429,18 +473,22 @@ pub fn check_idle() -> Vec<u32> {
 /// List all socket activation entries.
 pub fn list() -> Vec<SocketEntryInfo> {
     let state = STATE.lock();
-    state.entries.iter().map(|e| SocketEntryInfo {
-        id: e.id,
-        service_id: e.service_id,
-        service_name: e.service_name.clone(),
-        socket_type: e.spec.socket_type,
-        port: e.spec.port,
-        path: e.spec.path.clone(),
-        state: e.state,
-        activation_count: e.activation_count,
-        pending_connections: e.pending_connections,
-        idle_stop: e.idle_stop,
-    }).collect()
+    state
+        .entries
+        .iter()
+        .map(|e| SocketEntryInfo {
+            id: e.id,
+            service_id: e.service_id,
+            service_name: e.service_name.clone(),
+            socket_type: e.spec.socket_type,
+            port: e.spec.port,
+            path: e.spec.path.clone(),
+            state: e.state,
+            activation_count: e.activation_count,
+            pending_connections: e.pending_connections,
+            idle_stop: e.idle_stop,
+        })
+        .collect()
 }
 
 /// Public view of a socket entry.
@@ -491,11 +539,21 @@ pub fn stats() -> SocketActStats {
 
     for entry in &state.entries {
         match entry.state {
-            ActivationState::Listening => { st.listening += 1; }
-            ActivationState::Activating => { st.activating += 1; }
-            ActivationState::Active => { st.active += 1; }
-            ActivationState::Disabled => { st.disabled += 1; }
-            ActivationState::Failed => { st.failed += 1; }
+            ActivationState::Listening => {
+                st.listening += 1;
+            }
+            ActivationState::Activating => {
+                st.activating += 1;
+            }
+            ActivationState::Active => {
+                st.active += 1;
+            }
+            ActivationState::Disabled => {
+                st.disabled += 1;
+            }
+            ActivationState::Failed => {
+                st.failed += 1;
+            }
         }
     }
 
@@ -521,18 +579,31 @@ pub fn procfs_content() -> String {
     out.push_str(&format!("Total failures:  {}\n", st.total_failed));
 
     if !entries.is_empty() {
-        out.push_str(&format!("\n{:>3} {:>4} {:4} {:>6} {:20} {:12} {:>6} {:>4}\n",
-            "ID", "SvcID", "Type", "Port", "Path/Service", "State", "Activ", "Pend"));
+        out.push_str(&format!(
+            "\n{:>3} {:>4} {:4} {:>6} {:20} {:12} {:>6} {:>4}\n",
+            "ID", "SvcID", "Type", "Port", "Path/Service", "State", "Activ", "Pend"
+        ));
         for e in &entries {
             let display = if e.path.is_empty() {
                 e.service_name.clone()
             } else {
                 e.path.clone()
             };
-            out.push_str(&format!("{:>3} {:>5} {:4} {:>6} {:20} {:12} {:>6} {:>4}\n",
-                e.id, e.service_id, e.socket_type.label(),
-                if e.port > 0 { format!("{}", e.port) } else { String::from("-") },
-                display, e.state.label(), e.activation_count, e.pending_connections));
+            out.push_str(&format!(
+                "{:>3} {:>5} {:4} {:>6} {:20} {:12} {:>6} {:>4}\n",
+                e.id,
+                e.service_id,
+                e.socket_type.label(),
+                if e.port > 0 {
+                    format!("{}", e.port)
+                } else {
+                    String::from("-")
+                },
+                display,
+                e.state.label(),
+                e.activation_count,
+                e.pending_connections
+            ));
         }
     }
 
@@ -558,13 +629,16 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: Register a TCP socket for the network service.
     let net = crate::fs::servicemgr::find_by_name("network")?;
-    let entry_id = register(net.id, SocketSpec {
-        socket_type: SocketType::Tcp,
-        port: 80,
-        path: String::new(),
-        bind_addr: String::new(),
-        backlog: 128,
-    })?;
+    let entry_id = register(
+        net.id,
+        SocketSpec {
+            socket_type: SocketType::Tcp,
+            port: 80,
+            path: String::new(),
+            bind_addr: String::new(),
+            backlog: 128,
+        },
+    )?;
     {
         let state = STATE.lock();
         if state.entries.len() != 1 {
@@ -576,23 +650,29 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 2: Register a Unix socket for the logging service.
     let log = crate::fs::servicemgr::find_by_name("logging")?;
-    let log_entry = register(log.id, SocketSpec {
-        socket_type: SocketType::Unix,
-        port: 0,
-        path: String::from("/run/log.sock"),
-        bind_addr: String::new(),
-        backlog: 32,
-    })?;
+    let log_entry = register(
+        log.id,
+        SocketSpec {
+            socket_type: SocketType::Unix,
+            port: 0,
+            path: String::from("/run/log.sock"),
+            bind_addr: String::new(),
+            backlog: 32,
+        },
+    )?;
     crate::serial_println!("[sockact]   2. Register Unix socket: OK");
 
     // Test 3: Duplicate rejection.
-    let dup = register(net.id, SocketSpec {
-        socket_type: SocketType::Tcp,
-        port: 80,
-        path: String::new(),
-        bind_addr: String::new(),
-        backlog: 64,
-    });
+    let dup = register(
+        net.id,
+        SocketSpec {
+            socket_type: SocketType::Tcp,
+            port: 80,
+            path: String::new(),
+            bind_addr: String::new(),
+            backlog: 64,
+        },
+    );
     if dup.is_ok() {
         crate::serial_println!("[sockact]   FAIL: duplicate not rejected");
         return Err(KernelError::InternalError);
@@ -703,7 +783,10 @@ pub fn self_test() -> KernelResult<()> {
         crate::serial_println!("[sockact]   FAIL: expected > 0 activations");
         return Err(KernelError::InternalError);
     }
-    crate::serial_println!("[sockact]   11. Stats: OK (activations={})", st.total_activations);
+    crate::serial_println!(
+        "[sockact]   11. Stats: OK (activations={})",
+        st.total_activations
+    );
 
     // Test 12: Procfs content.
     let content = procfs_content();

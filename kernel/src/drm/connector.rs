@@ -91,7 +91,8 @@ impl DrmConnector {
     /// The preferred mode (first in the list, or first with PREFERRED flag).
     #[must_use]
     pub fn preferred_mode(&self) -> Option<&DrmMode> {
-        self.modes.iter()
+        self.modes
+            .iter()
             .find(|m| m.flags == super::mode::DrmModeFlags::PREFERRED)
             .or_else(|| self.modes.first())
     }

@@ -48,10 +48,10 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
-use alloc::string::String;
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Maximum number of container networks tracked at once.
 pub const MAX_NETWORKS: usize = 64;
@@ -252,7 +252,9 @@ pub fn parse_cidr(s: &str) -> KernelResult<([u8; 4], u8)> {
     let addr_str = it.next().unwrap_or("");
     let prefix_str = it.next().ok_or(KernelError::InvalidArgument)?;
     let addr = parse_ipv4(addr_str)?;
-    let prefix: u8 = prefix_str.parse().map_err(|_| KernelError::InvalidArgument)?;
+    let prefix: u8 = prefix_str
+        .parse()
+        .map_err(|_| KernelError::InvalidArgument)?;
     if prefix > 32 {
         return Err(KernelError::InvalidArgument);
     }
@@ -341,9 +343,10 @@ pub fn create(name: &str) -> KernelResult<()> {
             let second = table.next_default_second;
             table.next_default_second = second.wrapping_add(1);
             let candidate = [DEFAULT_SUBNET_FIRST, second, 0, 0];
-            let clash = table.networks.iter().any(|n| {
-                n.network_addr == candidate && n.prefix_len == DEFAULT_PREFIX_LEN
-            });
+            let clash = table
+                .networks
+                .iter()
+                .any(|n| n.network_addr == candidate && n.prefix_len == DEFAULT_PREFIX_LEN);
             if !clash {
                 chosen = Some((candidate, DEFAULT_PREFIX_LEN));
                 break;
@@ -456,8 +459,7 @@ pub fn allocate(name: &str, container_id: Option<u32>) -> KernelResult<Lease> {
     let mut candidate = net.saturating_add(1);
     while candidate < broadcast {
         let ip = u32_to_ip(candidate);
-        let taken = candidate == gw
-            || n.allocations.iter().any(|a| ip_to_u32(a.ip) == candidate);
+        let taken = candidate == gw || n.allocations.iter().any(|a| ip_to_u32(a.ip) == candidate);
         if !taken {
             n.allocations.push(Allocation {
                 ip,
@@ -645,11 +647,7 @@ fn detach_and_maybe_teardown(n: &mut Network, veth_pair: usize) {
 ///   container owns no allocation on it.
 /// - Propagates [`net::bridge`] errors (e.g. [`KernelError::OutOfMemory`] if
 ///   the bridge table or the bridge's ports are exhausted).
-pub fn attach_container_veth(
-    name: &str,
-    container_id: u32,
-    veth_pair: usize,
-) -> KernelResult<()> {
+pub fn attach_container_veth(name: &str, container_id: u32, veth_pair: usize) -> KernelResult<()> {
     let mut table = TABLE.lock();
     let idx = table.position(name).ok_or(KernelError::NotFound)?;
     let n = table.networks.get_mut(idx).ok_or(KernelError::NotFound)?;
@@ -696,7 +694,11 @@ pub fn release(name: &str, ip: [u8; 4]) -> KernelResult<()> {
     let mut table = TABLE.lock();
     let idx = table.position(name).ok_or(KernelError::NotFound)?;
     let n = table.networks.get_mut(idx).ok_or(KernelError::NotFound)?;
-    let veth = n.allocations.iter().find(|a| a.ip == ip).and_then(|a| a.veth_pair);
+    let veth = n
+        .allocations
+        .iter()
+        .find(|a| a.ip == ip)
+        .and_then(|a| a.veth_pair);
     let before = n.allocations.len();
     n.allocations.retain(|a| a.ip != ip);
     if n.allocations.len() == before {
@@ -809,7 +811,9 @@ pub fn connect_container(
         if let Err(e) = register_dns_names(network, container_id, dns_names) {
             crate::serial_println!(
                 "[cnetwork] connect '{}' -> container {}: DNS registration failed: {:?}",
-                network, container_id, e
+                network,
+                container_id,
+                e
             );
         }
     }
@@ -862,7 +866,10 @@ pub fn self_test() {
     serial_println!("[cnetwork] Running self-test...");
 
     // Name validation (shared rules with volumes).
-    assert!(validate_name("frontend").is_ok(), "simple name must validate");
+    assert!(
+        validate_name("frontend").is_ok(),
+        "simple name must validate"
+    );
     assert!(validate_name("").is_err(), "empty name rejected");
     assert!(validate_name(".").is_err(), "'.' rejected");
     assert!(validate_name("a/b").is_err(), "name with '/' rejected");
@@ -894,14 +901,16 @@ pub fn self_test() {
     let base = count();
 
     // Create with an explicit subnet; default gateway is network+1.
-    create_with_subnet("st-net-a", [10, 40, 0, 0], 24, None)
-        .expect("create st-net-a");
+    create_with_subnet("st-net-a", [10, 40, 0, 0], 24, None).expect("create st-net-a");
     assert!(exists("st-net-a"), "created network must exist");
     assert_eq!(count(), base.saturating_add(1), "create adds one entry");
     let info = inspect("st-net-a").expect("inspect st-net-a");
     assert_eq!(info.network_addr, [10, 40, 0, 0], "subnet recorded");
     assert_eq!(info.gateway, [10, 40, 0, 1], "default gateway is network+1");
-    assert!(info.allocations.is_empty(), "new network has no allocations");
+    assert!(
+        info.allocations.is_empty(),
+        "new network has no allocations"
+    );
     // Duplicate name rejected.
     assert!(
         create_with_subnet("st-net-a", [10, 41, 0, 0], 24, None).is_err(),
@@ -932,7 +941,10 @@ pub fn self_test() {
 
     // Release a specific address, then re-allocate: the hole is reused.
     release("st-net-a", [10, 40, 0, 3]).expect("release .3");
-    assert!(release("st-net-a", [10, 40, 0, 3]).is_err(), "double release errors");
+    assert!(
+        release("st-net-a", [10, 40, 0, 3]).is_err(),
+        "double release errors"
+    );
     let l4 = allocate("st-net-a", Some(9)).expect("allocate after release");
     assert_eq!(l4.ip, [10, 40, 0, 3], "freed address is reused first");
     serial_println!("[cnetwork]   release/reuse: OK");
@@ -950,12 +962,19 @@ pub fn self_test() {
     let freed = release_container(7);
     assert_eq!(freed, 2, "container 7 owned two addresses (.2 and .4)");
     let remaining = inspect("st-net-a").expect("inspect").allocations.len();
-    assert_eq!(remaining, 1, "one address remains (container 9's reused .3)");
+    assert_eq!(
+        remaining, 1,
+        "one address remains (container 9's reused .3)"
+    );
     serial_println!("[cnetwork]   container-scoped release: OK");
 
     // Free the rest, then removal succeeds. Container 8 owns nothing (its .3
     // was reused by c9); container 9 owns the single remaining address.
-    assert_eq!(release_container(8), 0, "container 8 owns nothing (its .3 was reused)");
+    assert_eq!(
+        release_container(8),
+        0,
+        "container 8 owns nothing (its .3 was reused)"
+    );
     assert_eq!(release_container(9), 1, "container 9 owns the reused .3");
     remove("st-net-a").expect("remove empty network");
     assert!(!exists("st-net-a"), "removed network must not exist");
@@ -969,7 +988,11 @@ pub fn self_test() {
     assert_eq!(d0, 172, "default subnet in 172/8");
     assert_eq!(dinfo.prefix_len, 16, "default prefix is /16");
     remove("st-net-def").expect("remove default network");
-    assert_eq!(count(), base, "registry returns to baseline after default net");
+    assert_eq!(
+        count(),
+        base,
+        "registry returns to baseline after default net"
+    );
     serial_println!("[cnetwork]   default-subnet create: OK");
 
     // set_allocation_owner: reserve with no owner (as the run path does), then
@@ -978,13 +1001,21 @@ pub fn self_test() {
     let lease = allocate("st-net-own", None).expect("reserve unowned");
     assert_eq!(lease.ip, [10, 50, 0, 2], "reserved first host address");
     // An unowned lease is not reclaimed by container-scoped release.
-    assert_eq!(release_container(42), 0, "no address owned by container 42 yet");
+    assert_eq!(
+        release_container(42),
+        0,
+        "no address owned by container 42 yet"
+    );
     set_allocation_owner("st-net-own", lease.ip, 42).expect("bind owner");
     assert!(
         set_allocation_owner("st-net-own", [10, 50, 0, 99], 42).is_err(),
         "binding an unallocated address errors",
     );
-    assert_eq!(release_container(42), 1, "owner binding lets release reclaim it");
+    assert_eq!(
+        release_container(42),
+        1,
+        "owner binding lets release reclaim it"
+    );
     remove("st-net-own").expect("remove own-net");
     assert_eq!(count(), base, "registry returns to baseline after own net");
     serial_println!("[cnetwork]   set_allocation_owner (run-path reservation): OK");
@@ -1037,25 +1068,29 @@ pub fn self_test() {
         };
 
         // c1 broadcasts (unknown destination) → flooded to c2's container side.
-        veth::send(pair1, VethEndId::B, make_frame([0xFF; 6], mac1, 0xA1))
-            .expect("c1 broadcast");
+        veth::send(pair1, VethEndId::B, make_frame([0xFF; 6], mac1, 0xA1)).expect("c1 broadcast");
         bridge::forward_all();
         assert!(
             veth::recv(pair2, VethEndId::B).is_some_and(|f| f.get(14) == Some(&0xA1)),
             "broadcast flooded to peer c2",
         );
-        assert!(veth::recv(pair1, VethEndId::B).is_none(), "broadcast not echoed to sender");
+        assert!(
+            veth::recv(pair1, VethEndId::B).is_none(),
+            "broadcast not echoed to sender"
+        );
 
         // The bridge learned c1's MAC on ingress; a unicast c2 → c1 is delivered
         // only to c1 (switched, not flooded).
-        veth::send(pair2, VethEndId::B, make_frame(mac1, mac2, 0xB2))
-            .expect("c2 unicast to c1");
+        veth::send(pair2, VethEndId::B, make_frame(mac1, mac2, 0xB2)).expect("c2 unicast to c1");
         bridge::forward_all();
         assert!(
             veth::recv(pair1, VethEndId::B).is_some_and(|f| f.get(14) == Some(&0xB2)),
             "learned unicast delivered to c1",
         );
-        assert!(veth::recv(pair2, VethEndId::B).is_none(), "unicast not echoed to sender");
+        assert!(
+            veth::recv(pair2, VethEndId::B).is_none(),
+            "unicast not echoed to sender"
+        );
         serial_println!("[cnetwork]   L2 bridge forward/learn: OK");
 
         // Teardown: releasing c1 leaves the bridge (c2 still a member); releasing
@@ -1070,8 +1105,14 @@ pub fn self_test() {
             !bridge::list_bridges().iter().any(|b| b.name == "st-l2"),
             "bridge torn down when last member left",
         );
-        assert!(!veth::is_bridged(pair1, VethEndId::A), "c1 host-end unbridged");
-        assert!(!veth::is_bridged(pair2, VethEndId::A), "c2 host-end unbridged");
+        assert!(
+            !veth::is_bridged(pair1, VethEndId::A),
+            "c1 host-end unbridged"
+        );
+        assert!(
+            !veth::is_bridged(pair2, VethEndId::A),
+            "c2 host-end unbridged"
+        );
 
         veth::destroy_pair(pair1).expect("destroy pair1");
         veth::destroy_pair(pair2).expect("destroy pair2");
@@ -1082,15 +1123,17 @@ pub fn self_test() {
 
     // Embedded DNS: name → address resolution within a network.
     {
-        create_with_subnet("st-dns", [10, 44, 0, 0], 24, None)
-            .expect("create st-dns");
+        create_with_subnet("st-dns", [10, 44, 0, 0], 24, None).expect("create st-dns");
         let web = allocate("st-dns", None).expect("web lease").ip;
         let db = allocate("st-dns", None).expect("db lease").ip;
         set_allocation_owner("st-dns", web, 201).expect("bind web owner");
         set_allocation_owner("st-dns", db, 202).expect("bind db owner");
 
         // Before registration nothing resolves.
-        assert!(resolve("st-dns", "web").is_none(), "unregistered name must not resolve");
+        assert!(
+            resolve("st-dns", "web").is_none(),
+            "unregistered name must not resolve"
+        );
 
         // Register the container name plus a hostname alias for web; a bare
         // container name for db.
@@ -1099,13 +1142,23 @@ pub fn self_test() {
 
         // Exact and case-insensitive lookups both resolve to the right address.
         assert_eq!(resolve("st-dns", "web"), Some(web), "web resolves");
-        assert_eq!(resolve("st-dns", "WEB"), Some(web), "resolution is case-insensitive");
+        assert_eq!(
+            resolve("st-dns", "WEB"),
+            Some(web),
+            "resolution is case-insensitive"
+        );
         assert_eq!(resolve("st-dns", "web.local"), Some(web), "alias resolves");
         assert_eq!(resolve("st-dns", "db"), Some(db), "db resolves");
-        assert!(resolve("st-dns", "missing").is_none(), "unknown name does not resolve");
+        assert!(
+            resolve("st-dns", "missing").is_none(),
+            "unknown name does not resolve"
+        );
         // Names are scoped to the network: a name on st-dns must not resolve on
         // an unrelated (nonexistent) network.
-        assert!(resolve("st-net-a", "web").is_none(), "names are network-scoped");
+        assert!(
+            resolve("st-net-a", "web").is_none(),
+            "names are network-scoped"
+        );
 
         // Duplicate registration (any casing) does not double-list.
         register_dns_names("st-dns", 201, &["WEB", ""]).expect("dup register");
@@ -1122,11 +1175,13 @@ pub fn self_test() {
         // Container-scoped resolution: a member resolves peer names on its own
         // network but not names it is not a member of.
         assert_eq!(
-            resolve_for_container(201, "db"), Some(db),
+            resolve_for_container(201, "db"),
+            Some(db),
             "member resolves a peer by name",
         );
         assert_eq!(
-            resolve_for_container(202, "web"), Some(web),
+            resolve_for_container(202, "web"),
+            Some(web),
             "the other member resolves too",
         );
         assert!(
@@ -1140,7 +1195,10 @@ pub fn self_test() {
 
         // Releasing a container drops its DNS names too.
         assert_eq!(release_container(201), 1, "web lease freed");
-        assert!(resolve("st-dns", "web").is_none(), "names gone after release");
+        assert!(
+            resolve("st-dns", "web").is_none(),
+            "names gone after release"
+        );
         assert_eq!(resolve("st-dns", "db"), Some(db), "db still resolves");
 
         assert_eq!(release_container(202), 1, "db lease freed");

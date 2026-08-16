@@ -27,11 +27,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -208,7 +208,9 @@ pub fn create_layout(name: &str, desc: &str) -> KernelResult<()> {
     if state.layouts.contains_key(name) {
         return Err(KernelError::AlreadyExists);
     }
-    state.layouts.insert(String::from(name), Layout::new(name, desc, false));
+    state
+        .layouts
+        .insert(String::from(name), Layout::new(name, desc, false));
     Ok(())
 }
 
@@ -230,7 +232,9 @@ pub fn get_layout(name: &str) -> Option<Layout> {
 /// List all layout names and descriptions.
 pub fn list_layouts() -> Vec<(String, String, bool)> {
     let state = STATE.lock();
-    state.layouts.values()
+    state
+        .layouts
+        .values()
         .map(|l| (l.name.clone(), l.description.clone(), l.builtin))
         .collect()
 }
@@ -267,7 +271,9 @@ pub fn active_layout() -> Option<Layout> {
 /// Add a key remapping to a layout.
 pub fn remap(layout_name: &str, from: KeyCode, to: KeyCode) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let layout = state.layouts.get_mut(layout_name)
+    let layout = state
+        .layouts
+        .get_mut(layout_name)
         .ok_or(KernelError::NotFound)?;
     if layout.remaps.len() >= MAX_REMAPS {
         return Err(KernelError::ResourceExhausted);
@@ -279,7 +285,9 @@ pub fn remap(layout_name: &str, from: KeyCode, to: KeyCode) -> KernelResult<()> 
 /// Remove a remapping from a layout.
 pub fn unmap(layout_name: &str, from: KeyCode) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let layout = state.layouts.get_mut(layout_name)
+    let layout = state
+        .layouts
+        .get_mut(layout_name)
         .ok_or(KernelError::NotFound)?;
     layout.remaps.remove(&from);
     Ok(())
@@ -288,7 +296,9 @@ pub fn unmap(layout_name: &str, from: KeyCode) -> KernelResult<()> {
 /// Disable a key in a layout (key produces no output).
 pub fn disable_key(layout_name: &str, key: KeyCode) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let layout = state.layouts.get_mut(layout_name)
+    let layout = state
+        .layouts
+        .get_mut(layout_name)
         .ok_or(KernelError::NotFound)?;
     if layout.disabled.len() >= MAX_DISABLED {
         return Err(KernelError::ResourceExhausted);
@@ -302,7 +312,9 @@ pub fn disable_key(layout_name: &str, key: KeyCode) -> KernelResult<()> {
 /// Re-enable a disabled key.
 pub fn enable_key(layout_name: &str, key: KeyCode) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let layout = state.layouts.get_mut(layout_name)
+    let layout = state
+        .layouts
+        .get_mut(layout_name)
         .ok_or(KernelError::NotFound)?;
     layout.disabled.retain(|&k| k != key);
     Ok(())
@@ -416,35 +428,74 @@ pub fn init_defaults() -> KernelResult<()> {
 pub fn key_name(code: KeyCode) -> &'static str {
     match code {
         keys::ESCAPE => "Esc",
-        keys::KEY_1 => "1", keys::KEY_2 => "2", keys::KEY_3 => "3",
-        keys::KEY_4 => "4", keys::KEY_5 => "5", keys::KEY_6 => "6",
-        keys::KEY_7 => "7", keys::KEY_8 => "8", keys::KEY_9 => "9",
+        keys::KEY_1 => "1",
+        keys::KEY_2 => "2",
+        keys::KEY_3 => "3",
+        keys::KEY_4 => "4",
+        keys::KEY_5 => "5",
+        keys::KEY_6 => "6",
+        keys::KEY_7 => "7",
+        keys::KEY_8 => "8",
+        keys::KEY_9 => "9",
         keys::KEY_0 => "0",
-        keys::MINUS => "-", keys::EQUALS => "=",
-        keys::BACKSPACE => "Backspace", keys::TAB => "Tab",
-        keys::KEY_Q => "Q", keys::KEY_W => "W", keys::KEY_E => "E",
-        keys::KEY_R => "R", keys::KEY_T => "T", keys::KEY_Y => "Y",
-        keys::KEY_U => "U", keys::KEY_I => "I", keys::KEY_O => "O",
+        keys::MINUS => "-",
+        keys::EQUALS => "=",
+        keys::BACKSPACE => "Backspace",
+        keys::TAB => "Tab",
+        keys::KEY_Q => "Q",
+        keys::KEY_W => "W",
+        keys::KEY_E => "E",
+        keys::KEY_R => "R",
+        keys::KEY_T => "T",
+        keys::KEY_Y => "Y",
+        keys::KEY_U => "U",
+        keys::KEY_I => "I",
+        keys::KEY_O => "O",
         keys::KEY_P => "P",
-        keys::LEFT_BRACKET => "[", keys::RIGHT_BRACKET => "]",
-        keys::ENTER => "Enter", keys::LEFT_CTRL => "LCtrl",
-        keys::KEY_A => "A", keys::KEY_S => "S", keys::KEY_D => "D",
-        keys::KEY_F => "F", keys::KEY_G => "G", keys::KEY_H => "H",
-        keys::KEY_J => "J", keys::KEY_K => "K", keys::KEY_L => "L",
-        keys::SEMICOLON => ";", keys::APOSTROPHE => "'",
-        keys::GRAVE => "`", keys::LEFT_SHIFT => "LShift",
+        keys::LEFT_BRACKET => "[",
+        keys::RIGHT_BRACKET => "]",
+        keys::ENTER => "Enter",
+        keys::LEFT_CTRL => "LCtrl",
+        keys::KEY_A => "A",
+        keys::KEY_S => "S",
+        keys::KEY_D => "D",
+        keys::KEY_F => "F",
+        keys::KEY_G => "G",
+        keys::KEY_H => "H",
+        keys::KEY_J => "J",
+        keys::KEY_K => "K",
+        keys::KEY_L => "L",
+        keys::SEMICOLON => ";",
+        keys::APOSTROPHE => "'",
+        keys::GRAVE => "`",
+        keys::LEFT_SHIFT => "LShift",
         keys::BACKSLASH => "\\",
-        keys::KEY_Z => "Z", keys::KEY_X => "X", keys::KEY_C => "C",
-        keys::KEY_V => "V", keys::KEY_B => "B", keys::KEY_N => "N",
+        keys::KEY_Z => "Z",
+        keys::KEY_X => "X",
+        keys::KEY_C => "C",
+        keys::KEY_V => "V",
+        keys::KEY_B => "B",
+        keys::KEY_N => "N",
         keys::KEY_M => "M",
-        keys::COMMA => ",", keys::DOT => ".", keys::SLASH => "/",
+        keys::COMMA => ",",
+        keys::DOT => ".",
+        keys::SLASH => "/",
         keys::RIGHT_SHIFT => "RShift",
-        keys::LEFT_ALT => "LAlt", keys::SPACE => "Space",
+        keys::LEFT_ALT => "LAlt",
+        keys::SPACE => "Space",
         keys::CAPS_LOCK => "CapsLock",
-        keys::F1 => "F1", keys::F2 => "F2", keys::F3 => "F3",
-        keys::F4 => "F4", keys::F5 => "F5", keys::F6 => "F6",
-        keys::F7 => "F7", keys::F8 => "F8", keys::F9 => "F9",
-        keys::F10 => "F10", keys::F11 => "F11", keys::F12 => "F12",
+        keys::F1 => "F1",
+        keys::F2 => "F2",
+        keys::F3 => "F3",
+        keys::F4 => "F4",
+        keys::F5 => "F5",
+        keys::F6 => "F6",
+        keys::F7 => "F7",
+        keys::F8 => "F8",
+        keys::F9 => "F9",
+        keys::F10 => "F10",
+        keys::F11 => "F11",
+        keys::F12 => "F12",
         _ => "?",
     }
 }
@@ -453,40 +504,63 @@ pub fn key_name(code: KeyCode) -> &'static str {
 pub fn parse_key(name: &str) -> Option<KeyCode> {
     match name.to_ascii_lowercase().as_str() {
         "esc" | "escape" => Some(keys::ESCAPE),
-        "1" => Some(keys::KEY_1), "2" => Some(keys::KEY_2),
-        "3" => Some(keys::KEY_3), "4" => Some(keys::KEY_4),
-        "5" => Some(keys::KEY_5), "6" => Some(keys::KEY_6),
-        "7" => Some(keys::KEY_7), "8" => Some(keys::KEY_8),
-        "9" => Some(keys::KEY_9), "0" => Some(keys::KEY_0),
+        "1" => Some(keys::KEY_1),
+        "2" => Some(keys::KEY_2),
+        "3" => Some(keys::KEY_3),
+        "4" => Some(keys::KEY_4),
+        "5" => Some(keys::KEY_5),
+        "6" => Some(keys::KEY_6),
+        "7" => Some(keys::KEY_7),
+        "8" => Some(keys::KEY_8),
+        "9" => Some(keys::KEY_9),
+        "0" => Some(keys::KEY_0),
         "backspace" | "bs" => Some(keys::BACKSPACE),
         "tab" => Some(keys::TAB),
-        "q" => Some(keys::KEY_Q), "w" => Some(keys::KEY_W),
-        "e" => Some(keys::KEY_E), "r" => Some(keys::KEY_R),
-        "t" => Some(keys::KEY_T), "y" => Some(keys::KEY_Y),
-        "u" => Some(keys::KEY_U), "i" => Some(keys::KEY_I),
-        "o" => Some(keys::KEY_O), "p" => Some(keys::KEY_P),
+        "q" => Some(keys::KEY_Q),
+        "w" => Some(keys::KEY_W),
+        "e" => Some(keys::KEY_E),
+        "r" => Some(keys::KEY_R),
+        "t" => Some(keys::KEY_T),
+        "y" => Some(keys::KEY_Y),
+        "u" => Some(keys::KEY_U),
+        "i" => Some(keys::KEY_I),
+        "o" => Some(keys::KEY_O),
+        "p" => Some(keys::KEY_P),
         "enter" | "return" => Some(keys::ENTER),
         "lctrl" | "leftctrl" => Some(keys::LEFT_CTRL),
-        "a" => Some(keys::KEY_A), "s" => Some(keys::KEY_S),
-        "d" => Some(keys::KEY_D), "f" => Some(keys::KEY_F),
-        "g" => Some(keys::KEY_G), "h" => Some(keys::KEY_H),
-        "j" => Some(keys::KEY_J), "k" => Some(keys::KEY_K),
+        "a" => Some(keys::KEY_A),
+        "s" => Some(keys::KEY_S),
+        "d" => Some(keys::KEY_D),
+        "f" => Some(keys::KEY_F),
+        "g" => Some(keys::KEY_G),
+        "h" => Some(keys::KEY_H),
+        "j" => Some(keys::KEY_J),
+        "k" => Some(keys::KEY_K),
         "l" => Some(keys::KEY_L),
         "lshift" | "leftshift" => Some(keys::LEFT_SHIFT),
-        "z" => Some(keys::KEY_Z), "x" => Some(keys::KEY_X),
-        "c" => Some(keys::KEY_C), "v" => Some(keys::KEY_V),
-        "b" => Some(keys::KEY_B), "n" => Some(keys::KEY_N),
+        "z" => Some(keys::KEY_Z),
+        "x" => Some(keys::KEY_X),
+        "c" => Some(keys::KEY_C),
+        "v" => Some(keys::KEY_V),
+        "b" => Some(keys::KEY_B),
+        "n" => Some(keys::KEY_N),
         "m" => Some(keys::KEY_M),
         "rshift" | "rightshift" => Some(keys::RIGHT_SHIFT),
         "lalt" | "leftalt" => Some(keys::LEFT_ALT),
         "space" => Some(keys::SPACE),
         "capslock" | "caps" => Some(keys::CAPS_LOCK),
-        "f1" => Some(keys::F1), "f2" => Some(keys::F2),
-        "f3" => Some(keys::F3), "f4" => Some(keys::F4),
-        "f5" => Some(keys::F5), "f6" => Some(keys::F6),
-        "f7" => Some(keys::F7), "f8" => Some(keys::F8),
-        "f9" => Some(keys::F9), "f10" => Some(keys::F10),
-        "f11" => Some(keys::F11), "f12" => Some(keys::F12),
+        "f1" => Some(keys::F1),
+        "f2" => Some(keys::F2),
+        "f3" => Some(keys::F3),
+        "f4" => Some(keys::F4),
+        "f5" => Some(keys::F5),
+        "f6" => Some(keys::F6),
+        "f7" => Some(keys::F7),
+        "f8" => Some(keys::F8),
+        "f9" => Some(keys::F9),
+        "f10" => Some(keys::F10),
+        "f11" => Some(keys::F11),
+        "f12" => Some(keys::F12),
         _ => name.parse::<u16>().ok(),
     }
 }
@@ -500,7 +574,12 @@ pub fn stats() -> (usize, usize, u64, u64) {
     let state = STATE.lock();
     let lc = state.layouts.len();
     let rc: usize = state.layouts.values().map(|l| l.remaps.len()).sum();
-    (lc, rc, TRANSLATE_COUNT.load(Ordering::Relaxed), SWITCH_COUNT.load(Ordering::Relaxed))
+    (
+        lc,
+        rc,
+        TRANSLATE_COUNT.load(Ordering::Relaxed),
+        SWITCH_COUNT.load(Ordering::Relaxed),
+    )
 }
 
 /// Reset statistics.

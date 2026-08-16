@@ -24,7 +24,6 @@
 //! All tests use the `PT_SELFTEST` kvspace region (0xFFFF_C900_0000_0000)
 //! for temporary mappings.  Tests clean up after themselves (unmap + free).
 
-use crate::serial_println;
 use crate::mm::{
     frame::{self, FRAME_SIZE},
     migrate_type::{self, MigrateType},
@@ -34,6 +33,7 @@ use crate::mm::{
     tlb_gather::TlbGather,
     watermark,
 };
+use crate::serial_println;
 
 // ---------------------------------------------------------------------------
 // Test region
@@ -150,7 +150,9 @@ fn test_tlb_gather_integration() {
     // Write to each page.
     for i in 0..4u64 {
         let ptr = (TEST_BASE + (i + 1) * FRAME_SIZE as u64) as *mut u64;
-        unsafe { core::ptr::write_volatile(ptr, 0x1111 * (i + 1)); }
+        unsafe {
+            core::ptr::write_volatile(ptr, 0x1111 * (i + 1));
+        }
     }
 
     // Unmap all 4 pages via TlbGather (batch).
@@ -197,12 +199,17 @@ fn test_pt_walk_finds_mappings() {
     // Walk the range and look for our mapping.
     let mut found = false;
     let _summary = unsafe {
-        pt_walk::walk_range(pml4, test_va, test_va + FRAME_SIZE as u64, |entry: WalkEntry| {
-            if entry.phys_addr == phys {
-                found = true;
-            }
-            WalkAction::Continue
-        })
+        pt_walk::walk_range(
+            pml4,
+            test_va,
+            test_va + FRAME_SIZE as u64,
+            |entry: WalkEntry| {
+                if entry.phys_addr == phys {
+                    found = true;
+                }
+                WalkAction::Continue
+            },
+        )
     };
 
     assert!(found, "page table walk should find our mapping");
@@ -257,7 +264,10 @@ fn test_migrate_type_coherence() {
 
     // Change to Reclaimable.
     migrate_type::set_frame_type(test_idx, MigrateType::Reclaimable);
-    assert_eq!(migrate_type::get_frame_type(test_idx), MigrateType::Reclaimable);
+    assert_eq!(
+        migrate_type::get_frame_type(test_idx),
+        MigrateType::Reclaimable
+    );
     assert!(migrate_type::is_reclaimable(test_idx));
     assert!(!migrate_type::is_movable(test_idx));
 

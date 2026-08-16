@@ -331,11 +331,7 @@ pub fn begin_drag(
 }
 
 /// Begin a file drag (convenience wrapper).
-pub fn begin_file_drag(
-    source: &str,
-    paths: &[&str],
-    op: DragFileOp,
-) -> KernelResult<u64> {
+pub fn begin_file_drag(source: &str, paths: &[&str], op: DragFileOp) -> KernelResult<u64> {
     if paths.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -392,12 +388,18 @@ pub fn update_position(x: i32, y: i32) -> Option<(u64, DropEffect)> {
         let (zx, zy, zw, zh) = zone.bounds;
         let x_u = x as u32;
         let y_u = y as u32;
-        if x >= 0 && y >= 0 && x_u >= zx && x_u < zx.saturating_add(zw)
-            && y_u >= zy && y_u < zy.saturating_add(zh)
+        if x >= 0
+            && y >= 0
+            && x_u >= zx
+            && x_u < zx.saturating_add(zw)
+            && y_u >= zy
+            && y_u < zy.saturating_add(zh)
         {
             // Check format compatibility.
             let compatible = zone.accepted_formats.is_empty()
-                || session.offered_formats.iter()
+                || session
+                    .offered_formats
+                    .iter()
                     .any(|f| zone.accepted_formats.contains(f));
 
             if compatible {
@@ -424,14 +426,12 @@ pub fn update_position(x: i32, y: i32) -> Option<(u64, DropEffect)> {
 /// Determine the visual feedback effect for a zone.
 fn determine_effect(session: &DragSession, zone: &DropZone) -> DropEffect {
     match zone.kind {
-        DropZoneKind::FileListEmpty | DropZoneKind::FolderEntry => {
-            match session.file_op {
-                Some(DragFileOp::Copy) => DropEffect::Copy,
-                Some(DragFileOp::Move) => DropEffect::Move,
-                Some(DragFileOp::Link) => DropEffect::Link,
-                None => DropEffect::Copy,
-            }
-        }
+        DropZoneKind::FileListEmpty | DropZoneKind::FolderEntry => match session.file_op {
+            Some(DragFileOp::Copy) => DropEffect::Copy,
+            Some(DragFileOp::Move) => DropEffect::Move,
+            Some(DragFileOp::Link) => DropEffect::Link,
+            None => DropEffect::Copy,
+        },
         DropZoneKind::FileEntry => DropEffect::Link,
         DropZoneKind::TextInput | DropZoneKind::ImageArea => DropEffect::Copy,
         DropZoneKind::Custom => DropEffect::Copy,
@@ -453,8 +453,7 @@ pub fn query_formats() -> Vec<DragFormat> {
 /// session transitions to `Completed`.
 pub fn accept(format: DragFormat) -> KernelResult<Vec<u8>> {
     let mut session_guard = ACTIVE_SESSION.lock();
-    let session = session_guard.as_mut()
-        .ok_or(KernelError::NotFound)?;
+    let session = session_guard.as_mut().ok_or(KernelError::NotFound)?;
 
     if session.state != DragState::OverTarget && session.state != DragState::Dragging {
         return Err(KernelError::InvalidArgument);
@@ -467,7 +466,9 @@ pub fn accept(format: DragFormat) -> KernelResult<Vec<u8>> {
     session.state = DragState::Dropping;
 
     // Find data for the requested format.
-    let data = session.data.iter()
+    let data = session
+        .data
+        .iter()
         .find(|d| d.format == format)
         .map(|d| d.data.clone())
         .unwrap_or_default();
@@ -484,8 +485,7 @@ pub fn accept(format: DragFormat) -> KernelResult<Vec<u8>> {
 /// Accept a file drop and retrieve paths + operation.
 pub fn accept_files() -> KernelResult<(Vec<String>, DragFileOp)> {
     let mut session_guard = ACTIVE_SESSION.lock();
-    let session = session_guard.as_mut()
-        .ok_or(KernelError::NotFound)?;
+    let session = session_guard.as_mut().ok_or(KernelError::NotFound)?;
 
     if session.state != DragState::OverTarget && session.state != DragState::Dragging {
         return Err(KernelError::InvalidArgument);
@@ -679,7 +679,8 @@ pub fn self_test() -> KernelResult<()> {
     // Test 4: drop zone registration.
     {
         let zone_id = register_zone(
-            "explorer", "file-list",
+            "explorer",
+            "file-list",
             DropZoneKind::FileListEmpty,
             (0, 0, 800, 600),
             &[DragFormat::FilePaths],
@@ -695,7 +696,8 @@ pub fn self_test() -> KernelResult<()> {
     // Test 5: position tracking + zone hit test.
     {
         let zone_id = register_zone(
-            "explorer", "drop-area",
+            "explorer",
+            "drop-area",
             DropZoneKind::FileListEmpty,
             (100, 100, 400, 300),
             &[],

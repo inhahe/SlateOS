@@ -36,9 +36,9 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex as Mutex;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // State
@@ -115,8 +115,11 @@ pub fn set_power_info(info: &crate::acpi::fadt::PowerInfo) {
     };
     *POWER_INFO.lock() = Some(state);
     INITIALIZED.store(true, Ordering::Release);
-    serial_println!("[power] Power management initialized (PM1a={:#x}, SLP_TYP_S5={})",
-        state.pm1a_cnt, state.slp_typ_s5);
+    serial_println!(
+        "[power] Power management initialized (PM1a={:#x}, SLP_TYP_S5={})",
+        state.pm1a_cnt,
+        state.slp_typ_s5
+    );
 }
 
 /// Check if power management is initialized.
@@ -138,21 +141,30 @@ pub fn shutdown() -> ! {
     // Disable interrupts — we don't want anything interfering.
     // SAFETY: We're shutting down — disabling interrupts prevents any ISR
     // from interfering with the power transition sequence.
-    unsafe { crate::cpu::cli(); }
+    unsafe {
+        crate::cpu::cli();
+    }
 
     // Method 1: ACPI S5 via PM1a/PM1b control registers.
     if let Some(state) = *POWER_INFO.lock() {
         if state.pm1a_cnt != 0 {
-            serial_println!("[power] Trying ACPI S5 (PM1a={:#x}, SLP_TYP={})",
-                state.pm1a_cnt, state.slp_typ_s5);
+            serial_println!(
+                "[power] Trying ACPI S5 (PM1a={:#x}, SLP_TYP={})",
+                state.pm1a_cnt,
+                state.slp_typ_s5
+            );
             let val = (u16::from(state.slp_typ_s5) << SLP_TYP_SHIFT) | SLP_EN;
             // SAFETY: pm1a_cnt/pm1b_cnt are ACPI PM1 control register
             // ports parsed from the FADT.  Writing SLP_TYP+SLP_EN triggers S5.
-            unsafe { outw(state.pm1a_cnt, val); }
+            unsafe {
+                outw(state.pm1a_cnt, val);
+            }
 
             // If PM1b is present, write there too.
             if state.pm1b_cnt != 0 {
-                unsafe { outw(state.pm1b_cnt, val); }
+                unsafe {
+                    outw(state.pm1b_cnt, val);
+                }
             }
 
             // Give hardware time to respond.
@@ -163,12 +175,16 @@ pub fn shutdown() -> ! {
     // Method 2: QEMU exit port.
     serial_println!("[power] ACPI S5 failed, trying QEMU exit port...");
     // SAFETY: QEMU_EXIT_PORT is the well-known QEMU debug exit port (0x604).
-    unsafe { outw(QEMU_EXIT_PORT, 0x2000); }
+    unsafe {
+        outw(QEMU_EXIT_PORT, 0x2000);
+    }
     io_delay();
 
     // Method 3: Bochs/older QEMU shutdown port.
     // SAFETY: BOCHS_SHUTDOWN_PORT is the Bochs/old-QEMU shutdown port (0xB004).
-    unsafe { outw(BOCHS_SHUTDOWN_PORT, 0x2000); }
+    unsafe {
+        outw(BOCHS_SHUTDOWN_PORT, 0x2000);
+    }
     io_delay();
 
     // Method 4: Nothing worked — halt loop.
@@ -185,32 +201,44 @@ pub fn reboot() -> ! {
 
     // Disable interrupts.
     // SAFETY: We're rebooting — no ISRs should fire during reset.
-    unsafe { crate::cpu::cli(); }
+    unsafe {
+        crate::cpu::cli();
+    }
 
     // Method 1: ACPI reset register (ACPI 2.0+).
     if let Some(state) = *POWER_INFO.lock() {
         if state.has_reset_reg && state.reset_address != 0 {
-            serial_println!("[power] Trying ACPI reset register (space={}, addr={:#x}, val={:#x})",
-                state.reset_addr_space, state.reset_address, state.reset_value);
+            serial_println!(
+                "[power] Trying ACPI reset register (space={}, addr={:#x}, val={:#x})",
+                state.reset_addr_space,
+                state.reset_address,
+                state.reset_value
+            );
 
             match state.reset_addr_space {
                 1 => {
                     // System I/O space.
                     let port = state.reset_address as u16;
                     // SAFETY: Port from FADT reset register in I/O space.
-                    unsafe { outb(port, state.reset_value); }
+                    unsafe {
+                        outb(port, state.reset_value);
+                    }
                 }
                 0 => {
                     // System memory space — translate via HHDM.
                     if let Some(hhdm) = crate::mm::page_table::hhdm() {
                         let addr = (state.reset_address.wrapping_add(hhdm)) as *mut u8;
                         // SAFETY: FADT-specified reset register mapped via HHDM.
-                        unsafe { core::ptr::write_volatile(addr, state.reset_value); }
+                        unsafe {
+                            core::ptr::write_volatile(addr, state.reset_value);
+                        }
                     }
                 }
                 _ => {
-                    serial_println!("[power] Unknown reset address space: {}",
-                        state.reset_addr_space);
+                    serial_println!(
+                        "[power] Unknown reset address space: {}",
+                        state.reset_addr_space
+                    );
                 }
             }
             io_delay();
@@ -229,7 +257,9 @@ pub fn reboot() -> ! {
             break;
         }
     }
-    unsafe { outb(KBD_CTRL_PORT, KBD_RESET_CMD); }
+    unsafe {
+        outb(KBD_CTRL_PORT, KBD_RESET_CMD);
+    }
     io_delay();
 
     // Method 3: Triple fault — guaranteed hardware reset.
@@ -263,7 +293,7 @@ pub fn capabilities() -> PowerCapabilities {
         Some(state) => PowerCapabilities {
             acpi_shutdown: state.pm1a_cnt != 0,
             acpi_reboot: state.has_reset_reg,
-            kbd_reboot: true, // Always available on x86.
+            kbd_reboot: true,          // Always available on x86.
             triple_fault_reboot: true, // Always works.
             pm1a_port: state.pm1a_cnt,
             slp_typ_s5: state.slp_typ_s5,
@@ -396,7 +426,9 @@ fn triple_fault() -> ! {
     loop {
         // SAFETY: hlt stops the CPU until the next interrupt (none will
         // come since interrupts are disabled — this is an infinite halt).
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("hlt", options(nomem, nostack));
+        }
     }
 }
 
@@ -405,7 +437,9 @@ fn halt_loop() -> ! {
     loop {
         // SAFETY: hlt stops the CPU; with interrupts disabled this is
         // the intended "system frozen" terminal state.
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("hlt", options(nomem, nostack));
+        }
     }
 }
 
@@ -421,11 +455,18 @@ pub fn self_test() {
     serial_println!("[power] Running self-test...");
 
     let caps = capabilities();
-    serial_println!("[power]   ACPI shutdown: {} (PM1a={:#x}, SLP_TYP_S5={})",
-        caps.acpi_shutdown, caps.pm1a_port, caps.slp_typ_s5);
+    serial_println!(
+        "[power]   ACPI shutdown: {} (PM1a={:#x}, SLP_TYP_S5={})",
+        caps.acpi_shutdown,
+        caps.pm1a_port,
+        caps.slp_typ_s5
+    );
     serial_println!("[power]   ACPI reboot: {}", caps.acpi_reboot);
     serial_println!("[power]   KBD reboot: {}", caps.kbd_reboot);
-    serial_println!("[power]   Triple-fault reboot: {}", caps.triple_fault_reboot);
+    serial_println!(
+        "[power]   Triple-fault reboot: {}",
+        caps.triple_fault_reboot
+    );
 
     // Verify at least one reboot method is available.
     assert!(caps.kbd_reboot || caps.acpi_reboot || caps.triple_fault_reboot);

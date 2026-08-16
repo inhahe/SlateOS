@@ -23,13 +23,13 @@
 //! [PCP 3bits][DEI 1bit][VID 12bits]
 //! ```
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use alloc::format;
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -158,7 +158,8 @@ impl VlanInterface {
 }
 
 /// VLAN interface table.
-static VLANS: Mutex<[VlanInterface; MAX_VLANS]> = Mutex::new([const { VlanInterface::empty() }; MAX_VLANS]);
+static VLANS: Mutex<[VlanInterface; MAX_VLANS]> =
+    Mutex::new([const { VlanInterface::empty() }; MAX_VLANS]);
 
 // Statistics.
 static TAGGED_RX: AtomicU64 = AtomicU64::new(0);
@@ -258,8 +259,8 @@ pub fn add_tag(frame: &[u8], tag: &VlanTag) -> Vec<u8> {
 
     let mut tagged = Vec::with_capacity(frame.len() + 4);
     tagged.extend_from_slice(&frame[..12]); // Dst + Src MACs.
-    tagged.extend_from_slice(&tpid);        // TPID 0x8100.
-    tagged.extend_from_slice(&tci);         // TCI (PCP + DEI + VID).
+    tagged.extend_from_slice(&tpid); // TPID 0x8100.
+    tagged.extend_from_slice(&tci); // TCI (PCP + DEI + VID).
     tagged.extend_from_slice(&frame[12..]); // Original EtherType + Payload.
 
     // Update per-VLAN stats.
@@ -484,7 +485,11 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 3: TCI with DEI ---
     {
-        let tag = VlanTag { pcp: 3, dei: true, vid: 4094 };
+        let tag = VlanTag {
+            pcp: 3,
+            dei: true,
+            vid: 4094,
+        };
         let tci = tag.encode_tci();
         let decoded = VlanTag::decode_tci(tci);
         assert!(decoded.vid == 4094, "max vid");

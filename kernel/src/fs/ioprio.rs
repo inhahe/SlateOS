@@ -87,23 +87,41 @@ pub struct IoPriority {
 
 impl IoPriority {
     /// Default priority: BestEffort level 4.
-    pub const DEFAULT: Self = Self { class: IoClass::BestEffort, level: 4 };
+    pub const DEFAULT: Self = Self {
+        class: IoClass::BestEffort,
+        level: 4,
+    };
 
     /// Highest best-effort priority.
-    pub const HIGH: Self = Self { class: IoClass::BestEffort, level: 0 };
+    pub const HIGH: Self = Self {
+        class: IoClass::BestEffort,
+        level: 0,
+    };
 
     /// Lowest best-effort priority.
-    pub const LOW: Self = Self { class: IoClass::BestEffort, level: 7 };
+    pub const LOW: Self = Self {
+        class: IoClass::BestEffort,
+        level: 7,
+    };
 
     /// Realtime priority.
-    pub const REALTIME: Self = Self { class: IoClass::Realtime, level: 0 };
+    pub const REALTIME: Self = Self {
+        class: IoClass::Realtime,
+        level: 0,
+    };
 
     /// Idle (background) priority.
-    pub const IDLE: Self = Self { class: IoClass::Idle, level: 0 };
+    pub const IDLE: Self = Self {
+        class: IoClass::Idle,
+        level: 0,
+    };
 
     /// Create a new I/O priority.
     pub fn new(class: IoClass, level: u8) -> Self {
-        Self { class, level: level.min(7) }
+        Self {
+            class,
+            level: level.min(7),
+        }
     }
 
     /// Pack into a u16 for compact storage.
@@ -269,7 +287,8 @@ pub fn list_all() -> Vec<(u64, IoPriority)> {
 
 /// Quick summary stats.
 pub fn stats() -> (u64, u64, usize) {
-    let active = TASK_PRIO.iter()
+    let active = TASK_PRIO
+        .iter()
         .filter(|a| a.load(Ordering::Relaxed) != 0)
         .count();
     (
@@ -388,8 +407,12 @@ fn test_list() {
     assert!(set_ioprio(task_b, IoPriority::IDLE).is_ok());
 
     let all = list_all();
-    let found_a = all.iter().any(|(t, p)| *t == task_a && p.class == IoClass::BestEffort && p.level == 0);
-    let found_b = all.iter().any(|(t, p)| *t == task_b && p.class == IoClass::Idle);
+    let found_a = all
+        .iter()
+        .any(|(t, p)| *t == task_a && p.class == IoClass::BestEffort && p.level == 0);
+    let found_b = all
+        .iter()
+        .any(|(t, p)| *t == task_b && p.class == IoClass::Idle);
     assert!(found_a);
     assert!(found_b);
 

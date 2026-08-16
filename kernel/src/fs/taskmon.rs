@@ -36,10 +36,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -74,11 +74,11 @@ impl TaskState {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Running  => "Running",
+            Self::Running => "Running",
             Self::Sleeping => "Sleeping",
-            Self::Stopped  => "Stopped",
-            Self::Zombie   => "Zombie",
-            Self::Idle     => "Idle",
+            Self::Stopped => "Stopped",
+            Self::Zombie => "Zombie",
+            Self::Idle => "Idle",
         }
     }
 }
@@ -105,12 +105,12 @@ impl TaskPriority {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::RealTime    => "RealTime",
-            Self::High        => "High",
-            Self::Normal      => "Normal",
+            Self::RealTime => "RealTime",
+            Self::High => "High",
+            Self::Normal => "Normal",
             Self::BelowNormal => "BelowNormal",
-            Self::Low         => "Low",
-            Self::Idle        => "Idle",
+            Self::Low => "Low",
+            Self::Idle => "Idle",
         }
     }
 }
@@ -287,7 +287,9 @@ pub fn kill_task(pid: u32) -> KernelResult<()> {
     }
 
     with_state(|s| {
-        let task = s.tasks.iter_mut()
+        let task = s
+            .tasks
+            .iter_mut()
             .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
 
@@ -309,7 +311,9 @@ pub fn suspend_task(pid: u32) -> KernelResult<()> {
     }
 
     with_state(|s| {
-        let task = s.tasks.iter_mut()
+        let task = s
+            .tasks
+            .iter_mut()
             .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
 
@@ -330,7 +334,9 @@ pub fn suspend_task(pid: u32) -> KernelResult<()> {
 /// Resume a stopped task (set state to Running).
 pub fn resume_task(pid: u32) -> KernelResult<()> {
     with_state(|s| {
-        let task = s.tasks.iter_mut()
+        let task = s
+            .tasks
+            .iter_mut()
             .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
 
@@ -346,7 +352,9 @@ pub fn resume_task(pid: u32) -> KernelResult<()> {
 /// Change the priority class of a task.
 pub fn set_priority(pid: u32, priority: TaskPriority) -> KernelResult<()> {
     with_state(|s| {
-        let task = s.tasks.iter_mut()
+        let task = s
+            .tasks
+            .iter_mut()
             .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
 
@@ -366,7 +374,9 @@ pub fn set_priority(pid: u32, priority: TaskPriority) -> KernelResult<()> {
 /// Update CPU and memory usage for a specific task.
 pub fn update_task_usage(pid: u32, cpu_percent: u32, memory_kb: u64) -> KernelResult<()> {
     with_state(|s| {
-        let task = s.tasks.iter_mut()
+        let task = s
+            .tasks
+            .iter_mut()
             .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
 
@@ -399,7 +409,8 @@ pub fn update_resources(total_cpu_percent: u32, used_memory_kb: u64, total_memor
 /// Get information about a single task by PID.
 pub fn get_task(pid: u32) -> KernelResult<TaskInfo> {
     with_state(|s| {
-        s.tasks.iter()
+        s.tasks
+            .iter()
             .find(|t| t.pid == pid)
             .cloned()
             .ok_or(KernelError::NotFound)
@@ -478,8 +489,8 @@ pub fn self_test() {
 
     // Test 2: register a new task (PIDs start at 1).
     let testapp_pid = {
-        let pid = register_task("testapp", TaskPriority::Normal, 1, "alice")
-            .expect("register testapp");
+        let pid =
+            register_task("testapp", TaskPriority::Normal, 1, "alice").expect("register testapp");
         assert_eq!(pid, 1);
         let task = get_task(pid).expect("get testapp");
         assert_eq!(task.name, "testapp");
@@ -508,8 +519,7 @@ pub fn self_test() {
 
     // Test 5: suspend and resume
     let daemon_pid = {
-        let pid = register_task("daemon", TaskPriority::High, 1, "root")
-            .expect("register daemon");
+        let pid = register_task("daemon", TaskPriority::High, 1, "root").expect("register daemon");
         suspend_task(pid).expect("suspend daemon");
         let task = get_task(pid).expect("get suspended");
         assert_eq!(task.state, TaskState::Stopped);
@@ -562,10 +572,10 @@ pub fn self_test() {
     // Test 10: stats counters reflect exactly the operations above.
     {
         let (count, created, killed, suspended, ops) = stats();
-        assert_eq!(count, 2);      // testapp (zombie, still tracked) + daemon
-        assert_eq!(created, 2);    // testapp + daemon
-        assert_eq!(killed, 1);     // testapp
-        assert_eq!(suspended, 1);  // daemon was suspended once
+        assert_eq!(count, 2); // testapp (zombie, still tracked) + daemon
+        assert_eq!(created, 2); // testapp + daemon
+        assert_eq!(killed, 1); // testapp
+        assert_eq!(suspended, 1); // daemon was suspended once
         assert!(ops > 0);
         serial_println!("[taskmon]  10. Stats counters — OK");
     }

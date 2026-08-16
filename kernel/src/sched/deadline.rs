@@ -62,8 +62,8 @@
 //! - Linux SCHED_DEADLINE (kernel/sched/deadline.c).
 //! - LITMUS^RT research scheduler.
 
+use super::task::{NUM_PRIORITIES, TaskId};
 use alloc::collections::BTreeMap;
-use super::task::{TaskId, NUM_PRIORITIES};
 
 // ---------------------------------------------------------------------------
 // Deadline task parameters
@@ -258,7 +258,8 @@ impl DeadlineScheduler {
 
         // Remove old registration if re-registering.
         if let Some(old) = self.params.remove(&id) {
-            self.total_utilization = self.total_utilization
+            self.total_utilization = self
+                .total_utilization
                 .saturating_sub(old.utilization_x10000());
         }
 
@@ -274,7 +275,8 @@ impl DeadlineScheduler {
     /// be treated as best-effort on next enqueue.
     pub fn unregister(&mut self, id: TaskId) {
         if let Some(old) = self.params.remove(&id) {
-            self.total_utilization = self.total_utilization
+            self.total_utilization = self
+                .total_utilization
                 .saturating_sub(old.utilization_x10000());
         }
         self.throttled.remove(&id);
@@ -331,7 +333,10 @@ impl DeadlineScheduler {
         } else {
             // Non-deadline task: use priority-based time slice.
             let idx = (entry.priority as usize).min(NUM_PRIORITIES.saturating_sub(1));
-            self.current_remaining = self.time_slices.get(idx).copied()
+            self.current_remaining = self
+                .time_slices
+                .get(idx)
+                .copied()
                 .unwrap_or(BASE_TIME_SLICE);
         }
 
@@ -351,7 +356,8 @@ impl DeadlineScheduler {
             self.nr_running = self.nr_running.saturating_sub(1);
         }
 
-        let (abs_deadline, remaining_budget) = if self.current_id == id && self.current_is_deadline {
+        let (abs_deadline, remaining_budget) = if self.current_id == id && self.current_is_deadline
+        {
             // Re-enqueuing the currently-running deadline task (preempted
             // but not throttled).  Keep its existing deadline and budget.
             let dl = self.current_abs_deadline;
@@ -361,12 +367,18 @@ impl DeadlineScheduler {
             (dl, budget)
         } else if let Some(params) = self.params.get(&id) {
             // New activation of a registered deadline task.
-            let abs_dl = self.current_tick.saturating_add(params.deadline_ticks as u64);
+            let abs_dl = self
+                .current_tick
+                .saturating_add(params.deadline_ticks as u64);
             (abs_dl, params.budget_ticks)
         } else {
             // Non-deadline task: derive a pseudo-deadline from priority.
             let idx = (priority as usize).min(NUM_PRIORITIES.saturating_sub(1));
-            let slice = self.time_slices.get(idx).copied().unwrap_or(BASE_TIME_SLICE);
+            let slice = self
+                .time_slices
+                .get(idx)
+                .copied()
+                .unwrap_or(BASE_TIME_SLICE);
             let abs_dl = self.current_tick.saturating_add(slice as u64);
             (abs_dl, slice)
         };
@@ -449,14 +461,10 @@ impl DeadlineScheduler {
             if self.current_is_deadline {
                 // Throttle: don't re-enqueue until next period.
                 if let Some(params) = self.params.get(&self.current_id) {
-                    let next_period = self.current_tick
-                        .saturating_add(params.period_ticks as u64);
-                    let next_deadline = next_period
-                        .saturating_add(params.deadline_ticks as u64);
-                    self.throttled.insert(
-                        self.current_id,
-                        (next_deadline, next_period),
-                    );
+                    let next_period = self.current_tick.saturating_add(params.period_ticks as u64);
+                    let next_deadline = next_period.saturating_add(params.deadline_ticks as u64);
+                    self.throttled
+                        .insert(self.current_id, (next_deadline, next_period));
                 }
                 self.current_id = 0;
                 self.current_is_deadline = false;
@@ -485,7 +493,9 @@ impl DeadlineScheduler {
     /// Check if any non-idle task is ready.
     #[must_use]
     pub fn has_real_work(&self) -> bool {
-        self.tree.values().any(|e| e.priority != super::task::IDLE_PRIORITY)
+        self.tree
+            .values()
+            .any(|e| e.priority != super::task::IDLE_PRIORITY)
     }
 
     /// Total runnable tasks.
@@ -604,29 +614,38 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let mut sched = DeadlineScheduler::new();
 
         // Register a task that uses 50% CPU: budget=5, period=10.
-        let ok = sched.register(1, DeadlineParams {
-            budget_ticks: 5,
-            deadline_ticks: 10,
-            period_ticks: 10,
-        });
+        let ok = sched.register(
+            1,
+            DeadlineParams {
+                budget_ticks: 5,
+                deadline_ticks: 10,
+                period_ticks: 10,
+            },
+        );
         assert!(ok, "50% utilization should be accepted");
         assert_eq!(sched.utilization(), 5000); // 50% × 10000
 
         // Register another at 40%: should still fit (90% total).
-        let ok = sched.register(2, DeadlineParams {
-            budget_ticks: 4,
-            deadline_ticks: 10,
-            period_ticks: 10,
-        });
+        let ok = sched.register(
+            2,
+            DeadlineParams {
+                budget_ticks: 4,
+                deadline_ticks: 10,
+                period_ticks: 10,
+            },
+        );
         assert!(ok, "40% should be accepted (90% total)");
         assert_eq!(sched.utilization(), 9000);
 
         // Register at 10%: would be 100%, exceeds 95% limit.
-        let ok = sched.register(3, DeadlineParams {
-            budget_ticks: 1,
-            deadline_ticks: 10,
-            period_ticks: 10,
-        });
+        let ok = sched.register(
+            3,
+            DeadlineParams {
+                budget_ticks: 1,
+                deadline_ticks: 10,
+                period_ticks: 10,
+            },
+        );
         assert!(!ok, "10% should be rejected (would be 100%)");
     }
 
@@ -635,17 +654,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let mut sched = DeadlineScheduler::new();
 
         // Task A: deadline in 5 ticks.
-        sched.register(10, DeadlineParams {
-            budget_ticks: 2,
-            deadline_ticks: 5,
-            period_ticks: 10,
-        });
+        sched.register(
+            10,
+            DeadlineParams {
+                budget_ticks: 2,
+                deadline_ticks: 5,
+                period_ticks: 10,
+            },
+        );
         // Task B: deadline in 3 ticks (tighter).
-        sched.register(11, DeadlineParams {
-            budget_ticks: 2,
-            deadline_ticks: 3,
-            period_ticks: 10,
-        });
+        sched.register(
+            11,
+            DeadlineParams {
+                budget_ticks: 2,
+                deadline_ticks: 3,
+                period_ticks: 10,
+            },
+        );
 
         sched.enqueue(10, 0);
         sched.enqueue(11, 0);
@@ -659,11 +684,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     {
         let mut sched = DeadlineScheduler::new();
 
-        sched.register(20, DeadlineParams {
-            budget_ticks: 2,
-            deadline_ticks: 5,
-            period_ticks: 10,
-        });
+        sched.register(
+            20,
+            DeadlineParams {
+                budget_ticks: 2,
+                deadline_ticks: 5,
+                period_ticks: 10,
+            },
+        );
         sched.enqueue(20, 0);
 
         let _ = sched.pick_next(); // Pick task 20.
@@ -671,7 +699,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // Tick twice to exhaust budget.
         assert!(!sched.tick()); // tick 1: remaining=1
-        assert!(sched.tick());  // tick 2: remaining=0, throttled
+        assert!(sched.tick()); // tick 2: remaining=0, throttled
 
         // Task should now be throttled.
         assert_eq!(sched.throttled_count(), 1, "task should be throttled");
@@ -682,11 +710,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     {
         let mut sched = DeadlineScheduler::new();
 
-        sched.register(30, DeadlineParams {
-            budget_ticks: 1,
-            deadline_ticks: 3,
-            period_ticks: 5,
-        });
+        sched.register(
+            30,
+            DeadlineParams {
+                budget_ticks: 1,
+                deadline_ticks: 3,
+                period_ticks: 5,
+            },
+        );
         sched.enqueue(30, 0);
 
         // Pick and exhaust budget.
@@ -735,11 +766,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("  deadline: unregister frees utilization...");
     {
         let mut sched = DeadlineScheduler::new();
-        sched.register(60, DeadlineParams {
-            budget_ticks: 5,
-            deadline_ticks: 10,
-            period_ticks: 10,
-        });
+        sched.register(
+            60,
+            DeadlineParams {
+                budget_ticks: 5,
+                deadline_ticks: 10,
+                period_ticks: 10,
+            },
+        );
         assert_eq!(sched.utilization(), 5000);
 
         sched.unregister(60);
@@ -772,11 +806,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let mut sched = DeadlineScheduler::new();
 
         // Register task 80 as deadline.
-        sched.register(80, DeadlineParams {
-            budget_ticks: 2,
-            deadline_ticks: 5,
-            period_ticks: 10,
-        });
+        sched.register(
+            80,
+            DeadlineParams {
+                budget_ticks: 2,
+                deadline_ticks: 5,
+                period_ticks: 10,
+            },
+        );
         sched.enqueue(80, 0);
 
         // Enqueue task 81 as non-deadline.

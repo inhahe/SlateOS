@@ -23,11 +23,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -91,13 +91,27 @@ impl EventKind {
     /// All event kinds.
     pub fn all() -> &'static [EventKind] {
         &[
-            Self::Login, Self::Logout, Self::Lock, Self::Unlock,
-            Self::Startup, Self::Shutdown, Self::Notification,
-            Self::NotificationUrgent, Self::Error, Self::Warning,
-            Self::Information, Self::Question, Self::DeviceConnect,
-            Self::DeviceDisconnect, Self::MessageReceived, Self::MessageSent,
-            Self::EmptyTrash, Self::ScreenCapture, Self::VolumeChange,
-            Self::BatteryLow, Self::ChargingStart,
+            Self::Login,
+            Self::Logout,
+            Self::Lock,
+            Self::Unlock,
+            Self::Startup,
+            Self::Shutdown,
+            Self::Notification,
+            Self::NotificationUrgent,
+            Self::Error,
+            Self::Warning,
+            Self::Information,
+            Self::Question,
+            Self::DeviceConnect,
+            Self::DeviceDisconnect,
+            Self::MessageReceived,
+            Self::MessageSent,
+            Self::EmptyTrash,
+            Self::ScreenCapture,
+            Self::VolumeChange,
+            Self::BatteryLow,
+            Self::ChargingStart,
         ]
     }
 }
@@ -162,18 +176,78 @@ where
 fn default_scheme() -> SoundScheme {
     let base = "/usr/share/sounds/default";
     let mappings = alloc::vec![
-        SoundMapping { event: EventKind::Login, sound_path: format!("{}/login.wav", base), volume: 80, enabled: true },
-        SoundMapping { event: EventKind::Logout, sound_path: format!("{}/logout.wav", base), volume: 80, enabled: true },
-        SoundMapping { event: EventKind::Notification, sound_path: format!("{}/notification.wav", base), volume: 70, enabled: true },
-        SoundMapping { event: EventKind::NotificationUrgent, sound_path: format!("{}/urgent.wav", base), volume: 90, enabled: true },
-        SoundMapping { event: EventKind::Error, sound_path: format!("{}/error.wav", base), volume: 80, enabled: true },
-        SoundMapping { event: EventKind::Warning, sound_path: format!("{}/warning.wav", base), volume: 70, enabled: true },
-        SoundMapping { event: EventKind::Information, sound_path: format!("{}/info.wav", base), volume: 60, enabled: true },
-        SoundMapping { event: EventKind::DeviceConnect, sound_path: format!("{}/device-added.wav", base), volume: 60, enabled: true },
-        SoundMapping { event: EventKind::DeviceDisconnect, sound_path: format!("{}/device-removed.wav", base), volume: 60, enabled: true },
-        SoundMapping { event: EventKind::EmptyTrash, sound_path: format!("{}/trash-empty.wav", base), volume: 50, enabled: true },
-        SoundMapping { event: EventKind::ScreenCapture, sound_path: format!("{}/screen-capture.wav", base), volume: 50, enabled: true },
-        SoundMapping { event: EventKind::BatteryLow, sound_path: format!("{}/battery-low.wav", base), volume: 100, enabled: true },
+        SoundMapping {
+            event: EventKind::Login,
+            sound_path: format!("{}/login.wav", base),
+            volume: 80,
+            enabled: true
+        },
+        SoundMapping {
+            event: EventKind::Logout,
+            sound_path: format!("{}/logout.wav", base),
+            volume: 80,
+            enabled: true
+        },
+        SoundMapping {
+            event: EventKind::Notification,
+            sound_path: format!("{}/notification.wav", base),
+            volume: 70,
+            enabled: true
+        },
+        SoundMapping {
+            event: EventKind::NotificationUrgent,
+            sound_path: format!("{}/urgent.wav", base),
+            volume: 90,
+            enabled: true
+        },
+        SoundMapping {
+            event: EventKind::Error,
+            sound_path: format!("{}/error.wav", base),
+            volume: 80,
+            enabled: true
+        },
+        SoundMapping {
+            event: EventKind::Warning,
+            sound_path: format!("{}/warning.wav", base),
+            volume: 70,
+            enabled: true
+        },
+        SoundMapping {
+            event: EventKind::Information,
+            sound_path: format!("{}/info.wav", base),
+            volume: 60,
+            enabled: true
+        },
+        SoundMapping {
+            event: EventKind::DeviceConnect,
+            sound_path: format!("{}/device-added.wav", base),
+            volume: 60,
+            enabled: true
+        },
+        SoundMapping {
+            event: EventKind::DeviceDisconnect,
+            sound_path: format!("{}/device-removed.wav", base),
+            volume: 60,
+            enabled: true
+        },
+        SoundMapping {
+            event: EventKind::EmptyTrash,
+            sound_path: format!("{}/trash-empty.wav", base),
+            volume: 50,
+            enabled: true
+        },
+        SoundMapping {
+            event: EventKind::ScreenCapture,
+            sound_path: format!("{}/screen-capture.wav", base),
+            volume: 50,
+            enabled: true
+        },
+        SoundMapping {
+            event: EventKind::BatteryLow,
+            sound_path: format!("{}/battery-low.wav", base),
+            volume: 100,
+            enabled: true
+        },
     ];
     SoundScheme {
         name: String::from("Default"),
@@ -188,7 +262,9 @@ fn default_scheme() -> SoundScheme {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let schemes = alloc::vec![
         default_scheme(),
@@ -217,13 +293,21 @@ pub fn play(event: EventKind) -> Option<String> {
     state.ops += 1;
     OPS.store(state.ops, Ordering::Relaxed);
 
-    if !state.enabled || state.muted { return None; }
+    if !state.enabled || state.muted {
+        return None;
+    }
 
     // Find active scheme.
-    let scheme = state.schemes.iter().find(|s| s.name == state.active_scheme)?;
+    let scheme = state
+        .schemes
+        .iter()
+        .find(|s| s.name == state.active_scheme)?;
 
     // Find mapping for this event.
-    let mapping = scheme.mappings.iter().find(|m| m.event == event && m.enabled)?;
+    let mapping = scheme
+        .mappings
+        .iter()
+        .find(|m| m.event == event && m.enabled)?;
 
     state.total_played += 1;
     Some(mapping.sound_path.clone())
@@ -231,7 +315,10 @@ pub fn play(event: EventKind) -> Option<String> {
 
 /// Set global sound enabled.
 pub fn set_enabled(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.enabled = enabled; Ok(()) })
+    with_state(|state| {
+        state.enabled = enabled;
+        Ok(())
+    })
 }
 
 pub fn is_enabled() -> bool {
@@ -240,12 +327,18 @@ pub fn is_enabled() -> bool {
 
 /// Set global volume (0-100).
 pub fn set_volume(volume: u32) -> KernelResult<()> {
-    with_state(|state| { state.global_volume = volume.min(100); Ok(()) })
+    with_state(|state| {
+        state.global_volume = volume.min(100);
+        Ok(())
+    })
 }
 
 /// Set muted (by focus assist).
 pub fn set_muted(muted: bool) -> KernelResult<()> {
-    with_state(|state| { state.muted = muted; Ok(()) })
+    with_state(|state| {
+        state.muted = muted;
+        Ok(())
+    })
 }
 
 /// Set active sound scheme.
@@ -261,13 +354,18 @@ pub fn set_scheme(name: &str) -> KernelResult<()> {
 
 /// Get active scheme name.
 pub fn active_scheme() -> String {
-    STATE.lock().as_ref().map_or(String::from("Default"), |s| s.active_scheme.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(String::from("Default"), |s| s.active_scheme.clone())
 }
 
 /// Set sound for an event in the active scheme.
 pub fn set_sound(event: EventKind, path: &str, volume: u32) -> KernelResult<()> {
     with_state(|state| {
-        let scheme = state.schemes.iter_mut()
+        let scheme = state
+            .schemes
+            .iter_mut()
             .find(|s| s.name == state.active_scheme)
             .ok_or(KernelError::NotFound)?;
 
@@ -289,7 +387,9 @@ pub fn set_sound(event: EventKind, path: &str, volume: u32) -> KernelResult<()> 
 /// Enable/disable sound for a specific event.
 pub fn set_event_enabled(event: EventKind, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let scheme = state.schemes.iter_mut()
+        let scheme = state
+            .schemes
+            .iter_mut()
             .find(|s| s.name == state.active_scheme)
             .ok_or(KernelError::NotFound)?;
         if let Some(m) = scheme.mappings.iter_mut().find(|m| m.event == event) {
@@ -304,16 +404,25 @@ pub fn set_event_enabled(event: EventKind, enabled: bool) -> KernelResult<()> {
 /// List available schemes.
 pub fn list_schemes() -> Vec<(String, String)> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.schemes.iter().map(|sc| (sc.name.clone(), sc.description.clone())).collect()
+        s.schemes
+            .iter()
+            .map(|sc| (sc.name.clone(), sc.description.clone()))
+            .collect()
     })
 }
 
 /// List mappings in active scheme.
 pub fn list_mappings() -> Vec<SoundMapping> {
     let guard = STATE.lock();
-    guard.as_ref().and_then(|s| {
-        s.schemes.iter().find(|sc| sc.name == s.active_scheme).map(|sc| sc.mappings.clone())
-    }).unwrap_or_default()
+    guard
+        .as_ref()
+        .and_then(|s| {
+            s.schemes
+                .iter()
+                .find(|sc| sc.name == s.active_scheme)
+                .map(|sc| sc.mappings.clone())
+        })
+        .unwrap_or_default()
 }
 
 /// Statistics: (scheme_count, mapping_count, total_played, enabled, muted, ops).
@@ -321,10 +430,19 @@ pub fn stats() -> (usize, usize, u64, bool, bool, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let map_count = s.schemes.iter()
+            let map_count = s
+                .schemes
+                .iter()
                 .find(|sc| sc.name == s.active_scheme)
                 .map_or(0, |sc| sc.mappings.len());
-            (s.schemes.len(), map_count, s.total_played, s.enabled, s.muted, s.ops)
+            (
+                s.schemes.len(),
+                map_count,
+                s.total_played,
+                s.enabled,
+                s.muted,
+                s.ops,
+            )
         }
         None => (0, 0, 0, false, false, 0),
     }
@@ -375,7 +493,10 @@ pub fn self_test() {
     // 7: Set sound.
     set_sound(EventKind::Login, "/custom/login.ogg", 90).expect("set sound");
     let mappings = list_mappings();
-    let login = mappings.iter().find(|m| m.event == EventKind::Login).expect("find login");
+    let login = mappings
+        .iter()
+        .find(|m| m.event == EventKind::Login)
+        .expect("find login");
     assert!(login.sound_path.contains("custom"));
     crate::serial_println!("  [7/11] set sound: OK");
 

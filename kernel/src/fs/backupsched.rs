@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -159,16 +159,22 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
-        schedules: alloc::vec![
-            BackupSchedule {
-                id: 1, name: String::from("Daily Home"),
-                source_path: String::from("/home"), destination: String::from("/backup/daily"),
-                backup_type: BackupType::Incremental, frequency: BackupFrequency::Daily,
-                retention_count: 30, enabled: true, last_run_ns: 0, run_count: 0,
-            },
-        ],
+        schedules: alloc::vec![BackupSchedule {
+            id: 1,
+            name: String::from("Daily Home"),
+            source_path: String::from("/home"),
+            destination: String::from("/backup/daily"),
+            backup_type: BackupType::Incremental,
+            frequency: BackupFrequency::Daily,
+            retention_count: 30,
+            enabled: true,
+            last_run_ns: 0,
+            run_count: 0,
+        },],
         history: Vec::new(),
         next_id: 2,
         total_runs: 0,
@@ -180,7 +186,14 @@ pub fn init_defaults() {
 }
 
 /// Create a new backup schedule.
-pub fn create_schedule(name: &str, source: &str, dest: &str, btype: BackupType, freq: BackupFrequency, retention: u32) -> KernelResult<u32> {
+pub fn create_schedule(
+    name: &str,
+    source: &str,
+    dest: &str,
+    btype: BackupType,
+    freq: BackupFrequency,
+    retention: u32,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.schedules.len() >= MAX_SCHEDULES {
             return Err(KernelError::ResourceExhausted);
@@ -188,10 +201,16 @@ pub fn create_schedule(name: &str, source: &str, dest: &str, btype: BackupType, 
         let id = state.next_id;
         state.next_id += 1;
         state.schedules.push(BackupSchedule {
-            id, name: String::from(name),
-            source_path: String::from(source), destination: String::from(dest),
-            backup_type: btype, frequency: freq, retention_count: retention,
-            enabled: true, last_run_ns: 0, run_count: 0,
+            id,
+            name: String::from(name),
+            source_path: String::from(source),
+            destination: String::from(dest),
+            backup_type: btype,
+            frequency: freq,
+            retention_count: retention,
+            enabled: true,
+            last_run_ns: 0,
+            run_count: 0,
         });
         Ok(id)
     })
@@ -202,7 +221,9 @@ pub fn delete_schedule(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.schedules.len();
         state.schedules.retain(|s| s.id != id);
-        if state.schedules.len() == before { return Err(KernelError::NotFound); }
+        if state.schedules.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -210,7 +231,10 @@ pub fn delete_schedule(id: u32) -> KernelResult<()> {
 /// Enable/disable a schedule.
 pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let sched = state.schedules.iter_mut().find(|s| s.id == id)
+        let sched = state
+            .schedules
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         sched.enabled = enabled;
         Ok(())
@@ -221,15 +245,24 @@ pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
 pub fn run_now(id: u32, result: RunResult, bytes: u64, files: u64) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let sched = state.schedules.iter_mut().find(|s| s.id == id)
+        let sched = state
+            .schedules
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         sched.last_run_ns = now;
         sched.run_count += 1;
 
-        if state.history.len() >= MAX_HISTORY { state.history.remove(0); }
+        if state.history.len() >= MAX_HISTORY {
+            state.history.remove(0);
+        }
         state.history.push(BackupRun {
-            schedule_id: id, result, bytes_backed: bytes,
-            files_count: files, started_ns: now, duration_ms: 0,
+            schedule_id: id,
+            result,
+            bytes_backed: bytes,
+            files_count: files,
+            started_ns: now,
+            duration_ms: 0,
         });
 
         state.total_runs += 1;
@@ -248,7 +281,9 @@ pub fn run_now(id: u32, result: RunResult, bytes: u64, files: u64) -> KernelResu
 /// Get run history for a schedule.
 pub fn get_history(schedule_id: u32, max: usize) -> Vec<BackupRun> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let mut runs: Vec<BackupRun> = s.history.iter()
+        let mut runs: Vec<BackupRun> = s
+            .history
+            .iter()
             .filter(|r| r.schedule_id == schedule_id)
             .cloned()
             .collect();
@@ -260,14 +295,25 @@ pub fn get_history(schedule_id: u32, max: usize) -> Vec<BackupRun> {
 
 /// List all schedules.
 pub fn list_schedules() -> Vec<BackupSchedule> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.schedules.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.schedules.clone())
 }
 
 /// Statistics: (schedule_count, history_size, total_runs, total_successful, total_failed, total_bytes, ops).
 pub fn stats() -> (usize, usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.schedules.len(), s.history.len(), s.total_runs, s.total_successful, s.total_failed, s.total_bytes_backed, s.ops),
+        Some(s) => (
+            s.schedules.len(),
+            s.history.len(),
+            s.total_runs,
+            s.total_successful,
+            s.total_failed,
+            s.total_bytes_backed,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0, 0),
     }
 }
@@ -285,7 +331,15 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] defaults: OK");
 
     // 2: Create schedule.
-    let id = create_schedule("Weekly Docs", "/documents", "/backup/weekly", BackupType::Full, BackupFrequency::Weekly, 8).expect("create");
+    let id = create_schedule(
+        "Weekly Docs",
+        "/documents",
+        "/backup/weekly",
+        BackupType::Full,
+        BackupFrequency::Weekly,
+        8,
+    )
+    .expect("create");
     assert_eq!(list_schedules().len(), 2);
     crate::serial_println!("  [2/8] create: OK");
 

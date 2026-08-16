@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -165,7 +165,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         enabled: true,
         activity: ActivityState::Active,
@@ -184,7 +186,10 @@ pub fn init_defaults() {
 
 /// Set tracking enabled/disabled.
 pub fn set_enabled(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.enabled = enabled; Ok(()) })
+    with_state(|state| {
+        state.enabled = enabled;
+        Ok(())
+    })
 }
 
 pub fn is_enabled() -> bool {
@@ -194,14 +199,20 @@ pub fn is_enabled() -> bool {
 /// Record that an app gained focus.
 pub fn app_focus(app_id: &str, app_name: &str) -> KernelResult<()> {
     with_state(|state| {
-        if !state.enabled { return Ok(()); }
+        if !state.enabled {
+            return Ok(());
+        }
 
         let now = crate::hpet::elapsed_ns();
 
         // Close out previous app's focus time.
         if !state.current_app.is_empty() && state.focus_start_ns > 0 {
             let elapsed_secs = (now.saturating_sub(state.focus_start_ns)) / 1_000_000_000;
-            if let Some(app) = state.apps.iter_mut().find(|a| a.app_id == state.current_app) {
+            if let Some(app) = state
+                .apps
+                .iter_mut()
+                .find(|a| a.app_id == state.current_app)
+            {
                 app.focus_secs += elapsed_secs;
             }
         }
@@ -213,7 +224,10 @@ pub fn app_focus(app_id: &str, app_name: &str) -> KernelResult<()> {
         } else {
             if state.apps.len() >= MAX_APPS {
                 // Remove least-used app.
-                if let Some(min_idx) = state.apps.iter().enumerate()
+                if let Some(min_idx) = state
+                    .apps
+                    .iter()
+                    .enumerate()
                     .min_by_key(|(_, a)| a.focus_secs)
                     .map(|(i, _)| i)
                 {
@@ -256,7 +270,10 @@ pub fn mark_idle() -> KernelResult<()> {
 
 /// Get current activity state.
 pub fn activity_state() -> ActivityState {
-    STATE.lock().as_ref().map_or(ActivityState::Active, |s| s.activity)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(ActivityState::Active, |s| s.activity)
 }
 
 /// Add active time (called periodically by the idle detector).
@@ -300,25 +317,38 @@ pub fn today_summary() -> DailySummary {
             }
         }
         None => DailySummary {
-            day_offset: 0, active_secs: 0, idle_secs: 0,
-            app_switches: 0, top_app: String::from("none"), top_app_secs: 0,
+            day_offset: 0,
+            active_secs: 0,
+            idle_secs: 0,
+            app_switches: 0,
+            top_app: String::from("none"),
+            top_app_secs: 0,
         },
     }
 }
 
 /// Set daily usage limit.
 pub fn set_daily_limit(minutes: u32) -> KernelResult<()> {
-    with_state(|state| { state.limits.daily_limit_mins = minutes; Ok(()) })
+    with_state(|state| {
+        state.limits.daily_limit_mins = minutes;
+        Ok(())
+    })
 }
 
 /// Set reminder interval.
 pub fn set_reminder_interval(minutes: u32) -> KernelResult<()> {
-    with_state(|state| { state.limits.reminder_interval_mins = minutes; Ok(()) })
+    with_state(|state| {
+        state.limits.reminder_interval_mins = minutes;
+        Ok(())
+    })
 }
 
 /// Get usage limits.
 pub fn get_limits() -> UsageLimits {
-    STATE.lock().as_ref().map_or(UsageLimits::default(), |s| s.limits.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(UsageLimits::default(), |s| s.limits.clone())
 }
 
 /// Check if daily limit is exceeded.
@@ -326,7 +356,9 @@ pub fn limit_exceeded() -> bool {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            if s.limits.daily_limit_mins == 0 { return false; }
+            if s.limits.daily_limit_mins == 0 {
+                return false;
+            }
             let active_mins = s.active_secs_today / 60;
             active_mins >= s.limits.daily_limit_mins as u64
         }
@@ -374,8 +406,12 @@ pub fn stats() -> (usize, u64, u64, u32, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => (
-            s.apps.len(), s.active_secs_today, s.idle_secs_today,
-            s.switches_today, s.total_focus_events, s.ops,
+            s.apps.len(),
+            s.active_secs_today,
+            s.idle_secs_today,
+            s.switches_today,
+            s.total_focus_events,
+            s.ops,
         ),
         None => (0, 0, 0, 0, 0, 0),
     }
@@ -417,7 +453,10 @@ pub fn self_test() {
     // 4: Focus count — re-focusing the editor bumps its count to 2.
     app_focus("org.editor", "Text Editor").expect("focus 3");
     let apps = app_usage();
-    let editor = apps.iter().find(|a| a.app_id == "org.editor").expect("find editor");
+    let editor = apps
+        .iter()
+        .find(|a| a.app_id == "org.editor")
+        .expect("find editor");
     assert_eq!(editor.focus_count, 2);
     crate::serial_println!("  [4/11] focus count: OK");
 

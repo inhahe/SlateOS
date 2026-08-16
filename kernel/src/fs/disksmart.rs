@@ -25,10 +25,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -236,7 +236,9 @@ fn evaluate_health(drive: &SmartDrive) -> HealthStatus {
 /// builds its own fixtures via the real API; see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     *guard = Some(State {
         drives: Vec::new(),
@@ -249,7 +251,11 @@ pub fn init_defaults() {
 
 /// Register a drive for monitoring.
 pub fn register_drive(
-    device: &str, model: &str, serial: &str, interface: DriveInterface, capacity_bytes: u64,
+    device: &str,
+    model: &str,
+    serial: &str,
+    interface: DriveInterface,
+    capacity_bytes: u64,
 ) -> KernelResult<()> {
     with_state(|state| {
         if state.drives.iter().any(|d| d.device == device) {
@@ -283,7 +289,10 @@ pub fn register_drive(
 /// Remove a drive from monitoring.
 pub fn unregister_drive(device: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.drives.iter().position(|d| d.device == device)
+        let pos = state
+            .drives
+            .iter()
+            .position(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         state.drives.remove(pos);
         Ok(())
@@ -293,7 +302,10 @@ pub fn unregister_drive(device: &str) -> KernelResult<()> {
 /// Update drive temperature.
 pub fn set_temperature(device: &str, temp_c: i16) -> KernelResult<()> {
     with_state(|state| {
-        let drive = state.drives.iter_mut().find(|d| d.device == device)
+        let drive = state
+            .drives
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         drive.temperature_c = temp_c;
         drive.health = evaluate_health(drive);
@@ -304,7 +316,10 @@ pub fn set_temperature(device: &str, temp_c: i16) -> KernelResult<()> {
 /// Update reallocated sector count.
 pub fn set_reallocated(device: &str, count: u32) -> KernelResult<()> {
     with_state(|state| {
-        let drive = state.drives.iter_mut().find(|d| d.device == device)
+        let drive = state
+            .drives
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         drive.reallocated_sectors = count;
         drive.health = evaluate_health(drive);
@@ -315,7 +330,10 @@ pub fn set_reallocated(device: &str, count: u32) -> KernelResult<()> {
 /// Update wear level percentage.
 pub fn set_wear_level(device: &str, pct: u8) -> KernelResult<()> {
     with_state(|state| {
-        let drive = state.drives.iter_mut().find(|d| d.device == device)
+        let drive = state
+            .drives
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         drive.wear_level_pct = pct.min(100);
         drive.health = evaluate_health(drive);
@@ -326,14 +344,21 @@ pub fn set_wear_level(device: &str, pct: u8) -> KernelResult<()> {
 /// Get drive info.
 pub fn get_drive(device: &str) -> KernelResult<SmartDrive> {
     with_state(|state| {
-        state.drives.iter().find(|d| d.device == device).cloned()
+        state
+            .drives
+            .iter()
+            .find(|d| d.device == device)
+            .cloned()
             .ok_or(KernelError::NotFound)
     })
 }
 
 /// List all monitored drives.
 pub fn list_drives() -> Vec<SmartDrive> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.drives.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.drives.clone())
 }
 
 /// Check all drives against thresholds, return number of alerts.
@@ -366,7 +391,10 @@ pub fn check_thresholds() -> u32 {
 
 /// Get alert configuration.
 pub fn get_alert_config() -> AlertConfig {
-    STATE.lock().as_ref().map_or(AlertConfig::default(), |s| s.config.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(AlertConfig::default(), |s| s.config.clone())
 }
 
 /// Statistics: (drive_count, good_count, warning_count, total_checks, total_alerts, ops).
@@ -374,9 +402,29 @@ pub fn stats() -> (usize, usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let good = s.drives.iter().filter(|d| d.health == HealthStatus::Good).count();
-            let warn = s.drives.iter().filter(|d| matches!(d.health, HealthStatus::Warning | HealthStatus::Critical | HealthStatus::Caution)).count();
-            (s.drives.len(), good, warn, s.total_checks, s.total_alerts, s.ops)
+            let good = s
+                .drives
+                .iter()
+                .filter(|d| d.health == HealthStatus::Good)
+                .count();
+            let warn = s
+                .drives
+                .iter()
+                .filter(|d| {
+                    matches!(
+                        d.health,
+                        HealthStatus::Warning | HealthStatus::Critical | HealthStatus::Caution
+                    )
+                })
+                .count();
+            (
+                s.drives.len(),
+                good,
+                warn,
+                s.total_checks,
+                s.total_alerts,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0, 0),
     }
@@ -403,13 +451,30 @@ pub fn self_test() {
     crate::serial_println!("  [1/11] empty init: OK");
 
     // 2: Register a drive — starts with Unknown health (no telemetry yet).
-    register_drive("/dev/sda", "Test SSD 512GB", "T-001", DriveInterface::Sata, 512 * 1024 * 1024 * 1024).expect("register sda");
+    register_drive(
+        "/dev/sda",
+        "Test SSD 512GB",
+        "T-001",
+        DriveInterface::Sata,
+        512 * 1024 * 1024 * 1024,
+    )
+    .expect("register sda");
     assert_eq!(list_drives().len(), 1);
-    assert_eq!(get_drive("/dev/sda").expect("get sda").health, HealthStatus::Unknown);
+    assert_eq!(
+        get_drive("/dev/sda").expect("get sda").health,
+        HealthStatus::Unknown
+    );
     crate::serial_println!("  [2/11] register + unknown health: OK");
 
     // 3: Register a second drive.
-    register_drive("/dev/nvme0n1", "Test NVMe 1TB", "NV-001", DriveInterface::Nvme, 1024 * 1024 * 1024 * 1024).expect("register nvme");
+    register_drive(
+        "/dev/nvme0n1",
+        "Test NVMe 1TB",
+        "NV-001",
+        DriveInterface::Nvme,
+        1024 * 1024 * 1024 * 1024,
+    )
+    .expect("register nvme");
     assert_eq!(list_drives().len(), 2);
     crate::serial_println!("  [3/11] register drive: OK");
 
@@ -427,7 +492,10 @@ pub fn self_test() {
 
     // 6: Reallocated sectors — 15 (>10) → Warning.
     set_reallocated("/dev/sda", 15).expect("set realloc");
-    assert_eq!(get_drive("/dev/sda").expect("get sda").health, HealthStatus::Warning);
+    assert_eq!(
+        get_drive("/dev/sda").expect("get sda").health,
+        HealthStatus::Warning
+    );
     crate::serial_println!("  [6/11] reallocated sectors: OK");
 
     // 7: Wear level — 50 % on the NVMe drive (still Good: <60, temp 0).

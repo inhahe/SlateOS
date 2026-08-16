@@ -64,19 +64,19 @@ pub mod supervisor;
 pub mod task;
 pub mod waitqueue;
 
-use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use crate::cpu;
 use crate::error::{KernelError, KernelResult};
-use crate::serial_println;
 use crate::serial_print;
+use crate::serial_println;
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use self::context::switch_context;
-use self::priority_rr::{PerCpuScheduler, PriorityRoundRobin};
 pub use self::priority_rr::WorkloadProfile;
-use self::task::{Context, Task, TaskId, TaskState, NUM_PRIORITIES};
+use self::priority_rr::{PerCpuScheduler, PriorityRoundRobin};
+use self::task::{Context, NUM_PRIORITIES, Task, TaskId, TaskState};
 
 // ---------------------------------------------------------------------------
 // Scheduler trait
@@ -301,7 +301,9 @@ static SCHED_ACQ_DEPTH: [CachePadded<AtomicUsize>; priority_rr::MAX_CPUS] = {
 /// (so pop stays balanced) but stops storing sites past the array bound.
 #[inline]
 fn sched_acq_push(cpu: usize, loc: &'static core::panic::Location<'static>) {
-    let Some(depth) = SCHED_ACQ_DEPTH.get(cpu) else { return };
+    let Some(depth) = SCHED_ACQ_DEPTH.get(cpu) else {
+        return;
+    };
     let d = depth.load(Ordering::Relaxed);
     if let Some(slot) = SCHED_ACQ_SITES.get(cpu).and_then(|row| row.get(d)) {
         slot.store(loc as *const _ as usize, Ordering::Relaxed);
@@ -312,7 +314,9 @@ fn sched_acq_push(cpu: usize, loc: &'static core::panic::Location<'static>) {
 /// Pop the top SCHED acquire site from `cpu`'s in-flight stack (on guard drop).
 #[inline]
 fn sched_acq_pop(cpu: usize) {
-    let Some(depth) = SCHED_ACQ_DEPTH.get(cpu) else { return };
+    let Some(depth) = SCHED_ACQ_DEPTH.get(cpu) else {
+        return;
+    };
     let d = depth.load(Ordering::Relaxed);
     if d == 0 {
         return;
@@ -445,7 +449,8 @@ pub(crate) fn dump_sched_lock_owner() {
         if site_ptr == 0 {
             crate::serial_println!(
                 "[liveness]   SCHED-lock: HELD by tid={} (cpu {}, acquire site unknown)",
-                owner, cpu
+                owner,
+                cpu
             );
         } else {
             // SAFETY: a non-zero SCHED_LOCK_SITE holds a `&'static Location`
@@ -481,14 +486,17 @@ pub(crate) fn dump_sched_lock_owner() {
 /// that is currently holding or spinning to acquire SCHED on that CPU.
 fn dump_sched_acquire_stacks() {
     for cpu in 0..priority_rr::MAX_CPUS {
-        let Some(depth_cell) = SCHED_ACQ_DEPTH.get(cpu) else { continue };
+        let Some(depth_cell) = SCHED_ACQ_DEPTH.get(cpu) else {
+            continue;
+        };
         let depth = depth_cell.load(Ordering::Relaxed);
         if depth == 0 {
             continue;
         }
         crate::serial_println!(
             "[liveness]   SCHED acquire-stack cpu{}: depth={} (outer->inner):",
-            cpu, depth
+            cpu,
+            depth
         );
         let shown = depth.min(SCHED_ACQ_DEPTH_MAX);
         for level in 0..shown {
@@ -506,7 +514,10 @@ fn dump_sched_acquire_stacks() {
                 unsafe { &*(site_ptr as *const core::panic::Location<'static>) };
             crate::serial_println!(
                 "[liveness]     [{}] {}:{}:{}",
-                level, loc.file(), loc.line(), loc.column(),
+                level,
+                loc.file(),
+                loc.line(),
+                loc.column(),
             );
         }
         if depth > SCHED_ACQ_DEPTH_MAX {
@@ -854,10 +865,13 @@ pub(crate) fn record_dispatch_latency(wait_ticks: u64) {
     LATENCY_TOTAL_TICKS.fetch_add(wait_ticks, Ordering::Relaxed);
     LATENCY_TOTAL_EVENTS.fetch_add(1, Ordering::Relaxed);
     // Update max (CAS loop).
-    let _ = LATENCY_MAX_EVER.fetch_update(
-        Ordering::Relaxed, Ordering::Relaxed,
-        |cur| if wait_ticks > cur { Some(wait_ticks) } else { None },
-    );
+    let _ = LATENCY_MAX_EVER.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+        if wait_ticks > cur {
+            Some(wait_ticks)
+        } else {
+            None
+        }
+    });
 }
 
 /// Scheduling latency histogram snapshot.
@@ -883,7 +897,10 @@ pub fn latency_histogram() -> LatencyHistogram {
     let total_events = LATENCY_TOTAL_EVENTS.load(Ordering::Relaxed);
     let total_ticks = LATENCY_TOTAL_TICKS.load(Ordering::Relaxed);
     let mean_x100 = if total_events > 0 {
-        total_ticks.saturating_mul(100).checked_div(total_events).unwrap_or(0)
+        total_ticks
+            .saturating_mul(100)
+            .checked_div(total_events)
+            .unwrap_or(0)
     } else {
         0
     };
@@ -946,7 +963,8 @@ pub fn sched_stats() -> SchedStats {
             stats.ctx_switches[i] = CTX_SWITCHES[i].load(Ordering::Relaxed);
             stats.voluntary_switches[i] = VOLUNTARY_SWITCHES[i].load(Ordering::Relaxed);
             stats.preemptions[i] = PREEMPTIONS[i].load(Ordering::Relaxed);
-            stats.total_ctx_switches = stats.total_ctx_switches
+            stats.total_ctx_switches = stats
+                .total_ctx_switches
                 .saturating_add(stats.ctx_switches[i]);
             stats.cpu_ticks[i] = (
                 TOTAL_TICKS[i].load(Ordering::Relaxed),
@@ -1044,13 +1062,17 @@ pub fn register_exit_hook(hook: fn(TaskId)) -> Option<usize> {
             EXIT_HOOK_COUNT.fetch_add(1, Ordering::Release);
             serial_println!(
                 "[sched] Registered exit hook at slot {} (addr {:#x})",
-                i, hook_addr
+                i,
+                hook_addr
             );
             return Some(i);
         }
     }
 
-    serial_println!("[sched] WARNING: exit hook table full ({} slots)", MAX_EXIT_HOOKS);
+    serial_println!(
+        "[sched] WARNING: exit hook table full ({} slots)",
+        MAX_EXIT_HOOKS
+    );
     None
 }
 
@@ -1114,9 +1136,7 @@ fn notify_exit_hooks(task_id: TaskId) {
         // to 0) or never.  The function pointer remains valid for the lifetime
         // of the kernel (hooks are registered by subsystem init, never
         // unloaded).
-        let hook: fn(TaskId) = unsafe {
-            core::mem::transmute::<u64, fn(TaskId)>(addr)
-        };
+        let hook: fn(TaskId) = unsafe { core::mem::transmute::<u64, fn(TaskId)>(addr) };
         hook(task_id);
     }
 }
@@ -1183,9 +1203,7 @@ static KERNEL_PML4: AtomicU64 = AtomicU64::new(0);
 pub fn init() {
     // Save the kernel PML4 so we can restore it when switching to
     // tasks that use the kernel address space (pml4_phys == 0).
-    let kernel_pml4 = crate::mm::page_table::cr3_to_pml4(
-        crate::mm::page_table::read_cr3(),
-    );
+    let kernel_pml4 = crate::mm::page_table::cr3_to_pml4(crate::mm::page_table::read_cr3());
     KERNEL_PML4.store(kernel_pml4, Ordering::Release);
 
     // Initialize per-CPU scheduler with 1 CPU (boot CPU).
@@ -1244,7 +1262,8 @@ pub fn register_ap_idle(cpu_index: usize) -> TaskId {
 
     serial_println!(
         "[sched] Registered AP idle task {} for CPU {}",
-        id, cpu_index
+        id,
+        cpu_index
     );
     id
 }
@@ -1281,7 +1300,11 @@ fn choose_cpu_for_task(task: &Task) -> usize {
     // This is the cold path; we could also pick the lightest-loaded
     // allowed CPU, but that requires locking per-CPU queues.
     let first = task.cpu_affinity.trailing_zeros();
-    if first < 64 { first as usize } else { task.last_cpu }
+    if first < 64 {
+        first as usize
+    } else {
+        task.last_cpu
+    }
 }
 
 /// Signal a CPU that new work has been enqueued on its run queue.
@@ -1347,7 +1370,14 @@ pub fn spawn(
     arg: u64,
     pml4_phys: u64,
 ) -> KernelResult<TaskId> {
-    spawn_with_affinity(name, priority, entry, arg, pml4_phys, task::CPU_AFFINITY_ALL)
+    spawn_with_affinity(
+        name,
+        priority,
+        entry,
+        arg,
+        pml4_phys,
+        task::CPU_AFFINITY_ALL,
+    )
 }
 
 /// Spawn a new kernel task with explicit CPU affinity.
@@ -1401,7 +1431,15 @@ pub fn spawn_suspended(
     arg: u64,
     pml4_phys: u64,
 ) -> KernelResult<TaskId> {
-    spawn_inner(name, priority, entry, arg, pml4_phys, task::CPU_AFFINITY_ALL, false)
+    spawn_inner(
+        name,
+        priority,
+        entry,
+        arg,
+        pml4_phys,
+        task::CPU_AFFINITY_ALL,
+        false,
+    )
 }
 
 /// Admit a task previously created via [`spawn_suspended`], transitioning it
@@ -1526,7 +1564,12 @@ fn spawn_inner(
         id,
         prio as u64,
     );
-    serial_println!("[sched] Spawned task {} (priority {}, cpu {})", id, prio, target_cpu);
+    serial_println!(
+        "[sched] Spawned task {} (priority {}, cpu {})",
+        id,
+        prio,
+        target_cpu
+    );
     Ok(id)
 }
 
@@ -1702,10 +1745,7 @@ pub fn current_task_net_ns() -> crate::netns::NetNsId {
 /// network namespace after creation.
 ///
 /// Returns `Err(InvalidArgument)` if the task doesn't exist.
-pub fn set_task_net_ns(
-    task_id: TaskId,
-    ns_id: crate::netns::NetNsId,
-) -> KernelResult<()> {
+pub fn set_task_net_ns(task_id: TaskId, ns_id: crate::netns::NetNsId) -> KernelResult<()> {
     let mut state = SCHED.lock();
     if let Some(task) = state.tasks.get_mut(&task_id) {
         task.net_ns = ns_id;
@@ -1737,10 +1777,7 @@ pub fn set_task_net_ns(
 ///
 /// - [`KernelError::InvalidArgument`] if `new_cgroup` doesn't exist or
 ///   the task doesn't exist.
-pub fn set_task_cgroup(
-    task_id: TaskId,
-    new_cgroup: crate::cgroup::CgroupId,
-) -> KernelResult<()> {
+pub fn set_task_cgroup(task_id: TaskId, new_cgroup: crate::cgroup::CgroupId) -> KernelResult<()> {
     // Validate the target group exists before mutating anything, so a
     // bad cgroup id can never leave a task pointing at a dead group.
     if !crate::cgroup::exists(new_cgroup) {
@@ -2076,16 +2113,24 @@ fn watchdog_check() {
     }
 
     for cpu in 1..num_cpus {
-        let Some(heartbeat) = WATCHDOG_HEARTBEAT.get(cpu) else { continue };
-        let Some(last_seen) = WATCHDOG_LAST_SEEN.get(cpu) else { continue };
-        let Some(stall_count) = WATCHDOG_STALL_COUNT.get(cpu) else { continue };
+        let Some(heartbeat) = WATCHDOG_HEARTBEAT.get(cpu) else {
+            continue;
+        };
+        let Some(last_seen) = WATCHDOG_LAST_SEEN.get(cpu) else {
+            continue;
+        };
+        let Some(stall_count) = WATCHDOG_STALL_COUNT.get(cpu) else {
+            continue;
+        };
 
         let current = heartbeat.load(Ordering::Relaxed);
         let previous = last_seen.load(Ordering::Relaxed);
 
         if current == previous && previous > 0 {
             // CPU hasn't ticked since last check.
-            let count = stall_count.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+            let count = stall_count
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1);
             if count >= WATCHDOG_ALERT_COUNT {
                 // Soft lockup detected — report but don't halt.
                 // The CPU may recover (e.g., if it was just a very
@@ -2093,11 +2138,17 @@ fn watchdog_check() {
                 let stall_secs = count.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100);
                 serial_println!(
                     "[watchdog] SOFT LOCKUP on CPU {} (no progress for {}+ seconds, heartbeat={})",
-                    cpu, stall_secs, current,
+                    cpu,
+                    stall_secs,
+                    current,
                 );
-                crate::klog!(Error, "sched.watchdog",
+                crate::klog!(
+                    Error,
+                    "sched.watchdog",
                     "soft lockup: cpu={}, stall_seconds={}, heartbeat={}",
-                    cpu, stall_secs, current
+                    cpu,
+                    stall_secs,
+                    current
                 );
             }
         } else {
@@ -2118,14 +2169,8 @@ fn watchdog_check() {
 pub fn watchdog_status() -> [(u64, u64); priority_rr::MAX_CPUS] {
     let mut result = [(0u64, 0u64); priority_rr::MAX_CPUS];
     for (i, entry) in result.iter_mut().enumerate() {
-        if let (Some(hb), Some(sc)) = (
-            WATCHDOG_HEARTBEAT.get(i),
-            WATCHDOG_STALL_COUNT.get(i),
-        ) {
-            *entry = (
-                hb.load(Ordering::Relaxed),
-                sc.load(Ordering::Relaxed),
-            );
+        if let (Some(hb), Some(sc)) = (WATCHDOG_HEARTBEAT.get(i), WATCHDOG_STALL_COUNT.get(i)) {
+            *entry = (hb.load(Ordering::Relaxed), sc.load(Ordering::Relaxed));
         }
     }
     result
@@ -2392,8 +2437,7 @@ const LIVENESS_BREADCRUMB_NS: u64 = 30_000_000_000;
 /// [`LIVENESS_BOOT_DEADLINE_DEFAULT_NS`] is the fallback for boots with no such
 /// cmdline (real hardware, a hand-rolled QEMU invocation): nothing is going to
 /// kill us there, so it only needs to be generous enough never to false-fire.
-static LIVENESS_BOOT_DEADLINE_NS: AtomicU64 =
-    AtomicU64::new(LIVENESS_BOOT_DEADLINE_DEFAULT_NS);
+static LIVENESS_BOOT_DEADLINE_NS: AtomicU64 = AtomicU64::new(LIVENESS_BOOT_DEADLINE_DEFAULT_NS);
 
 /// Fallback boot deadline when the harness supplied no `sched.boot_deadline_ms`.
 ///
@@ -2585,9 +2629,7 @@ pub fn liveness_disarm() {
 /// total stall.
 #[inline]
 fn liveness_boot_deadline_check() {
-    if !LIVENESS_ARMED.load(Ordering::Acquire)
-        || LIVENESS_DEADLINE_FIRED.load(Ordering::Relaxed)
-    {
+    if !LIVENESS_ARMED.load(Ordering::Acquire) || LIVENESS_DEADLINE_FIRED.load(Ordering::Relaxed) {
         return;
     }
     let arm_ns = LIVENESS_ARM_NS.load(Ordering::Relaxed);
@@ -2835,7 +2877,13 @@ fn dump_all_tasks_serial() {
         serial_println!(
             "[liveness]   cpu{}: heartbeat={} ctx_switches={} local_has_real_work={} \
              preempt_disable_depth={} last_rip={:#x} ({})",
-            cpu, hb, cs, has_work, preempt, rip, class,
+            cpu,
+            hb,
+            cs,
+            has_work,
+            preempt,
+            rip,
+            class,
         );
 
         // Full call stack for the wedged CPU, not just its lone RIP. Walk the
@@ -2866,11 +2914,17 @@ fn dump_all_tasks_serial() {
         let mut hist = [0u64; 16];
         let hn = crate::rip_sample::recent_rips(cpu, &mut hist);
         if hn > 0 {
-            serial_println!("[liveness]   cpu{} recent RIPs (newest first, {} samples):", cpu, hn);
+            serial_println!(
+                "[liveness]   cpu{} recent RIPs (newest first, {} samples):",
+                cpu,
+                hn
+            );
             for (i, &r) in hist.iter().take(hn).enumerate() {
                 serial_println!(
                     "[liveness]     [{:2}] {:#018x} ({})",
-                    i, r, crate::rip_sample::AddrClass::classify(r).name(),
+                    i,
+                    r,
+                    crate::rip_sample::AddrClass::classify(r).name(),
                 );
             }
         }
@@ -2894,11 +2948,18 @@ fn dump_all_tasks_serial() {
         return;
     };
 
-    serial_println!("[liveness]   {} task(s) in table (now_tick={}):", state.tasks.len(), now);
+    serial_println!(
+        "[liveness]   {} task(s) in table (now_tick={}):",
+        state.tasks.len(),
+        now
+    );
     for (&id, task) in state.tasks.iter() {
         // Name is stored as raw bytes (OS-boundary data): render losslessly
         // as an escaped byte string rather than forcing UTF-8.
-        let name = task.name.get(..task.name_len.min(task.name.len())).unwrap_or(&[]);
+        let name = task
+            .name
+            .get(..task.name_len.min(task.name.len()))
+            .unwrap_or(&[]);
         let waited = if task.ready_since_tick == 0 {
             0
         } else {
@@ -2995,9 +3056,7 @@ pub fn timer_tick(from_user: bool) -> bool {
     // For simplicity, we track idle via the PER_CPU_SCHED fast check:
     // if the local queue has no real work, this CPU is effectively idle.
     let has_real_work = PER_CPU_SCHED.local_has_real_work(cpu);
-    if !has_real_work
-        && let Some(idle) = IDLE_TICK_COUNTS.get(cpu)
-    {
+    if !has_real_work && let Some(idle) = IDLE_TICK_COUNTS.get(cpu) {
         idle.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -3092,7 +3151,9 @@ pub fn timer_tick(from_user: bool) -> bool {
     // OPT: These checks use PER_CPU_SCHED directly — no global lock.
     // This proactive check means idle CPUs pull work within 100ms
     // instead of waiting for the next yield/block event.
-    let Some(balance_counter) = BALANCE_TICKS.get(cpu) else { return false; };
+    let Some(balance_counter) = BALANCE_TICKS.get(cpu) else {
+        return false;
+    };
     let tick_count = balance_counter.fetch_add(1, Ordering::Relaxed);
     if tick_count % BALANCE_INTERVAL == 0 {
         // Check: does our local queue have real work (above idle)?
@@ -3383,9 +3444,7 @@ fn update_load_average() {
     let num_cpus = crate::smp::cpu_count().max(1);
     let mut runnable: u64 = 0;
     for cpu_idx in 0..num_cpus.min(priority_rr::MAX_CPUS) {
-        runnable = runnable.saturating_add(
-            PER_CPU_SCHED.queue_length(cpu_idx) as u64,
-        );
+        runnable = runnable.saturating_add(PER_CPU_SCHED.queue_length(cpu_idx) as u64);
     }
 
     // active = n_runnable in fixed-point (Linux passes `nr_active * FIXED_1`).
@@ -3478,7 +3537,9 @@ fn check_starvation() {
 
     // Use try_lock to avoid blocking timer_tick if the scheduler is
     // already held (e.g., a context switch is in progress).
-    let Some(state) = SCHED.try_lock() else { return };
+    let Some(state) = SCHED.try_lock() else {
+        return;
+    };
 
     // Collect tasks that need boosting (avoid mutating while iterating).
     // Stack-allocated small buffer for the common case (few starved tasks).
@@ -3661,15 +3722,15 @@ pub fn set_cpu_quota(task_id: TaskId, quota_pct: u8) -> bool {
     // logging under the lock is acceptable.
     if old_quota != quota_pct {
         match (old_quota, quota_pct) {
-            (0, new) => serial_println!(
-                "[sched] Task {} CPU quota: unlimited% → {}%", task_id, new
-            ),
-            (old, 0) => serial_println!(
-                "[sched] Task {} CPU quota: {}% → unlimited%", task_id, old
-            ),
-            (old, new) => serial_println!(
-                "[sched] Task {} CPU quota: {}% → {}%", task_id, old, new
-            ),
+            (0, new) => {
+                serial_println!("[sched] Task {} CPU quota: unlimited% → {}%", task_id, new)
+            }
+            (old, 0) => {
+                serial_println!("[sched] Task {} CPU quota: {}% → unlimited%", task_id, old)
+            }
+            (old, new) => {
+                serial_println!("[sched] Task {} CPU quota: {}% → {}%", task_id, old, new)
+            }
         }
     }
 
@@ -3920,7 +3981,9 @@ pub fn resume(task_id: TaskId) -> bool {
 pub fn set_priority(task_id: TaskId, new_priority: u8) -> Option<u8> {
     let clamped = new_priority.min(
         #[allow(clippy::cast_possible_truncation)]
-        { (NUM_PRIORITIES - 1) as u8 }
+        {
+            (NUM_PRIORITIES - 1) as u8
+        },
     );
 
     let mut state = SCHED.lock();
@@ -3958,7 +4021,9 @@ pub fn set_priority(task_id: TaskId, new_priority: u8) -> Option<u8> {
 
     serial_println!(
         "[sched] Task {} priority: {} → {}{}",
-        task_id, old_priority, clamped,
+        task_id,
+        old_priority,
+        clamped,
         if is_interactive { " (interactive)" } else { "" }
     );
     Some(old_priority)
@@ -3992,8 +4057,7 @@ pub fn set_cpu_affinity(task_id: TaskId, mask: u64) -> Option<u64> {
     }
 
     // Check if the task's current CPU is still allowed.
-    let needs_migrate = task_state == TaskState::Ready
-        && (mask >> old_cpu) & 1 == 0;
+    let needs_migrate = task_state == TaskState::Ready && (mask >> old_cpu) & 1 == 0;
 
     // Update the stored mask.
     if let Some(task) = state.tasks.get_mut(&task_id) {
@@ -4122,11 +4186,10 @@ pub fn reap_dead_tasks() -> usize {
     // related work.
     let dead_ids: alloc::vec::Vec<TaskId> = {
         let state = SCHED.lock();
-        state.tasks.iter()
-            .filter(|(id, task)| {
-                task.state == TaskState::Dead
-                    && !active_ids.contains(id)
-            })
+        state
+            .tasks
+            .iter()
+            .filter(|(id, task)| task.state == TaskState::Dead && !active_ids.contains(id))
             .map(|(id, _)| *id)
             .collect()
     };
@@ -4170,7 +4233,8 @@ pub fn reap_dead_tasks() -> usize {
             if let Err(e) = unsafe { task.free_stack() } {
                 serial_println!(
                     "[sched] WARNING: failed to free stack for task {}: {:?}",
-                    id, e
+                    id,
+                    e
                 );
             }
 
@@ -4229,7 +4293,9 @@ pub fn apply_workload_profile(profile_id: u8) -> bool {
     PER_CPU_SCHED.apply_profile(profile);
     serial_println!(
         "[sched] Applied workload profile: {} (base={}, inc={})",
-        profile.name(), profile.base(), profile.increment()
+        profile.name(),
+        profile.base(),
+        profile.increment()
     );
     true
 }
@@ -4343,7 +4409,10 @@ pub fn boost_priority(task_id: TaskId, donor_priority: u8) -> Option<u8> {
 
     serial_println!(
         "[sched] PI boost: task {} priority {} → {} (donor prio {})",
-        task_id, old_effective, new_effective, donor_priority
+        task_id,
+        old_effective,
+        new_effective,
+        donor_priority
     );
     Some(new_effective)
 }
@@ -4390,8 +4459,14 @@ pub fn set_inherited_priority(task_id: TaskId, new_inherited: Option<u8>) -> Opt
     if old_effective != new_effective {
         serial_println!(
             "[sched] PI {}: task {} effective priority {} → {}",
-            if new_inherited.is_some() { "update" } else { "clear" },
-            task_id, old_effective, new_effective
+            if new_inherited.is_some() {
+                "update"
+            } else {
+                "clear"
+            },
+            task_id,
+            old_effective,
+            new_effective
         );
     }
 
@@ -4485,7 +4560,8 @@ pub fn pi_chain_boost(
         if next_owner == start_owner {
             serial_println!(
                 "[sched] PI chain: cycle detected at task {} (addr {:#x})",
-                next_owner, addr
+                next_owner,
+                addr
             );
             break;
         }
@@ -4499,7 +4575,9 @@ pub fn pi_chain_boost(
     if boosted > 0 {
         serial_println!(
             "[sched] PI chain: boosted {} transitive owner(s) from task {} (donor prio {})",
-            boosted, start_owner, donor_priority
+            boosted,
+            start_owner,
+            donor_priority
         );
     }
 
@@ -4752,7 +4830,9 @@ pub fn check_all_canaries() -> CanaryScanResult {
         if canary == task_item.planted_canary {
             result.ok += 1;
         } else {
-            result.corrupted.push((id, task_item.name, task_item.name_len));
+            result
+                .corrupted
+                .push((id, task_item.name, task_item.name_len));
         }
     }
 
@@ -5010,7 +5090,12 @@ pub fn defer_wake(task_id: TaskId) {
     for slot in &DEFERRED_WAKES {
         // CAS: claim an empty slot.
         if slot
-            .compare_exchange(DEFERRED_WAKE_EMPTY, task_id, Ordering::AcqRel, Ordering::Relaxed)
+            .compare_exchange(
+                DEFERRED_WAKE_EMPTY,
+                task_id,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
             .is_ok()
         {
             // Signal that the drain loop should run on next schedule_inner.
@@ -5151,7 +5236,10 @@ fn dump_idle_fallback_wedge(state: &SchedState, cpu: usize, blocked_id: TaskId) 
             task.ready_since_tick,
         );
     } else {
-        serial_println!("[sched]   parked task {} is GONE from the table", blocked_id);
+        serial_println!(
+            "[sched]   parked task {} is GONE from the table",
+            blocked_id
+        );
     }
 
     // Any occupied deferred-wake slots (task IDs queued for a retry wake).
@@ -5688,24 +5776,31 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     // executed a single instruction" boot hang (B-PTHREAD-YIELDBUDGET
                     // family).  So: extract first, mark Running only on success,
                     // and re-enqueue `ready_id` on failure.
-                    let old_data = s.tasks.get_mut(&current_id)
-                        .map(|t| {
-                            t.check_stack_canary();
-                            // Real switch (current != ready): charge the
-                            // outgoing task's voluntary/involuntary ctxsw.
-                            match kind {
-                                SwitchKind::Voluntary => {
-                                    t.nvcsw = t.nvcsw.saturating_add(1);
-                                }
-                                SwitchKind::Involuntary => {
-                                    t.nivcsw = t.nivcsw.saturating_add(1);
-                                }
-                                SwitchKind::Uncounted => {}
+                    let old_data = s.tasks.get_mut(&current_id).map(|t| {
+                        t.check_stack_canary();
+                        // Real switch (current != ready): charge the
+                        // outgoing task's voluntary/involuntary ctxsw.
+                        match kind {
+                            SwitchKind::Voluntary => {
+                                t.nvcsw = t.nvcsw.saturating_add(1);
                             }
-                            (&raw mut t.context, &raw mut t.fpu_state, t.pml4_phys)
-                        });
-                    let new_data = s.tasks.get(&ready_id)
-                        .map(|t| (&raw const t.context, &raw const t.fpu_state, t.pml4_phys, t.stack_bottom, t.fs_base, t.gs_base));
+                            SwitchKind::Involuntary => {
+                                t.nivcsw = t.nivcsw.saturating_add(1);
+                            }
+                            SwitchKind::Uncounted => {}
+                        }
+                        (&raw mut t.context, &raw mut t.fpu_state, t.pml4_phys)
+                    });
+                    let new_data = s.tasks.get(&ready_id).map(|t| {
+                        (
+                            &raw const t.context,
+                            &raw const t.fpu_state,
+                            t.pml4_phys,
+                            t.stack_bottom,
+                            t.fs_base,
+                            t.gs_base,
+                        )
+                    });
 
                     if old_data.is_none() || new_data.is_none() {
                         // Switch cannot proceed (the outgoing task vanished from
@@ -5713,8 +5808,8 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         // `ready_id` is still Ready but was dequeued by the pick
                         // above; put it back so it is not lost, and log loudly so
                         // the trigger is captured rather than silently wedging.
-                        let (still_ready, prio) = s.tasks.get(&ready_id)
-                            .map_or((false, 0u8), |t| {
+                        let (still_ready, prio) =
+                            s.tasks.get(&ready_id).map_or((false, 0u8), |t| {
                                 (t.state == TaskState::Ready, t.effective_priority())
                             });
                         if still_ready {
@@ -5724,9 +5819,17 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                             "[sched] BUG: idle-fallback switch aborted (current {} \
                              {}, ready {} {}) — re-enqueued ready task {}",
                             current_id,
-                            if old_data.is_none() { "missing" } else { "present" },
+                            if old_data.is_none() {
+                                "missing"
+                            } else {
+                                "present"
+                            },
                             ready_id,
-                            if new_data.is_none() { "missing" } else { "present" },
+                            if new_data.is_none() {
+                                "missing"
+                            } else {
+                                "present"
+                            },
                             ready_id,
                         );
                         drop(s);
@@ -5742,8 +5845,10 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         task.last_cpu = cpu;
                     }
 
-                    if let (Some((old_p, old_fpu, o_pml4)), Some((new_p, new_fpu, n_pml4, n_sb, n_fs_base, n_gs_base))) =
-                        (old_data, new_data)
+                    if let (
+                        Some((old_p, old_fpu, o_pml4)),
+                        Some((new_p, new_fpu, n_pml4, n_sb, n_fs_base, n_gs_base)),
+                    ) = (old_data, new_data)
                     {
                         // Account CPU cycles to the outgoing task (idle fallback path).
                         account_cycles(&mut s, current_id, cpu);
@@ -5837,7 +5942,9 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         // new is & (shared), pointing to different tasks.
                         // FPU pointers are 64-byte aligned (FpuState has
                         // repr(align(64))).
-                        unsafe { switch_context(&mut *old_p, &*new_p, old_fpu, new_fpu); }
+                        unsafe {
+                            switch_context(&mut *old_p, &*new_p, old_fpu, new_fpu);
+                        }
 
                         // NOTE: After switch_context returns, we're now
                         // running as the OLD task (resumed later).  The
@@ -5907,29 +6014,38 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
         // pointer extraction and use, so the pointers remain valid.
         // The lock is dropped before switch_context, but no other code
         // on this CPU runs until the switch completes.
-        let old_data = state.tasks.get_mut(&current_id)
-            .map(|t| {
-                // Check stack canary before switching away from this task.
-                t.check_stack_canary();
-                // Reaching here means a real switch (picked_id != current_id
-                // returns early above), so charge the outgoing task's
-                // voluntary/involuntary context-switch counter.
-                match kind {
-                    SwitchKind::Voluntary => {
-                        t.nvcsw = t.nvcsw.saturating_add(1);
-                    }
-                    SwitchKind::Involuntary => {
-                        t.nivcsw = t.nivcsw.saturating_add(1);
-                    }
-                    SwitchKind::Uncounted => {}
+        let old_data = state.tasks.get_mut(&current_id).map(|t| {
+            // Check stack canary before switching away from this task.
+            t.check_stack_canary();
+            // Reaching here means a real switch (picked_id != current_id
+            // returns early above), so charge the outgoing task's
+            // voluntary/involuntary context-switch counter.
+            match kind {
+                SwitchKind::Voluntary => {
+                    t.nvcsw = t.nvcsw.saturating_add(1);
                 }
-                (&raw mut t.context, &raw mut t.fpu_state, t.pml4_phys)
-            });
-        let new_data = state.tasks.get(&next_id)
-            .map(|t| (&raw const t.context, &raw const t.fpu_state, t.pml4_phys, t.stack_bottom, t.fs_base, t.gs_base));
+                SwitchKind::Involuntary => {
+                    t.nivcsw = t.nivcsw.saturating_add(1);
+                }
+                SwitchKind::Uncounted => {}
+            }
+            (&raw mut t.context, &raw mut t.fpu_state, t.pml4_phys)
+        });
+        let new_data = state.tasks.get(&next_id).map(|t| {
+            (
+                &raw const t.context,
+                &raw const t.fpu_state,
+                t.pml4_phys,
+                t.stack_bottom,
+                t.fs_base,
+                t.gs_base,
+            )
+        });
 
-        if let (Some((old, old_fpu, o_pml4)), Some((new, new_fpu, n_pml4, n_stack_bottom, n_fs_base, n_gs_base))) =
-            (old_data, new_data)
+        if let (
+            Some((old, old_fpu, o_pml4)),
+            Some((new, new_fpu, n_pml4, n_stack_bottom, n_fs_base, n_gs_base)),
+        ) = (old_data, new_data)
         {
             // Both present — commit `next_id` as the running task now that the
             // switch is guaranteed (re-borrow; the raw pointer taken above stays
@@ -5959,17 +6075,18 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
             // Switch cannot proceed (outgoing task vanished from the table).
             // `next_id` is still Ready but was dequeued by the pick above; put
             // it back so it is not orphaned out of the run queue, then bail.
-            let (still_ready, prio) = state.tasks.get(&next_id)
-                .map_or((false, 0u8), |t| {
-                    (t.state == TaskState::Ready, t.effective_priority())
-                });
+            let (still_ready, prio) = state.tasks.get(&next_id).map_or((false, 0u8), |t| {
+                (t.state == TaskState::Ready, t.effective_priority())
+            });
             if still_ready {
                 PER_CPU_SCHED.enqueue(next_id, prio, cpu);
             }
             serial_println!(
                 "[sched] BUG: context switch failed — task {} or {} not in table \
                  (re-enqueued ready task {})",
-                current_id, next_id, next_id
+                current_id,
+                next_id,
+                next_id
             );
             return;
         }
@@ -6099,16 +6216,14 @@ pub fn smp_self_test() -> KernelResult<()> {
             if !seen.insert(id) {
                 serial_println!(
                     "[sched]   FAIL: CPU {} shares current_task {} with another CPU",
-                    i, id
+                    i,
+                    id
                 );
                 return Err(KernelError::InternalError);
             }
         }
     }
-    serial_println!(
-        "[sched]   Distinct current tasks: OK ({} CPUs)",
-        num_cpus
-    );
+    serial_println!("[sched]   Distinct current tasks: OK ({} CPUs)", num_cpus);
 
     // 2. Each AP's idle task must exist in the task table at IDLE_PRIORITY.
     if num_cpus > 1 {
@@ -6122,32 +6237,30 @@ pub fn smp_self_test() -> KernelResult<()> {
                 Some(t) => {
                     serial_println!(
                         "[sched]   FAIL: AP {}'s task {} has priority {} (expected {})",
-                        i, ap_current, t.priority, task::IDLE_PRIORITY
+                        i,
+                        ap_current,
+                        t.priority,
+                        task::IDLE_PRIORITY
                     );
                     return Err(KernelError::InternalError);
                 }
                 None => {
                     serial_println!(
                         "[sched]   FAIL: AP {}'s current task {} not in table",
-                        i, ap_current
+                        i,
+                        ap_current
                     );
                     return Err(KernelError::InternalError);
                 }
             }
         }
         drop(state);
-        serial_println!(
-            "[sched]   AP idle tasks valid: OK ({} APs)",
-            num_cpus - 1
-        );
+        serial_println!("[sched]   AP idle tasks valid: OK ({} APs)", num_cpus - 1);
     }
 
     // 3. No CPU should be in idle fallback state during normal operation.
     for i in 0..num_cpus {
-        if IDLE_FLAGS
-            .get(i)
-            .is_some_and(|f| f.load(Ordering::Acquire))
-        {
+        if IDLE_FLAGS.get(i).is_some_and(|f| f.load(Ordering::Acquire)) {
             serial_println!(
                 "[sched]   FAIL: CPU {} has idle flag set during normal operation",
                 i
@@ -6172,10 +6285,7 @@ pub fn smp_self_test() -> KernelResult<()> {
         let state = SCHED.lock();
         for (i, &id) in current_ids.iter().enumerate() {
             if !state.tasks.contains_key(&id) {
-                serial_println!(
-                    "[sched]   FAIL: CPU {}'s task {} was reaped!",
-                    i, id
-                );
+                serial_println!("[sched]   FAIL: CPU {}'s task {} was reaped!", i, id);
                 return Err(KernelError::InternalError);
             }
         }
@@ -6359,7 +6469,9 @@ fn test_liveness_watchdog() -> KernelResult<()> {
             return false;
         }
         if LIVENESS_CTX_STALL_COUNT.load(Ordering::Relaxed) != 0 {
-            serial_println!("[sched]   FAIL: livelock guard did not reset its counter after warning");
+            serial_println!(
+                "[sched]   FAIL: livelock guard did not reset its counter after warning"
+            );
             return false;
         }
 
@@ -6369,7 +6481,9 @@ fn test_liveness_watchdog() -> KernelResult<()> {
         LIVENESS_LAST_CTX.store(total_ctx_switches().wrapping_sub(1), Ordering::Relaxed);
         liveness_check();
         if LIVENESS_CTX_STALL_COUNT.load(Ordering::Relaxed) != 0 {
-            serial_println!("[sched]   FAIL: livelock guard counted an interval with ctx-switch progress");
+            serial_println!(
+                "[sched]   FAIL: livelock guard counted an interval with ctx-switch progress"
+            );
             return false;
         }
         true
@@ -6403,10 +6517,7 @@ fn test_liveness_watchdog() -> KernelResult<()> {
         liveness_arm();
         for _ in 0..LIVENESS_ALERT_COUNT.saturating_add(1) {
             // Pretend a page fault or disk read landed since the last check.
-            LIVENESS_LAST_KWORK.store(
-                kernel_progress_count().wrapping_sub(1),
-                Ordering::Relaxed,
-            );
+            LIVENESS_LAST_KWORK.store(kernel_progress_count().wrapping_sub(1), Ordering::Relaxed);
             liveness_check(); // useful-work frozen, silent, but kernel busy
         }
         if LIVENESS_STALL_COUNT.load(Ordering::Relaxed) != 0 {
@@ -6563,15 +6674,14 @@ fn test_load_average() -> KernelResult<()> {
         load = calc_load(load, LOAD_EXP_1, active_one);
     }
     if load != LOAD_FIXED_1 {
-        serial_println!(
-            "[sched]   FAIL: rising load converged to {load}, want {LOAD_FIXED_1}"
-        );
+        serial_println!("[sched]   FAIL: rising load converged to {load}, want {LOAD_FIXED_1}");
         return Err(KernelError::InternalError);
     }
     if load_int(load) != 1 || load_frac(load) != 0 {
         serial_println!(
             "[sched]   FAIL: load 1.00 formatted as {}.{:02}",
-            load_int(load), load_frac(load)
+            load_int(load),
+            load_frac(load)
         );
         return Err(KernelError::InternalError);
     }
@@ -6591,7 +6701,8 @@ fn test_load_average() -> KernelResult<()> {
     if load_int(l) != 1 || load_frac(l) != 50 {
         serial_println!(
             "[sched]   FAIL: 1.50 fixed-point formatted as {}.{:02}",
-            load_int(l), load_frac(l)
+            load_int(l),
+            load_frac(l)
         );
         return Err(KernelError::InternalError);
     }
@@ -6629,16 +6740,11 @@ fn test_stack_canary() -> KernelResult<()> {
         if let Some(t) = state.tasks.get(&id) {
             if t.stack_bottom != 0 {
                 // SAFETY: stack_bottom is valid HHDM address.
-                let canary = unsafe {
-                    core::ptr::read_volatile(t.stack_bottom as *const u64)
-                };
+                let canary = unsafe { core::ptr::read_volatile(t.stack_bottom as *const u64) };
                 // Compare against the per-task planted value, not the
                 // global canary (see Task::planted_canary).
                 if canary != t.planted_canary {
-                    serial_println!(
-                        "[sched]   FAIL: stack canary corrupted for task {}",
-                        id
-                    );
+                    serial_println!("[sched]   FAIL: stack canary corrupted for task {}", id);
                     return Err(KernelError::InternalError);
                 }
             }
@@ -6651,7 +6757,9 @@ fn test_stack_canary() -> KernelResult<()> {
         if let Some(mut t) = state.tasks.remove(&id) {
             if t.stack_phys != 0 {
                 // SAFETY: Task is dead and removed.
-                unsafe { let _ = t.free_stack(); }
+                unsafe {
+                    let _ = t.free_stack();
+                }
                 t.stack_phys = 0;
             }
         }
@@ -6672,19 +6780,16 @@ fn test_cooperative_scheduling() -> KernelResult<()> {
 
     // Yield to let the test tasks run.
     // Each test task increments TEST_COUNTER and yields back.
-    yield_now();  // → test-a runs, increments to 10, yields
-    yield_now();  // → test-b runs, increments to 30, yields
-    yield_now();  // → test-a runs again, increments to 40, exits
-    yield_now();  // → test-b runs again, increments to 60, exits
+    yield_now(); // → test-a runs, increments to 10, yields
+    yield_now(); // → test-b runs, increments to 30, yields
+    yield_now(); // → test-a runs again, increments to 40, exits
+    yield_now(); // → test-b runs again, increments to 60, exits
 
     let final_count = TEST_COUNTER.load(Ordering::SeqCst);
     serial_println!("[sched]   Test counter final value: {}", final_count);
 
     if final_count != 60 {
-        serial_println!(
-            "[sched]   FAIL: expected counter=60, got {}",
-            final_count
-        );
+        serial_println!("[sched]   FAIL: expected counter=60, got {}", final_count);
         return Err(KernelError::InternalError);
     }
     serial_println!("[sched]   Cooperative scheduling: OK");
@@ -6699,7 +6804,9 @@ fn test_cooperative_scheduling() -> KernelResult<()> {
             {
                 // SAFETY: Task is dead and removed from the table;
                 // no CPU is using its stack.
-                unsafe { let _ = task.free_stack(); }
+                unsafe {
+                    let _ = task.free_stack();
+                }
                 // Clear stack_phys so Drop doesn't warn.
                 task.stack_phys = 0;
             }
@@ -6771,10 +6878,7 @@ fn test_kill_and_reap() -> KernelResult<()> {
         let state = SCHED.lock();
         let task_state = state.tasks.get(&id_block).map(|t| t.state);
         if task_state != Some(TaskState::Blocked) {
-            serial_println!(
-                "[sched]   FAIL: expected Blocked, got {:?}",
-                task_state
-            );
+            serial_println!("[sched]   FAIL: expected Blocked, got {:?}", task_state);
             return Err(KernelError::InternalError);
         }
     }
@@ -6833,10 +6937,7 @@ fn test_suspend_resume() -> KernelResult<()> {
         let state = SCHED.lock();
         if let Some(task) = state.tasks.get(&id) {
             if task.state != TaskState::Suspended {
-                serial_println!(
-                    "[sched]   FAIL: expected Suspended, got {:?}",
-                    task.state
-                );
+                serial_println!("[sched]   FAIL: expected Suspended, got {:?}", task.state);
                 return Err(KernelError::InternalError);
             }
         }
@@ -6882,7 +6983,9 @@ fn test_suspend_resume() -> KernelResult<()> {
             && task.stack_phys != 0
         {
             // SAFETY: Task is Dead, removed from table, stack_phys is valid.
-            unsafe { let _ = task.free_stack(); }
+            unsafe {
+                let _ = task.free_stack();
+            }
             task.stack_phys = 0;
         }
     }
@@ -6942,7 +7045,9 @@ fn test_set_priority() -> KernelResult<()> {
             && task.stack_phys != 0
         {
             // SAFETY: Task is Dead, removed from table, stack_phys is valid.
-            unsafe { let _ = task.free_stack(); }
+            unsafe {
+                let _ = task.free_stack();
+            }
             task.stack_phys = 0;
         }
     }
@@ -6988,7 +7093,8 @@ fn test_interactive_detection() -> KernelResult<()> {
             if effective != expected {
                 serial_println!(
                     "[sched]   FAIL: effective priority should be {}, got {}",
-                    expected, effective
+                    expected,
+                    effective
                 );
                 return Err(KernelError::InternalError);
             }
@@ -7012,7 +7118,8 @@ fn test_interactive_detection() -> KernelResult<()> {
             if effective != base_priority {
                 serial_println!(
                     "[sched]   FAIL: non-interactive effective priority should be {}, got {}",
-                    base_priority, effective
+                    base_priority,
+                    effective
                 );
                 return Err(KernelError::InternalError);
             }
@@ -7030,14 +7137,17 @@ fn test_interactive_detection() -> KernelResult<()> {
             && task.stack_phys != 0
         {
             // SAFETY: Task is Dead, removed from table, stack_phys is valid.
-            unsafe { let _ = task.free_stack(); }
+            unsafe {
+                let _ = task.free_stack();
+            }
             task.stack_phys = 0;
         }
     }
 
     serial_println!(
         "[sched]   Interactive detection (threshold={}ticks, boost={}): OK",
-        INTERACTIVE_THRESHOLD_TICKS, INTERACTIVE_BOOST
+        INTERACTIVE_THRESHOLD_TICKS,
+        INTERACTIVE_BOOST
     );
     Ok(())
 }
@@ -7079,7 +7189,10 @@ fn test_time_slice_config() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if get_time_slice(5) != Some(100) {
-        serial_println!("[sched]   FAIL: after set, level 5 is {:?}", get_time_slice(5));
+        serial_println!(
+            "[sched]   FAIL: after set, level 5 is {:?}",
+            get_time_slice(5)
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -7101,11 +7214,17 @@ fn test_time_slice_config() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if get_time_slice(0) != Some(4) {
-        serial_println!("[sched]   FAIL: after reconfig, level 0 is {:?}", get_time_slice(0));
+        serial_println!(
+            "[sched]   FAIL: after reconfig, level 0 is {:?}",
+            get_time_slice(0)
+        );
         return Err(KernelError::InternalError);
     }
     if get_time_slice(5) != Some(14) {
-        serial_println!("[sched]   FAIL: after reconfig, level 5 is {:?}", get_time_slice(5));
+        serial_println!(
+            "[sched]   FAIL: after reconfig, level 5 is {:?}",
+            get_time_slice(5)
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -7138,7 +7257,8 @@ fn test_workload_profiles() -> KernelResult<()> {
     if get_time_slice(0) != Some(2) || get_time_slice(1) != Some(3) {
         serial_println!(
             "[sched]   FAIL: Desktop profile: level0={:?}, level1={:?}, expected 2, 3",
-            get_time_slice(0), get_time_slice(1)
+            get_time_slice(0),
+            get_time_slice(1)
         );
         return Err(KernelError::InternalError);
     }
@@ -7161,7 +7281,8 @@ fn test_workload_profiles() -> KernelResult<()> {
     if get_time_slice(0) != Some(4) || get_time_slice(1) != Some(6) {
         serial_println!(
             "[sched]   FAIL: Server profile: level0={:?}, level1={:?}, expected 4, 6",
-            get_time_slice(0), get_time_slice(1)
+            get_time_slice(0),
+            get_time_slice(1)
         );
         return Err(KernelError::InternalError);
     }
@@ -7184,7 +7305,8 @@ fn test_workload_profiles() -> KernelResult<()> {
     if get_time_slice(0) != Some(1) || get_time_slice(1) != Some(2) {
         serial_println!(
             "[sched]   FAIL: Development profile: level0={:?}, level1={:?}, expected 1, 2",
-            get_time_slice(0), get_time_slice(1)
+            get_time_slice(0),
+            get_time_slice(1)
         );
         return Err(KernelError::InternalError);
     }
@@ -7207,7 +7329,8 @@ fn test_workload_profiles() -> KernelResult<()> {
     if get_time_slice(0) != Some(1) || get_time_slice(1) != Some(3) {
         serial_println!(
             "[sched]   FAIL: Gaming profile: level0={:?}, level1={:?}, expected 1, 3",
-            get_time_slice(0), get_time_slice(1)
+            get_time_slice(0),
+            get_time_slice(1)
         );
         return Err(KernelError::InternalError);
     }
@@ -7255,8 +7378,8 @@ fn test_workload_profiles() -> KernelResult<()> {
 /// from another.  This validates the work stealing algorithm without
 /// requiring actual SMP hardware.
 fn test_per_cpu_work_stealing() -> KernelResult<()> {
-    use alloc::boxed::Box;
     use self::priority_rr::PerCpuScheduler;
+    use alloc::boxed::Box;
 
     // PerCpuScheduler is ~58 KB (MAX_CPUS=64 × ~900 bytes each).
     // Must be heap-allocated — kernel task stacks are only 32 KB.
@@ -7328,14 +7451,17 @@ fn test_per_cpu_work_stealing() -> KernelResult<()> {
     if total != 8 {
         serial_println!(
             "[sched]   FAIL: total tasks {} != 8 (stolen={}, remaining={})",
-            total, picked.len(), remaining
+            total,
+            picked.len(),
+            remaining
         );
         return Err(KernelError::InternalError);
     }
 
     serial_println!(
         "[sched]   Per-CPU work stealing: OK (stolen={}, remaining={}, total=8)",
-        picked.len(), remaining
+        picked.len(),
+        remaining
     );
     Ok(())
 }
@@ -7370,7 +7496,9 @@ fn test_smp_idle_task_safety() -> KernelResult<()> {
     if final_task_count != initial_task_count {
         serial_println!(
             "[sched]   FAIL: task leak: {} before, {} after (reaped {})",
-            initial_task_count, final_task_count, reaped
+            initial_task_count,
+            final_task_count,
+            reaped
         );
         return Err(KernelError::InternalError);
     }
@@ -7416,7 +7544,9 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
         {
             serial_println!(
                 "[sched]   FAIL: PI tasks not blocked: A={:?}, B={:?}, C={:?}",
-                a_state, b_state, c_state
+                a_state,
+                b_state,
+                c_state
             );
             // Clean up.
             drop(state);
@@ -7442,9 +7572,13 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
     if b_addr != Some(0xDEAD_0002) || a_addr.is_some() || c_addr.is_some() {
         serial_println!(
             "[sched]   FAIL: blocked_on_pi_addr: A={:?}, B={:?}, C={:?}",
-            a_addr, b_addr, c_addr
+            a_addr,
+            b_addr,
+            c_addr
         );
-        kill_task(task_a); kill_task(task_b); kill_task(task_c);
+        kill_task(task_a);
+        kill_task(task_b);
+        kill_task(task_c);
         reap_dead_tasks();
         return Err(KernelError::InternalError);
     }
@@ -7470,7 +7604,11 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
     // Mock owner lookup: 0xDEAD_0002 → task_c, everything else → None.
     let mock_c = task_c; // Capture for closure.
     let chain_boosted = pi_chain_boost(task_b, 4, |addr| {
-        if addr == 0xDEAD_0002 { Some(mock_c) } else { None }
+        if addr == 0xDEAD_0002 {
+            Some(mock_c)
+        } else {
+            None
+        }
     });
 
     if chain_boosted != 1 {
@@ -7478,7 +7616,9 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
             "[sched]   FAIL: pi_chain_boost: expected 1 transitive boost, got {}",
             chain_boosted
         );
-        kill_task(task_a); kill_task(task_b); kill_task(task_c);
+        kill_task(task_a);
+        kill_task(task_b);
+        kill_task(task_c);
         reap_dead_tasks();
         return Err(KernelError::InternalError);
     }
@@ -7490,7 +7630,9 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
             "[sched]   FAIL: task C effective prio should be 4, got {:?}",
             c_eff
         );
-        kill_task(task_a); kill_task(task_b); kill_task(task_c);
+        kill_task(task_a);
+        kill_task(task_b);
+        kill_task(task_c);
         reap_dead_tasks();
         return Err(KernelError::InternalError);
     }
@@ -7500,7 +7642,9 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
     set_blocked_on_pi_addr(task_b, None);
     if get_blocked_on_pi_addr(task_b).is_some() {
         serial_println!("[sched]   FAIL: blocked_on_pi_addr not cleared");
-        kill_task(task_a); kill_task(task_b); kill_task(task_c);
+        kill_task(task_a);
+        kill_task(task_b);
+        kill_task(task_c);
         reap_dead_tasks();
         return Err(KernelError::InternalError);
     }
@@ -7514,7 +7658,9 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
             "[sched]   FAIL: expected 0 boosts (chain terminated), got {}",
             chain_boosted_2
         );
-        kill_task(task_a); kill_task(task_b); kill_task(task_c);
+        kill_task(task_a);
+        kill_task(task_b);
+        kill_task(task_c);
         reap_dead_tasks();
         return Err(KernelError::InternalError);
     }
@@ -7529,9 +7675,13 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
     let mock_b = task_b;
     let mock_c2 = task_c;
     let cycle_boosted = pi_chain_boost(task_b, 2, |addr| {
-        if addr == 0xDEAD_0002 { Some(mock_c2) }
-        else if addr == 0xDEAD_0001 { Some(mock_b) }
-        else { None }
+        if addr == 0xDEAD_0002 {
+            Some(mock_c2)
+        } else if addr == 0xDEAD_0001 {
+            Some(mock_b)
+        } else {
+            None
+        }
     });
 
     // Should detect the cycle: boost C (1 boost), then find B which is
@@ -7541,7 +7691,9 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
             "[sched]   FAIL: cycle detection: expected 1 boost, got {}",
             cycle_boosted
         );
-        kill_task(task_a); kill_task(task_b); kill_task(task_c);
+        kill_task(task_a);
+        kill_task(task_b);
+        kill_task(task_c);
         reap_dead_tasks();
         return Err(KernelError::InternalError);
     }
@@ -7573,7 +7725,10 @@ fn test_cpu_affinity() -> KernelResult<()> {
     let id = spawn(b"test-aff", task::DEFAULT_PRIORITY, test_task_incr, 0, 0)?;
     let aff = get_cpu_affinity(id).ok_or(KernelError::InternalError)?;
     if aff != task::CPU_AFFINITY_ALL {
-        serial_println!("[sched]   FAIL: default affinity should be all-CPUs, got {:#x}", aff);
+        serial_println!(
+            "[sched]   FAIL: default affinity should be all-CPUs, got {:#x}",
+            aff
+        );
         kill_task(id);
         reap_dead_tasks();
         return Err(KernelError::InternalError);
@@ -7609,11 +7764,19 @@ fn test_cpu_affinity() -> KernelResult<()> {
     // 4. spawn_with_affinity.
     let pml4 = crate::mm::page_table::active_pml4_phys();
     let id2 = spawn_with_affinity(
-        b"test-aff2", task::DEFAULT_PRIORITY, test_task_incr, 0, pml4, 0b10,
+        b"test-aff2",
+        task::DEFAULT_PRIORITY,
+        test_task_incr,
+        0,
+        pml4,
+        0b10,
     )?;
     let aff2 = get_cpu_affinity(id2).ok_or(KernelError::InternalError)?;
     if aff2 != 0b10 {
-        serial_println!("[sched]   FAIL: spawn_with_affinity mask should be 0b10, got {:#x}", aff2);
+        serial_println!(
+            "[sched]   FAIL: spawn_with_affinity mask should be 0b10, got {:#x}",
+            aff2
+        );
         kill_task(id2);
         reap_dead_tasks();
         return Err(KernelError::InternalError);
@@ -7623,7 +7786,9 @@ fn test_cpu_affinity() -> KernelResult<()> {
     let err = spawn_with_affinity(b"bad", task::DEFAULT_PRIORITY, test_task_incr, 0, pml4, 0);
     if err.is_ok() {
         serial_println!("[sched]   FAIL: spawn_with_affinity(mask=0) should fail");
-        if let Ok(bad_id) = err { kill_task(bad_id); }
+        if let Ok(bad_id) = err {
+            kill_task(bad_id);
+        }
         kill_task(id2);
         reap_dead_tasks();
         return Err(KernelError::InternalError);
@@ -7685,7 +7850,13 @@ fn test_exit_hooks() -> KernelResult<()> {
     let slot = slot.unwrap_or(0); // Safe: checked above.
 
     // -- 2. Normal task exit fires the hook --
-    let _id = spawn(b"test-hook-exit", task::DEFAULT_PRIORITY, test_task_incr, 1, 0)?;
+    let _id = spawn(
+        b"test-hook-exit",
+        task::DEFAULT_PRIORITY,
+        test_task_incr,
+        1,
+        0,
+    )?;
     // Let the task run and exit naturally.
     yield_now();
     yield_now();
@@ -7702,7 +7873,13 @@ fn test_exit_hooks() -> KernelResult<()> {
 
     // -- 3. kill_task fires the hook --
     let before_kill = EXIT_HOOK_TEST_COUNTER.load(Ordering::SeqCst);
-    let id2 = spawn(b"test-hook-kill", task::DEFAULT_PRIORITY, test_task_block_self, 0, 0)?;
+    let id2 = spawn(
+        b"test-hook-kill",
+        task::DEFAULT_PRIORITY,
+        test_task_block_self,
+        0,
+        0,
+    )?;
     // Let the task start and block.
     yield_now();
     yield_now();
@@ -7714,7 +7891,8 @@ fn test_exit_hooks() -> KernelResult<()> {
     if after_kill <= before_kill {
         serial_println!(
             "[sched]   FAIL: exit hook not called on kill_task (before={}, after={})",
-            before_kill, after_kill
+            before_kill,
+            after_kill
         );
         unregister_exit_hook(slot);
         return Err(KernelError::InternalError);
@@ -7729,7 +7907,13 @@ fn test_exit_hooks() -> KernelResult<()> {
     }
 
     let before_unreg = EXIT_HOOK_TEST_COUNTER.load(Ordering::SeqCst);
-    let _id3 = spawn(b"test-hook-unreg", task::DEFAULT_PRIORITY, test_task_incr, 1, 0)?;
+    let _id3 = spawn(
+        b"test-hook-unreg",
+        task::DEFAULT_PRIORITY,
+        test_task_incr,
+        1,
+        0,
+    )?;
     yield_now();
     yield_now();
     yield_now();
@@ -7739,7 +7923,8 @@ fn test_exit_hooks() -> KernelResult<()> {
     if after_unreg != before_unreg {
         serial_println!(
             "[sched]   FAIL: hook called after unregister (before={}, after={})",
-            before_unreg, after_unreg
+            before_unreg,
+            after_unreg
         );
         return Err(KernelError::InternalError);
     }
@@ -7763,7 +7948,8 @@ fn test_exit_hooks() -> KernelResult<()> {
         } else {
             serial_println!(
                 "[sched]   FAIL: table full at slot {} (expected {})",
-                i, MAX_EXIT_HOOKS
+                i,
+                MAX_EXIT_HOOKS
             );
             // Clean up any registered hooks.
             #[allow(clippy::indexing_slicing)] // j < i < MAX_EXIT_HOOKS.
@@ -7864,7 +8050,10 @@ fn test_cpu_bandwidth() -> KernelResult<()> {
 
     // --- 3. Reject quota > 100 ---
     assert!(!set_cpu_quota(id, 101), "Quota > 100 should be rejected");
-    assert!(get_cpu_quota(id) == Some(50), "Quota should remain 50 after rejection");
+    assert!(
+        get_cpu_quota(id) == Some(50),
+        "Quota should remain 50 after rejection"
+    );
     serial_println!("[sched]   Reject > 100: OK");
 
     // --- 4. Throttle flag when period_used >= quota ---
@@ -7905,8 +8094,14 @@ fn test_cpu_bandwidth() -> KernelResult<()> {
     {
         let state = SCHED.lock();
         if let Some(task) = state.tasks.get(&id) {
-            assert!(!task.throttled, "Task should be un-throttled after period reset");
-            assert!(task.cpu_period_used == 0, "Period usage should be reset to 0");
+            assert!(
+                !task.throttled,
+                "Task should be un-throttled after period reset"
+            );
+            assert!(
+                task.cpu_period_used == 0,
+                "Period usage should be reset to 0"
+            );
         }
     }
     serial_println!("[sched]   unthrottle_expired resets: OK");
@@ -7931,15 +8126,24 @@ fn test_cpu_bandwidth() -> KernelResult<()> {
     {
         let state = SCHED.lock();
         if let Some(task) = state.tasks.get(&id) {
-            assert!(!task.throttled, "Task should be un-throttled after quota removal");
+            assert!(
+                !task.throttled,
+                "Task should be un-throttled after quota removal"
+            );
             assert!(task.cpu_quota_pct == 0, "Quota should be 0");
         }
     }
     serial_println!("[sched]   Remove quota un-throttles: OK");
 
     // --- 7. Nonexistent task ---
-    assert!(!set_cpu_quota(u64::MAX, 50), "Nonexistent task should return false");
-    assert!(get_cpu_quota(u64::MAX).is_none(), "Nonexistent task should return None");
+    assert!(
+        !set_cpu_quota(u64::MAX, 50),
+        "Nonexistent task should return false"
+    );
+    assert!(
+        get_cpu_quota(u64::MAX).is_none(),
+        "Nonexistent task should return None"
+    );
     serial_println!("[sched]   Nonexistent task: OK");
 
     // --- 8. Boundary: quota = 100 (full CPU) ---
@@ -7965,7 +8169,10 @@ fn test_cpu_bandwidth() -> KernelResult<()> {
     {
         let state = SCHED.lock();
         if let Some(task) = state.tasks.get(&id) {
-            assert!(!task.throttled, "Task should be un-throttled when quota raised above usage");
+            assert!(
+                !task.throttled,
+                "Task should be un-throttled when quota raised above usage"
+            );
         }
     }
     serial_println!("[sched]   Raise quota un-throttles: OK");
@@ -8046,7 +8253,13 @@ fn test_stack_watermark() -> KernelResult<()> {
     }
 
     let pml4 = crate::mm::page_table::active_pml4_phys();
-    let id = spawn(b"test-stack-wm", task::DEFAULT_PRIORITY, stack_test_task, 0, pml4)?;
+    let id = spawn(
+        b"test-stack-wm",
+        task::DEFAULT_PRIORITY,
+        stack_test_task,
+        0,
+        pml4,
+    )?;
 
     // Let the task run.
     for _ in 0..5 {
@@ -8071,7 +8284,8 @@ fn test_stack_watermark() -> KernelResult<()> {
         assert!(
             used < task::TASK_STACK_SIZE / 2,
             "Stack usage too high: {} bytes (expected < {})",
-            used, task::TASK_STACK_SIZE / 2,
+            used,
+            task::TASK_STACK_SIZE / 2,
         );
         let pct_val = pct.unwrap_or(0);
         assert!(
@@ -8081,7 +8295,8 @@ fn test_stack_watermark() -> KernelResult<()> {
         );
         serial_println!(
             "[sched]   Stack watermark: OK (test task used {} bytes, {}%)",
-            used, pct_val,
+            used,
+            pct_val,
         );
     } else {
         // Task already reaped — that's fine, just verify the API doesn't crash.
@@ -8125,7 +8340,13 @@ fn test_sleep_ns() -> KernelResult<()> {
     SLEEPER_DONE.store(0, Ordering::Relaxed);
 
     let pml4 = crate::mm::page_table::active_pml4_phys();
-    let _id = spawn(b"test-sleep-ns", task::DEFAULT_PRIORITY, sleeper_task, 0, pml4)?;
+    let _id = spawn(
+        b"test-sleep-ns",
+        task::DEFAULT_PRIORITY,
+        sleeper_task,
+        0,
+        pml4,
+    )?;
 
     // Wait for the sleeper to complete.  Use a spin loop that does NOT
     // hold the scheduler lock constantly — the hrtimer callback calls
@@ -8150,7 +8371,10 @@ fn test_sleep_ns() -> KernelResult<()> {
     }
 
     let done = SLEEPER_DONE.load(Ordering::Acquire);
-    assert!(done != 0, "sleep_ns: sleeper task did not complete within 500ms");
+    assert!(
+        done != 0,
+        "sleep_ns: sleeper task did not complete within 500ms"
+    );
 
     let start = SLEEP_START.load(Ordering::Acquire);
     let end = SLEEP_END.load(Ordering::Acquire);

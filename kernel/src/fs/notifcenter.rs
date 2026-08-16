@@ -39,12 +39,12 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -242,7 +242,8 @@ pub fn send_full(
     let id = center.next_id;
     center.next_id = center.next_id.wrapping_add(1);
 
-    let action_vec: Vec<NotifAction> = actions.iter()
+    let action_vec: Vec<NotifAction> = actions
+        .iter()
         .take(MAX_ACTIONS)
         .map(|(aid, lbl)| NotifAction {
             id: String::from(*aid),
@@ -275,8 +276,7 @@ pub fn send_full(
         }
     }
 
-    let show_toast = !center.muted_apps.contains(app)
-        || priority == Priority::Critical;
+    let show_toast = !center.muted_apps.contains(app) || priority == Priority::Critical;
 
     // Update app counter.
     *center.app_counts.entry(String::from(app)).or_insert(0) += 1;
@@ -331,7 +331,9 @@ pub fn dismiss_all() -> usize {
 pub fn remove(id: u64) -> KernelResult<()> {
     let mut center = CENTER.lock();
     let len_before = center.notifications.len();
-    let app = center.notifications.iter()
+    let app = center
+        .notifications
+        .iter()
         .find(|n| n.id == id)
         .map(|n| n.app.clone());
 
@@ -361,7 +363,9 @@ pub fn clear_all_notifications() {
 /// Get unread notifications.
 pub fn unread() -> Vec<Notification> {
     let center = CENTER.lock();
-    center.notifications.iter()
+    center
+        .notifications
+        .iter()
         .filter(|n| !n.read)
         .cloned()
         .collect()
@@ -384,7 +388,9 @@ pub fn history(limit: usize) -> Vec<Notification> {
 pub fn app_notifications(app: &str, limit: usize) -> Vec<Notification> {
     let center = CENTER.lock();
     let max = if limit == 0 { MAX_NOTIFICATIONS } else { limit };
-    center.notifications.iter()
+    center
+        .notifications
+        .iter()
         .filter(|n| n.app == app)
         .take(max)
         .cloned()
@@ -402,14 +408,14 @@ pub fn app_summaries() -> Vec<AppSummary> {
             entry.1 += 1;
         }
     }
-    apps.into_iter().map(|(app, (total, unread_n))| {
-        AppSummary {
+    apps.into_iter()
+        .map(|(app, (total, unread_n))| AppSummary {
             muted: center.muted_apps.contains(&app),
             app,
             total,
             unread: unread_n,
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 /// Get a notification by ID.
@@ -518,7 +524,13 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: send and retrieve.
     {
-        let (id, show) = send("TestApp", "Hello", "World", Category::Info, Priority::Normal);
+        let (id, show) = send(
+            "TestApp",
+            "Hello",
+            "World",
+            Category::Info,
+            Priority::Normal,
+        );
         assert!(id > 0);
         assert!(show);
         let notif = get(id).unwrap();
@@ -530,8 +542,20 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 2: unread count.
     {
-        send("TestApp", "Second", "Notification", Category::Info, Priority::Normal);
-        send("OtherApp", "Third", "Alert", Category::Warning, Priority::High);
+        send(
+            "TestApp",
+            "Second",
+            "Notification",
+            Category::Info,
+            Priority::Normal,
+        );
+        send(
+            "OtherApp",
+            "Third",
+            "Alert",
+            Category::Warning,
+            Priority::High,
+        );
         assert_eq!(unread_count(), 3);
         serial_println!("[notifcenter] test 2 passed: unread count");
     }
@@ -552,7 +576,13 @@ pub fn self_test() -> KernelResult<()> {
         let (_, show) = send("TestApp", "Muted", "Test", Category::Info, Priority::Normal);
         assert!(!show); // Muted, should not show.
         // But critical notifications bypass mute.
-        let (_, show) = send("TestApp", "Critical", "Alert", Category::Error, Priority::Critical);
+        let (_, show) = send(
+            "TestApp",
+            "Critical",
+            "Alert",
+            Category::Error,
+            Priority::Critical,
+        );
         assert!(show);
         serial_println!("[notifcenter] test 4 passed: mute/unmute");
     }

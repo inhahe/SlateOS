@@ -145,9 +145,7 @@ pub fn from_bytes(header: &[u8]) -> Option<&'static str> {
         return Some("application/x-rar-compressed");
     }
     if header.len() >= 4 {
-        let magic32 = u32::from_le_bytes([
-            header[0], header[1], header[2], header[3],
-        ]);
+        let magic32 = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
         if magic32 == 0xFD2F_B528 {
             return Some("application/zstd");
         }
@@ -522,7 +520,10 @@ pub fn self_test() -> KernelResult<()> {
     {
         assert_eq!(text_or_binary(b"Hello, world!\n"), "text/plain");
         assert_eq!(text_or_binary(b"line 1\nline 2\n"), "text/plain");
-        assert_eq!(text_or_binary(b"\x00\x01\x02\x03"), "application/octet-stream");
+        assert_eq!(
+            text_or_binary(b"\x00\x01\x02\x03"),
+            "application/octet-stream"
+        );
         assert_eq!(text_or_binary(b""), "application/octet-stream");
 
         serial_println!("[mime]   text/binary classification OK");
@@ -532,8 +533,14 @@ pub fn self_test() -> KernelResult<()> {
     {
         // Extension extraction now lives in `Path::extension`; these keep
         // watch over the cases `detect`'s fallback depends on.
-        assert_eq!(Path::new("/home/user/file.txt").extension(), Some(Path::new("txt")));
-        assert_eq!(Path::new("/path/to/image.PNG").extension(), Some(Path::new("PNG")));
+        assert_eq!(
+            Path::new("/home/user/file.txt").extension(),
+            Some(Path::new("txt"))
+        );
+        assert_eq!(
+            Path::new("/path/to/image.PNG").extension(),
+            Some(Path::new("PNG"))
+        );
         assert_eq!(Path::new("/path/.bashrc").extension(), None);
         assert_eq!(Path::new("/path/noext").extension(), None);
         assert_eq!(Path::new("file.tar.gz").extension(), Some(Path::new("gz")));

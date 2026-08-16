@@ -102,11 +102,7 @@ pub fn compress(input: &[u8]) -> Option<Vec<u8>> {
 
         // Check if the candidate matches.
         let offset = ip.wrapping_sub(candidate);
-        if offset == 0
-            || offset > 0xFFFF
-            || candidate >= ip
-            || !matches_at(input, candidate, ip)
-        {
+        if offset == 0 || offset > 0xFFFF || candidate >= ip || !matches_at(input, candidate, ip) {
             ip += 1;
             continue;
         }
@@ -212,7 +208,9 @@ pub fn decompress(input: &[u8], output_len: usize) -> Result<Vec<u8>, CompressEr
         // --- Match ---
         // Read 2-byte little-endian offset.
         let lo = *input.get(ip).ok_or(CompressError::Truncated)? as u16;
-        let hi = *input.get(ip.saturating_add(1)).ok_or(CompressError::Truncated)? as u16;
+        let hi = *input
+            .get(ip.saturating_add(1))
+            .ok_or(CompressError::Truncated)? as u16;
         ip = ip.saturating_add(2);
         let offset = (hi << 8) | lo;
 
@@ -245,7 +243,10 @@ pub fn decompress(input: &[u8], output_len: usize) -> Result<Vec<u8>, CompressEr
         // Copy byte-by-byte (handles overlapping matches).
         for i in 0..match_len {
             let src_idx = match_start.saturating_add(i % (offset as usize));
-            let b = output.get(src_idx).copied().ok_or(CompressError::InvalidOffset)?;
+            let b = output
+                .get(src_idx)
+                .copied()
+                .ok_or(CompressError::InvalidOffset)?;
             output.push(b);
         }
     }
@@ -348,7 +349,11 @@ fn write_sequence(
     is_last: bool,
 ) -> bool {
     // Token byte.
-    let lit_field = if literal_len >= 15 { 15u8 } else { literal_len as u8 };
+    let lit_field = if literal_len >= 15 {
+        15u8
+    } else {
+        literal_len as u8
+    };
     let mat_field = if is_last {
         0u8
     } else if match_len.saturating_sub(MIN_MATCH) >= 15 {
@@ -432,8 +437,7 @@ pub fn self_test() {
         assert_eq!(compressed.len(), 1, "zero page should be 1 byte");
         assert_eq!(compressed[0], ZERO_PAGE_MARKER);
 
-        let decompressed = decompress(&compressed, 16384)
-            .expect("zero page decompression");
+        let decompressed = decompress(&compressed, 16384).expect("zero page decompression");
         assert_eq!(decompressed, zeros, "zero page roundtrip");
 
         serial_println!("[compress]   Zero page: 16384 → 1 byte: OK");
@@ -458,8 +462,8 @@ pub fn self_test() {
             data.len()
         );
 
-        let decompressed = decompress(&compressed, data.len())
-            .expect("decompression should succeed");
+        let decompressed =
+            decompress(&compressed, data.len()).expect("decompression should succeed");
         assert_eq!(decompressed, data, "roundtrip should preserve data");
 
         serial_println!(
@@ -489,8 +493,8 @@ pub fn self_test() {
             "sparse page should compress well"
         );
 
-        let decompressed = decompress(&compressed, data.len())
-            .expect("decompression should succeed");
+        let decompressed =
+            decompress(&compressed, data.len()).expect("decompression should succeed");
         assert_eq!(decompressed, data, "roundtrip should preserve data");
 
         serial_println!(
@@ -506,8 +510,7 @@ pub fn self_test() {
         let data = b"Hello, compressed world!";
         let compressed = compress(data);
         if let Some(ref c) = compressed {
-            let decompressed = decompress(c, data.len())
-                .expect("small input decompression");
+            let decompressed = decompress(c, data.len()).expect("small input decompression");
             assert_eq!(&decompressed, data, "small input roundtrip");
         }
         // It's OK if small input doesn't compress (returns None).

@@ -343,11 +343,7 @@ pub fn clear_global_defaults() {
 // ---------------------------------------------------------------------------
 
 /// Register a view state template.
-pub fn register_template(
-    pattern: &str,
-    settings: ViewSettings,
-    label: &str,
-) -> KernelResult<u64> {
+pub fn register_template(pattern: &str, settings: ViewSettings, label: &str) -> KernelResult<u64> {
     let mut templates = TEMPLATES.lock();
     if templates.len() >= MAX_TEMPLATES {
         return Err(KernelError::OutOfMemory);
@@ -386,11 +382,20 @@ pub fn init_defaults() {
     drop(templates);
 
     let _ = register_template(
-        "**/Pictures", ViewSettings::photo_defaults(), "Photo directories");
+        "**/Pictures",
+        ViewSettings::photo_defaults(),
+        "Photo directories",
+    );
     let _ = register_template(
-        "**/Music", ViewSettings::music_defaults(), "Music directories");
+        "**/Music",
+        ViewSettings::music_defaults(),
+        "Music directories",
+    );
     let _ = register_template(
-        "**/Downloads", ViewSettings::downloads_defaults(), "Download directories");
+        "**/Downloads",
+        ViewSettings::downloads_defaults(),
+        "Download directories",
+    );
 }
 
 // ---------------------------------------------------------------------------

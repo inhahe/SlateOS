@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -120,18 +120,48 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let targets = alloc::vec![
-        ShareTarget { id: 1, app_name: String::from("clipboard"), display_name: String::from("Copy to Clipboard"),
+        ShareTarget {
+            id: 1,
+            app_name: String::from("clipboard"),
+            display_name: String::from("Copy to Clipboard"),
             supported_types: alloc::vec![ContentType::Text, ContentType::Url, ContentType::Image],
-            priority: 100, use_count: 0, registered_ns: crate::hpet::elapsed_ns() },
-        ShareTarget { id: 2, app_name: String::from("email"), display_name: String::from("Email"),
-            supported_types: alloc::vec![ContentType::Text, ContentType::Url, ContentType::File, ContentType::Image],
-            priority: 90, use_count: 0, registered_ns: crate::hpet::elapsed_ns() },
-        ShareTarget { id: 3, app_name: String::from("fileshare"), display_name: String::from("Nearby Share"),
-            supported_types: alloc::vec![ContentType::File, ContentType::Image, ContentType::Video, ContentType::Audio],
-            priority: 80, use_count: 0, registered_ns: crate::hpet::elapsed_ns() },
+            priority: 100,
+            use_count: 0,
+            registered_ns: crate::hpet::elapsed_ns()
+        },
+        ShareTarget {
+            id: 2,
+            app_name: String::from("email"),
+            display_name: String::from("Email"),
+            supported_types: alloc::vec![
+                ContentType::Text,
+                ContentType::Url,
+                ContentType::File,
+                ContentType::Image
+            ],
+            priority: 90,
+            use_count: 0,
+            registered_ns: crate::hpet::elapsed_ns()
+        },
+        ShareTarget {
+            id: 3,
+            app_name: String::from("fileshare"),
+            display_name: String::from("Nearby Share"),
+            supported_types: alloc::vec![
+                ContentType::File,
+                ContentType::Image,
+                ContentType::Video,
+                ContentType::Audio
+            ],
+            priority: 80,
+            use_count: 0,
+            registered_ns: crate::hpet::elapsed_ns()
+        },
     ];
 
     *guard = Some(State {
@@ -145,7 +175,11 @@ pub fn init_defaults() {
 }
 
 /// Register a share target.
-pub fn register_target(app_name: &str, display_name: &str, types: Vec<ContentType>) -> KernelResult<u32> {
+pub fn register_target(
+    app_name: &str,
+    display_name: &str,
+    types: Vec<ContentType>,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.targets.len() >= MAX_TARGETS {
             return Err(KernelError::ResourceExhausted);
@@ -153,10 +187,13 @@ pub fn register_target(app_name: &str, display_name: &str, types: Vec<ContentTyp
         let id = state.next_target_id;
         state.next_target_id += 1;
         state.targets.push(ShareTarget {
-            id, app_name: String::from(app_name),
+            id,
+            app_name: String::from(app_name),
             display_name: String::from(display_name),
-            supported_types: types, priority: 50,
-            use_count: 0, registered_ns: crate::hpet::elapsed_ns(),
+            supported_types: types,
+            priority: 50,
+            use_count: 0,
+            registered_ns: crate::hpet::elapsed_ns(),
         });
         Ok(id)
     })
@@ -165,7 +202,10 @@ pub fn register_target(app_name: &str, display_name: &str, types: Vec<ContentTyp
 /// Unregister a share target.
 pub fn unregister_target(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.targets.iter().position(|t| t.id == id)
+        let pos = state
+            .targets
+            .iter()
+            .position(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         state.targets.remove(pos);
         Ok(())
@@ -175,13 +215,18 @@ pub fn unregister_target(id: u32) -> KernelResult<()> {
 /// Get targets that support a content type (sorted by use count then priority).
 pub fn get_targets(content_type: ContentType) -> Vec<ShareTarget> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let mut matches: Vec<ShareTarget> = s.targets.iter()
+        let mut matches: Vec<ShareTarget> = s
+            .targets
+            .iter()
             .filter(|t| t.supported_types.contains(&content_type))
             .cloned()
             .collect();
         // Sort: most used first, then by priority.
-        matches.sort_by(|a, b| b.use_count.cmp(&a.use_count)
-            .then(b.priority.cmp(&a.priority)));
+        matches.sort_by(|a, b| {
+            b.use_count
+                .cmp(&a.use_count)
+                .then(b.priority.cmp(&a.priority))
+        });
         matches
     })
 }
@@ -189,7 +234,10 @@ pub fn get_targets(content_type: ContentType) -> Vec<ShareTarget> {
 /// Share content to a specific target.
 pub fn share_to(target_id: u32, content_type: ContentType, data: &str) -> KernelResult<u32> {
     with_state(|state| {
-        let target = state.targets.iter_mut().find(|t| t.id == target_id)
+        let target = state
+            .targets
+            .iter_mut()
+            .find(|t| t.id == target_id)
             .ok_or(KernelError::NotFound)?;
         if !target.supported_types.contains(&content_type) {
             return Err(KernelError::InvalidArgument);
@@ -206,7 +254,9 @@ pub fn share_to(target_id: u32, content_type: ContentType, data: &str) -> Kernel
             state.history.remove(0);
         }
         state.history.push(ShareAction {
-            id, content_type, target_id,
+            id,
+            content_type,
+            target_id,
             target_name,
             data_preview: preview,
             timestamp_ns: crate::hpet::elapsed_ns(),
@@ -217,7 +267,10 @@ pub fn share_to(target_id: u32, content_type: ContentType, data: &str) -> Kernel
 
 /// List all targets.
 pub fn list_targets() -> Vec<ShareTarget> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.targets.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.targets.clone())
 }
 
 /// Recent share history.
@@ -266,7 +319,12 @@ pub fn self_test() {
     crate::serial_println!("  [4/8] type mismatch: OK");
 
     // 5: Register custom target.
-    let tid = register_target("notes", "Quick Note", alloc::vec![ContentType::Text, ContentType::Url]).expect("reg");
+    let tid = register_target(
+        "notes",
+        "Quick Note",
+        alloc::vec![ContentType::Text, ContentType::Url],
+    )
+    .expect("reg");
     assert_eq!(list_targets().len(), 4);
     crate::serial_println!("  [5/8] register target: OK");
 

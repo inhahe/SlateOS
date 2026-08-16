@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -40,7 +40,7 @@ pub enum BlkOp {
     Write,
     Discard,
     Flush,
-    Fua,       // Force Unit Access.
+    Fua, // Force Unit Access.
 }
 
 impl BlkOp {
@@ -114,7 +114,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         traces: Vec::new(),
         next_seq: 1,
@@ -128,14 +130,21 @@ pub fn init_defaults() {
 pub fn start(device: &str) -> KernelResult<()> {
     with_state(|state| {
         if let Some(t) = state.traces.iter_mut().find(|t| t.device == device) {
-            if t.active { return Err(KernelError::AlreadyExists); }
+            if t.active {
+                return Err(KernelError::AlreadyExists);
+            }
             t.active = true;
             return Ok(());
         }
-        if state.traces.len() >= MAX_DEVICES { return Err(KernelError::ResourceExhausted); }
+        if state.traces.len() >= MAX_DEVICES {
+            return Err(KernelError::ResourceExhausted);
+        }
         state.traces.push(DeviceTrace {
-            device: String::from(device), active: true,
-            events: Vec::new(), total_events: 0, total_bytes: 0,
+            device: String::from(device),
+            active: true,
+            events: Vec::new(),
+            total_events: 0,
+            total_bytes: 0,
         });
         Ok(())
     })
@@ -144,20 +153,38 @@ pub fn start(device: &str) -> KernelResult<()> {
 /// Stop tracing a device.
 pub fn stop(device: &str) -> KernelResult<()> {
     with_state(|state| {
-        let trace = state.traces.iter_mut().find(|t| t.device == device)
+        let trace = state
+            .traces
+            .iter_mut()
+            .find(|t| t.device == device)
             .ok_or(KernelError::NotFound)?;
-        if !trace.active { return Err(KernelError::InvalidArgument); }
+        if !trace.active {
+            return Err(KernelError::InvalidArgument);
+        }
         trace.active = false;
         Ok(())
     })
 }
 
 /// Record a trace event.
-pub fn record(device: &str, op: BlkOp, sector: u64, size: u32, latency_us: u64, pid: u32, process: &str) -> KernelResult<u64> {
+pub fn record(
+    device: &str,
+    op: BlkOp,
+    sector: u64,
+    size: u32,
+    latency_us: u64,
+    pid: u32,
+    process: &str,
+) -> KernelResult<u64> {
     with_state(|state| {
-        let trace = state.traces.iter_mut().find(|t| t.device == device)
+        let trace = state
+            .traces
+            .iter_mut()
+            .find(|t| t.device == device)
             .ok_or(KernelError::NotFound)?;
-        if !trace.active { return Err(KernelError::PermissionDenied); }
+        if !trace.active {
+            return Err(KernelError::PermissionDenied);
+        }
         let now = crate::hpet::elapsed_ns();
         let seq = state.next_seq;
         state.next_seq += 1;
@@ -165,8 +192,14 @@ pub fn record(device: &str, op: BlkOp, sector: u64, size: u32, latency_us: u64, 
             trace.events.remove(0);
         }
         trace.events.push(TraceEvent {
-            seq, timestamp_ns: now, device: String::from(device),
-            op, sector, size_bytes: size, latency_us, pid,
+            seq,
+            timestamp_ns: now,
+            device: String::from(device),
+            op,
+            sector,
+            size_bytes: size,
+            latency_us,
+            pid,
             process_name: String::from(process),
         });
         trace.total_events += 1;
@@ -180,7 +213,9 @@ pub fn record(device: &str, op: BlkOp, sector: u64, size: u32, latency_us: u64, 
 /// Dump trace events for a device.
 pub fn dump(device: &str) -> Vec<TraceEvent> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.traces.iter().find(|t| t.device == device)
+        s.traces
+            .iter()
+            .find(|t| t.device == device)
             .map_or(Vec::new(), |t| t.events.clone())
     })
 }
@@ -188,18 +223,26 @@ pub fn dump(device: &str) -> Vec<TraceEvent> {
 /// List all traced devices.
 pub fn list_devices() -> Vec<DeviceTrace> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.traces.iter().map(|t| DeviceTrace {
-            device: t.device.clone(), active: t.active,
-            events: Vec::new(), // Don't clone events for listing.
-            total_events: t.total_events, total_bytes: t.total_bytes,
-        }).collect()
+        s.traces
+            .iter()
+            .map(|t| DeviceTrace {
+                device: t.device.clone(),
+                active: t.active,
+                events: Vec::new(), // Don't clone events for listing.
+                total_events: t.total_events,
+                total_bytes: t.total_bytes,
+            })
+            .collect()
     })
 }
 
 /// Clear trace for a device.
 pub fn clear(device: &str) -> KernelResult<u64> {
     with_state(|state| {
-        let trace = state.traces.iter_mut().find(|t| t.device == device)
+        let trace = state
+            .traces
+            .iter_mut()
+            .find(|t| t.device == device)
             .ok_or(KernelError::NotFound)?;
         let count = trace.events.len() as u64;
         trace.events.clear();
@@ -210,8 +253,12 @@ pub fn clear(device: &str) -> KernelResult<u64> {
 /// Filter events by operation type.
 pub fn filter_op(device: &str, op: BlkOp) -> Vec<TraceEvent> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.traces.iter().find(|t| t.device == device)
-            .map_or(Vec::new(), |t| t.events.iter().filter(|e| e.op == op).cloned().collect())
+        s.traces
+            .iter()
+            .find(|t| t.device == device)
+            .map_or(Vec::new(), |t| {
+                t.events.iter().filter(|e| e.op == op).cloned().collect()
+            })
     })
 }
 

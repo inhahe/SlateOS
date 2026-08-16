@@ -48,10 +48,10 @@
 //! scheduler or any other subsystem while holding it, so it never
 //! participates in a lock-ordering cycle.
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -355,7 +355,10 @@ pub fn self_test() -> KernelResult<()> {
     match interest_list(ep) {
         Some(list) => {
             if list != alloc::vec![(3, 0x4, 0x1234), (5, 0x1, 0xDEAD_BEEF)] {
-                serial_println!("[epoll]   FAIL: interest_list contents/order wrong: {:?}", list);
+                serial_println!(
+                    "[epoll]   FAIL: interest_list contents/order wrong: {:?}",
+                    list
+                );
                 close(ep);
                 return Err(KernelError::InternalError);
             }

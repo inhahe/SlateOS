@@ -302,7 +302,10 @@ pub fn configure(ip: Ipv4Addr, mask: Ipv4Addr, gateway: Ipv4Addr, dns: Ipv4Addr)
     }
     crate::serial_println!(
         "[net] Configured: IP {} mask {} gw {} dns {}",
-        ip, mask, gateway, dns
+        ip,
+        mask,
+        gateway,
+        dns
     );
 
     // Sync to the root network namespace so that per-namespace queries
@@ -337,7 +340,10 @@ pub fn configure(ip: Ipv4Addr, mask: Ipv4Addr, gateway: Ipv4Addr, dns: Ipv4Addr)
 /// restores connectivity without reconfiguration (matching Linux semantics).
 pub fn set_up(up: bool) {
     IFACE.lock().up = up;
-    crate::serial_println!("[net] Interface administratively {}", if up { "up" } else { "down" });
+    crate::serial_println!(
+        "[net] Interface administratively {}",
+        if up { "up" } else { "down" }
+    );
 
     // Keep the root namespace's view consistent. No-op if netns is not yet
     // initialized (boot ordering: net::init runs before netns::init).
@@ -393,8 +399,7 @@ pub fn ns_is_up(ns_id: crate::netns::NetNsId) -> bool {
     if ns_id == crate::netns::ROOT_NS {
         return is_up();
     }
-    crate::netns::interface_config(ns_id)
-        .is_some_and(|cfg| cfg.up)
+    crate::netns::interface_config(ns_id).is_some_and(|cfg| cfg.up)
 }
 
 /// Get a snapshot of the interface configuration for a specific
@@ -625,9 +630,7 @@ fn test_ipv4_addr_u32_roundtrip() -> crate::error::KernelResult<()> {
     let val = addr.to_u32();
     // 10.0.1.255 in network order = 0x0A0001FF.
     if val != 0x0A00_01FF {
-        crate::serial_println!(
-            "[interface]   FAIL: to_u32 = {:#010x}", val
-        );
+        crate::serial_println!("[interface]   FAIL: to_u32 = {:#010x}", val);
         return Err(KernelError::InternalError);
     }
 

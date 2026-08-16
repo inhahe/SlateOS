@@ -32,11 +32,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -317,13 +317,16 @@ pub fn add_device(id: &str, name: &str) -> KernelResult<()> {
         return Err(KernelError::ResourceExhausted);
     }
     let is_first = state.devices.is_empty();
-    state.devices.insert(String::from(id), AudioDevice {
-        id: String::from(id),
-        name: String::from(name),
-        is_default: is_first,
-        volume: 100,
-        muted: false,
-    });
+    state.devices.insert(
+        String::from(id),
+        AudioDevice {
+            id: String::from(id),
+            name: String::from(name),
+            is_default: is_first,
+            volume: 100,
+            muted: false,
+        },
+    );
     if is_first {
         state.default_device = String::from(id);
     }
@@ -336,10 +339,7 @@ pub fn remove_device(id: &str) -> KernelResult<()> {
     state.devices.remove(id).ok_or(KernelError::NotFound)?;
     // If we removed the default, pick another.
     if state.default_device == id {
-        let new_default = state.devices.keys()
-            .next()
-            .cloned()
-            .unwrap_or_default();
+        let new_default = state.devices.keys().next().cloned().unwrap_or_default();
         state.default_device = new_default.clone();
         if let Some(dev) = state.devices.get_mut(&new_default) {
             dev.is_default = true;
@@ -406,16 +406,19 @@ pub fn set_app_volume(app_id: &str, vol: u8) -> KernelResult<()> {
         if state.apps.len() >= MAX_APPS {
             return Err(KernelError::ResourceExhausted);
         }
-        state.apps.insert(String::from(app_id), AppAudioEntry {
-            app_id: String::from(app_id),
-            app_name: String::from(app_id),
-            volume: vol.min(100),
-            muted: false,
-            stream_count: 0,
-            playing: false,
-            last_sound_ns: 0,
-            output_device: None,
-        });
+        state.apps.insert(
+            String::from(app_id),
+            AppAudioEntry {
+                app_id: String::from(app_id),
+                app_name: String::from(app_id),
+                volume: vol.min(100),
+                muted: false,
+                stream_count: 0,
+                playing: false,
+                last_sound_ns: 0,
+                output_device: None,
+            },
+        );
     }
     Ok(())
 }
@@ -448,7 +451,8 @@ pub fn app_entries() -> Vec<AppAudioEntry> {
     let mut entries: Vec<AppAudioEntry> = state.apps.values().cloned().collect();
     // Sort: playing first, then by last_sound_ns descending.
     entries.sort_by(|a, b| {
-        b.playing.cmp(&a.playing)
+        b.playing
+            .cmp(&a.playing)
             .then(b.last_sound_ns.cmp(&a.last_sound_ns))
     });
     entries
@@ -467,10 +471,14 @@ pub fn effective_volume(app_id: &str) -> u8 {
     }
     let master = state.master_volume as u32;
     let device_vol = if let Some(entry) = state.apps.get(app_id) {
-        let dev_id = entry.output_device.as_deref()
+        let dev_id = entry
+            .output_device
+            .as_deref()
             .unwrap_or(&state.default_device);
         if let Some(dev) = state.devices.get(dev_id) {
-            if dev.muted { return 0; }
+            if dev.muted {
+                return 0;
+            }
             dev.volume as u32
         } else {
             100u32
@@ -478,10 +486,10 @@ pub fn effective_volume(app_id: &str) -> u8 {
     } else {
         100u32
     };
-    let app_vol = state.apps.get(app_id)
-        .map(|e| {
-            if e.muted { 0u32 } else { e.volume as u32 }
-        })
+    let app_vol = state
+        .apps
+        .get(app_id)
+        .map(|e| if e.muted { 0u32 } else { e.volume as u32 })
         .unwrap_or(100u32);
 
     // Multiply all three: master × device × app, each in 0-100.
@@ -494,8 +502,12 @@ pub fn effective_volume(app_id: &str) -> u8 {
 // ---------------------------------------------------------------------------
 
 /// Register an audio stream for an application.
-pub fn register_stream(app_id: &str, app_name: &str, label: &str,
-                       category: StreamCategory) -> KernelResult<u64> {
+pub fn register_stream(
+    app_id: &str,
+    app_name: &str,
+    label: &str,
+    category: StreamCategory,
+) -> KernelResult<u64> {
     if app_id.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -508,30 +520,36 @@ pub fn register_stream(app_id: &str, app_name: &str, label: &str,
     let id = state.next_stream_id;
     state.next_stream_id = state.next_stream_id.saturating_add(1);
 
-    state.streams.insert(id, AudioStream {
+    state.streams.insert(
         id,
-        app_id: String::from(app_id),
-        label: String::from(label),
-        volume: 100,
-        muted: false,
-        category,
-        active: false,
-        output_device: None,
-    });
+        AudioStream {
+            id,
+            app_id: String::from(app_id),
+            label: String::from(label),
+            volume: 100,
+            muted: false,
+            category,
+            active: false,
+            output_device: None,
+        },
+    );
 
     // Ensure app entry exists.
     if !state.apps.contains_key(app_id) {
         if state.apps.len() < MAX_APPS {
-            state.apps.insert(String::from(app_id), AppAudioEntry {
-                app_id: String::from(app_id),
-                app_name: String::from(app_name),
-                volume: 100,
-                muted: false,
-                stream_count: 0,
-                playing: false,
-                last_sound_ns: 0,
-                output_device: None,
-            });
+            state.apps.insert(
+                String::from(app_id),
+                AppAudioEntry {
+                    app_id: String::from(app_id),
+                    app_name: String::from(app_name),
+                    volume: 100,
+                    muted: false,
+                    stream_count: 0,
+                    playing: false,
+                    last_sound_ns: 0,
+                    output_device: None,
+                },
+            );
         }
     }
 
@@ -550,7 +568,9 @@ pub fn register_stream(app_id: &str, app_name: &str, label: &str,
 /// Unregister an audio stream.
 pub fn unregister_stream(stream_id: u64) -> KernelResult<()> {
     let mut state = MIXER.lock();
-    let stream = state.streams.remove(&stream_id)
+    let stream = state
+        .streams
+        .remove(&stream_id)
         .ok_or(KernelError::NotFound)?;
 
     // Decrement app stream count.
@@ -568,7 +588,9 @@ pub fn unregister_stream(stream_id: u64) -> KernelResult<()> {
 /// Report that a stream is actively producing audio.
 pub fn report_activity(stream_id: u64) -> KernelResult<()> {
     let mut state = MIXER.lock();
-    let stream = state.streams.get_mut(&stream_id)
+    let stream = state
+        .streams
+        .get_mut(&stream_id)
         .ok_or(KernelError::NotFound)?;
     stream.active = true;
     let app_id = stream.app_id.clone();
@@ -599,13 +621,17 @@ pub fn report_activity(stream_id: u64) -> KernelResult<()> {
 /// Mark a stream as no longer active (paused/stopped but not unregistered).
 pub fn report_inactive(stream_id: u64) -> KernelResult<()> {
     let mut state = MIXER.lock();
-    let stream = state.streams.get_mut(&stream_id)
+    let stream = state
+        .streams
+        .get_mut(&stream_id)
         .ok_or(KernelError::NotFound)?;
     stream.active = false;
     let app_id = stream.app_id.clone();
 
     // Check if any other streams for this app are still active.
-    let any_active = state.streams.values()
+    let any_active = state
+        .streams
+        .values()
         .any(|s| s.app_id == app_id && s.active);
     if !any_active {
         if let Some(entry) = state.apps.get_mut(&app_id) {
@@ -620,7 +646,9 @@ pub fn report_inactive(stream_id: u64) -> KernelResult<()> {
 pub fn set_stream_volume(stream_id: u64, vol: u8) -> KernelResult<()> {
     VOLUME_CHANGE_COUNT.fetch_add(1, Ordering::Relaxed);
     let mut state = MIXER.lock();
-    let stream = state.streams.get_mut(&stream_id)
+    let stream = state
+        .streams
+        .get_mut(&stream_id)
         .ok_or(KernelError::NotFound)?;
     stream.volume = vol.min(100);
     Ok(())
@@ -633,7 +661,10 @@ pub fn list_streams() -> Vec<AudioStream> {
 
 /// List streams for a specific app.
 pub fn app_streams(app_id: &str) -> Vec<AudioStream> {
-    MIXER.lock().streams.values()
+    MIXER
+        .lock()
+        .streams
+        .values()
         .filter(|s| s.app_id == app_id)
         .cloned()
         .collect()
@@ -654,7 +685,9 @@ pub fn sound_history() -> Vec<SoundHistoryEntry> {
 /// Get history entries for a specific app.
 pub fn app_history(app_id: &str) -> Vec<SoundHistoryEntry> {
     let state = MIXER.lock();
-    state.history.iter()
+    state
+        .history
+        .iter()
         .filter(|e| e.app_id == app_id)
         .cloned()
         .collect()
@@ -676,7 +709,10 @@ pub fn set_ducking_policy(policy: DuckingPolicy) {
 
 /// Check if any communication streams are active (triggers ducking).
 pub fn communication_active() -> bool {
-    MIXER.lock().streams.values()
+    MIXER
+        .lock()
+        .streams
+        .values()
         .any(|s| s.active && s.category == StreamCategory::Communication)
 }
 
@@ -689,7 +725,9 @@ pub fn ducking_factor(category: StreamCategory) -> u8 {
             if category == StreamCategory::Communication {
                 return 100;
             }
-            let has_comm = state.streams.values()
+            let has_comm = state
+                .streams
+                .values()
                 .any(|s| s.active && s.category == StreamCategory::Communication);
             if has_comm { 30 } else { 100 }
         }
@@ -698,7 +736,9 @@ pub fn ducking_factor(category: StreamCategory) -> u8 {
             match category {
                 StreamCategory::System | StreamCategory::Communication => 100,
                 _ => {
-                    let has_comm = state.streams.values()
+                    let has_comm = state
+                        .streams
+                        .values()
                         .any(|s| s.active && s.category == StreamCategory::Communication);
                     if has_comm { 20 } else { 100 }
                 }
@@ -715,13 +755,16 @@ pub fn ducking_factor(category: StreamCategory) -> u8 {
 pub fn init_defaults() {
     let mut state = MIXER.lock();
     if state.devices.is_empty() {
-        state.devices.insert(String::from("default"), AudioDevice {
-            id: String::from("default"),
-            name: String::from("System Audio Output"),
-            is_default: true,
-            volume: 100,
-            muted: false,
-        });
+        state.devices.insert(
+            String::from("default"),
+            AudioDevice {
+                id: String::from("default"),
+                name: String::from("System Audio Output"),
+                is_default: true,
+                volume: 100,
+                muted: false,
+            },
+        );
         state.default_device = String::from("default");
     }
 }
@@ -807,7 +850,12 @@ pub fn self_test() -> KernelResult<()> {
     // Test 3: Stream registration.
     serial_println!("  soundmixer::test 3: streams");
     let s1 = register_stream("player", "Media Player", "Music", StreamCategory::Media)?;
-    let s2 = register_stream("player", "Media Player", "Effects", StreamCategory::Application)?;
+    let s2 = register_stream(
+        "player",
+        "Media Player",
+        "Effects",
+        StreamCategory::Application,
+    )?;
     let s3 = register_stream("browser", "Web Browser", "Tab Audio", StreamCategory::Media)?;
     assert_eq!(list_streams().len(), 3);
 

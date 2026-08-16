@@ -256,7 +256,9 @@ fn gather_general(path: &Path, meta: &crate::fs::FileMeta) -> KernelResult<Gener
 /// Gather security properties.
 fn gather_security(_path: &Path, meta: &crate::fs::FileMeta) -> SecurityProperties {
     let perms = format_permissions(meta.permissions);
-    let xattrs: Vec<(String, String)> = meta.xattrs.iter()
+    let xattrs: Vec<(String, String)> = meta
+        .xattrs
+        .iter()
         .map(|(k, v)| {
             let val = core::str::from_utf8(v)
                 .map(String::from)
@@ -284,13 +286,14 @@ fn gather_details(path: &Path) -> Vec<DetailField> {
         Err(_) => return Vec::new(),
     };
 
-    info.fields.iter().map(|field| {
-        DetailField {
+    info.fields
+        .iter()
+        .map(|field| DetailField {
             name: field.label.clone(),
             value: field.value.display(),
             category: String::from("Content"),
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 /// Gather disk usage for a directory.
@@ -410,9 +413,15 @@ fn mime_to_description(mime: &str) -> &str {
 fn format_permissions(mode: u16) -> String {
     let mut s = String::with_capacity(9);
     let flags = [
-        (0o400, 'r'), (0o200, 'w'), (0o100, 'x'),
-        (0o040, 'r'), (0o020, 'w'), (0o010, 'x'),
-        (0o004, 'r'), (0o002, 'w'), (0o001, 'x'),
+        (0o400, 'r'),
+        (0o200, 'w'),
+        (0o100, 'x'),
+        (0o040, 'r'),
+        (0o020, 'w'),
+        (0o010, 'x'),
+        (0o004, 'r'),
+        (0o002, 'w'),
+        (0o001, 'x'),
     ];
     for (mask, ch) in flags {
         s.push(if mode & mask != 0 { ch } else { '-' });

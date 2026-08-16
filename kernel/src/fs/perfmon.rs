@@ -26,12 +26,12 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::vec;
-use alloc::format;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -285,7 +285,9 @@ pub fn set_disk_alert(pct: u32) {
 /// Record a CPU sample.
 pub fn record_cpu(sample: CpuSample) {
     let mut state = STATE.lock();
-    if !state.config.cpu_enabled { return; }
+    if !state.config.cpu_enabled {
+        return;
+    }
     let max = state.config.max_samples;
     if state.cpu_history.len() >= max {
         state.cpu_history.remove(0);
@@ -304,8 +306,10 @@ pub fn record_cpu(sample: CpuSample) {
         state.alerts.push(Alert {
             id,
             resource: String::from("CPU"),
-            message: format!("CPU usage {}% exceeds threshold {}%",
-                usage, alert_threshold),
+            message: format!(
+                "CPU usage {}% exceeds threshold {}%",
+                usage, alert_threshold
+            ),
             value: usage,
             threshold: alert_threshold,
             timestamp_ns: ts,
@@ -321,7 +325,9 @@ pub fn record_cpu(sample: CpuSample) {
 /// Record a memory sample.
 pub fn record_mem(sample: MemSample) {
     let mut state = STATE.lock();
-    if !state.config.mem_enabled { return; }
+    if !state.config.mem_enabled {
+        return;
+    }
     let max = state.config.max_samples;
     if state.mem_history.len() >= max {
         state.mem_history.remove(0);
@@ -334,7 +340,9 @@ pub fn record_mem(sample: MemSample) {
 /// Record a disk I/O sample.
 pub fn record_disk(sample: DiskSample) {
     let mut state = STATE.lock();
-    if !state.config.disk_enabled { return; }
+    if !state.config.disk_enabled {
+        return;
+    }
     let max = state.config.max_samples;
     if state.disk_history.len() >= max {
         state.disk_history.remove(0);
@@ -347,7 +355,9 @@ pub fn record_disk(sample: DiskSample) {
 /// Record a network sample.
 pub fn record_net(sample: NetSample) {
     let mut state = STATE.lock();
-    if !state.config.net_enabled { return; }
+    if !state.config.net_enabled {
+        return;
+    }
     let max = state.config.max_samples;
     if state.net_history.len() >= max {
         state.net_history.remove(0);
@@ -397,7 +407,10 @@ pub fn net_history() -> Vec<NetSample> {
 
 /// Get active (undismissed) alerts.
 pub fn active_alerts() -> Vec<Alert> {
-    STATE.lock().alerts.iter()
+    STATE
+        .lock()
+        .alerts
+        .iter()
         .filter(|a| !a.dismissed)
         .cloned()
         .collect()
@@ -411,7 +424,10 @@ pub fn all_alerts() -> Vec<Alert> {
 /// Dismiss an alert.
 pub fn dismiss_alert(id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let alert = state.alerts.iter_mut().find(|a| a.id == id)
+    let alert = state
+        .alerts
+        .iter_mut()
+        .find(|a| a.id == id)
         .ok_or(KernelError::NotFound)?;
     alert.dismissed = true;
     state.changes += 1;
@@ -458,12 +474,14 @@ pub fn init_defaults() {
 /// Return (cpu_samples, mem_samples, disk_samples, net_samples, alerts, ops).
 pub fn stats() -> (usize, usize, usize, usize, usize, u64) {
     let state = STATE.lock();
-    (state.cpu_history.len(),
-     state.mem_history.len(),
-     state.disk_history.len(),
-     state.net_history.len(),
-     state.alerts.len(),
-     OP_COUNT.load(Ordering::Relaxed))
+    (
+        state.cpu_history.len(),
+        state.mem_history.len(),
+        state.disk_history.len(),
+        state.net_history.len(),
+        state.alerts.len(),
+        OP_COUNT.load(Ordering::Relaxed),
+    )
 }
 
 pub fn reset_stats() {

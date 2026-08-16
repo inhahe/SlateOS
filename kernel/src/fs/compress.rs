@@ -20,9 +20,9 @@
 //! - RFC 1952: GZIP file format specification
 //! - Based on the public-domain puff.c by Mark Adler
 
+use crate::error::{KernelError, KernelResult};
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Bit reader — reads bits from a byte stream, LSB first
@@ -31,13 +31,17 @@ use crate::error::{KernelError, KernelResult};
 /// Reads bits from a byte buffer, least-significant-bit first.
 struct BitReader<'a> {
     data: &'a [u8],
-    pos: usize,   // byte position
-    bit: u8,      // bit position within current byte (0-7)
+    pos: usize, // byte position
+    bit: u8,    // bit position within current byte (0-7)
 }
 
 impl<'a> BitReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0, bit: 0 }
+        Self {
+            data,
+            pos: 0,
+            bit: 0,
+        }
     }
 
     /// Read `n` bits (1..=25) and return as u32 (LSB first).
@@ -178,8 +182,7 @@ impl HuffmanTable {
         // symbols array.
         let mut offsets = [0u16; MAX_BITS + 1];
         for bits in 1..MAX_BITS {
-            offsets[bits.wrapping_add(1)] =
-                offsets[bits].wrapping_add(table.counts[bits]);
+            offsets[bits.wrapping_add(1)] = offsets[bits].wrapping_add(table.counts[bits]);
         }
 
         // Fill in the symbols array, sorted by code length then value.
@@ -203,8 +206,8 @@ impl HuffmanTable {
     /// and works well for the small alphabets in DEFLATE.
     fn decode(&self, reader: &mut BitReader<'_>) -> KernelResult<u16> {
         let mut code: u32 = 0;
-        let mut first: u32 = 0;   // first code of this length
-        let mut index: u32 = 0;   // index into symbols for this length
+        let mut first: u32 = 0; // first code of this length
+        let mut index: u32 = 0; // index into symbols for this length
 
         for len in 1..=MAX_BITS {
             let bit = reader.read_bits(1)?;
@@ -212,7 +215,9 @@ impl HuffmanTable {
             let count = u32::from(self.counts[len]);
             if code.wrapping_sub(first) < count {
                 let sym_idx = index.wrapping_add(code.wrapping_sub(first)) as usize;
-                return self.symbols.get(sym_idx)
+                return self
+                    .symbols
+                    .get(sym_idx)
                     .copied()
                     .ok_or(KernelError::CorruptedData);
             }
@@ -230,27 +235,25 @@ impl HuffmanTable {
 
 /// Base lengths for length codes 257..285.
 const LENGTH_BASE: [u16; 29] = [
-    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
-    35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258,
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
+    163, 195, 227, 258,
 ];
 
 /// Extra bits for length codes 257..285.
 const LENGTH_EXTRA: [u8; 29] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
-    3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
 ];
 
 /// Base distances for distance codes 0..29.
 const DIST_BASE: [u16; 30] = [
-    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
-    257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145,
-    8193, 12289, 16385, 24577,
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+    2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
 ];
 
 /// Extra bits for distance codes 0..29.
 const DIST_EXTRA: [u8; 30] = [
-    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
-    7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13,
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13,
 ];
 
 /// Permutation order for reading code-length code lengths (RFC 1951 §3.2.7).
@@ -267,13 +270,25 @@ fn fixed_lit_lengths() -> [u8; 288] {
     let mut lens = [0u8; 288];
     // 0..143   → 8 bits
     let mut i = 0;
-    while i <= 143 { lens[i] = 8; i += 1; }
+    while i <= 143 {
+        lens[i] = 8;
+        i += 1;
+    }
     // 144..255 → 9 bits
-    while i <= 255 { lens[i] = 9; i += 1; }
+    while i <= 255 {
+        lens[i] = 9;
+        i += 1;
+    }
     // 256..279 → 7 bits
-    while i <= 279 { lens[i] = 7; i += 1; }
+    while i <= 279 {
+        lens[i] = 7;
+        i += 1;
+    }
     // 280..287 → 8 bits
-    while i <= 287 { lens[i] = 8; i += 1; }
+    while i <= 287 {
+        lens[i] = 8;
+        i += 1;
+    }
     lens
 }
 
@@ -347,9 +362,9 @@ fn inflate_fixed(reader: &mut BitReader<'_>, output: &mut Vec<u8>) -> KernelResu
 fn inflate_dynamic(reader: &mut BitReader<'_>, output: &mut Vec<u8>) -> KernelResult<()> {
     // Read the number of literal/length codes, distance codes, and
     // code-length codes.
-    let hlit = reader.read_bits(5)?.wrapping_add(257) as usize;  // 257..286
-    let hdist = reader.read_bits(5)?.wrapping_add(1) as usize;   // 1..32
-    let hclen = reader.read_bits(4)?.wrapping_add(4) as usize;   // 4..19
+    let hlit = reader.read_bits(5)?.wrapping_add(257) as usize; // 257..286
+    let hdist = reader.read_bits(5)?.wrapping_add(1) as usize; // 1..32
+    let hclen = reader.read_bits(4)?.wrapping_add(4) as usize; // 4..19
 
     if hlit > 286 || hdist > 30 || hclen > 19 {
         return Err(KernelError::CorruptedData);
@@ -427,11 +442,11 @@ fn inflate_dynamic(reader: &mut BitReader<'_>, output: &mut Vec<u8>) -> KernelRe
         }
     }
 
-    let lit_table = HuffmanTable::build(
-        all_lens.get(..hlit).ok_or(KernelError::CorruptedData)?
-    )?;
+    let lit_table = HuffmanTable::build(all_lens.get(..hlit).ok_or(KernelError::CorruptedData)?)?;
     let dist_table = HuffmanTable::build(
-        all_lens.get(hlit..total).ok_or(KernelError::CorruptedData)?
+        all_lens
+            .get(hlit..total)
+            .ok_or(KernelError::CorruptedData)?,
     )?;
 
     inflate_codes(reader, &lit_table, &dist_table, output)
@@ -459,20 +474,16 @@ fn inflate_codes(
         } else {
             // Length/distance pair — back-reference.
             let len_idx = (sym as usize).wrapping_sub(257);
-            let base_len = *LENGTH_BASE.get(len_idx)
+            let base_len = *LENGTH_BASE.get(len_idx).ok_or(KernelError::CorruptedData)?;
+            let extra = *LENGTH_EXTRA
+                .get(len_idx)
                 .ok_or(KernelError::CorruptedData)?;
-            let extra = *LENGTH_EXTRA.get(len_idx)
-                .ok_or(KernelError::CorruptedData)?;
-            let length = base_len as usize
-                + reader.read_bits(extra)? as usize;
+            let length = base_len as usize + reader.read_bits(extra)? as usize;
 
             let dist_sym = dist_table.decode(reader)? as usize;
-            let base_dist = *DIST_BASE.get(dist_sym)
-                .ok_or(KernelError::CorruptedData)?;
-            let dist_extra = *DIST_EXTRA.get(dist_sym)
-                .ok_or(KernelError::CorruptedData)?;
-            let distance = base_dist as usize
-                + reader.read_bits(dist_extra)? as usize;
+            let base_dist = *DIST_BASE.get(dist_sym).ok_or(KernelError::CorruptedData)?;
+            let dist_extra = *DIST_EXTRA.get(dist_sym).ok_or(KernelError::CorruptedData)?;
+            let distance = base_dist as usize + reader.read_bits(dist_extra)? as usize;
 
             if distance == 0 || distance > output.len() {
                 return Err(KernelError::CorruptedData);
@@ -506,7 +517,11 @@ struct BitWriter {
 
 impl BitWriter {
     fn new() -> Self {
-        Self { data: Vec::new(), current: 0, bits_used: 0 }
+        Self {
+            data: Vec::new(),
+            current: 0,
+            bits_used: 0,
+        }
     }
 
     /// Write `n` bits (1..=16) from `val` (LSB first).
@@ -672,12 +687,7 @@ enum LzToken {
 ///
 /// `head[h]` stores the most recent position with hash `h`.
 /// `prev[pos % MAX_DISTANCE]` links to the previous position in the chain.
-fn insert_hash(
-    data: &[u8],
-    pos: usize,
-    head: &mut [u32],
-    prev: &mut [u32],
-) -> u32 {
+fn insert_hash(data: &[u8], pos: usize, head: &mut [u32], prev: &mut [u32]) -> u32 {
     let h = lz77_hash(data, pos);
     let old_head = head[h];
     prev[pos % MAX_DISTANCE] = old_head;
@@ -689,12 +699,7 @@ fn insert_hash(
 ///
 /// Returns (length, distance) of the best match found, or (0, 0) if
 /// no match of at least `MIN_MATCH` bytes exists.
-fn find_best_match(
-    data: &[u8],
-    pos: usize,
-    head: &[u32],
-    prev: &[u32],
-) -> (usize, usize) {
+fn find_best_match(data: &[u8], pos: usize, head: &[u32], prev: &[u32]) -> (usize, usize) {
     let remaining = data.len().wrapping_sub(pos);
     if remaining < MIN_MATCH {
         return (0, 0);
@@ -708,9 +713,7 @@ fn find_best_match(
     let mut best_dist: usize = 0;
     let mut chain_count = 0usize;
 
-    while candidate < pos
-        && pos.wrapping_sub(candidate) <= MAX_DISTANCE
-        && chain_count < MAX_CHAIN
+    while candidate < pos && pos.wrapping_sub(candidate) <= MAX_DISTANCE && chain_count < MAX_CHAIN
     {
         // Compare bytes at candidate vs pos, starting from the current
         // best length downward (zlib trick: check the last matching byte
@@ -720,8 +723,7 @@ fn find_best_match(
         // Quick rejection: if bytes at the current best length don't match,
         // this candidate can't be better.
         if best_len > 0
-            && data.get(candidate.wrapping_add(best_len))
-                != data.get(pos.wrapping_add(best_len))
+            && data.get(candidate.wrapping_add(best_len)) != data.get(pos.wrapping_add(best_len))
         {
             candidate = prev[candidate % MAX_DISTANCE] as usize;
             chain_count = chain_count.wrapping_add(1);
@@ -891,7 +893,9 @@ fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Vec<u8> {
     let mut lengths = vec![0; n];
 
     // Collect non-zero frequency symbols.
-    let mut symbols: Vec<(u32, usize)> = freqs.iter().enumerate()
+    let mut symbols: Vec<(u32, usize)> = freqs
+        .iter()
+        .enumerate()
         .filter(|(_, f)| **f > 0)
         .map(|(i, f)| (*f, i))
         .collect();
@@ -962,9 +966,7 @@ fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Vec<u8> {
         let merged = next_node;
         next_node = next_node.saturating_add(1);
         node_freq[merged] = f1.saturating_add(f2);
-        node_depth[merged] = node_depth[min1]
-            .max(node_depth[min2])
-            .saturating_add(1);
+        node_depth[merged] = node_depth[min1].max(node_depth[min2]).saturating_add(1);
         active[merged] = true;
         active[min1] = false;
         active[min2] = false;
@@ -1165,12 +1167,16 @@ fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
 
     // HLIT: number of lit/len codes - 257 (max 286 codes).
     // Find the last non-zero length.
-    let hlit = lit_lengths.iter().rposition(|&l| l > 0)
+    let hlit = lit_lengths
+        .iter()
+        .rposition(|&l| l > 0)
         .map(|p| p.saturating_add(1))
         .unwrap_or(257)
         .max(257);
     // HDIST: number of distance codes - 1 (at least 1).
-    let hdist = dist_lengths.iter().rposition(|&l| l > 0)
+    let hdist = dist_lengths
+        .iter()
+        .rposition(|&l| l > 0)
         .map(|p| p.saturating_add(1))
         .unwrap_or(1)
         .max(1);
@@ -1212,11 +1218,11 @@ fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
 
     // --- Emit block header ---
     writer.write_bits(u32::from(bfinal), 1); // BFINAL
-    writer.write_bits(2, 2);                  // BTYPE=10 (dynamic)
+    writer.write_bits(2, 2); // BTYPE=10 (dynamic)
 
-    writer.write_bits((hlit.wrapping_sub(257)) as u32, 5);  // HLIT
-    writer.write_bits((hdist.wrapping_sub(1)) as u32, 5);   // HDIST
-    writer.write_bits((hclen.wrapping_sub(4)) as u32, 4);   // HCLEN
+    writer.write_bits((hlit.wrapping_sub(257)) as u32, 5); // HLIT
+    writer.write_bits((hdist.wrapping_sub(1)) as u32, 5); // HDIST
+    writer.write_bits((hclen.wrapping_sub(4)) as u32, 4); // HCLEN
 
     // Emit code-length code lengths (3 bits each, permuted order).
     for i in 0..hclen {
@@ -1251,9 +1257,13 @@ fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
                 writer.write_bits(u32::from(code), bits);
             }
             LzToken::Match { length, distance } => {
-                if let (Some((len_sym, len_extra, len_ebits)), Some((dist_sym, dist_extra, dist_ebits))) =
-                    (encode_length(*length as usize), encode_distance(*distance as usize))
-                {
+                if let (
+                    Some((len_sym, len_extra, len_ebits)),
+                    Some((dist_sym, dist_extra, dist_ebits)),
+                ) = (
+                    encode_length(*length as usize),
+                    encode_distance(*distance as usize),
+                ) {
                     let (lcode, lbits) = lit_codes[len_sym as usize];
                     writer.write_bits(u32::from(lcode), lbits);
                     if len_ebits > 0 {
@@ -1278,7 +1288,7 @@ fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
 #[allow(clippy::arithmetic_side_effects)]
 fn encode_fixed(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
     writer.write_bits(u32::from(bfinal), 1); // BFINAL
-    writer.write_bits(1, 2);                  // BTYPE=01
+    writer.write_bits(1, 2); // BTYPE=01
 
     for token in tokens {
         match token {
@@ -1287,9 +1297,13 @@ fn encode_fixed(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
                 writer.write_bits(u32::from(code), bits);
             }
             LzToken::Match { length, distance } => {
-                if let (Some((len_sym, len_extra, len_ebits)), Some((dist_sym, dist_extra, dist_ebits))) =
-                    (encode_length(*length as usize), encode_distance(*distance as usize))
-                {
+                if let (
+                    Some((len_sym, len_extra, len_ebits)),
+                    Some((dist_sym, dist_extra, dist_ebits)),
+                ) = (
+                    encode_length(*length as usize),
+                    encode_distance(*distance as usize),
+                ) {
                     let (lcode, lbits) = fixed_code(len_sym);
                     writer.write_bits(u32::from(lcode), lbits);
                     if len_ebits > 0 {
@@ -1349,8 +1363,8 @@ pub fn deflate(data: &[u8]) -> Vec<u8> {
 /// Write a stored (uncompressed) DEFLATE block.
 fn deflate_stored(writer: &mut BitWriter, data: &[u8], bfinal: bool) {
     writer.write_bits(u32::from(bfinal), 1); // BFINAL
-    writer.write_bits(0, 2);                  // BTYPE=00 (stored)
-    writer.flush();                           // align to byte
+    writer.write_bits(0, 2); // BTYPE=00 (stored)
+    writer.flush(); // align to byte
 
     let len = data.len() as u16;
     // LEN
@@ -1377,12 +1391,13 @@ pub fn gzip(data: &[u8]) -> Vec<u8> {
 
     let mut out = Vec::with_capacity(10 + compressed.len() + 8);
     // Gzip header (10 bytes).
-    out.push(0x1F); out.push(0x8B); // ID
-    out.push(0x08);                  // CM = deflate
-    out.push(0x00);                  // FLG
+    out.push(0x1F);
+    out.push(0x8B); // ID
+    out.push(0x08); // CM = deflate
+    out.push(0x00); // FLG
     out.extend_from_slice(&[0, 0, 0, 0]); // MTIME
-    out.push(0x04);                  // XFL = fastest compression
-    out.push(0xFF);                  // OS = unknown
+    out.push(0x04); // XFL = fastest compression
+    out.push(0xFF); // OS = unknown
     // DEFLATE data.
     out.extend_from_slice(&compressed);
     // Trailer: CRC32 + ISIZE.
@@ -1429,8 +1444,8 @@ pub fn gunzip(data: &[u8]) -> KernelResult<Vec<u8>> {
     let flg = reader.read_byte()?;
     let _mtime = reader.read_u16_le()?; // skip MTIME (4 bytes)
     let _mtime_hi = reader.read_u16_le()?;
-    let _xfl = reader.read_byte()?;      // extra flags
-    let _os = reader.read_byte()?;        // OS identifier
+    let _xfl = reader.read_byte()?; // extra flags
+    let _os = reader.read_byte()?; // OS identifier
 
     // Skip optional extra field.
     if (flg & FEXTRA) != 0 {
@@ -1444,7 +1459,9 @@ pub fn gunzip(data: &[u8]) -> KernelResult<Vec<u8>> {
     if (flg & FNAME) != 0 {
         loop {
             let b = reader.read_byte()?;
-            if b == 0 { break; }
+            if b == 0 {
+                break;
+            }
         }
     }
 
@@ -1452,7 +1469,9 @@ pub fn gunzip(data: &[u8]) -> KernelResult<Vec<u8>> {
     if (flg & FCOMMENT) != 0 {
         loop {
             let b = reader.read_byte()?;
-            if b == 0 { break; }
+            if b == 0 {
+                break;
+            }
         }
     }
 
@@ -1469,31 +1488,28 @@ pub fn gunzip(data: &[u8]) -> KernelResult<Vec<u8>> {
         return Err(KernelError::CorruptedData);
     }
     let deflate_end = data.len().wrapping_sub(8);
-    let deflate_data = data.get(deflate_start..deflate_end)
+    let deflate_data = data
+        .get(deflate_start..deflate_end)
         .ok_or(KernelError::CorruptedData)?;
 
     let output = inflate(deflate_data)?;
 
     // Verify CRC32 and ISIZE from trailer.
-    let trailer = data.get(deflate_end..)
-        .ok_or(KernelError::CorruptedData)?;
+    let trailer = data.get(deflate_end..).ok_or(KernelError::CorruptedData)?;
     if trailer.len() < 8 {
         return Err(KernelError::CorruptedData);
     }
 
-    let expected_crc = u32::from_le_bytes([
-        trailer[0], trailer[1], trailer[2], trailer[3],
-    ]);
-    let expected_size = u32::from_le_bytes([
-        trailer[4], trailer[5], trailer[6], trailer[7],
-    ]);
+    let expected_crc = u32::from_le_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
+    let expected_size = u32::from_le_bytes([trailer[4], trailer[5], trailer[6], trailer[7]]);
 
     // Verify size (mod 2^32).
     let actual_size = output.len() as u32;
     if actual_size != expected_size {
         crate::serial_println!(
             "[gunzip] Size mismatch: expected {} got {}",
-            expected_size, actual_size
+            expected_size,
+            actual_size
         );
         return Err(KernelError::CorruptedData);
     }
@@ -1504,7 +1520,8 @@ pub fn gunzip(data: &[u8]) -> KernelResult<Vec<u8>> {
     if actual_crc != expected_crc {
         crate::serial_println!(
             "[gunzip] CRC32 mismatch: expected {:#010x} got {:#010x}",
-            expected_crc, actual_crc
+            expected_crc,
+            actual_crc
         );
         return Err(KernelError::CorruptedData);
     }
@@ -1626,7 +1643,8 @@ pub fn zlib_inflate(data: &[u8]) -> KernelResult<Vec<u8>> {
     }
 
     // Compressed data starts at offset 2.
-    let compressed = data.get(2..data.len().saturating_sub(4))
+    let compressed = data
+        .get(2..data.len().saturating_sub(4))
         .ok_or(KernelError::CorruptedData)?;
 
     // --- Decompress ---
@@ -1643,7 +1661,8 @@ pub fn zlib_inflate(data: &[u8]) -> KernelResult<Vec<u8>> {
     if stored_adler != computed_adler {
         crate::serial_println!(
             "[compress] zlib Adler-32 mismatch: stored={:#010x} computed={:#010x}",
-            stored_adler, computed_adler,
+            stored_adler,
+            computed_adler,
         );
         return Err(KernelError::CorruptedData);
     }
@@ -1718,11 +1737,10 @@ pub fn self_test() -> KernelResult<()> {
     // Test inflate with a stored block.
     // Stored block: BFINAL=1, BTYPE=00, LEN=5, NLEN=~5, "hello"
     let stored: [u8; 12] = [
-        0x01,                   // BFINAL=1, BTYPE=0 (stored)
-        0x05, 0x00,             // LEN = 5
-        0xFA, 0xFF,             // NLEN = ~5 = 0xFFFA
-        b'h', b'e', b'l', b'l', b'o',
-        0x00, 0x00,             // padding (unused)
+        0x01, // BFINAL=1, BTYPE=0 (stored)
+        0x05, 0x00, // LEN = 5
+        0xFA, 0xFF, // NLEN = ~5 = 0xFFFA
+        b'h', b'e', b'l', b'l', b'o', 0x00, 0x00, // padding (unused)
     ];
     let result = inflate(&stored[..10])?;
     if result.as_slice() != b"hello" {
@@ -1750,12 +1768,13 @@ pub fn self_test() -> KernelResult<()> {
 
     let mut gz = Vec::with_capacity(30);
     // Gzip header
-    gz.push(0x1F); gz.push(0x8B); // ID
-    gz.push(0x08);                  // CM = deflate
-    gz.push(0x00);                  // FLG = no extras
+    gz.push(0x1F);
+    gz.push(0x8B); // ID
+    gz.push(0x08); // CM = deflate
+    gz.push(0x00); // FLG = no extras
     gz.extend_from_slice(&[0, 0, 0, 0]); // MTIME
-    gz.push(0x00);                  // XFL
-    gz.push(0xFF);                  // OS = unknown
+    gz.push(0x00); // XFL
+    gz.push(0xFF); // OS = unknown
     // DEFLATE stored block: BFINAL=1, BTYPE=00
     gz.push(0x01);
     let len = payload.len() as u16;
@@ -1791,7 +1810,9 @@ pub fn self_test() -> KernelResult<()> {
     if lit_table.counts[7] != 24 || lit_table.counts[8] != 152 || lit_table.counts[9] != 112 {
         crate::serial_println!(
             "[compress]   FAIL: fixed literal table counts: 7={} 8={} 9={}",
-            lit_table.counts[7], lit_table.counts[8], lit_table.counts[9]
+            lit_table.counts[7],
+            lit_table.counts[8],
+            lit_table.counts[9]
         );
         return Err(KernelError::InternalError);
     }
@@ -1805,13 +1826,16 @@ pub fn self_test() -> KernelResult<()> {
     if decompressed.as_slice() != &original[..] {
         crate::serial_println!(
             "[compress]   FAIL: deflate round-trip mismatch (orig={}, dec={})",
-            original.len(), decompressed.len()
+            original.len(),
+            decompressed.len()
         );
         return Err(KernelError::InternalError);
     }
     crate::serial_println!(
         "[compress]   Deflate round-trip verified ({} -> {} -> {} bytes) ✓",
-        original.len(), compressed.len(), decompressed.len()
+        original.len(),
+        compressed.len(),
+        decompressed.len()
     );
 
     // Test gzip → gunzip round-trip.
@@ -1823,7 +1847,8 @@ pub fn self_test() -> KernelResult<()> {
     }
     crate::serial_println!(
         "[compress]   Gzip compress round-trip verified ({} -> {} bytes) ✓",
-        original.len(), gz_data.len()
+        original.len(),
+        gz_data.len()
     );
 
     // Test with empty input.
@@ -1857,7 +1882,8 @@ pub fn self_test() -> KernelResult<()> {
     }
     crate::serial_println!(
         "[compress]   zlib round-trip verified ({} -> {} bytes) ✓",
-        zlib_input.len(), zlib_compressed.len()
+        zlib_input.len(),
+        zlib_compressed.len()
     );
 
     // zlib empty input round-trip.
@@ -1880,9 +1906,9 @@ pub fn self_test() -> KernelResult<()> {
         // common bytes.
         for i in 0..2048usize {
             let b = match i % 16 {
-                0..=7 => b'a',       // 50% 'a'
-                8..=11 => b'b',      // 25% 'b'
-                12..=13 => b'c',     // 12.5% 'c'
+                0..=7 => b'a',              // 50% 'a'
+                8..=11 => b'b',             // 25% 'b'
+                12..=13 => b'c',            // 12.5% 'c'
                 _ => (i % 26) as u8 + b'd', // 12.5% varied
             };
             skewed.push(b);
@@ -1910,8 +1936,13 @@ pub fn self_test() -> KernelResult<()> {
 
         crate::serial_println!(
             "[compress]   Dynamic vs fixed: dyn={} fixed={} (dyn {}) ✓",
-            dyn_size, fixed_size,
-            if dyn_size < fixed_size { "wins" } else { "≈ fixed" }
+            dyn_size,
+            fixed_size,
+            if dyn_size < fixed_size {
+                "wins"
+            } else {
+                "≈ fixed"
+            }
         );
     }
 
@@ -1925,10 +1956,7 @@ pub fn self_test() -> KernelResult<()> {
             crate::serial_println!("[compress]   FAIL: all-same-byte round-trip");
             return Err(KernelError::InternalError);
         }
-        crate::serial_println!(
-            "[compress]   All-same-byte: 1024 -> {} bytes ✓",
-            comp.len()
-        );
+        crate::serial_println!("[compress]   All-same-byte: 1024 -> {} bytes ✓", comp.len());
     }
 
     // Test with pseudo-random data (poor compression expected).
@@ -1948,10 +1976,7 @@ pub fn self_test() -> KernelResult<()> {
             crate::serial_println!("[compress]   FAIL: pseudo-random round-trip");
             return Err(KernelError::InternalError);
         }
-        crate::serial_println!(
-            "[compress]   Pseudo-random: 1024 -> {} bytes ✓",
-            comp.len()
-        );
+        crate::serial_println!("[compress]   Pseudo-random: 1024 -> {} bytes ✓", comp.len());
     }
 
     // Test with a larger input to stress the lazy matching.
@@ -1976,7 +2001,8 @@ pub fn self_test() -> KernelResult<()> {
         }
         crate::serial_println!(
             "[compress]   8K mixed: {} -> {} bytes ({:.0}%) ✓",
-            large.len(), comp.len(),
+            large.len(),
+            comp.len(),
             (comp.len() as f64 / large.len() as f64) * 100.0
         );
     }

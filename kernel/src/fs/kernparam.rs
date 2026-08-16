@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -95,7 +95,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     // Read the REAL kernel command line from the bootloader (Limine). We never
     // fabricate boot parameters: if the bootloader passed no cmdline (as with
@@ -145,7 +147,11 @@ pub fn get(key: &str) -> Option<String> {
     if let Some(state) = guard.as_mut() {
         state.total_lookups += 1;
         state.ops += 1;
-        state.params.iter().find(|p| p.key == key).map(|p| p.value.clone())
+        state
+            .params
+            .iter()
+            .find(|p| p.key == key)
+            .map(|p| p.value.clone())
     } else {
         None
     }
@@ -158,10 +164,14 @@ pub fn set(key: &str, value: &str) -> KernelResult<()> {
             p.value = String::from(value);
             p.origin = ParamOrigin::Runtime;
         } else {
-            if state.params.len() >= MAX_PARAMS { return Err(KernelError::ResourceExhausted); }
+            if state.params.len() >= MAX_PARAMS {
+                return Err(KernelError::ResourceExhausted);
+            }
             state.params.push(KernelParam {
-                key: String::from(key), value: String::from(value),
-                origin: ParamOrigin::Runtime, consumed_by: None,
+                key: String::from(key),
+                value: String::from(value),
+                origin: ParamOrigin::Runtime,
+                consumed_by: None,
                 description: String::from("User-set parameter"),
             });
         }
@@ -173,7 +183,11 @@ pub fn set(key: &str, value: &str) -> KernelResult<()> {
 /// Mark a parameter as consumed.
 pub fn consume(key: &str, subsystem: &str) -> KernelResult<String> {
     with_state(|state| {
-        let p = state.params.iter_mut().find(|p| p.key == key).ok_or(KernelError::NotFound)?;
+        let p = state
+            .params
+            .iter_mut()
+            .find(|p| p.key == key)
+            .ok_or(KernelError::NotFound)?;
         p.consumed_by = Some(String::from(subsystem));
         Ok(p.value.clone())
     })
@@ -186,12 +200,18 @@ pub fn is_set(key: &str) -> bool {
 
 /// List all parameters.
 pub fn list_params() -> Vec<KernelParam> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.params.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.params.clone())
 }
 
 /// Get full command line.
 pub fn cmdline() -> String {
-    STATE.lock().as_ref().map_or(String::new(), |s| s.cmdline.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(String::new(), |s| s.cmdline.clone())
 }
 
 /// Remove a parameter.
@@ -199,7 +219,9 @@ pub fn remove(key: &str) -> KernelResult<()> {
     with_state(|state| {
         let before = state.params.len();
         state.params.retain(|p| p.key != key);
-        if state.params.len() == before { return Err(KernelError::NotFound); }
+        if state.params.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -207,7 +229,11 @@ pub fn remove(key: &str) -> KernelResult<()> {
 /// Get unconsumed parameters.
 pub fn unconsumed() -> Vec<KernelParam> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.params.iter().filter(|p| p.consumed_by.is_none()).cloned().collect()
+        s.params
+            .iter()
+            .filter(|p| p.consumed_by.is_none())
+            .cloned()
+            .collect()
     })
 }
 
@@ -217,7 +243,13 @@ pub fn stats() -> (usize, u64, u64, usize, u64) {
     match guard.as_ref() {
         Some(s) => {
             let unconsumed = s.params.iter().filter(|p| p.consumed_by.is_none()).count();
-            (s.params.len(), s.total_lookups, s.total_sets, unconsumed, s.ops)
+            (
+                s.params.len(),
+                s.total_lookups,
+                s.total_sets,
+                unconsumed,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }
@@ -269,7 +301,11 @@ pub fn self_test() {
 
     // 5: Override (origin flips to Runtime).
     set("loglevel", "7").expect("override");
-    let p = list_params().iter().find(|p| p.key == "loglevel").expect("find").clone();
+    let p = list_params()
+        .iter()
+        .find(|p| p.key == "loglevel")
+        .expect("find")
+        .clone();
     assert_eq!(p.value, "7");
     assert_eq!(p.origin, ParamOrigin::Runtime);
     crate::serial_println!("  [5/8] override: OK");

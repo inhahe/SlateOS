@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -104,59 +104,163 @@ fn default_layouts(start_id: u32) -> (Vec<SnapLayout>, u32) {
 
     // 1: Half-half (left/right).
     layouts.push(SnapLayout {
-        id: { let i = id; id += 1; i },
+        id: {
+            let i = id;
+            id += 1;
+            i
+        },
         name: String::from("Half-Half"),
         zones: alloc::vec![
-            SnapZone { id: 0, x_pct: 0, y_pct: 0, w_pct: 50, h_pct: 100 },
-            SnapZone { id: 1, x_pct: 50, y_pct: 0, w_pct: 50, h_pct: 100 },
+            SnapZone {
+                id: 0,
+                x_pct: 0,
+                y_pct: 0,
+                w_pct: 50,
+                h_pct: 100
+            },
+            SnapZone {
+                id: 1,
+                x_pct: 50,
+                y_pct: 0,
+                w_pct: 50,
+                h_pct: 100
+            },
         ],
         use_count: 0,
     });
 
     // 2: Three columns (33/33/34).
     layouts.push(SnapLayout {
-        id: { let i = id; id += 1; i },
+        id: {
+            let i = id;
+            id += 1;
+            i
+        },
         name: String::from("Three Columns"),
         zones: alloc::vec![
-            SnapZone { id: 0, x_pct: 0, y_pct: 0, w_pct: 33, h_pct: 100 },
-            SnapZone { id: 1, x_pct: 33, y_pct: 0, w_pct: 34, h_pct: 100 },
-            SnapZone { id: 2, x_pct: 67, y_pct: 0, w_pct: 33, h_pct: 100 },
+            SnapZone {
+                id: 0,
+                x_pct: 0,
+                y_pct: 0,
+                w_pct: 33,
+                h_pct: 100
+            },
+            SnapZone {
+                id: 1,
+                x_pct: 33,
+                y_pct: 0,
+                w_pct: 34,
+                h_pct: 100
+            },
+            SnapZone {
+                id: 2,
+                x_pct: 67,
+                y_pct: 0,
+                w_pct: 33,
+                h_pct: 100
+            },
         ],
         use_count: 0,
     });
 
     // 3: Quadrants.
     layouts.push(SnapLayout {
-        id: { let i = id; id += 1; i },
+        id: {
+            let i = id;
+            id += 1;
+            i
+        },
         name: String::from("Quadrants"),
         zones: alloc::vec![
-            SnapZone { id: 0, x_pct: 0, y_pct: 0, w_pct: 50, h_pct: 50 },
-            SnapZone { id: 1, x_pct: 50, y_pct: 0, w_pct: 50, h_pct: 50 },
-            SnapZone { id: 2, x_pct: 0, y_pct: 50, w_pct: 50, h_pct: 50 },
-            SnapZone { id: 3, x_pct: 50, y_pct: 50, w_pct: 50, h_pct: 50 },
+            SnapZone {
+                id: 0,
+                x_pct: 0,
+                y_pct: 0,
+                w_pct: 50,
+                h_pct: 50
+            },
+            SnapZone {
+                id: 1,
+                x_pct: 50,
+                y_pct: 0,
+                w_pct: 50,
+                h_pct: 50
+            },
+            SnapZone {
+                id: 2,
+                x_pct: 0,
+                y_pct: 50,
+                w_pct: 50,
+                h_pct: 50
+            },
+            SnapZone {
+                id: 3,
+                x_pct: 50,
+                y_pct: 50,
+                w_pct: 50,
+                h_pct: 50
+            },
         ],
         use_count: 0,
     });
 
     // 4: Main + sidebar (70/30).
     layouts.push(SnapLayout {
-        id: { let i = id; id += 1; i },
+        id: {
+            let i = id;
+            id += 1;
+            i
+        },
         name: String::from("Main + Sidebar"),
         zones: alloc::vec![
-            SnapZone { id: 0, x_pct: 0, y_pct: 0, w_pct: 70, h_pct: 100 },
-            SnapZone { id: 1, x_pct: 70, y_pct: 0, w_pct: 30, h_pct: 100 },
+            SnapZone {
+                id: 0,
+                x_pct: 0,
+                y_pct: 0,
+                w_pct: 70,
+                h_pct: 100
+            },
+            SnapZone {
+                id: 1,
+                x_pct: 70,
+                y_pct: 0,
+                w_pct: 30,
+                h_pct: 100
+            },
         ],
         use_count: 0,
     });
 
     // 5: Main + 2 side (60/40 split).
     layouts.push(SnapLayout {
-        id: { let i = id; id += 1; i },
+        id: {
+            let i = id;
+            id += 1;
+            i
+        },
         name: String::from("Main + 2 Side"),
         zones: alloc::vec![
-            SnapZone { id: 0, x_pct: 0, y_pct: 0, w_pct: 60, h_pct: 100 },
-            SnapZone { id: 1, x_pct: 60, y_pct: 0, w_pct: 40, h_pct: 50 },
-            SnapZone { id: 2, x_pct: 60, y_pct: 50, w_pct: 40, h_pct: 50 },
+            SnapZone {
+                id: 0,
+                x_pct: 0,
+                y_pct: 0,
+                w_pct: 60,
+                h_pct: 100
+            },
+            SnapZone {
+                id: 1,
+                x_pct: 60,
+                y_pct: 0,
+                w_pct: 40,
+                h_pct: 50
+            },
+            SnapZone {
+                id: 2,
+                x_pct: 60,
+                y_pct: 50,
+                w_pct: 40,
+                h_pct: 50
+            },
         ],
         use_count: 0,
     });
@@ -170,7 +274,9 @@ fn default_layouts(start_id: u32) -> (Vec<SnapLayout>, u32) {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let (layouts, next_id) = default_layouts(1);
     *guard = Some(State {
         active_layout_id: 1,
@@ -195,7 +301,10 @@ pub fn add_layout(name: &str, zones: Vec<SnapZone>) -> KernelResult<u32> {
         let id = state.next_layout_id;
         state.next_layout_id += 1;
         state.layouts.push(SnapLayout {
-            id, name: String::from(name), zones, use_count: 0,
+            id,
+            name: String::from(name),
+            zones,
+            use_count: 0,
         });
         Ok(id)
     })
@@ -230,17 +339,24 @@ pub fn set_active(id: u32) -> KernelResult<()> {
 /// Get the active layout.
 pub fn get_active() -> Option<SnapLayout> {
     STATE.lock().as_ref().and_then(|s| {
-        s.layouts.iter().find(|l| l.id == s.active_layout_id).cloned()
+        s.layouts
+            .iter()
+            .find(|l| l.id == s.active_layout_id)
+            .cloned()
     })
 }
 
 /// Snap a window to a zone in the active layout.
 pub fn snap_to_zone(window_id: u32, zone_id: u32) -> KernelResult<SnapZone> {
     with_state(|state| {
-        let layout = state.layouts.iter_mut()
+        let layout = state
+            .layouts
+            .iter_mut()
             .find(|l| l.id == state.active_layout_id)
             .ok_or(KernelError::NotFound)?;
-        let zone = layout.zones.iter()
+        let zone = layout
+            .zones
+            .iter()
             .find(|z| z.id == zone_id)
             .ok_or(KernelError::NotFound)?
             .clone();
@@ -248,7 +364,11 @@ pub fn snap_to_zone(window_id: u32, zone_id: u32) -> KernelResult<SnapZone> {
         state.total_snaps += 1;
 
         // Add to or update snap group.
-        if let Some(group) = state.groups.iter_mut().find(|g| g.layout_id == state.active_layout_id) {
+        if let Some(group) = state
+            .groups
+            .iter_mut()
+            .find(|g| g.layout_id == state.active_layout_id)
+        {
             group.assignments.retain(|&(wid, _)| wid != window_id);
             group.assignments.push((window_id, zone_id));
         } else if state.groups.len() < MAX_GROUPS {
@@ -268,9 +388,9 @@ pub fn snap_to_zone(window_id: u32, zone_id: u32) -> KernelResult<SnapZone> {
 pub fn suggest_layout(window_count: usize) -> Option<SnapLayout> {
     STATE.lock().as_ref().and_then(|s| {
         // Find layout with zone count closest to window count.
-        s.layouts.iter()
+        s.layouts
+            .iter()
             .min_by_key(|l| {
-                
                 if l.zones.len() >= window_count {
                     l.zones.len() - window_count
                 } else {
@@ -283,12 +403,18 @@ pub fn suggest_layout(window_count: usize) -> Option<SnapLayout> {
 
 /// List all layouts.
 pub fn list_layouts() -> Vec<SnapLayout> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.layouts.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.layouts.clone())
 }
 
 /// List snap groups.
 pub fn list_groups() -> Vec<SnapGroup> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.groups.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.groups.clone())
 }
 
 /// Statistics: (layout_count, group_count, total_snaps, ops).
@@ -335,9 +461,27 @@ pub fn self_test() {
 
     // 5: Add custom layout.
     let custom_zones = alloc::vec![
-        SnapZone { id: 0, x_pct: 0, y_pct: 0, w_pct: 25, h_pct: 100 },
-        SnapZone { id: 1, x_pct: 25, y_pct: 0, w_pct: 50, h_pct: 100 },
-        SnapZone { id: 2, x_pct: 75, y_pct: 0, w_pct: 25, h_pct: 100 },
+        SnapZone {
+            id: 0,
+            x_pct: 0,
+            y_pct: 0,
+            w_pct: 25,
+            h_pct: 100
+        },
+        SnapZone {
+            id: 1,
+            x_pct: 25,
+            y_pct: 0,
+            w_pct: 50,
+            h_pct: 100
+        },
+        SnapZone {
+            id: 2,
+            x_pct: 75,
+            y_pct: 0,
+            w_pct: 25,
+            h_pct: 100
+        },
     ];
     let cid = add_layout("Custom 3-col", custom_zones).expect("add");
     assert!(cid >= 6);

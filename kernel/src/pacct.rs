@@ -110,9 +110,8 @@ struct AcctSlot(core::cell::UnsafeCell<AcctRecord>);
 unsafe impl Sync for AcctSlot {}
 
 /// Ring buffer of accounting records.
-static RING: [AcctSlot; RING_SIZE] = [const {
-    AcctSlot(core::cell::UnsafeCell::new(AcctRecord::empty()))
-}; RING_SIZE];
+static RING: [AcctSlot; RING_SIZE] =
+    [const { AcctSlot(core::cell::UnsafeCell::new(AcctRecord::empty())) }; RING_SIZE];
 
 /// Write index (monotonically increasing, wraps via mask).
 static WRITE_IDX: AtomicU32 = AtomicU32::new(0);
@@ -130,7 +129,10 @@ static TOTAL_RECORDS: AtomicU64 = AtomicU64::new(0);
 /// after the scheduler is initialized.
 pub fn init() {
     crate::sched::register_exit_hook(on_task_exit);
-    crate::serial_println!("[pacct] Process accounting initialized (ring size {})", RING_SIZE);
+    crate::serial_println!(
+        "[pacct] Process accounting initialized (ring size {})",
+        RING_SIZE
+    );
 }
 
 // ---------------------------------------------------------------------------

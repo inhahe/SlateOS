@@ -19,10 +19,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -142,11 +142,29 @@ fn field_value(notif: &NotifData, field: MatchField) -> &str {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         rules: alloc::vec![
-            FilterRule { id: 1, name: String::from("Block spam"), field: MatchField::Title, pattern: String::from("spam"), action: FilterAction::Block, enabled: true, hit_count: 0 },
-            FilterRule { id: 2, name: String::from("Silence ads"), field: MatchField::Category, pattern: String::from("advertisement"), action: FilterAction::Silence, enabled: true, hit_count: 0 },
+            FilterRule {
+                id: 1,
+                name: String::from("Block spam"),
+                field: MatchField::Title,
+                pattern: String::from("spam"),
+                action: FilterAction::Block,
+                enabled: true,
+                hit_count: 0
+            },
+            FilterRule {
+                id: 2,
+                name: String::from("Silence ads"),
+                field: MatchField::Category,
+                pattern: String::from("advertisement"),
+                action: FilterAction::Silence,
+                enabled: true,
+                hit_count: 0
+            },
         ],
         next_id: 3,
         total_evaluated: 0,
@@ -158,7 +176,12 @@ pub fn init_defaults() {
 }
 
 /// Add a filter rule.
-pub fn add_rule(name: &str, field: MatchField, pattern: &str, action: FilterAction) -> KernelResult<u32> {
+pub fn add_rule(
+    name: &str,
+    field: MatchField,
+    pattern: &str,
+    action: FilterAction,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.rules.len() >= MAX_RULES {
             return Err(KernelError::ResourceExhausted);
@@ -166,9 +189,13 @@ pub fn add_rule(name: &str, field: MatchField, pattern: &str, action: FilterActi
         let id = state.next_id;
         state.next_id += 1;
         state.rules.push(FilterRule {
-            id, name: String::from(name), field,
-            pattern: String::from(pattern), action,
-            enabled: true, hit_count: 0,
+            id,
+            name: String::from(name),
+            field,
+            pattern: String::from(pattern),
+            action,
+            enabled: true,
+            hit_count: 0,
         });
         Ok(id)
     })
@@ -179,7 +206,9 @@ pub fn remove_rule(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.rules.len();
         state.rules.retain(|r| r.id != id);
-        if state.rules.len() == before { return Err(KernelError::NotFound); }
+        if state.rules.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -187,7 +216,10 @@ pub fn remove_rule(id: u32) -> KernelResult<()> {
 /// Enable/disable a rule.
 pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let rule = state.rules.iter_mut().find(|r| r.id == id)
+        let rule = state
+            .rules
+            .iter_mut()
+            .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         rule.enabled = enabled;
         Ok(())
@@ -199,7 +231,9 @@ pub fn evaluate(notif: &NotifData) -> KernelResult<FilterAction> {
     with_state(|state| {
         state.total_evaluated += 1;
         for rule in &mut state.rules {
-            if !rule.enabled { continue; }
+            if !rule.enabled {
+                continue;
+            }
             let value = field_value(notif, rule.field).to_lowercase();
             let pattern = rule.pattern.to_lowercase();
             if value.contains(&pattern) {
@@ -220,14 +254,24 @@ pub fn evaluate(notif: &NotifData) -> KernelResult<FilterAction> {
 
 /// List all rules.
 pub fn list_rules() -> Vec<FilterRule> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.rules.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.rules.clone())
 }
 
 /// Statistics: (rule_count, total_evaluated, total_allowed, total_blocked, total_silenced, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.rules.len(), s.total_evaluated, s.total_allowed, s.total_blocked, s.total_silenced, s.ops),
+        Some(s) => (
+            s.rules.len(),
+            s.total_evaluated,
+            s.total_allowed,
+            s.total_blocked,
+            s.total_silenced,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -245,26 +289,56 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] defaults: OK");
 
     // 2: Normal notification allowed.
-    let notif = NotifData { app_name: String::from("email"), category: String::from("message"), title: String::from("New message"), body: String::from("Hello"), priority: String::from("normal") };
+    let notif = NotifData {
+        app_name: String::from("email"),
+        category: String::from("message"),
+        title: String::from("New message"),
+        body: String::from("Hello"),
+        priority: String::from("normal"),
+    };
     let action = evaluate(&notif).expect("eval1");
     assert_eq!(action, FilterAction::Allow);
     crate::serial_println!("  [2/8] allow: OK");
 
     // 3: Spam blocked.
-    let spam = NotifData { app_name: String::from("store"), category: String::from("promo"), title: String::from("Buy spam products now!"), body: String::from("Sale"), priority: String::from("low") };
+    let spam = NotifData {
+        app_name: String::from("store"),
+        category: String::from("promo"),
+        title: String::from("Buy spam products now!"),
+        body: String::from("Sale"),
+        priority: String::from("low"),
+    };
     let action = evaluate(&spam).expect("eval2");
     assert_eq!(action, FilterAction::Block);
     crate::serial_println!("  [3/8] block: OK");
 
     // 4: Ad silenced.
-    let ad = NotifData { app_name: String::from("game"), category: String::from("advertisement"), title: String::from("Special offer"), body: String::new(), priority: String::from("low") };
+    let ad = NotifData {
+        app_name: String::from("game"),
+        category: String::from("advertisement"),
+        title: String::from("Special offer"),
+        body: String::new(),
+        priority: String::from("low"),
+    };
     let action = evaluate(&ad).expect("eval3");
     assert_eq!(action, FilterAction::Silence);
     crate::serial_println!("  [4/8] silence: OK");
 
     // 5: Add custom rule.
-    let rid = add_rule("Defer work emails", MatchField::AppName, "work", FilterAction::Defer).expect("add");
-    let work = NotifData { app_name: String::from("work-email"), category: String::from("email"), title: String::from("Meeting"), body: String::new(), priority: String::from("normal") };
+    let rid = add_rule(
+        "Defer work emails",
+        MatchField::AppName,
+        "work",
+        FilterAction::Defer,
+    )
+    .expect("add");
+    let work = NotifData {
+        app_name: String::from("work-email"),
+        category: String::from("email"),
+        title: String::from("Meeting"),
+        body: String::new(),
+        priority: String::from("normal"),
+    };
     let action = evaluate(&work).expect("eval4");
     assert_eq!(action, FilterAction::Defer);
     crate::serial_println!("  [5/8] custom rule: OK");

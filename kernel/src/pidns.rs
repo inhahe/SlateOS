@@ -50,12 +50,12 @@
 //! - `man 7 pid_namespaces`
 //! - Design spec: container primitives for Docker support
 
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -348,11 +348,17 @@ pub fn alloc_pid(ns_id: PidNsId, global_pid: GlobalPid) -> KernelResult<LocalPid
         }
 
         // Allocate next PID.
-        let local_pid = table.namespaces[idx].next_pid.fetch_add(1, Ordering::Relaxed);
+        let local_pid = table.namespaces[idx]
+            .next_pid
+            .fetch_add(1, Ordering::Relaxed);
 
         // Insert bidirectional mapping.
-        table.namespaces[idx].global_to_local.insert(global_pid, local_pid);
-        table.namespaces[idx].local_to_global.insert(local_pid, global_pid);
+        table.namespaces[idx]
+            .global_to_local
+            .insert(global_pid, local_pid);
+        table.namespaces[idx]
+            .local_to_global
+            .insert(local_pid, global_pid);
         table.namespaces[idx].nr_procs = table.namespaces[idx].nr_procs.saturating_add(1);
 
         // First process is init (local PID 1).
@@ -383,8 +389,7 @@ pub fn free_pid(ns_id: PidNsId, global_pid: GlobalPid) -> bool {
 
         if let Some(local) = table.namespaces[idx].global_to_local.remove(&global_pid) {
             table.namespaces[idx].local_to_global.remove(&local);
-            table.namespaces[idx].nr_procs =
-                table.namespaces[idx].nr_procs.saturating_sub(1);
+            table.namespaces[idx].nr_procs = table.namespaces[idx].nr_procs.saturating_sub(1);
         }
 
         if was_init {
@@ -405,7 +410,10 @@ pub fn translate_to_local(ns_id: PidNsId, global_pid: GlobalPid) -> Option<Local
         if idx >= MAX_NAMESPACES || !table.namespaces[idx].active {
             return None;
         }
-        table.namespaces[idx].global_to_local.get(&global_pid).copied()
+        table.namespaces[idx]
+            .global_to_local
+            .get(&global_pid)
+            .copied()
     })
 }
 
@@ -419,7 +427,10 @@ pub fn translate_to_global(ns_id: PidNsId, local_pid: LocalPid) -> Option<Global
         if idx >= MAX_NAMESPACES || !table.namespaces[idx].active {
             return None;
         }
-        table.namespaces[idx].local_to_global.get(&local_pid).copied()
+        table.namespaces[idx]
+            .local_to_global
+            .get(&local_pid)
+            .copied()
     })
 }
 
@@ -506,7 +517,11 @@ pub fn parent_ns(ns_id: PidNsId) -> Option<PidNsId> {
             return None;
         }
         let parent = table.namespaces[idx].parent;
-        if parent == NO_PARENT { None } else { Some(parent) }
+        if parent == NO_PARENT {
+            None
+        } else {
+            Some(parent)
+        }
     })
 }
 
@@ -546,9 +561,7 @@ pub fn exists(id: PidNsId) -> bool {
 /// Count active namespaces.
 #[must_use]
 pub fn active_count() -> usize {
-    with_table_ref(|table| {
-        table.namespaces.iter().filter(|ns| ns.active).count()
-    })
+    with_table_ref(|table| table.namespaces.iter().filter(|ns| ns.active).count())
 }
 
 // ---------------------------------------------------------------------------

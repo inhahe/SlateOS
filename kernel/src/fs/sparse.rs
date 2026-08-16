@@ -156,7 +156,10 @@ pub fn punch_hole(path: &str, offset: u64, length: u64) -> KernelResult<RangeRes
     // Verify file exists and get size.
     let meta = Vfs::metadata(path)?;
     if offset >= meta.size {
-        return Ok(RangeResult { bytes_affected: 0, created_hole: false });
+        return Ok(RangeResult {
+            bytes_affected: 0,
+            created_hole: false,
+        });
     }
 
     // Clamp to file size.
@@ -180,7 +183,10 @@ pub fn punch_hole(path: &str, offset: u64, length: u64) -> KernelResult<RangeRes
     // Notify fstrim about freed blocks.
     crate::fs::fstrim::notify_free(path, offset, actual_len);
 
-    Ok(RangeResult { bytes_affected: actual_len, created_hole: created })
+    Ok(RangeResult {
+        bytes_affected: actual_len,
+        created_hole: created,
+    })
 }
 
 /// Zero a range without necessarily deallocating (FALLOC_FL_ZERO_RANGE).
@@ -196,7 +202,10 @@ pub fn zero_range(path: &str, offset: u64, length: u64) -> KernelResult<RangeRes
 
     let meta = Vfs::metadata(path)?;
     if offset >= meta.size {
-        return Ok(RangeResult { bytes_affected: 0, created_hole: false });
+        return Ok(RangeResult {
+            bytes_affected: 0,
+            created_hole: false,
+        });
     }
 
     let actual_len = length.min(meta.size - offset);
@@ -212,7 +221,10 @@ pub fn zero_range(path: &str, offset: u64, length: u64) -> KernelResult<RangeRes
     }
 
     // Zero range doesn't create a hole (space stays allocated).
-    Ok(RangeResult { bytes_affected: actual_len, created_hole: false })
+    Ok(RangeResult {
+        bytes_affected: actual_len,
+        created_hole: false,
+    })
 }
 
 /// Collapse a range — remove data and shift everything after it down.
@@ -259,7 +271,10 @@ pub fn collapse_range(path: &str, offset: u64, length: u64) -> KernelResult<Rang
     // Invalidate sparse map for this file (regions have shifted).
     remove_tracking(path);
 
-    Ok(RangeResult { bytes_affected: actual_len, created_hole: false })
+    Ok(RangeResult {
+        bytes_affected: actual_len,
+        created_hole: false,
+    })
 }
 
 /// Insert a zero range at the given offset, shifting data up.
@@ -313,7 +328,10 @@ pub fn insert_range(path: &str, offset: u64, length: u64) -> KernelResult<RangeR
     // Track the new hole.
     track_hole(path, offset, length);
 
-    Ok(RangeResult { bytes_affected: length, created_hole: true })
+    Ok(RangeResult {
+        bytes_affected: length,
+        created_hole: true,
+    })
 }
 
 /// Map the sparse regions of a file.
@@ -374,7 +392,8 @@ pub fn map_regions(path: &str) -> KernelResult<SparseMap> {
         });
     }
 
-    let hole_bytes: u64 = regions.iter()
+    let hole_bytes: u64 = regions
+        .iter()
         .filter(|r| r.kind == RegionKind::Hole)
         .map(|r| r.length)
         .sum();
@@ -406,7 +425,11 @@ pub fn seek_data(path: &str, offset: u64) -> KernelResult<Option<u64>> {
         if offset >= hole_off && offset < hole_off + hole_len {
             // Inside a hole — next data starts after this hole.
             let next = hole_off + hole_len;
-            return if next < meta.size { Ok(Some(next)) } else { Ok(None) };
+            return if next < meta.size {
+                Ok(Some(next))
+            } else {
+                Ok(None)
+            };
         }
     }
 
@@ -472,7 +495,10 @@ pub fn reset_stats() {
 /// List tracked sparse files.
 pub fn list_tracked() -> Vec<(String, usize)> {
     let table = SPARSE_TABLE.lock();
-    table.iter().map(|e| (e.path.clone(), e.holes.len())).collect()
+    table
+        .iter()
+        .map(|e| (e.path.clone(), e.holes.len()))
+        .collect()
 }
 
 /// Clear all sparse tracking data.
@@ -500,7 +526,9 @@ fn track_hole(path: &str, offset: u64, length: u64) -> bool {
     } else {
         // Evict LRU if at capacity.
         if table.len() >= MAX_TRACKED_FILES {
-            if let Some(oldest_idx) = table.iter().enumerate()
+            if let Some(oldest_idx) = table
+                .iter()
+                .enumerate()
                 .min_by_key(|(_, e)| e.last_access_ns)
                 .map(|(i, _)| i)
             {
@@ -546,9 +574,9 @@ fn track_hole(path: &str, offset: u64, length: u64) -> bool {
                 let mut min_gap = u64::MAX;
                 let mut min_idx = 0;
                 for i in 0..entry.holes.len() - 1 {
-                    let gap = entry.holes[i + 1].0.saturating_sub(
-                        entry.holes[i].0 + entry.holes[i].1
-                    );
+                    let gap = entry.holes[i + 1]
+                        .0
+                        .saturating_sub(entry.holes[i].0 + entry.holes[i].1);
                     if gap < min_gap {
                         min_gap = gap;
                         min_idx = i;

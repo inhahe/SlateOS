@@ -54,11 +54,11 @@
 //! `INOTIFY_TABLE` → `notify::WATCHES`, and no path takes them in the reverse
 //! order, so there is no cycle.
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::notify::{self, FsEventMask, FsEventType};
@@ -351,11 +351,16 @@ impl Inotify {
             // single component; taking only the first guards against a deeper
             // path slipping through, so the emitted name can never contain an
             // embedded '/' (which would corrupt the record stream).
-            return rem.components().next().map_or_else(Vec::new, |c| c.as_bytes().to_vec());
+            return rem
+                .components()
+                .next()
+                .map_or_else(Vec::new, |c| c.as_bytes().to_vec());
         }
         // Path did not fall under the watch (shouldn't happen — native
         // already filtered) — fall back to the whole path's final component.
-        abs_path.file_name().map_or_else(Vec::new, |n| n.as_bytes().to_vec())
+        abs_path
+            .file_name()
+            .map_or_else(Vec::new, |n| n.as_bytes().to_vec())
     }
 
     /// Drain all native watches into `self.pending`, translating each native
@@ -468,7 +473,10 @@ pub fn dup(handle: InotifyHandle) -> KernelResult<InotifyHandle> {
     let ino = table
         .get_mut(&handle.id())
         .ok_or(KernelError::InvalidHandle)?;
-    ino.refcount = ino.refcount.checked_add(1).ok_or(KernelError::InvalidHandle)?;
+    ino.refcount = ino
+        .refcount
+        .checked_add(1)
+        .ok_or(KernelError::InvalidHandle)?;
     Ok(handle)
 }
 
@@ -565,11 +573,14 @@ pub fn add_watch(handle: InotifyHandle, path: impl AsRef<Path>, in_mask: u32) ->
 
     let effective = in_mask & REPORTABLE_EVENTS;
     let native_id = create_native(&norm, effective, handle.id())?;
-    ino.watches.insert(wd, Watch {
-        native_id,
-        in_mask: in_mask & REPORTABLE_EVENTS,
-        path_norm: norm,
-    });
+    ino.watches.insert(
+        wd,
+        Watch {
+            native_id,
+            in_mask: in_mask & REPORTABLE_EVENTS,
+            path_norm: norm,
+        },
+    );
     Ok(wd)
 }
 
@@ -774,7 +785,9 @@ pub fn self_test() -> KernelResult<()> {
     if record_size(0) != 16 || record_size(8) != 16 + 16 || record_size(16) != 16 + 32 {
         serial_println!(
             "[inotify]   FAIL: record_size wrong ({},{},{})",
-            record_size(0), record_size(8), record_size(16)
+            record_size(0),
+            record_size(8),
+            record_size(16)
         );
         return Err(KernelError::InternalError);
     }
@@ -788,7 +801,10 @@ pub fn self_test() -> KernelResult<()> {
     let dir = "/INOTIFY_SELFTEST";
     let wd = add_watch(ino, dir, IN_CREATE | IN_MODIFY | IN_DELETE | IN_MOVE)?;
     if wd <= 0 {
-        serial_println!("[inotify]   FAIL: add_watch returned non-positive wd {}", wd);
+        serial_println!(
+            "[inotify]   FAIL: add_watch returned non-positive wd {}",
+            wd
+        );
         close(ino);
         return Err(KernelError::InternalError);
     }
@@ -805,7 +821,8 @@ pub fn self_test() -> KernelResult<()> {
     if events[0].mask != IN_CREATE || events[0].name != b"a.txt" {
         serial_println!(
             "[inotify]   FAIL: event[0] mask={:#x} name={:?}",
-            events[0].mask, core::str::from_utf8(&events[0].name)
+            events[0].mask,
+            core::str::from_utf8(&events[0].name)
         );
         close(ino);
         return Err(KernelError::InternalError);
@@ -820,9 +837,7 @@ pub fn self_test() -> KernelResult<()> {
     //     reported mask, while a file-subject event of the same type does not.
     notify::emit_created_dir("/INOTIFY_SELFTEST/subdir");
     let events = read_into(ino, 4096)?;
-    if events.len() != 1
-        || events[0].mask != (IN_CREATE | IN_ISDIR)
-        || events[0].name != b"subdir"
+    if events.len() != 1 || events[0].mask != (IN_CREATE | IN_ISDIR) || events[0].name != b"subdir"
     {
         serial_println!(
             "[inotify]   FAIL: dir-create event mask={:#x} name={:?} (want IN_CREATE|IN_ISDIR 'subdir')",

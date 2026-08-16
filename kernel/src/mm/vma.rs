@@ -25,11 +25,11 @@
 //! process will have its own.  Kernel-half PML4 entries (256--511)
 //! are shared across all address spaces.
 
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::serial_println;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // VMA types
@@ -274,7 +274,8 @@ impl AddressSpace {
         }
 
         // Insert sorted by start address (binary search for position).
-        let pos = self.vmas
+        let pos = self
+            .vmas
             .binary_search_by_key(&vma.start, |v| v.start)
             .unwrap_or_else(|p| p);
         self.vmas.insert(pos, vma);
@@ -310,11 +311,7 @@ impl AddressSpace {
             Err(i) => i - 1,
         };
         let vma = self.vmas.get(idx)?;
-        if vma.contains(addr) {
-            Some(vma)
-        } else {
-            None
-        }
+        if vma.contains(addr) { Some(vma) } else { None }
     }
 
     /// Resolve a page fault within this address space.
@@ -417,8 +414,7 @@ impl AddressSpace {
         // leaks — the frame may contain data from a previous user.
         // Demand-paged VMA frames are anonymous user memory in the census.
         let phys_frame = {
-            let _own =
-                super::frame_owner::OwnerScope::new(super::frame_owner::Owner::UserAnon);
+            let _own = super::frame_owner::OwnerScope::new(super::frame_owner::Owner::UserAnon);
             frame::alloc_frame_zeroed()?
         };
 
@@ -427,9 +423,7 @@ impl AddressSpace {
         // SAFETY: pml4_phys is our address space's PML4 (valid).
         // phys_frame is a valid, freshly-allocated frame.  virt is
         // frame-aligned and within a VMA that allows this mapping.
-        let map_result = unsafe {
-            page_table::map_frame(self.pml4_phys, virt, phys_frame, flags)
-        };
+        let map_result = unsafe { page_table::map_frame(self.pml4_phys, virt, phys_frame, flags) };
 
         if let Err(e) = map_result {
             // Map failed — free the frame to avoid leaking it.
@@ -515,7 +509,9 @@ pub fn self_test() {
         kind: VmaKind::Stack,
         flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE,
     };
-    addr_space.add_vma(vma2).expect("non-overlapping VMA should succeed");
+    addr_space
+        .add_vma(vma2)
+        .expect("non-overlapping VMA should succeed");
     serial_println!("[vma]   Non-overlapping add: OK");
 
     // Test 6: Remove VMA by start address.
@@ -526,7 +522,10 @@ pub fn self_test() {
 
     // Test 7: Remove non-existent VMA returns None.
     let no_remove = addr_space.remove_vma(0xDEAD_0000);
-    assert!(no_remove.is_none(), "non-existent VMA removal should be None");
+    assert!(
+        no_remove.is_none(),
+        "non-existent VMA removal should be None"
+    );
     serial_println!("[vma]   Remove non-existent: OK");
 
     // Test 8: Misaligned VMA is rejected.
@@ -629,7 +628,11 @@ pub fn self_test() {
 
     // Test 16: degenerate inputs.
     assert_eq!(find_gap(&[], 0, base, end), None, "zero size: None");
-    assert_eq!(find_gap(&[], 4 * frame_size, end, base), None, "inverted window: None");
+    assert_eq!(
+        find_gap(&[], 4 * frame_size, end, base),
+        None,
+        "inverted window: None"
+    );
     serial_println!("[vma]   find_gap: OK");
 
     serial_println!("[vma] Self-test PASSED");

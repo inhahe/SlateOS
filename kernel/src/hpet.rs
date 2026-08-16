@@ -160,7 +160,9 @@ unsafe fn mmio_read64(base: u64, offset: usize) -> u64 {
 unsafe fn mmio_write64(base: u64, offset: usize, value: u64) {
     // SAFETY: Caller guarantees base + offset points to a valid writable
     // MMIO register in HHDM-mapped space.
-    unsafe { ((base + offset as u64) as *mut u64).write_volatile(value); }
+    unsafe {
+        ((base + offset as u64) as *mut u64).write_volatile(value);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -205,9 +207,7 @@ pub unsafe fn init() {
     // The HHDM maps all physical memory.
     let table_virt = table_phys.wrapping_add(hhdm);
     let sdt_header_size = 36u64;
-    let hpet_table = unsafe {
-        &*((table_virt + sdt_header_size) as *const HpetAcpiTable)
-    };
+    let hpet_table = unsafe { &*((table_virt + sdt_header_size) as *const HpetAcpiTable) };
 
     // The base address must be in system memory space (address_space_id == 0).
     if hpet_table.address_space_id != 0 {
@@ -224,7 +224,9 @@ pub unsafe fn init() {
 
     serial_println!(
         "[hpet] HPET {} at phys={:#x} (min_tick={})",
-        hpet_number, base_phys, min_tick
+        hpet_number,
+        base_phys,
+        min_tick
     );
 
     // Map the HPET MMIO register block.  The register space is 1024 bytes
@@ -252,9 +254,7 @@ pub unsafe fn init() {
     // SAFETY: HPET physical address is valid MMIO (from ACPI table).
     // We're mapping it into the HHDM range.  If Limine already mapped
     // this region, map_frame may fail — that's fine, the page is accessible.
-    if let Err(e) = unsafe {
-        page_table::map_frame(pml4_phys, hpet_virt, hpet_frame, mmio_flags)
-    } {
+    if let Err(e) = unsafe { page_table::map_frame(pml4_phys, hpet_virt, hpet_frame, mmio_flags) } {
         serial_println!("[hpet] MMIO map returned {:?} (may already be mapped)", e);
         // Proceed anyway — the HHDM might cover it.
     } else {
@@ -297,7 +297,8 @@ pub unsafe fn init() {
     if period_fs > MAX_PERIOD_FS {
         serial_println!(
             "[hpet] Counter period {} fs exceeds maximum ({} fs), skipping",
-            period_fs, MAX_PERIOD_FS
+            period_fs,
+            MAX_PERIOD_FS
         );
         return;
     }
@@ -351,7 +352,11 @@ pub unsafe fn init() {
     let val2 = unsafe { mmio_read64(base_virt, REG_COUNTER) };
 
     if val2 <= val1 {
-        serial_println!("[hpet] WARNING: Counter not advancing ({} → {})", val1, val2);
+        serial_println!(
+            "[hpet] WARNING: Counter not advancing ({} → {})",
+            val1,
+            val2
+        );
         // Don't mark as available — fall back to TSC/APIC.
         return;
     }
@@ -481,8 +486,12 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[hpet] Running self-test...");
 
     let freq = frequency_hz();
-    serial_println!("[hpet]   Frequency: {} Hz ({}.{:03} MHz)",
-        freq, freq / 1_000_000, (freq % 1_000_000) / 1_000);
+    serial_println!(
+        "[hpet]   Frequency: {} Hz ({}.{:03} MHz)",
+        freq,
+        freq / 1_000_000,
+        (freq % 1_000_000) / 1_000
+    );
 
     // Test 1: Counter is monotonically increasing.
     let a = read_counter();
@@ -507,12 +516,18 @@ pub fn self_test() -> KernelResult<()> {
     if one_second_ns < lower || one_second_ns > upper {
         serial_println!(
             "[hpet]   FAIL: {} ticks → {} ns (expected ~{} ns)",
-            one_second_ticks, one_second_ns, expected
+            one_second_ticks,
+            one_second_ns,
+            expected
         );
         return Err(KernelError::InternalError);
     }
-    serial_println!("[hpet]   Tick conversion: {} ticks → {} ns (expected ~{}): OK",
-        one_second_ticks, one_second_ns, expected);
+    serial_println!(
+        "[hpet]   Tick conversion: {} ticks → {} ns (expected ~{}): OK",
+        one_second_ticks,
+        one_second_ns,
+        expected
+    );
 
     // Test 3: Elapsed time is positive.
     let t1 = elapsed_ns();

@@ -45,11 +45,11 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::error::{KernelError, KernelResult};
-use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::pci::{self, PciDevice};
 use crate::serial_println;
-use crate::virtio::queue::{Virtqueue, VRING_DESC_F_WRITE};
+use crate::virtio::queue::{VRING_DESC_F_WRITE, Virtqueue};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -82,28 +82,28 @@ const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
 // Modern common config register offsets (§4.1.4.3)
 // ---------------------------------------------------------------------------
 
-const COMMON_DFSELECT: usize = 0x00;       // u32 - device feature select
-const COMMON_DF: usize = 0x04;             // u32 - device feature (read)
-const COMMON_GFSELECT: usize = 0x08;       // u32 - guest feature select
-const COMMON_GF: usize = 0x0C;             // u32 - guest feature (write)
+const COMMON_DFSELECT: usize = 0x00; // u32 - device feature select
+const COMMON_DF: usize = 0x04; // u32 - device feature (read)
+const COMMON_GFSELECT: usize = 0x08; // u32 - guest feature select
+const COMMON_GF: usize = 0x0C; // u32 - guest feature (write)
 #[allow(dead_code)]
-const COMMON_MSIX: usize = 0x10;           // u16 - MSI-X config vector
-const COMMON_NUMQ: usize = 0x12;           // u16 - number of queues
-const COMMON_STATUS: usize = 0x14;         // u8 - device status
+const COMMON_MSIX: usize = 0x10; // u16 - MSI-X config vector
+const COMMON_NUMQ: usize = 0x12; // u16 - number of queues
+const COMMON_STATUS: usize = 0x14; // u8 - device status
 #[allow(dead_code)]
-const COMMON_CFGGEN: usize = 0x15;         // u8 - config generation
-const COMMON_QSELECT: usize = 0x16;        // u16 - queue select
-const COMMON_QSIZE: usize = 0x18;          // u16 - queue size
+const COMMON_CFGGEN: usize = 0x15; // u8 - config generation
+const COMMON_QSELECT: usize = 0x16; // u16 - queue select
+const COMMON_QSIZE: usize = 0x18; // u16 - queue size
 #[allow(dead_code)]
-const COMMON_QMSIX: usize = 0x1A;          // u16 - queue MSI-X vector
-const COMMON_QENABLE: usize = 0x1C;        // u16 - queue enable
-const COMMON_QNOFF: usize = 0x1E;          // u16 - queue notify offset
-const COMMON_QDESC_LO: usize = 0x20;       // u32 - queue desc low
-const COMMON_QDESC_HI: usize = 0x24;       // u32 - queue desc high
-const COMMON_QDRIVER_LO: usize = 0x28;     // u32 - queue driver (avail) low
-const COMMON_QDRIVER_HI: usize = 0x2C;     // u32 - queue driver (avail) high
-const COMMON_QDEVICE_LO: usize = 0x30;     // u32 - queue device (used) low
-const COMMON_QDEVICE_HI: usize = 0x34;     // u32 - queue device (used) high
+const COMMON_QMSIX: usize = 0x1A; // u16 - queue MSI-X vector
+const COMMON_QENABLE: usize = 0x1C; // u16 - queue enable
+const COMMON_QNOFF: usize = 0x1E; // u16 - queue notify offset
+const COMMON_QDESC_LO: usize = 0x20; // u32 - queue desc low
+const COMMON_QDESC_HI: usize = 0x24; // u32 - queue desc high
+const COMMON_QDRIVER_LO: usize = 0x28; // u32 - queue driver (avail) low
+const COMMON_QDRIVER_HI: usize = 0x2C; // u32 - queue driver (avail) high
+const COMMON_QDEVICE_LO: usize = 0x30; // u32 - queue device (used) low
+const COMMON_QDEVICE_HI: usize = 0x34; // u32 - queue device (used) high
 
 // ---------------------------------------------------------------------------
 // GPU command types (virtio 1.1 §5.7.6.7)
@@ -284,7 +284,9 @@ impl VirtioModernTransport {
         // SAFETY: common_cfg points to mapped MMIO for the device (set
         // during transport setup).  COMMON_STATUS is within the common
         // config region.
-        unsafe { core::ptr::write_volatile(self.common_cfg.add(COMMON_STATUS), status); }
+        unsafe {
+            core::ptr::write_volatile(self.common_cfg.add(COMMON_STATUS), status);
+        }
     }
 
     /// Reset device.
@@ -303,10 +305,7 @@ impl VirtioModernTransport {
         // SAFETY: common_cfg points to mapped MMIO.  DFSELECT and DF are
         // within the common config region per the virtio spec layout.
         unsafe {
-            core::ptr::write_volatile(
-                self.common_cfg.add(COMMON_DFSELECT) as *mut u32,
-                page,
-            );
+            core::ptr::write_volatile(self.common_cfg.add(COMMON_DFSELECT) as *mut u32, page);
             core::ptr::read_volatile(self.common_cfg.add(COMMON_DF) as *const u32)
         }
     }
@@ -316,14 +315,8 @@ impl VirtioModernTransport {
         // SAFETY: common_cfg points to mapped MMIO.  GFSELECT and GF are
         // within the common config region.
         unsafe {
-            core::ptr::write_volatile(
-                self.common_cfg.add(COMMON_GFSELECT) as *mut u32,
-                page,
-            );
-            core::ptr::write_volatile(
-                self.common_cfg.add(COMMON_GF) as *mut u32,
-                features,
-            );
+            core::ptr::write_volatile(self.common_cfg.add(COMMON_GFSELECT) as *mut u32, page);
+            core::ptr::write_volatile(self.common_cfg.add(COMMON_GF) as *mut u32, features);
         }
     }
 
@@ -331,9 +324,7 @@ impl VirtioModernTransport {
     fn num_queues(&self) -> u16 {
         // SAFETY: common_cfg points to mapped MMIO.  NUMQ is within
         // the common config region.
-        unsafe {
-            core::ptr::read_volatile(self.common_cfg.add(COMMON_NUMQ) as *const u16)
-        }
+        unsafe { core::ptr::read_volatile(self.common_cfg.add(COMMON_NUMQ) as *const u16) }
     }
 
     /// Select a queue for configuration.
@@ -341,10 +332,7 @@ impl VirtioModernTransport {
         // SAFETY: common_cfg points to mapped MMIO.  QSELECT is within
         // the common config region.
         unsafe {
-            core::ptr::write_volatile(
-                self.common_cfg.add(COMMON_QSELECT) as *mut u16,
-                index,
-            );
+            core::ptr::write_volatile(self.common_cfg.add(COMMON_QSELECT) as *mut u16, index);
         }
     }
 
@@ -352,9 +340,7 @@ impl VirtioModernTransport {
     fn queue_size(&self) -> u16 {
         // SAFETY: common_cfg points to mapped MMIO.  QSIZE is within
         // the common config region.
-        unsafe {
-            core::ptr::read_volatile(self.common_cfg.add(COMMON_QSIZE) as *const u16)
-        }
+        unsafe { core::ptr::read_volatile(self.common_cfg.add(COMMON_QSIZE) as *const u16) }
     }
 
     /// Set the selected queue's descriptor table physical address.
@@ -413,10 +399,7 @@ impl VirtioModernTransport {
         // SAFETY: common_cfg points to mapped MMIO.  QENABLE is within
         // the common config region.
         unsafe {
-            core::ptr::write_volatile(
-                self.common_cfg.add(COMMON_QENABLE) as *mut u16,
-                1,
-            );
+            core::ptr::write_volatile(self.common_cfg.add(COMMON_QENABLE) as *mut u16, 1);
         }
     }
 
@@ -424,9 +407,7 @@ impl VirtioModernTransport {
     fn queue_notify_off(&self) -> u16 {
         // SAFETY: common_cfg points to mapped MMIO.  QNOFF is within
         // the common config region.
-        unsafe {
-            core::ptr::read_volatile(self.common_cfg.add(COMMON_QNOFF) as *const u16)
-        }
+        unsafe { core::ptr::read_volatile(self.common_cfg.add(COMMON_QNOFF) as *const u16) }
     }
 
     /// Notify a queue (write queue index to the doorbell).
@@ -442,7 +423,8 @@ impl VirtioModernTransport {
         // The offset is queue_notify_off * notify_off_multiplier, which the
         // device guarantees stays within the notify region.
         let notify_addr = unsafe {
-            self.notify_cfg.add((off as u32 * self.notify_off_multiplier) as usize)
+            self.notify_cfg
+                .add((off as u32 * self.notify_off_multiplier) as usize)
         };
         // SAFETY: notify_addr is within the mapped notify BAR region
         // (computed above).  Writing the queue index to this doorbell
@@ -456,9 +438,7 @@ impl VirtioModernTransport {
     fn read_device_config32(&self, offset: usize) -> u32 {
         // SAFETY: device_cfg points to the mapped device-specific config
         // BAR region.  Callers pass offsets within the documented config.
-        unsafe {
-            core::ptr::read_volatile(self.device_cfg.add(offset) as *const u32)
-        }
+        unsafe { core::ptr::read_volatile(self.device_cfg.add(offset) as *const u32) }
     }
 }
 
@@ -523,8 +503,11 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     let dev = find_device()?;
     serial_println!(
         "[virtio-gpu] Found at {:02x}:{:02x}.{} (ID {:04x}:{:04x})",
-        dev.address.bus, dev.address.device, dev.address.function,
-        dev.vendor_id, dev.device_id
+        dev.address.bus,
+        dev.address.device,
+        dev.address.function,
+        dev.vendor_id,
+        dev.device_id
     );
 
     // Enable bus mastering and memory space.
@@ -584,7 +567,10 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
 
     // 8. Set DRIVER_OK — device is live.
     transport.set_status(transport.status() | VIRTIO_STATUS_DRIVER_OK);
-    serial_println!("[virtio-gpu] Device status: DRIVER_OK ({:#x})", transport.status());
+    serial_println!(
+        "[virtio-gpu] Device status: DRIVER_OK ({:#x})",
+        transport.status()
+    );
 
     // Allocate DMA frame for control messages.
     let ctl_frame = frame::alloc_frame()?;
@@ -617,7 +603,12 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     // Create a 2D resource.
     let resource_id = create_resource_2d(&mut device, width, height)?;
     device.resource_id = resource_id;
-    serial_println!("[virtio-gpu] Created resource {} ({}x{})", resource_id, width, height);
+    serial_println!(
+        "[virtio-gpu] Created resource {} ({}x{})",
+        resource_id,
+        width,
+        height
+    );
 
     // Allocate framebuffer backing memory.
     let fb_bytes = (width as usize)
@@ -634,7 +625,9 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
             for frame in &fb_frames {
                 // SAFETY: These frames were allocated above and are not
                 // aliased.  Failure to free is logged but not fatal.
-                unsafe { let _ = frame::free_frame(*frame); }
+                unsafe {
+                    let _ = frame::free_frame(*frame);
+                }
             }
         })?;
         // Zero the frame.
@@ -648,7 +641,10 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     }
     serial_println!(
         "[virtio-gpu] Allocated {} frames ({} KiB) for {}x{} framebuffer",
-        frames_needed, frames_needed * FRAME_SIZE / 1024, width, height
+        frames_needed,
+        frames_needed * FRAME_SIZE / 1024,
+        width,
+        height
     );
     device.fb_frames = fb_frames;
 
@@ -670,7 +666,11 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     *DEVICE.lock() = Some(device);
     INITIALIZED.store(true, Ordering::Release);
 
-    serial_println!("[virtio-gpu] Initialization complete ({}x{} active)", width, height);
+    serial_println!(
+        "[virtio-gpu] Initialization complete ({}x{} active)",
+        width,
+        height
+    );
     Ok(())
 }
 
@@ -739,7 +739,10 @@ fn setup_modern_transport(
 
         serial_println!(
             "[virtio-gpu]   Cap type={} bar={} offset={:#x} len={:#x}",
-            cfg_type, bar, region_offset, region_length
+            cfg_type,
+            bar,
+            region_offset,
+            region_length
         );
 
         match cfg_type {
@@ -747,9 +750,8 @@ fn setup_modern_transport(
             VIRTIO_PCI_CAP_NOTIFY_CFG => {
                 notify_cap = Some(vcap);
                 // Read notify_off_multiplier at offset +16 of this cap.
-                notify_off_multiplier = pci::config_read32(
-                    a.bus, a.device, a.function, off.wrapping_add(16)
-                );
+                notify_off_multiplier =
+                    pci::config_read32(a.bus, a.device, a.function, off.wrapping_add(16));
             }
             VIRTIO_PCI_CAP_ISR_CFG => isr_cap = Some(vcap),
             VIRTIO_PCI_CAP_DEVICE_CFG => device_cap = Some(vcap),
@@ -782,8 +784,8 @@ fn setup_modern_transport(
     let mmio_flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE;
 
     let map_bar_region = |cap: &VirtioPciCap| -> KernelResult<*mut u8> {
-        let bar_phys = pci::bar_mmio_addr64(dev, cap.bar as usize)
-            .ok_or(KernelError::NoSuchDevice)?;
+        let bar_phys =
+            pci::bar_mmio_addr64(dev, cap.bar as usize).ok_or(KernelError::NoSuchDevice)?;
         let region_phys = bar_phys + cap.offset as u64;
         let region_virt = region_phys + hhdm_offset;
 
@@ -794,8 +796,8 @@ fn setup_modern_transport(
         let num_frames = (region_len as usize).div_ceil(FRAME_SIZE);
 
         for i in 0..num_frames {
-            let frame_phys = (region_phys & !(FRAME_SIZE as u64 - 1))
-                + (i as u64) * (FRAME_SIZE as u64);
+            let frame_phys =
+                (region_phys & !(FRAME_SIZE as u64 - 1)) + (i as u64) * (FRAME_SIZE as u64);
             let frame_virt = frame_phys + hhdm_offset;
 
             if let Some(frame) = PhysFrame::from_addr(frame_phys) {
@@ -803,12 +805,12 @@ fn setup_modern_transport(
                 // SAFETY: We're mapping device MMIO into the HHDM range
                 // where it would naturally live.  This is the same pattern
                 // used by the APIC MMIO mapping.
-                let _ = unsafe {
-                    page_table::map_frame(pml4_phys, va, frame, mmio_flags)
-                };
+                let _ = unsafe { page_table::map_frame(pml4_phys, va, frame, mmio_flags) };
                 // SAFETY: Flushing the TLB for a page we just mapped is
                 // always safe and ensures subsequent accesses use the new mapping.
-                unsafe { page_table::flush_frame(va); }
+                unsafe {
+                    page_table::flush_frame(va);
+                }
             }
         }
 
@@ -822,7 +824,11 @@ fn setup_modern_transport(
 
     serial_println!(
         "[virtio-gpu] Transport: common={:p} notify={:p} isr={:p} dev={:p} mult={}",
-        common_cfg, notify_cfg, isr_cfg, device_cfg, notify_off_multiplier
+        common_cfg,
+        notify_cfg,
+        isr_cfg,
+        device_cfg,
+        notify_off_multiplier
     );
 
     Ok(VirtioModernTransport {
@@ -875,7 +881,11 @@ fn setup_queue(
 
     serial_println!(
         "[virtio-gpu]   Queue {}: size={} desc={:#x} avail={:#x} used={:#x}",
-        queue_idx, queue_size, desc_addr, avail_addr, used_addr
+        queue_idx,
+        queue_size,
+        desc_addr,
+        avail_addr,
+        used_addr
     );
 
     Ok(vq)
@@ -935,9 +945,7 @@ fn send_ctrl_cmd(
     // Read response type.
     // SAFETY: The device has written the response at resp_offset within
     // the DMA frame.  Volatile read because the device writes asynchronously.
-    let resp_type = unsafe {
-        core::ptr::read_volatile(ctl_virt.add(resp_offset) as *const u32)
-    };
+    let resp_type = unsafe { core::ptr::read_volatile(ctl_virt.add(resp_offset) as *const u32) };
     Ok(resp_type)
 }
 
@@ -968,15 +976,16 @@ fn get_display_info(dev: &mut VirtioGpuDevice) -> KernelResult<(u32, u32)> {
     // within the DMA frame.  The struct is #[repr(C)] and the response
     // type was validated above.  Reading it fully is within frame bounds
     // (resp_offset + size_of::<VirtioGpuRespDisplayInfo>() < FRAME_SIZE).
-    let resp = unsafe {
-        core::ptr::read(ctl_virt.add(resp_offset) as *const VirtioGpuRespDisplayInfo)
-    };
+    let resp =
+        unsafe { core::ptr::read(ctl_virt.add(resp_offset) as *const VirtioGpuRespDisplayInfo) };
 
     for (i, pmode) in resp.pmodes.iter().enumerate() {
         if pmode.enabled != 0 && pmode.r.width > 0 && pmode.r.height > 0 {
             serial_println!(
                 "[virtio-gpu]   Scanout {}: {}x{} enabled",
-                i, pmode.r.width, pmode.r.height
+                i,
+                pmode.r.width,
+                pmode.r.height
             );
             return Ok((pmode.r.width, pmode.r.height));
         }
@@ -1008,7 +1017,9 @@ fn create_resource_2d(dev: &mut VirtioGpuDevice, width: u32, height: u32) -> Ker
     };
 
     let resp_type = send_ctrl_cmd(
-        dev, req_bytes, 512,
+        dev,
+        req_bytes,
+        512,
         core::mem::size_of::<VirtioGpuCtrlHdr>(),
     )?;
 
@@ -1070,7 +1081,9 @@ fn attach_backing(dev: &mut VirtioGpuDevice, resource_id: u32) -> KernelResult<(
 
     // Zero response.
     // SAFETY: resp_offset + resp_size <= FRAME_SIZE (checked above).
-    unsafe { core::ptr::write_bytes(ctl_virt.add(resp_offset), 0, resp_size); }
+    unsafe {
+        core::ptr::write_bytes(ctl_virt.add(resp_offset), 0, resp_size);
+    }
 
     // Submit.
     let resp_phys = ctl_phys + resp_offset as u64;
@@ -1083,17 +1096,19 @@ fn attach_backing(dev: &mut VirtioGpuDevice, resource_id: u32) -> KernelResult<(
     // Poll.
     let mut attempts = 0u32;
     loop {
-        if dev.controlq.poll_used().is_some() { break; }
+        if dev.controlq.poll_used().is_some() {
+            break;
+        }
         attempts = attempts.wrapping_add(1);
-        if attempts > 5_000_000 { return Err(KernelError::TimedOut); }
+        if attempts > 5_000_000 {
+            return Err(KernelError::TimedOut);
+        }
         core::hint::spin_loop();
     }
 
     // SAFETY: Device wrote the response at resp_offset within the DMA
     // frame.  Volatile read because the device writes asynchronously.
-    let resp_type = unsafe {
-        core::ptr::read_volatile(ctl_virt.add(resp_offset) as *const u32)
-    };
+    let resp_type = unsafe { core::ptr::read_volatile(ctl_virt.add(resp_offset) as *const u32) };
     if resp_type != VIRTIO_GPU_RESP_OK_NODATA {
         serial_println!("[virtio-gpu] ATTACH_BACKING: resp={:#x}", resp_type);
         return Err(KernelError::IoError);
@@ -1111,7 +1126,12 @@ fn set_scanout(
 ) -> KernelResult<()> {
     let req = VirtioGpuSetScanout {
         hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_SET_SCANOUT),
-        r: VirtioGpuRect { x: 0, y: 0, width, height },
+        r: VirtioGpuRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
         scanout_id,
         resource_id,
     };
@@ -1123,7 +1143,12 @@ fn set_scanout(
             core::mem::size_of::<VirtioGpuSetScanout>(),
         )
     };
-    let resp_type = send_ctrl_cmd(dev, req_bytes, 512, core::mem::size_of::<VirtioGpuCtrlHdr>())?;
+    let resp_type = send_ctrl_cmd(
+        dev,
+        req_bytes,
+        512,
+        core::mem::size_of::<VirtioGpuCtrlHdr>(),
+    )?;
     if resp_type != VIRTIO_GPU_RESP_OK_NODATA {
         serial_println!("[virtio-gpu] SET_SCANOUT: resp={:#x}", resp_type);
         return Err(KernelError::IoError);
@@ -1135,11 +1160,19 @@ fn set_scanout(
 fn transfer_to_host_2d(
     dev: &mut VirtioGpuDevice,
     resource_id: u32,
-    x: u32, y: u32, width: u32, height: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
 ) -> KernelResult<()> {
     let req = VirtioGpuTransferToHost2d {
         hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D),
-        r: VirtioGpuRect { x, y, width, height },
+        r: VirtioGpuRect {
+            x,
+            y,
+            width,
+            height,
+        },
         offset: 0,
         resource_id,
         _padding: 0,
@@ -1152,7 +1185,12 @@ fn transfer_to_host_2d(
             core::mem::size_of::<VirtioGpuTransferToHost2d>(),
         )
     };
-    let resp_type = send_ctrl_cmd(dev, req_bytes, 512, core::mem::size_of::<VirtioGpuCtrlHdr>())?;
+    let resp_type = send_ctrl_cmd(
+        dev,
+        req_bytes,
+        512,
+        core::mem::size_of::<VirtioGpuCtrlHdr>(),
+    )?;
     if resp_type != VIRTIO_GPU_RESP_OK_NODATA {
         serial_println!("[virtio-gpu] TRANSFER_TO_HOST_2D: resp={:#x}", resp_type);
         return Err(KernelError::IoError);
@@ -1164,11 +1202,19 @@ fn transfer_to_host_2d(
 fn resource_flush(
     dev: &mut VirtioGpuDevice,
     resource_id: u32,
-    x: u32, y: u32, width: u32, height: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
 ) -> KernelResult<()> {
     let req = VirtioGpuResourceFlush {
         hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_FLUSH),
-        r: VirtioGpuRect { x, y, width, height },
+        r: VirtioGpuRect {
+            x,
+            y,
+            width,
+            height,
+        },
         resource_id,
         _padding: 0,
     };
@@ -1180,7 +1226,12 @@ fn resource_flush(
             core::mem::size_of::<VirtioGpuResourceFlush>(),
         )
     };
-    let resp_type = send_ctrl_cmd(dev, req_bytes, 512, core::mem::size_of::<VirtioGpuCtrlHdr>())?;
+    let resp_type = send_ctrl_cmd(
+        dev,
+        req_bytes,
+        512,
+        core::mem::size_of::<VirtioGpuCtrlHdr>(),
+    )?;
     if resp_type != VIRTIO_GPU_RESP_OK_NODATA {
         serial_println!("[virtio-gpu] RESOURCE_FLUSH: resp={:#x}", resp_type);
         return Err(KernelError::IoError);
@@ -1199,7 +1250,10 @@ pub fn is_available() -> bool {
 
 /// Get display dimensions: (width, height).
 pub fn dimensions() -> (u32, u32) {
-    (DISPLAY_WIDTH.load(Ordering::Acquire), DISPLAY_HEIGHT.load(Ordering::Acquire))
+    (
+        DISPLAY_WIDTH.load(Ordering::Acquire),
+        DISPLAY_HEIGHT.load(Ordering::Acquire),
+    )
 }
 
 /// Get the virtual address of the first framebuffer byte.
@@ -1218,7 +1272,9 @@ pub fn set_pixel(x: u32, y: u32, color: u32) {
         Some(d) => d,
         None => return,
     };
-    if x >= dev.width || y >= dev.height { return; }
+    if x >= dev.width || y >= dev.height {
+        return;
+    }
 
     let offset = ((y as usize) * (dev.width as usize) + (x as usize)) * 4;
     let frame_idx = offset / FRAME_SIZE;
@@ -1241,7 +1297,9 @@ pub fn flush_rect(x: u32, y: u32, width: u32, height: u32) -> KernelResult<()> {
     let mut guard = DEVICE.lock();
     let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
     let rid = dev.resource_id;
-    if rid == 0 { return Err(KernelError::NoSuchDevice); }
+    if rid == 0 {
+        return Err(KernelError::NoSuchDevice);
+    }
     transfer_to_host_2d(dev, rid, x, y, width, height)?;
     resource_flush(dev, rid, x, y, width, height)
 }
@@ -1249,7 +1307,9 @@ pub fn flush_rect(x: u32, y: u32, width: u32, height: u32) -> KernelResult<()> {
 /// Flush the entire display.
 pub fn flush_full() -> KernelResult<()> {
     let (w, h) = dimensions();
-    if w == 0 || h == 0 { return Err(KernelError::NoSuchDevice); }
+    if w == 0 || h == 0 {
+        return Err(KernelError::NoSuchDevice);
+    }
     flush_rect(0, 0, w, h)
 }
 
@@ -1260,7 +1320,9 @@ pub fn fill(color: u32) -> KernelResult<()> {
     let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
     let rid = dev.resource_id;
     let (width, height) = (dev.width, dev.height);
-    if rid == 0 { return Err(KernelError::NoSuchDevice); }
+    if rid == 0 {
+        return Err(KernelError::NoSuchDevice);
+    }
 
     let total_pixels = (width as usize) * (height as usize);
     let total_bytes = total_pixels * 4;
@@ -1287,8 +1349,11 @@ pub fn fill(color: u32) -> KernelResult<()> {
 /// Status string for diagnostics.
 #[allow(dead_code)]
 pub fn status_info() -> &'static str {
-    if INITIALIZED.load(Ordering::Acquire) { "virtio-gpu: active" }
-    else { "virtio-gpu: not present" }
+    if INITIALIZED.load(Ordering::Acquire) {
+        "virtio-gpu: active"
+    } else {
+        "virtio-gpu: not present"
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -46,14 +46,14 @@
 //! The swap subsystem uses its own spinlock.  Lock ordering:
 //! SWAP → page table manipulation → frame allocator.
 
-use alloc::string::String;
-use alloc::vec;
-use alloc::vec::Vec;
+use super::frame::{self, FRAME_SIZE};
+use super::page_table::{self, PageFlags, PageTableEntry, VirtAddr};
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 use crate::sync::Mutex;
-use super::frame::{self, FRAME_SIZE};
-use super::page_table::{self, PageFlags, PageTableEntry, VirtAddr};
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -63,7 +63,7 @@ use super::page_table::{self, PageFlags, PageTableEntry, VirtAddr};
 const SWAP_MARKER_BIT: u64 = 1 << 1;
 
 /// Mask for the swap slot index (bits 2–31 = 30 bits).
-const SWAP_SLOT_MASK: u64 = 0xFFFF_FFFC;  // bits 2–31
+const SWAP_SLOT_MASK: u64 = 0xFFFF_FFFC; // bits 2–31
 /// Shift to extract the slot index from a raw PTE.
 const SWAP_SLOT_SHIFT: u32 = 2;
 
@@ -175,9 +175,7 @@ impl SwapSlotAllocator {
 
             // Find the first zero bit.
             let bit = (!word).trailing_zeros();
-            let slot = (wi as u64)
-                .saturating_mul(64)
-                .saturating_add(bit as u64);
+            let slot = (wi as u64).saturating_mul(64).saturating_add(bit as u64);
 
             if slot >= self.capacity as u64 {
                 // Past the end of valid slots (bitmap may be larger than
@@ -229,9 +227,7 @@ impl SwapSlotAllocator {
     fn is_used(&self, slot: u32) -> bool {
         let wi = (slot / 64) as usize;
         let bit = slot % 64;
-        self.bitmap
-            .get(wi)
-            .is_some_and(|w| *w & (1u64 << bit) != 0)
+        self.bitmap.get(wi).is_some_and(|w| *w & (1u64 << bit) != 0)
     }
 
     /// Number of free slots.
@@ -328,24 +324,19 @@ impl MemBackend {
         let stored = match super::compress::compress(data) {
             Some(compressed) => {
                 let compressed_len = compressed.len() as u64;
-                self.compressed_bytes =
-                    self.compressed_bytes.saturating_add(compressed_len);
-                self.compressed_count =
-                    self.compressed_count.saturating_add(1);
+                self.compressed_bytes = self.compressed_bytes.saturating_add(compressed_len);
+                self.compressed_count = self.compressed_count.saturating_add(1);
                 SlotData::Compressed(compressed)
             }
             None => {
                 // Incompressible — store uncompressed.
-                self.compressed_bytes =
-                    self.compressed_bytes.saturating_add(FRAME_SIZE as u64);
-                self.uncompressed_count =
-                    self.uncompressed_count.saturating_add(1);
+                self.compressed_bytes = self.compressed_bytes.saturating_add(FRAME_SIZE as u64);
+                self.uncompressed_count = self.uncompressed_count.saturating_add(1);
                 SlotData::Uncompressed(data.to_vec())
             }
         };
 
-        self.uncompressed_bytes =
-            self.uncompressed_bytes.saturating_add(FRAME_SIZE as u64);
+        self.uncompressed_bytes = self.uncompressed_bytes.saturating_add(FRAME_SIZE as u64);
         *slot_storage = Some(stored);
         Ok(())
     }
@@ -369,10 +360,8 @@ impl MemBackend {
 
         match slot_data {
             SlotData::Compressed(compressed) => {
-                let decompressed = super::compress::decompress(
-                    compressed,
-                    FRAME_SIZE,
-                ).map_err(|_| KernelError::InternalError)?;
+                let decompressed = super::compress::decompress(compressed, FRAME_SIZE)
+                    .map_err(|_| KernelError::InternalError)?;
                 buf.copy_from_slice(&decompressed);
             }
             SlotData::Uncompressed(data) => {
@@ -392,10 +381,8 @@ impl MemBackend {
                     SlotData::Compressed(c) => c.len() as u64,
                     SlotData::Uncompressed(_) => FRAME_SIZE as u64,
                 };
-                self.uncompressed_bytes =
-                    self.uncompressed_bytes.saturating_sub(FRAME_SIZE as u64);
-                self.compressed_bytes =
-                    self.compressed_bytes.saturating_sub(stored_size);
+                self.uncompressed_bytes = self.uncompressed_bytes.saturating_sub(FRAME_SIZE as u64);
+                self.compressed_bytes = self.compressed_bytes.saturating_sub(stored_size);
             }
             *slot_storage = None;
         }
@@ -486,19 +473,16 @@ impl DiskBackend {
         }
 
         // Try to compress the data.
-        let (write_buf, compressed, stored_size) =
-            match super::compress::compress(data) {
-                Some(compressed) => {
-                    let size = compressed.len();
-                    // Pad to FRAME_SIZE for writing full sectors.
-                    let mut padded = compressed;
-                    padded.resize(FRAME_SIZE, 0);
-                    (padded, true, size)
-                }
-                None => {
-                    (data.to_vec(), false, FRAME_SIZE)
-                }
-            };
+        let (write_buf, compressed, stored_size) = match super::compress::compress(data) {
+            Some(compressed) => {
+                let size = compressed.len();
+                // Pad to FRAME_SIZE for writing full sectors.
+                let mut padded = compressed;
+                padded.resize(FRAME_SIZE, 0);
+                (padded, true, size)
+            }
+            None => (data.to_vec(), false, FRAME_SIZE),
+        };
 
         let sector = self.slot_sector(slot);
         let device_name = self.device_name.clone();
@@ -707,18 +691,24 @@ impl SwapState {
 
     /// Write data to a global swap slot.
     fn write_slot(&mut self, global_slot: u32, data: &[u8]) -> KernelResult<()> {
-        let (dev_idx, local_slot) = self.find_device(global_slot)
+        let (dev_idx, local_slot) = self
+            .find_device(global_slot)
             .ok_or(KernelError::InvalidArgument)?;
-        let dev = self.devices.get_mut(dev_idx)
+        let dev = self
+            .devices
+            .get_mut(dev_idx)
             .ok_or(KernelError::InternalError)?;
         dev.backend.write(local_slot, data)
     }
 
     /// Read data from a global swap slot.
     fn read_slot(&self, global_slot: u32, buf: &mut [u8]) -> KernelResult<()> {
-        let (dev_idx, local_slot) = self.find_device(global_slot)
+        let (dev_idx, local_slot) = self
+            .find_device(global_slot)
             .ok_or(KernelError::InvalidArgument)?;
-        let dev = self.devices.get(dev_idx)
+        let dev = self
+            .devices
+            .get(dev_idx)
             .ok_or(KernelError::InternalError)?;
         dev.backend.read(local_slot, buf)
     }
@@ -906,7 +896,9 @@ pub fn try_reclaim(target: usize) -> usize {
                                 pte.flags() & !PageFlags::ACCESSED,
                             )
                         };
-                        unsafe { page_table::flush_frame(virt); }
+                        unsafe {
+                            page_table::flush_frame(virt);
+                        }
                     } else {
                         // Not recently accessed — select as victim.
                         victims.push((idx, entry));
@@ -917,8 +909,7 @@ pub fn try_reclaim(target: usize) -> usize {
                     // Mark inactive.
                     if let Some(e) = state.pages.get_mut(idx) {
                         e.active = false;
-                        state.active_count =
-                            state.active_count.saturating_sub(1);
+                        state.active_count = state.active_count.saturating_sub(1);
                     }
                 }
             }
@@ -931,8 +922,8 @@ pub fn try_reclaim(target: usize) -> usize {
     // Read the swap batch size from sysctl.  This controls how many
     // pages we swap out before yielding the CPU, keeping the system
     // responsive during heavy swap activity.
-    let batch_size = crate::sysctl::get(crate::sysctl::PARAM_MM_SWAP_BATCH_SIZE)
-        .unwrap_or(4) as usize;
+    let batch_size =
+        crate::sysctl::get(crate::sysctl::PARAM_MM_SWAP_BATCH_SIZE).unwrap_or(4) as usize;
     let batch_size = if batch_size == 0 { 1 } else { batch_size };
     let mut batch_count = 0usize;
 
@@ -951,8 +942,7 @@ pub fn try_reclaim(target: usize) -> usize {
                 let mut state = RECLAIM.lock();
                 if let Some(e) = state.pages.get_mut(idx) {
                     e.active = false;
-                    state.active_count =
-                        state.active_count.saturating_sub(1);
+                    state.active_count = state.active_count.saturating_sub(1);
                 }
                 // OPT: Yield the CPU after every batch_size pages to let
                 // other tasks run.  Without this, a swap storm (many pages
@@ -967,7 +957,8 @@ pub fn try_reclaim(target: usize) -> usize {
             Err(e) => {
                 serial_println!(
                     "[swap] Reclaim failed for virt={:#x}: {:?}",
-                    victim.vaddr, e
+                    victim.vaddr,
+                    e
                 );
                 // Skip this page, try the next victim.
             }
@@ -975,7 +966,11 @@ pub fn try_reclaim(target: usize) -> usize {
     }
 
     if reclaimed > 0 {
-        serial_println!("[swap] Reclaimed {} pages (batch_size={})", reclaimed, batch_size);
+        serial_println!(
+            "[swap] Reclaimed {} pages (batch_size={})",
+            reclaimed,
+            batch_size
+        );
     }
 
     reclaimed
@@ -1016,7 +1011,9 @@ pub fn init(num_slots: u32) {
     });
     state.total_capacity = state.total_capacity.saturating_add(num_slots);
     // Keep devices sorted by priority (descending).
-    state.devices.sort_by_key(|e| core::cmp::Reverse(e.priority));
+    state
+        .devices
+        .sort_by_key(|e| core::cmp::Reverse(e.priority));
     state.initialized = true;
 
     serial_println!(
@@ -1067,7 +1064,10 @@ pub fn init_disk(device_name: &str, base_sector: u64, num_slots: u32) -> KernelR
     if end_sector > sector_count {
         serial_println!(
             "[swap] Device '{}' too small: need {} sectors from base {}, device has {}",
-            device_name, sectors_needed, base_sector, sector_count
+            device_name,
+            sectors_needed,
+            base_sector,
+            sector_count
         );
         return Err(KernelError::InvalidArgument);
     }
@@ -1079,15 +1079,15 @@ pub fn init_disk(device_name: &str, base_sector: u64, num_slots: u32) -> KernelR
     state.devices.push(SwapDevice {
         priority: 0,
         name: dev_name,
-        backend: SwapBackend::Disk(
-            DiskBackend::new(device_name, base_sector, num_slots),
-        ),
+        backend: SwapBackend::Disk(DiskBackend::new(device_name, base_sector, num_slots)),
         slots: SwapSlotAllocator::new(num_slots),
         base_slot,
     });
     state.total_capacity = state.total_capacity.saturating_add(num_slots);
     // Keep devices sorted by priority (descending).
-    state.devices.sort_by_key(|e| core::cmp::Reverse(e.priority));
+    state
+        .devices
+        .sort_by_key(|e| core::cmp::Reverse(e.priority));
     state.initialized = true;
 
     let total_free: u32 = state.devices.iter().map(|d| d.slots.free_count()).sum();
@@ -1102,7 +1102,8 @@ pub fn init_disk(device_name: &str, base_sector: u64, num_slots: u32) -> KernelR
     );
     serial_println!(
         "[swap]   {} device(s) active, {} total slots free",
-        device_count, total_free
+        device_count,
+        total_free
     );
     Ok(())
 }
@@ -1244,13 +1245,13 @@ pub fn compression_stats() -> CompressionStats {
     };
     for dev in &state.devices {
         if let SwapBackend::Memory(m) = &dev.backend {
-            stats.uncompressed_bytes = stats.uncompressed_bytes
+            stats.uncompressed_bytes = stats
+                .uncompressed_bytes
                 .saturating_add(m.uncompressed_bytes);
-            stats.compressed_bytes = stats.compressed_bytes
-                .saturating_add(m.compressed_bytes);
-            stats.compressed_count = stats.compressed_count
-                .saturating_add(m.compressed_count);
-            stats.uncompressed_count = stats.uncompressed_count
+            stats.compressed_bytes = stats.compressed_bytes.saturating_add(m.compressed_bytes);
+            stats.compressed_count = stats.compressed_count.saturating_add(m.compressed_count);
+            stats.uncompressed_count = stats
+                .uncompressed_count
                 .saturating_add(m.uncompressed_count);
         }
     }
@@ -1279,10 +1280,7 @@ pub fn compression_stats() -> CompressionStats {
 /// - The page at `virt` must be mapped and present.
 /// - The page must not be actively accessed by another CPU/context
 ///   during the swap-out operation.
-pub unsafe fn swap_out_page(
-    pml4_phys: u64,
-    virt: VirtAddr,
-) -> KernelResult<SwapEntry> {
+pub unsafe fn swap_out_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<SwapEntry> {
     if !virt.is_frame_aligned() {
         return Err(KernelError::BadAlignment);
     }
@@ -1292,8 +1290,7 @@ pub unsafe fn swap_out_page(
 
     // Step 1: Read the page data via HHDM before unmapping.
     let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
-    let phys = page_table::translate(pml4_phys, virt)
-        .ok_or(KernelError::InvalidAddress)?;
+    let phys = page_table::translate(pml4_phys, virt).ok_or(KernelError::InvalidAddress)?;
 
     // The physical address from translate includes the page offset (0 for
     // frame-aligned addresses), so it's the frame's base.
@@ -1303,11 +1300,7 @@ pub unsafe fn swap_out_page(
     // SAFETY: frame_virt points to a valid, mapped physical frame via HHDM.
     // We read FRAME_SIZE bytes (the entire 16 KiB frame).
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            frame_virt as *const u8,
-            page_data.as_mut_ptr(),
-            FRAME_SIZE,
-        );
+        core::ptr::copy_nonoverlapping(frame_virt as *const u8, page_data.as_mut_ptr(), FRAME_SIZE);
     }
 
     // Step 2: Allocate a swap slot and write the data.
@@ -1338,20 +1331,27 @@ pub unsafe fn swap_out_page(
     // Step 4: Write swap entries into the PTEs.
     let swap_pte = PageTableEntry::from_raw(swap_entry.to_pte_raw());
     // SAFETY: pml4_phys valid, virt frame-aligned, PTEs now non-present.
-    unsafe { page_table::write_swap_entries(pml4_phys, virt, swap_pte)?; }
+    unsafe {
+        page_table::write_swap_entries(pml4_phys, virt, swap_pte)?;
+    }
 
     // Step 5: Flush the TLB.
     // SAFETY: invlpg is always safe in ring 0.
-    unsafe { page_table::flush_frame(virt); }
+    unsafe {
+        page_table::flush_frame(virt);
+    }
 
     // Step 6: Free the physical frame.
     // SAFETY: The frame was just unmapped and the TLB flushed, so no
     // CPU holds a mapping to it.
-    unsafe { frame::free_frame(phys_frame)?; }
+    unsafe {
+        frame::free_frame(phys_frame)?;
+    }
 
     serial_println!(
         "[swap] Swapped out: virt={:#x} → slot={}",
-        virt.as_u64(), swap_entry.slot()
+        virt.as_u64(),
+        swap_entry.slot()
     );
 
     crate::ktrace::record(
@@ -1386,21 +1386,15 @@ pub unsafe fn swap_out_page(
 ///
 /// - `pml4_phys` must be a valid PML4 table.
 /// - The PTE at `virt` must contain a valid swap entry.
-pub unsafe fn swap_in_page(
-    pml4_phys: u64,
-    virt: VirtAddr,
-    flags: PageFlags,
-) -> KernelResult<()> {
+pub unsafe fn swap_in_page(pml4_phys: u64, virt: VirtAddr, flags: PageFlags) -> KernelResult<()> {
     if !virt.is_frame_aligned() {
         return Err(KernelError::BadAlignment);
     }
 
     // Step 1: Read the swap entry from the PTE.
-    let pte = page_table::read_leaf_pte(pml4_phys, virt)
-        .ok_or(KernelError::InvalidAddress)?;
+    let pte = page_table::read_leaf_pte(pml4_phys, virt).ok_or(KernelError::InvalidAddress)?;
 
-    let swap_entry = SwapEntry::from_pte_raw(pte.raw())
-        .ok_or(KernelError::InvalidArgument)?;
+    let swap_entry = SwapEntry::from_pte_raw(pte.raw()).ok_or(KernelError::InvalidArgument)?;
 
     // Step 2: Read page data from the swap backend.
     // Multi-device: find_device() locates which backend owns this slot.
@@ -1419,28 +1413,21 @@ pub unsafe fn swap_in_page(
 
     // Step 4: Copy the page data into the new frame via HHDM.
     let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
-    let frame_virt = new_frame.addr()
+    let frame_virt = new_frame
+        .addr()
         .checked_add(hhdm)
         .ok_or(KernelError::InternalError)?;
 
     // SAFETY: new_frame is freshly allocated and mapped via HHDM.
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            page_data.as_ptr(),
-            frame_virt as *mut u8,
-            FRAME_SIZE,
-        );
+        core::ptr::copy_nonoverlapping(page_data.as_ptr(), frame_virt as *mut u8, FRAME_SIZE);
     }
 
     // Step 5: Map the frame into the page table.
     // First, clear the swap entries (write EMPTY to all 4 PTEs).
     // SAFETY: pml4_phys valid, virt frame-aligned.
     unsafe {
-        page_table::write_swap_entries(
-            pml4_phys,
-            virt,
-            PageTableEntry::EMPTY,
-        )?;
+        page_table::write_swap_entries(pml4_phys, virt, PageTableEntry::EMPTY)?;
     }
 
     // Now map the new frame with proper flags.
@@ -1461,11 +1448,14 @@ pub unsafe fn swap_in_page(
 
     // Step 7: Flush the TLB.
     // SAFETY: invlpg is always safe.
-    unsafe { page_table::flush_frame(virt); }
+    unsafe {
+        page_table::flush_frame(virt);
+    }
 
     serial_println!(
         "[swap] Swapped in: virt={:#x} ← slot={}",
-        virt.as_u64(), swap_entry.slot()
+        virt.as_u64(),
+        swap_entry.slot()
     );
 
     crate::ktrace::record(
@@ -1488,8 +1478,7 @@ pub unsafe fn swap_in_page(
 /// - `pml4_phys` must be a valid PML4 table.
 #[must_use]
 pub unsafe fn is_swapped(pml4_phys: u64, virt: VirtAddr) -> bool {
-    page_table::read_leaf_pte(pml4_phys, virt)
-        .is_some_and(|pte| pte.is_swap())
+    page_table::read_leaf_pte(pml4_phys, virt).is_some_and(|pte| pte.is_swap())
 }
 
 // ---------------------------------------------------------------------------
@@ -1577,7 +1566,10 @@ pub fn self_test() {
         }
         backend.write(0, &data).expect("write should succeed");
         // Verify it compressed (compressed_count should be 1).
-        assert_eq!(backend.compressed_count, 1, "should compress repeating data");
+        assert_eq!(
+            backend.compressed_count, 1,
+            "should compress repeating data"
+        );
         assert!(
             backend.compressed_bytes < FRAME_SIZE as u64,
             "compressed should be smaller than uncompressed"
@@ -1586,7 +1578,10 @@ pub fn self_test() {
         // Read back and verify integrity.
         let mut buf = vec![0u8; FRAME_SIZE];
         backend.read(0, &mut buf).expect("read should succeed");
-        assert_eq!(buf, data, "data integrity check failed after compress/decompress");
+        assert_eq!(
+            buf, data,
+            "data integrity check failed after compress/decompress"
+        );
 
         // Write all-zero page to slot 1 (special case: 1-byte encoding).
         let zeros = vec![0u8; FRAME_SIZE];
@@ -1630,7 +1625,9 @@ pub fn self_test() {
 
         serial_println!(
             "[swap]   Compressed zram backend: OK (saved {} bytes across test pages)",
-            backend.uncompressed_bytes.saturating_sub(backend.compressed_bytes)
+            backend
+                .uncompressed_bytes
+                .saturating_sub(backend.compressed_bytes)
         );
     }
 
@@ -1736,37 +1733,50 @@ pub fn self_test() {
         let overflow = test_state.alloc_slot().expect("overflow to B");
         assert!(
             overflow >= 4 && overflow < 8,
-            "overflow slot {} should be from device B (4..8)", overflow
+            "overflow slot {} should be from device B (4..8)",
+            overflow
         );
 
         // Free a slot from device A, next alloc should go back to A.
         test_state.free_slot(1);
         let refilled = test_state.alloc_slot().expect("refill from A");
-        assert!(refilled < 4, "refilled slot {} should be from device A", refilled);
+        assert!(
+            refilled < 4,
+            "refilled slot {} should be from device A",
+            refilled
+        );
 
         // Write and read through the multi-device API.
         let test_data = vec![0x42u8; FRAME_SIZE];
-        test_state.write_slot(overflow, &test_data).expect("write to B");
+        test_state
+            .write_slot(overflow, &test_data)
+            .expect("write to B");
         let mut read_buf = vec![0u8; FRAME_SIZE];
-        test_state.read_slot(overflow, &mut read_buf).expect("read from B");
+        test_state
+            .read_slot(overflow, &mut read_buf)
+            .expect("read from B");
         assert_eq!(read_buf, test_data, "multi-device read/write integrity");
 
         // Verify find_device routing.
         assert_eq!(
             test_state.find_device(0).map(|(d, _)| d),
-            Some(0), "slot 0 → device 0"
+            Some(0),
+            "slot 0 → device 0"
         );
         assert_eq!(
             test_state.find_device(3).map(|(d, _)| d),
-            Some(0), "slot 3 → device 0"
+            Some(0),
+            "slot 3 → device 0"
         );
         assert_eq!(
             test_state.find_device(4).map(|(d, _)| d),
-            Some(1), "slot 4 → device 1"
+            Some(1),
+            "slot 4 → device 1"
         );
         assert_eq!(
             test_state.find_device(7).map(|(d, _)| d),
-            Some(1), "slot 7 → device 1"
+            Some(1),
+            "slot 7 → device 1"
         );
         assert!(
             test_state.find_device(8).is_none(),
@@ -1793,7 +1803,10 @@ pub fn self_test_disk() {
 
     let has_disk = {
         let state = SWAP.lock();
-        state.devices.iter().any(|d| matches!(d.backend, SwapBackend::Disk(_)))
+        state
+            .devices
+            .iter()
+            .any(|d| matches!(d.backend, SwapBackend::Disk(_)))
     };
 
     if !has_disk {
@@ -1827,7 +1840,9 @@ pub fn self_test_disk() {
     let mut read_buf = vec![0u8; FRAME_SIZE];
     {
         let state = SWAP.lock();
-        state.read_slot(slot, &mut read_buf).expect("read test data");
+        state
+            .read_slot(slot, &mut read_buf)
+            .expect("read test data");
     }
     assert_eq!(read_buf, test_data, "disk roundtrip data integrity");
 
@@ -1843,7 +1858,9 @@ pub fn self_test_disk() {
 
     {
         let state = SWAP.lock();
-        state.read_slot(zero_slot, &mut read_buf).expect("read zeros");
+        state
+            .read_slot(zero_slot, &mut read_buf)
+            .expect("read zeros");
     }
     assert_eq!(read_buf, zero_data, "zero page roundtrip");
 
@@ -1862,8 +1879,15 @@ pub fn self_test_disk() {
         serial_println!(
             "[swap]   {} device(s): {}",
             state.devices.len(),
-            state.devices.iter()
-                .map(|d| alloc::format!("{}(pri={},free={})", d.name, d.priority, d.slots.free_count()))
+            state
+                .devices
+                .iter()
+                .map(|d| alloc::format!(
+                    "{}(pri={},free={})",
+                    d.name,
+                    d.priority,
+                    d.slots.free_count()
+                ))
                 .collect::<Vec<_>>()
                 .join(", ")
         );

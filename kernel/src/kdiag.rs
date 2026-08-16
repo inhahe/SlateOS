@@ -35,9 +35,9 @@
 //! - Windows `msinfo32` / `windbg !analyze`
 //! - macOS `sysdiagnose`
 
+use crate::serial_println;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::serial_println;
 
 // ---------------------------------------------------------------------------
 // Report structure
@@ -102,7 +102,13 @@ fn section_system() -> DiagSection {
     let cpu_count = crate::smp::cpu_count();
 
     let lines = alloc::vec![
-        alloc::format!("Uptime: {:02}:{:02}:{:02} ({} ticks)", hours, minutes, secs, ticks),
+        alloc::format!(
+            "Uptime: {:02}:{:02}:{:02} ({} ticks)",
+            hours,
+            minutes,
+            secs,
+            ticks
+        ),
         alloc::format!("CPUs: {} online", cpu_count),
     ];
 
@@ -132,15 +138,30 @@ fn section_memory() -> DiagSection {
     let free_mb = info.free_bytes / (1024 * 1024);
 
     let lines = alloc::vec![
-        alloc::format!("Physical: {} MiB total, {} MiB used, {} MiB free",
-            total_mb, used_mb, free_mb),
-        alloc::format!("Frames: {} total, {} free, {} used",
-            info.total_frames, info.free_frames,
-            info.total_frames.saturating_sub(info.free_frames)),
+        alloc::format!(
+            "Physical: {} MiB total, {} MiB used, {} MiB free",
+            total_mb,
+            used_mb,
+            free_mb
+        ),
+        alloc::format!(
+            "Frames: {} total, {} free, {} used",
+            info.total_frames,
+            info.free_frames,
+            info.total_frames.saturating_sub(info.free_frames)
+        ),
         alloc::format!("Fragmentation: {}%", info.fragmentation_pct),
-        alloc::format!("Pressure: score={} level={:?}", pressure.score, pressure.level),
-        alloc::format!("Heap: {} allocs, {} frees, {} active",
-            hs.slab_allocs, hs.slab_frees, net_heap),
+        alloc::format!(
+            "Pressure: score={} level={:?}",
+            pressure.score,
+            pressure.level
+        ),
+        alloc::format!(
+            "Heap: {} allocs, {} frees, {} active",
+            hs.slab_allocs,
+            hs.slab_frees,
+            net_heap
+        ),
     ];
 
     DiagSection {
@@ -154,7 +175,9 @@ fn section_memory() -> DiagSection {
 fn section_scheduler() -> DiagSection {
     let stats = crate::sched::sched_stats();
     let load = crate::sched::load_average_x100();
-    let active = stats.total_tasks_spawned.saturating_sub(stats.total_tasks_exited);
+    let active = stats
+        .total_tasks_spawned
+        .saturating_sub(stats.total_tasks_exited);
 
     let mut health = SectionHealth::Good;
     // High load relative to CPU count is noteworthy.
@@ -164,8 +187,12 @@ fn section_scheduler() -> DiagSection {
     }
 
     let lines = alloc::vec![
-        alloc::format!("Tasks: {} active ({} spawned, {} exited)",
-            active, stats.total_tasks_spawned, stats.total_tasks_exited),
+        alloc::format!(
+            "Tasks: {} active ({} spawned, {} exited)",
+            active,
+            stats.total_tasks_spawned,
+            stats.total_tasks_exited
+        ),
         alloc::format!("Context switches: {} total", stats.total_ctx_switches),
         alloc::format!("Work steals: {}", stats.total_work_steals),
         alloc::format!("Load average: {}.{:02}", load / 100, load % 100),
@@ -185,13 +212,20 @@ fn section_ipc() -> DiagSection {
 
     let lines = alloc::vec![
         alloc::format!("Total IPC operations: {}", total),
-        alloc::format!("Channels: {} created, {} destroyed, {} sends, {} recvs",
-            s.channels_created, s.channels_destroyed,
-            s.channel_sends, s.channel_recvs),
-        alloc::format!("Pipes: {} created, {} reads, {} writes",
-            s.pipes_created, s.pipe_reads, s.pipe_writes),
-        alloc::format!("Futex: {} waits, {} wakes",
-            s.futex_waits, s.futex_wakes),
+        alloc::format!(
+            "Channels: {} created, {} destroyed, {} sends, {} recvs",
+            s.channels_created,
+            s.channels_destroyed,
+            s.channel_sends,
+            s.channel_recvs
+        ),
+        alloc::format!(
+            "Pipes: {} created, {} reads, {} writes",
+            s.pipes_created,
+            s.pipe_reads,
+            s.pipe_writes
+        ),
+        alloc::format!("Futex: {} waits, {} wakes", s.futex_waits, s.futex_wakes),
     ];
 
     DiagSection {
@@ -208,15 +242,19 @@ fn section_objects() -> DiagSection {
 
     let mut health = SectionHealth::Good;
 
-    let mut lines = alloc::vec![
-        alloc::format!("Active objects: {}", total_active),
-    ];
+    let mut lines = alloc::vec![alloc::format!("Active objects: {}", total_active),];
 
     for s in &all {
         if s.created > 0 {
             let active = s.created.saturating_sub(s.destroyed);
-            lines.push(alloc::format!("  {}: {} created, {} destroyed, {} active, hwm={}",
-                s.obj_type.name(), s.created, s.destroyed, active, s.high_water));
+            lines.push(alloc::format!(
+                "  {}: {} created, {} destroyed, {} active, hwm={}",
+                s.obj_type.name(),
+                s.created,
+                s.destroyed,
+                active,
+                s.high_water
+            ));
             // Large number of active objects might indicate a leak.
             if active > 100 {
                 health = SectionHealth::Warning;
@@ -241,9 +279,11 @@ fn section_invariants() -> DiagSection {
         SectionHealth::Critical
     };
 
-    let mut lines = alloc::vec![
-        alloc::format!("{}/{} invariants passed", results.passed, results.total),
-    ];
+    let mut lines = alloc::vec![alloc::format!(
+        "{}/{} invariants passed",
+        results.passed,
+        results.total
+    ),];
 
     for r in &results.results {
         let status = if r.passed { "PASS" } else { "FAIL" };
@@ -292,16 +332,22 @@ fn section_migrations() -> DiagSection {
         health = SectionHealth::Info;
     }
 
-    let mut lines = alloc::vec![
-        alloc::format!("Total migrations: {}", s.total),
-    ];
+    let mut lines = alloc::vec![alloc::format!("Total migrations: {}", s.total),];
 
     if s.total > 0 {
-        lines.push(alloc::format!("  Work steal: {}, Push balance: {}, Wake-up: {}",
-            s.by_reason[0], s.by_reason[1], s.by_reason[4]));
+        lines.push(alloc::format!(
+            "  Work steal: {}, Push balance: {}, Wake-up: {}",
+            s.by_reason[0],
+            s.by_reason[1],
+            s.by_reason[4]
+        ));
         if let Some((from, to, count)) = crate::sched_migrate::hottest_path() {
-            lines.push(alloc::format!("  Hottest path: CPU{} → CPU{} ({}x)",
-                from, to, count));
+            lines.push(alloc::format!(
+                "  Hottest path: CPU{} → CPU{} ({}x)",
+                from,
+                to,
+                count
+            ));
         }
     }
 
@@ -330,7 +376,8 @@ pub fn full_report() -> DiagReport {
     ];
 
     // Overall health = worst across all sections.
-    let overall = sections.iter()
+    let overall = sections
+        .iter()
         .map(|s| s.health)
         .max_by_key(|h| *h as u8)
         .unwrap_or(SectionHealth::Good);
@@ -341,7 +388,9 @@ pub fn full_report() -> DiagReport {
 /// Generate a one-line health summary.
 pub fn health_summary() -> (SectionHealth, String) {
     let report = full_report();
-    let warnings: Vec<&str> = report.sections.iter()
+    let warnings: Vec<&str> = report
+        .sections
+        .iter()
         .filter(|s| s.health as u8 >= SectionHealth::Warning as u8)
         .map(|s| s.title)
         .collect();
@@ -381,14 +430,23 @@ pub fn self_test() {
     // Test 1: Full report generates all sections.
     let report = full_report();
     assert!(!report.sections.is_empty(), "report should have sections");
-    assert!(report.sections.len() >= 7, "should have at least 7 sections");
-    serial_println!("[kdiag]   Full report: OK ({} sections, overall={})",
-        report.sections.len(), report.overall.label());
+    assert!(
+        report.sections.len() >= 7,
+        "should have at least 7 sections"
+    );
+    serial_println!(
+        "[kdiag]   Full report: OK ({} sections, overall={})",
+        report.sections.len(),
+        report.overall.label()
+    );
 
     // Test 2: Each section has content.
     for s in &report.sections {
-        assert!(!s.lines.is_empty(),
-            "section '{}' should have content", s.title);
+        assert!(
+            !s.lines.is_empty(),
+            "section '{}' should have content",
+            s.title
+        );
     }
     serial_println!("[kdiag]   Section content: OK");
 
@@ -404,8 +462,10 @@ pub fn self_test() {
     serial_println!("[kdiag]   Section lookup: OK");
 
     // Test 5: During boot, everything should be healthy.
-    assert!(report.overall as u8 <= SectionHealth::Info as u8,
-        "boot-time report should not have warnings");
+    assert!(
+        report.overall as u8 <= SectionHealth::Info as u8,
+        "boot-time report should not have warnings"
+    );
     serial_println!("[kdiag]   Boot health: OK");
 
     serial_println!("[kdiag] Self-test PASSED");

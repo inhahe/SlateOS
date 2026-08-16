@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -56,7 +56,7 @@ pub struct Group {
     pub gid: u32,
     pub name: String,
     pub group_type: GroupType,
-    pub members: Vec<u32>,   // UIDs.
+    pub members: Vec<u32>, // UIDs.
     pub description: String,
     pub created_ns: u64,
 }
@@ -114,22 +114,44 @@ where
 /// should be unified into a single source of truth.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
         groups: alloc::vec![
-            Group { gid: 0, name: String::from("root"), group_type: GroupType::System,
-                members: Vec::new(), description: String::from("System administrators"),
-                created_ns: now },
-            Group { gid: 1, name: String::from("wheel"), group_type: GroupType::System,
-                members: Vec::new(), description: String::from("Sudo-capable users"),
-                created_ns: now },
-            Group { gid: 100, name: String::from("users"), group_type: GroupType::User,
-                members: Vec::new(), description: String::from("Regular users"),
-                created_ns: now },
-            Group { gid: 999, name: String::from("daemon"), group_type: GroupType::Service,
-                members: Vec::new(), description: String::from("System daemons"),
-                created_ns: now },
+            Group {
+                gid: 0,
+                name: String::from("root"),
+                group_type: GroupType::System,
+                members: Vec::new(),
+                description: String::from("System administrators"),
+                created_ns: now
+            },
+            Group {
+                gid: 1,
+                name: String::from("wheel"),
+                group_type: GroupType::System,
+                members: Vec::new(),
+                description: String::from("Sudo-capable users"),
+                created_ns: now
+            },
+            Group {
+                gid: 100,
+                name: String::from("users"),
+                group_type: GroupType::User,
+                members: Vec::new(),
+                description: String::from("Regular users"),
+                created_ns: now
+            },
+            Group {
+                gid: 999,
+                name: String::from("daemon"),
+                group_type: GroupType::Service,
+                members: Vec::new(),
+                description: String::from("System daemons"),
+                created_ns: now
+            },
         ],
         total_created: 4,
         total_deleted: 0,
@@ -140,17 +162,26 @@ pub fn init_defaults() {
 
 /// List all groups.
 pub fn list_groups() -> Vec<Group> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.groups.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.groups.clone())
 }
 
 /// Get group by GID.
 pub fn get_group(gid: u32) -> Option<Group> {
-    STATE.lock().as_ref().and_then(|s| s.groups.iter().find(|g| g.gid == gid).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.groups.iter().find(|g| g.gid == gid).cloned())
 }
 
 /// Get group by name.
 pub fn get_by_name(name: &str) -> Option<Group> {
-    STATE.lock().as_ref().and_then(|s| s.groups.iter().find(|g| g.name == name).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.groups.iter().find(|g| g.name == name).cloned())
 }
 
 /// Create a new group.
@@ -167,8 +198,11 @@ pub fn create_group(gid: u32, name: &str, gtype: GroupType, desc: &str) -> Kerne
         }
         let now = crate::hpet::elapsed_ns();
         state.groups.push(Group {
-            gid, name: String::from(name), group_type: gtype,
-            members: Vec::new(), description: String::from(desc),
+            gid,
+            name: String::from(name),
+            group_type: gtype,
+            members: Vec::new(),
+            description: String::from(desc),
             created_ns: now,
         });
         state.total_created += 1;
@@ -181,7 +215,9 @@ pub fn delete_group(gid: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.groups.len();
         state.groups.retain(|g| g.gid != gid);
-        if state.groups.len() == before { return Err(KernelError::NotFound); }
+        if state.groups.len() == before {
+            return Err(KernelError::NotFound);
+        }
         state.total_deleted += 1;
         Ok(())
     })
@@ -190,7 +226,10 @@ pub fn delete_group(gid: u32) -> KernelResult<()> {
 /// Add a member to a group.
 pub fn add_member(gid: u32, uid: u32) -> KernelResult<()> {
     with_state(|state| {
-        let group = state.groups.iter_mut().find(|g| g.gid == gid)
+        let group = state
+            .groups
+            .iter_mut()
+            .find(|g| g.gid == gid)
             .ok_or(KernelError::NotFound)?;
         if group.members.contains(&uid) {
             return Err(KernelError::AlreadyExists);
@@ -204,11 +243,16 @@ pub fn add_member(gid: u32, uid: u32) -> KernelResult<()> {
 /// Remove a member from a group.
 pub fn remove_member(gid: u32, uid: u32) -> KernelResult<()> {
     with_state(|state| {
-        let group = state.groups.iter_mut().find(|g| g.gid == gid)
+        let group = state
+            .groups
+            .iter_mut()
+            .find(|g| g.gid == gid)
             .ok_or(KernelError::NotFound)?;
         let before = group.members.len();
         group.members.retain(|&m| m != uid);
-        if group.members.len() == before { return Err(KernelError::NotFound); }
+        if group.members.len() == before {
+            return Err(KernelError::NotFound);
+        }
         state.total_member_ops += 1;
         Ok(())
     })
@@ -217,7 +261,11 @@ pub fn remove_member(gid: u32, uid: u32) -> KernelResult<()> {
 /// Get all groups a user belongs to.
 pub fn groups_for_user(uid: u32) -> Vec<Group> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.groups.iter().filter(|g| g.members.contains(&uid)).cloned().collect()
+        s.groups
+            .iter()
+            .filter(|g| g.members.contains(&uid))
+            .cloned()
+            .collect()
     })
 }
 
@@ -225,7 +273,13 @@ pub fn groups_for_user(uid: u32) -> Vec<Group> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.groups.len(), s.total_created, s.total_deleted, s.total_member_ops, s.ops),
+        Some(s) => (
+            s.groups.len(),
+            s.total_created,
+            s.total_deleted,
+            s.total_member_ops,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -259,7 +313,12 @@ pub fn self_test() {
     assert_eq!(g.gid, 1);
     assert!(g.members.is_empty());
     add_member(1, 1000).expect("add wheel member");
-    assert!(get_by_name("wheel").expect("by_name2").members.contains(&1000));
+    assert!(
+        get_by_name("wheel")
+            .expect("by_name2")
+            .members
+            .contains(&1000)
+    );
     crate::serial_println!("  [3/8] by_name: OK");
 
     // 4: Create group.

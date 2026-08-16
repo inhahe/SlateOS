@@ -32,10 +32,10 @@
 
 #![allow(dead_code)]
 
-use alloc::vec;
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
+use alloc::vec;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -96,7 +96,8 @@ fn xxhash64(data: &[u8]) -> u64 {
             pos += 32;
         }
 
-        let mut acc = v1.rotate_left(1)
+        let mut acc = v1
+            .rotate_left(1)
             .wrapping_add(v2.rotate_left(7))
             .wrapping_add(v3.rotate_left(12))
             .wrapping_add(v4.rotate_left(18));
@@ -119,7 +120,10 @@ fn xxhash64(data: &[u8]) -> u64 {
         let k = k.rotate_left(31);
         let k = k.wrapping_mul(XXHASH_PRIME1);
         hh ^= k;
-        hh = hh.rotate_left(27).wrapping_mul(XXHASH_PRIME1).wrapping_add(XXHASH_PRIME4);
+        hh = hh
+            .rotate_left(27)
+            .wrapping_mul(XXHASH_PRIME1)
+            .wrapping_add(XXHASH_PRIME4);
         pos += 8;
     }
 
@@ -127,7 +131,10 @@ fn xxhash64(data: &[u8]) -> u64 {
     if pos + 4 <= len {
         let k = read_le32(data, pos) as u64;
         hh ^= k.wrapping_mul(XXHASH_PRIME1);
-        hh = hh.rotate_left(23).wrapping_mul(XXHASH_PRIME2).wrapping_add(XXHASH_PRIME3);
+        hh = hh
+            .rotate_left(23)
+            .wrapping_mul(XXHASH_PRIME2)
+            .wrapping_add(XXHASH_PRIME3);
         pos += 4;
     }
 
@@ -168,13 +175,17 @@ fn xxh64_merge_round(mut acc: u64, val: u64) -> u64 {
 
 #[inline]
 fn read_le16(data: &[u8], off: usize) -> u16 {
-    if off + 2 > data.len() { return 0; }
+    if off + 2 > data.len() {
+        return 0;
+    }
     u16::from(data[off]) | (u16::from(data[off + 1]) << 8)
 }
 
 #[inline]
 fn read_le32(data: &[u8], off: usize) -> u32 {
-    if off + 4 > data.len() { return 0; }
+    if off + 4 > data.len() {
+        return 0;
+    }
     u32::from(data[off])
         | (u32::from(data[off + 1]) << 8)
         | (u32::from(data[off + 2]) << 16)
@@ -183,7 +194,9 @@ fn read_le32(data: &[u8], off: usize) -> u32 {
 
 #[inline]
 fn read_le64(data: &[u8], off: usize) -> u64 {
-    if off + 8 > data.len() { return 0; }
+    if off + 8 > data.len() {
+        return 0;
+    }
     u64::from(data[off])
         | (u64::from(data[off + 1]) << 8)
         | (u64::from(data[off + 2]) << 16)
@@ -210,13 +223,21 @@ struct BitReader<'a> {
 
 impl<'a> BitReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0, bit_pos: 0 }
+        Self {
+            data,
+            pos: 0,
+            bit_pos: 0,
+        }
     }
 
     /// Read up to 32 bits, LSB-first.
     fn read_bits(&mut self, n: u8) -> KernelResult<u32> {
-        if n == 0 { return Ok(0); }
-        if n > 32 { return Err(KernelError::CorruptedData); }
+        if n == 0 {
+            return Ok(0);
+        }
+        if n > 32 {
+            return Err(KernelError::CorruptedData);
+        }
 
         let mut result = 0u32;
         let mut bits_remaining = n;
@@ -228,7 +249,11 @@ impl<'a> BitReader<'a> {
             }
 
             let available = 8u8.saturating_sub(self.bit_pos);
-            let take = if bits_remaining < available { bits_remaining } else { available };
+            let take = if bits_remaining < available {
+                bits_remaining
+            } else {
+                available
+            };
             let mask = (1u32 << take) - 1;
             let bits = (u32::from(self.data[self.pos]) >> self.bit_pos) & mask;
             result |= bits << shift;
@@ -322,8 +347,12 @@ impl<'a> ReverseBitReader<'a> {
 
     /// Read `n` bits (up to 32), MSB-first from the back of the stream.
     fn read_bits(&mut self, n: u8) -> KernelResult<u32> {
-        if n == 0 { return Ok(0); }
-        if n > 32 { return Err(KernelError::CorruptedData); }
+        if n == 0 {
+            return Ok(0);
+        }
+        if n > 32 {
+            return Err(KernelError::CorruptedData);
+        }
 
         if self.bits_read + n as usize > self.total_bits {
             return Err(KernelError::CorruptedData);
@@ -359,7 +388,9 @@ impl<'a> ReverseBitReader<'a> {
     /// Used by Huffman table-based decoding where we read max_bits
     /// but only consumed nb_bits < max_bits.
     fn unread_bits(&mut self, n: u8) {
-        if n == 0 { return; }
+        if n == 0 {
+            return;
+        }
         self.bits_read -= n as usize;
         self.bit_pos += n as i8;
         while self.bit_pos > 7 {
@@ -423,7 +454,9 @@ impl FseTable {
         let mut position = 0usize;
 
         for (sym, &count) in norm_counts.iter().enumerate() {
-            if count <= 0 { continue; }
+            if count <= 0 {
+                continue;
+            }
             for _ in 0..count as usize {
                 state_table[position] = sym as u16;
                 position = (position + step) & mask;
@@ -437,7 +470,10 @@ impl FseTable {
         // 3. Build decoding entries from the symbol spread table.
         build_fse_table_standard(&mut entries, &state_table, norm_counts, accuracy_log)?;
 
-        Ok(Self { entries, accuracy_log })
+        Ok(Self {
+            entries,
+            accuracy_log,
+        })
     }
 
     /// Look up the current state's symbol and transition info.
@@ -504,7 +540,11 @@ fn build_fse_table_standard(
 /// Highest set bit position (0-indexed). Returns 0 for input 0.
 #[inline]
 fn highest_bit(v: u32) -> u8 {
-    if v == 0 { 0 } else { 31u8.saturating_sub(v.leading_zeros() as u8) }
+    if v == 0 {
+        0
+    } else {
+        31u8.saturating_sub(v.leading_zeros() as u8)
+    }
 }
 
 /// Decode an FSE table from a compressed bitstream.
@@ -564,7 +604,9 @@ fn decode_fse_table(
                 }
                 norm_counts.resize(norm_counts.len() + repeat, 0);
                 sym = new_sym;
-                if repeat < 3 { break; }
+                if repeat < 3 {
+                    break;
+                }
             }
         }
     }
@@ -659,7 +701,9 @@ impl HuffTable {
         // Process weights from max (1-bit code) down to 1 (max_weight-bit code).
         for bits in 1..=table_log {
             let w = table_log + 1 - bits; // weight = table_log + 1 - code_length
-            if w as usize >= weight_counts.len() { continue; }
+            if w as usize >= weight_counts.len() {
+                continue;
+            }
 
             for sym_idx in 0..num_symbols {
                 if sym_idx < weights.len() && weights[sym_idx] == w {
@@ -679,7 +723,10 @@ impl HuffTable {
             }
         }
 
-        Ok(Self { entries, max_bits: table_log })
+        Ok(Self {
+            entries,
+            max_bits: table_log,
+        })
     }
 
     /// Decode one symbol using the table.
@@ -757,17 +804,23 @@ fn decode_huffman_weights_fse(data: &[u8]) -> KernelResult<Vec<u8>> {
     loop {
         let entry1 = table.decode(state1);
         weights.push(entry1.symbol);
-        if br.bits_remaining() < entry1.nb_bits as usize { break; }
+        if br.bits_remaining() < entry1.nb_bits as usize {
+            break;
+        }
         let bits1 = br.read_bits(entry1.nb_bits)?;
         state1 = entry1.new_state_base.wrapping_add(bits1 as u16);
 
         let entry2 = table.decode(state2);
         weights.push(entry2.symbol);
-        if br.bits_remaining() < entry2.nb_bits as usize { break; }
+        if br.bits_remaining() < entry2.nb_bits as usize {
+            break;
+        }
         let bits2 = br.read_bits(entry2.nb_bits)?;
         state2 = entry2.new_state_base.wrapping_add(bits2 as u16);
 
-        if weights.len() > 256 { break; } // safety limit
+        if weights.len() > 256 {
+            break;
+        } // safety limit
     }
 
     Ok(weights)
@@ -779,30 +832,19 @@ fn decode_huffman_weights_fse(data: &[u8]) -> KernelResult<Vec<u8>> {
 
 /// Default literal-length FSE distribution (accuracy_log = 6).
 static LL_DEFAULT_DIST: &[i16] = &[
-    4, 3, 2, 2, 2, 2, 2, 2,
-    2, 2, 2, 2, 2, 1, 1, 1,
-    2, 2, 2, 2, 2, 2, 2, 2,
-    2, 3, 2, 1, 1, 1, 1, 1,
+    4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1, 1, 1,
     -1, -1, -1, -1,
 ];
 
 /// Default match-length FSE distribution (accuracy_log = 6).
 static ML_DEFAULT_DIST: &[i16] = &[
-    1, 4, 3, 2, 2, 2, 2, 2,
-    2, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, -1, -1,
-    -1, -1, -1, -1, -1,
+    1, 4, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1, -1, -1,
 ];
 
 /// Default offset FSE distribution (accuracy_log = 5).
 static OF_DEFAULT_DIST: &[i16] = &[
-    1, 1, 1, 1, 1, 1, 2, 2,
-    2, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1,
-    -1, -1, -1, -1, -1,
+    1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1,
 ];
 
 /// Default accuracy log for literal-length FSE.
@@ -953,7 +995,13 @@ fn parse_frame_header(data: &[u8]) -> KernelResult<FrameHeader> {
 
     // Frame content size (0, 1, 2, 4, or 8 bytes).
     let fcs_bytes = match fcs_flag {
-        0 => if single_segment { 1 } else { 0 },
+        0 => {
+            if single_segment {
+                1
+            } else {
+                0
+            }
+        }
         1 => 2,
         2 => 4,
         3 => 8,
@@ -1007,7 +1055,8 @@ fn decompress_frame(data: &[u8]) -> KernelResult<(Vec<u8>, usize)> {
     let header = parse_frame_header(data)?;
     let mut pos = header.header_size;
 
-    let initial_cap = header.content_size
+    let initial_cap = header
+        .content_size
         .map(|s| s.min(MAX_OUTPUT_SIZE as u64) as usize)
         .unwrap_or(4096);
     let mut output = Vec::with_capacity(initial_cap);
@@ -1083,7 +1132,9 @@ fn decompress_frame(data: &[u8]) -> KernelResult<(Vec<u8>, usize)> {
             }
         }
 
-        if last_block { break; }
+        if last_block {
+            break;
+        }
     }
 
     // Optional content checksum (lower 32 bits of xxHash-64).
@@ -1186,13 +1237,17 @@ fn decode_literals_section(
                 }
                 1 => {
                     // 12-bit size.
-                    if data.len() < 2 { return Err(KernelError::CorruptedData); }
+                    if data.len() < 2 {
+                        return Err(KernelError::CorruptedData);
+                    }
                     let sz = ((header_byte >> 4) as usize) | ((data[1] as usize) << 4);
                     (sz, 2)
                 }
                 3 => {
                     // 20-bit size.
-                    if data.len() < 3 { return Err(KernelError::CorruptedData); }
+                    if data.len() < 3 {
+                        return Err(KernelError::CorruptedData);
+                    }
                     let sz = ((header_byte >> 4) as usize)
                         | ((data[1] as usize) << 4)
                         | ((data[2] as usize) << 12);
@@ -1211,16 +1266,18 @@ fn decode_literals_section(
         LIT_RLE => {
             // RLE: single byte repeated.
             let (regen_size, header_size) = match size_format {
-                0 | 2 => {
-                    ((header_byte >> 3) as usize, 1)
-                }
+                0 | 2 => ((header_byte >> 3) as usize, 1),
                 1 => {
-                    if data.len() < 2 { return Err(KernelError::CorruptedData); }
+                    if data.len() < 2 {
+                        return Err(KernelError::CorruptedData);
+                    }
                     let sz = ((header_byte >> 4) as usize) | ((data[1] as usize) << 4);
                     (sz, 2)
                 }
                 3 => {
-                    if data.len() < 3 { return Err(KernelError::CorruptedData); }
+                    if data.len() < 3 {
+                        return Err(KernelError::CorruptedData);
+                    }
                     let sz = ((header_byte >> 4) as usize)
                         | ((data[1] as usize) << 4)
                         | ((data[2] as usize) << 12);
@@ -1242,7 +1299,9 @@ fn decode_literals_section(
             let (regen_size, compressed_size, num_streams, header_size) = match size_format {
                 0 => {
                     // Single stream, 10-bit sizes.
-                    if data.len() < 3 { return Err(KernelError::CorruptedData); }
+                    if data.len() < 3 {
+                        return Err(KernelError::CorruptedData);
+                    }
                     let b0 = data[0] as usize;
                     let b1 = data[1] as usize;
                     let b2 = data[2] as usize;
@@ -1255,7 +1314,9 @@ fn decode_literals_section(
                 }
                 1 => {
                     // Single stream, 10-bit sizes (same encoding but explicitly single).
-                    if data.len() < 3 { return Err(KernelError::CorruptedData); }
+                    if data.len() < 3 {
+                        return Err(KernelError::CorruptedData);
+                    }
                     let b0 = data[0] as usize;
                     let b1 = data[1] as usize;
                     let b2 = data[2] as usize;
@@ -1265,7 +1326,9 @@ fn decode_literals_section(
                 }
                 2 => {
                     // 4 streams, 14-bit sizes.
-                    if data.len() < 4 { return Err(KernelError::CorruptedData); }
+                    if data.len() < 4 {
+                        return Err(KernelError::CorruptedData);
+                    }
                     let b0 = data[0] as usize;
                     let b1 = data[1] as usize;
                     let b2 = data[2] as usize;
@@ -1276,7 +1339,9 @@ fn decode_literals_section(
                 }
                 3 => {
                     // 4 streams, 18-bit sizes.
-                    if data.len() < 5 { return Err(KernelError::CorruptedData); }
+                    if data.len() < 5 {
+                        return Err(KernelError::CorruptedData);
+                    }
                     let b0 = data[0] as usize;
                     let b1 = data[1] as usize;
                     let b2 = data[2] as usize;
@@ -1341,7 +1406,9 @@ fn decompress_huffman_single(
     while output.len() < regen_size {
         if br.bits_remaining() < table.max_bits as usize {
             // Try reading remaining bits.
-            if br.bits_remaining() == 0 { break; }
+            if br.bits_remaining() == 0 {
+                break;
+            }
             let bits = br.read_bits(br.bits_remaining() as u8)?;
             let entry = table.decode(bits << (table.max_bits - br.bits_remaining() as u8));
             output.push(entry.symbol);
@@ -1460,13 +1527,17 @@ fn decode_sequences(
     } else if byte0 < 128 {
         byte0 as usize
     } else if byte0 < 255 {
-        if pos >= data.len() { return Err(KernelError::CorruptedData); }
+        if pos >= data.len() {
+            return Err(KernelError::CorruptedData);
+        }
         let b1 = data[pos] as usize;
         pos += 1;
         ((byte0 as usize - 128) << 8) + b1
     } else {
         // byte0 == 255
-        if pos + 1 >= data.len() { return Err(KernelError::CorruptedData); }
+        if pos + 1 >= data.len() {
+            return Err(KernelError::CorruptedData);
+        }
         let b1 = data[pos] as usize;
         let b2 = data[pos + 1] as usize;
         pos += 2;
@@ -1482,7 +1553,9 @@ fn decode_sequences(
     }
 
     // Symbol compression modes byte.
-    if pos >= data.len() { return Err(KernelError::CorruptedData); }
+    if pos >= data.len() {
+        return Err(KernelError::CorruptedData);
+    }
     let modes_byte = data[pos];
     pos += 1;
 
@@ -1492,9 +1565,30 @@ fn decode_sequences(
 
     // Decode or set FSE tables based on modes.
     // Mode 0 = predefined, 1 = RLE (single symbol), 2 = FSE compressed, 3 = repeat previous.
-    pos += decode_seq_table_mode(ll_mode, &data[pos..], ll_table, LL_DEFAULT_DIST, LL_DEFAULT_AL, LL_MAX_SYMBOL)?;
-    pos += decode_seq_table_mode(of_mode, &data[pos..], of_table, OF_DEFAULT_DIST, OF_DEFAULT_AL, OF_MAX_SYMBOL)?;
-    pos += decode_seq_table_mode(ml_mode, &data[pos..], ml_table, ML_DEFAULT_DIST, ML_DEFAULT_AL, ML_MAX_SYMBOL)?;
+    pos += decode_seq_table_mode(
+        ll_mode,
+        &data[pos..],
+        ll_table,
+        LL_DEFAULT_DIST,
+        LL_DEFAULT_AL,
+        LL_MAX_SYMBOL,
+    )?;
+    pos += decode_seq_table_mode(
+        of_mode,
+        &data[pos..],
+        of_table,
+        OF_DEFAULT_DIST,
+        OF_DEFAULT_AL,
+        OF_MAX_SYMBOL,
+    )?;
+    pos += decode_seq_table_mode(
+        ml_mode,
+        &data[pos..],
+        ml_table,
+        ML_DEFAULT_DIST,
+        ML_DEFAULT_AL,
+        ML_MAX_SYMBOL,
+    )?;
 
     // The rest of the data is the FSE-compressed bitstream (read backwards).
     let bitstream = &data[pos..];
@@ -1575,7 +1669,9 @@ fn decode_sequences(
                     3 => {
                         let off = rep_offsets[0].wrapping_sub(1);
                         // Actually: offset = rep[0] - 1 (with special -1 handling)
-                        if off == 0 { return Err(KernelError::CorruptedData); }
+                        if off == 0 {
+                            return Err(KernelError::CorruptedData);
+                        }
                         rep_offsets[2] = rep_offsets[1];
                         rep_offsets[1] = rep_offsets[0];
                         rep_offsets[0] = off;
@@ -1681,7 +1777,9 @@ fn decode_seq_table_mode(
         }
         1 => {
             // RLE: single symbol repeated.
-            if data.is_empty() { return Err(KernelError::CorruptedData); }
+            if data.is_empty() {
+                return Err(KernelError::CorruptedData);
+            }
             let sym = data[0];
             // Build a trivial 1-entry table.
             let entries = vec![FseEntry {
@@ -1689,7 +1787,10 @@ fn decode_seq_table_mode(
                 nb_bits: 0,
                 new_state_base: 0,
             }];
-            *table = Some(FseTable { entries, accuracy_log: 0 });
+            *table = Some(FseTable {
+                entries,
+                accuracy_log: 0,
+            });
             Ok(1)
         }
         2 => {
@@ -1924,15 +2025,14 @@ pub fn compress_zstd(data: &[u8]) -> Vec<u8> {
         if compressed.len() < block_len {
             let bh = if is_last { 1u32 } else { 0u32 }
                 | (2u32 << 1)                       // type = compressed
-                | ((compressed.len() as u32) << 3);  // compressed size
+                | ((compressed.len() as u32) << 3); // compressed size
             out.push(bh as u8);
             out.push((bh >> 8) as u8);
             out.push((bh >> 16) as u8);
             out.extend_from_slice(&compressed);
         } else {
             // Fall back to raw block.
-            let bh = if is_last { 1u32 } else { 0u32 }
-                | ((block_len as u32) << 3);
+            let bh = if is_last { 1u32 } else { 0u32 } | ((block_len as u32) << 3);
             out.push(bh as u8);
             out.push((bh >> 8) as u8);
             out.push((bh >> 16) as u8);
@@ -2267,10 +2367,8 @@ fn encode_sequences_bitstream(sequences: &[LzSequence]) -> Vec<u8> {
         .iter()
         .map(|seq| {
             let (of_code, of_extra_bits, of_extra_val) = encode_offset(seq.offset);
-            let (ll_code, ll_extra_bits, ll_extra_val) =
-                encode_literal_length(seq.literal_length);
-            let (ml_code, ml_extra_bits, ml_extra_val) =
-                encode_match_length(seq.match_length);
+            let (ll_code, ll_extra_bits, ll_extra_val) = encode_literal_length(seq.literal_length);
+            let (ml_code, ml_extra_bits, ml_extra_val) = encode_match_length(seq.match_length);
             SeqCodes {
                 of_code,
                 of_extra_bits,
@@ -2317,12 +2415,9 @@ fn encode_sequences_bitstream(sequences: &[LzSequence]) -> Vec<u8> {
     // Walk backward from n-2 to 0.  For sequence i the decoder reads
     // state-update bits and transitions to the target states of seq i+1.
     for i in (0..n.saturating_sub(1)).rev() {
-        let (ll_src, ll_nb, ll_bits) =
-            find_encoding_state(&ll_table, codes[i].ll_code, ll_target);
-        let (of_src, of_nb, of_bits) =
-            find_encoding_state(&of_table, codes[i].of_code, of_target);
-        let (ml_src, ml_nb, ml_bits) =
-            find_encoding_state(&ml_table, codes[i].ml_code, ml_target);
+        let (ll_src, ll_nb, ll_bits) = find_encoding_state(&ll_table, codes[i].ll_code, ll_target);
+        let (of_src, of_nb, of_bits) = find_encoding_state(&of_table, codes[i].of_code, of_target);
+        let (ml_src, ml_nb, ml_bits) = find_encoding_state(&ml_table, codes[i].ml_code, ml_target);
 
         enc[i].ll_update = Some((ll_nb, ll_bits));
         enc[i].of_update = Some((of_nb, of_bits));
@@ -2384,7 +2479,9 @@ fn encode_offset(offset: u32) -> (u8, u8, u32) {
     // for repeat offsets. Since we don't use repeat offsets in the compressor,
     // the raw offset = actual_offset + 3 (values 1-3 are reserved for repeats).
     let raw = offset + 3;
-    if raw == 0 { return (0, 0, 0); }
+    if raw == 0 {
+        return (0, 0, 0);
+    }
     let code = 31u8.saturating_sub(raw.leading_zeros() as u8);
     let extra_bits = code;
     let extra_val = raw - (1u32 << code);
@@ -2393,7 +2490,9 @@ fn encode_offset(offset: u32) -> (u8, u8, u32) {
 
 /// Encode a literal length value for zstd sequences.
 fn encode_literal_length(ll: u32) -> (u8, u8, u32) {
-    if ll < 16 { return (ll as u8, 0, 0); }
+    if ll < 16 {
+        return (ll as u8, 0, 0);
+    }
     // Use the code table.
     let (code, bits, base) = match ll {
         16..=17 => (16, 1, 16),
@@ -2422,9 +2521,13 @@ fn encode_literal_length(ll: u32) -> (u8, u8, u32) {
 
 /// Encode a match length value for zstd sequences.
 fn encode_match_length(ml: u32) -> (u8, u8, u32) {
-    if ml < 3 { return (0, 0, 0); } // shouldn't happen — min match is 3
+    if ml < 3 {
+        return (0, 0, 0);
+    } // shouldn't happen — min match is 3
     let ml_minus3 = ml - 3;
-    if ml_minus3 < 32 { return (ml_minus3 as u8, 0, 0); }
+    if ml_minus3 < 32 {
+        return (ml_minus3 as u8, 0, 0);
+    }
     let (code, bits, base) = match ml {
         35..=36 => (32, 1, 35),
         37..=38 => (33, 1, 37),
@@ -2575,7 +2678,10 @@ pub fn self_test() -> KernelResult<()> {
     // Known test vector: xxhash64("") with seed 0 = 0xEF46DB3751D8E999.
     let h = xxhash64(&[]);
     if h != 0xEF46_DB37_51D8_E999 {
-        serial_println!("[zstd]   FAIL: xxhash64('') = {:#x}, expected 0xEF46DB3751D8E999", h);
+        serial_println!(
+            "[zstd]   FAIL: xxhash64('') = {:#x}, expected 0xEF46DB3751D8E999",
+            h
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -2583,7 +2689,10 @@ pub fn self_test() -> KernelResult<()> {
     let h2 = xxhash64(b"abc");
     // Reference: xxhash64("abc", 0) = 0x44BC2CF5AD770999
     if h2 != 0x44BC_2CF5_AD77_0999 {
-        serial_println!("[zstd]   FAIL: xxhash64('abc') = {:#x}, expected 0x44BC2CF5AD770999", h2);
+        serial_println!(
+            "[zstd]   FAIL: xxhash64('abc') = {:#x}, expected 0x44BC2CF5AD770999",
+            h2
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -2592,7 +2701,10 @@ pub fn self_test() -> KernelResult<()> {
     let test_frame = build_test_frame(b"hello");
     let header = parse_frame_header(&test_frame)?;
     if header.content_size != Some(5) {
-        serial_println!("[zstd]   FAIL: content_size = {:?}, expected Some(5)", header.content_size);
+        serial_println!(
+            "[zstd]   FAIL: content_size = {:?}, expected Some(5)",
+            header.content_size
+        );
         return Err(KernelError::InternalError);
     }
     if !header.single_segment {
@@ -2623,7 +2735,10 @@ pub fn self_test() -> KernelResult<()> {
     let comp_frame = build_test_frame(b"test data");
     let result = unzstd(&comp_frame)?;
     if result.as_slice() != b"test data" {
-        serial_println!("[zstd]   FAIL: compressed block mismatch: got {} bytes", result.len());
+        serial_println!(
+            "[zstd]   FAIL: compressed block mismatch: got {} bytes",
+            result.len()
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -2663,7 +2778,10 @@ pub fn self_test() -> KernelResult<()> {
     match unzstd(&bad_frame) {
         Err(KernelError::CorruptedData) => {} // expected
         other => {
-            serial_println!("[zstd]   FAIL: expected CorruptedData for size mismatch, got {:?}", other.err());
+            serial_println!(
+                "[zstd]   FAIL: expected CorruptedData for size mismatch, got {:?}",
+                other.err()
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -2678,7 +2796,10 @@ pub fn self_test() -> KernelResult<()> {
     match unzstd(&bad_checksum) {
         Err(KernelError::CorruptedData) => {} // expected
         other => {
-            serial_println!("[zstd]   FAIL: expected CorruptedData for bad checksum, got {:?}", other.err());
+            serial_println!(
+                "[zstd]   FAIL: expected CorruptedData for bad checksum, got {:?}",
+                other.err()
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -2717,7 +2838,10 @@ pub fn self_test() -> KernelResult<()> {
     let compressed_empty = zstd_store(b"");
     let decompressed_empty = unzstd(&compressed_empty)?;
     if !decompressed_empty.is_empty() {
-        serial_println!("[zstd]   FAIL: store empty: got {} bytes", decompressed_empty.len());
+        serial_println!(
+            "[zstd]   FAIL: store empty: got {} bytes",
+            decompressed_empty.len()
+        );
         return Err(KernelError::InternalError);
     }
 

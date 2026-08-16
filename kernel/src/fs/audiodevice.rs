@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -261,9 +261,10 @@ pub fn add_device(
 
         // Auto-set as default if first of its direction.
         let is_first = !state.devices.iter().any(|d| {
-            d.state != DeviceState::Disconnected &&
-            (d.direction == direction || d.direction == DeviceDirection::Duplex ||
-             direction == DeviceDirection::Duplex)
+            d.state != DeviceState::Disconnected
+                && (d.direction == direction
+                    || d.direction == DeviceDirection::Duplex
+                    || direction == DeviceDirection::Duplex)
         });
 
         state.devices.push(AudioDevice {
@@ -283,12 +284,14 @@ pub fn add_device(
         });
 
         // Auto-switch to new device if setting is on and it's output.
-        if state.auto_switch_on_connect && !is_first
+        if state.auto_switch_on_connect
+            && !is_first
             && (direction == DeviceDirection::Output || direction == DeviceDirection::Duplex)
         {
             // Set as default output.
             for d in &mut state.devices {
-                if d.direction == DeviceDirection::Output || d.direction == DeviceDirection::Duplex {
+                if d.direction == DeviceDirection::Output || d.direction == DeviceDirection::Duplex
+                {
                     d.is_default = d.id == id;
                 }
             }
@@ -301,7 +304,11 @@ pub fn add_device(
 /// Remove a device (hotunplug).
 pub fn remove_device(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.devices.iter().position(|d| d.id == id).ok_or(KernelError::NotFound)?;
+        let pos = state
+            .devices
+            .iter()
+            .position(|d| d.id == id)
+            .ok_or(KernelError::NotFound)?;
         let was_default = state.devices[pos].is_default;
         let direction = state.devices[pos].direction;
         state.devices.remove(pos);
@@ -309,8 +316,8 @@ pub fn remove_device(id: u32) -> KernelResult<()> {
         // Promote next device if default was removed.
         if was_default {
             if let Some(next) = state.devices.iter_mut().find(|d| {
-                d.state != DeviceState::Disconnected &&
-                (d.direction == direction || d.direction == DeviceDirection::Duplex)
+                d.state != DeviceState::Disconnected
+                    && (d.direction == direction || d.direction == DeviceDirection::Duplex)
             }) {
                 next.is_default = true;
             }
@@ -323,7 +330,12 @@ pub fn remove_device(id: u32) -> KernelResult<()> {
 pub fn get_device(id: u32) -> KernelResult<AudioDevice> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.devices.iter().find(|d| d.id == id).cloned().ok_or(KernelError::NotFound)
+    state
+        .devices
+        .iter()
+        .find(|d| d.id == id)
+        .cloned()
+        .ok_or(KernelError::NotFound)
 }
 
 /// List all devices.
@@ -336,8 +348,11 @@ pub fn list_devices() -> Vec<AudioDevice> {
 pub fn output_devices() -> Vec<AudioDevice> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.devices.iter()
-            .filter(|d| d.direction == DeviceDirection::Output || d.direction == DeviceDirection::Duplex)
+        s.devices
+            .iter()
+            .filter(|d| {
+                d.direction == DeviceDirection::Output || d.direction == DeviceDirection::Duplex
+            })
             .cloned()
             .collect()
     })
@@ -347,8 +362,11 @@ pub fn output_devices() -> Vec<AudioDevice> {
 pub fn input_devices() -> Vec<AudioDevice> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.devices.iter()
-            .filter(|d| d.direction == DeviceDirection::Input || d.direction == DeviceDirection::Duplex)
+        s.devices
+            .iter()
+            .filter(|d| {
+                d.direction == DeviceDirection::Input || d.direction == DeviceDirection::Duplex
+            })
             .cloned()
             .collect()
     })
@@ -392,8 +410,13 @@ pub fn set_default_input(id: u32) -> KernelResult<()> {
 pub fn default_output() -> Option<AudioDevice> {
     let guard = STATE.lock();
     guard.as_ref().and_then(|s| {
-        s.devices.iter()
-            .find(|d| d.is_default && (d.direction == DeviceDirection::Output || d.direction == DeviceDirection::Duplex))
+        s.devices
+            .iter()
+            .find(|d| {
+                d.is_default
+                    && (d.direction == DeviceDirection::Output
+                        || d.direction == DeviceDirection::Duplex)
+            })
             .cloned()
     })
 }
@@ -402,8 +425,13 @@ pub fn default_output() -> Option<AudioDevice> {
 pub fn default_input() -> Option<AudioDevice> {
     let guard = STATE.lock();
     guard.as_ref().and_then(|s| {
-        s.devices.iter()
-            .find(|d| d.is_default && (d.direction == DeviceDirection::Input || d.direction == DeviceDirection::Duplex))
+        s.devices
+            .iter()
+            .find(|d| {
+                d.is_default
+                    && (d.direction == DeviceDirection::Input
+                        || d.direction == DeviceDirection::Duplex)
+            })
             .cloned()
     })
 }
@@ -418,7 +446,11 @@ pub fn set_device_volume(id: u32, volume: u32) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == id).ok_or(KernelError::NotFound)?;
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == id)
+            .ok_or(KernelError::NotFound)?;
         dev.volume = volume;
         Ok(())
     })
@@ -427,7 +459,11 @@ pub fn set_device_volume(id: u32, volume: u32) -> KernelResult<()> {
 /// Set device mute.
 pub fn set_device_mute(id: u32, muted: bool) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == id).ok_or(KernelError::NotFound)?;
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == id)
+            .ok_or(KernelError::NotFound)?;
         dev.muted = muted;
         Ok(())
     })
@@ -436,7 +472,11 @@ pub fn set_device_mute(id: u32, muted: bool) -> KernelResult<()> {
 /// Set device sample rate.
 pub fn set_sample_rate(id: u32, rate: SampleRate) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == id).ok_or(KernelError::NotFound)?;
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == id)
+            .ok_or(KernelError::NotFound)?;
         dev.sample_rate = rate;
         Ok(())
     })
@@ -444,7 +484,10 @@ pub fn set_sample_rate(id: u32, rate: SampleRate) -> KernelResult<()> {
 
 /// Set auto-switch on connect.
 pub fn set_auto_switch(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.auto_switch_on_connect = enabled; Ok(()) })
+    with_state(|state| {
+        state.auto_switch_on_connect = enabled;
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -456,10 +499,38 @@ pub fn stats() -> (usize, usize, usize, u32, u32, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let out_count = s.devices.iter().filter(|d| d.direction == DeviceDirection::Output || d.direction == DeviceDirection::Duplex).count();
-            let in_count = s.devices.iter().filter(|d| d.direction == DeviceDirection::Input || d.direction == DeviceDirection::Duplex).count();
-            let def_out = s.devices.iter().find(|d| d.is_default && (d.direction == DeviceDirection::Output || d.direction == DeviceDirection::Duplex)).map_or(0, |d| d.id);
-            let def_in = s.devices.iter().find(|d| d.is_default && (d.direction == DeviceDirection::Input || d.direction == DeviceDirection::Duplex)).map_or(0, |d| d.id);
+            let out_count = s
+                .devices
+                .iter()
+                .filter(|d| {
+                    d.direction == DeviceDirection::Output || d.direction == DeviceDirection::Duplex
+                })
+                .count();
+            let in_count = s
+                .devices
+                .iter()
+                .filter(|d| {
+                    d.direction == DeviceDirection::Input || d.direction == DeviceDirection::Duplex
+                })
+                .count();
+            let def_out = s
+                .devices
+                .iter()
+                .find(|d| {
+                    d.is_default
+                        && (d.direction == DeviceDirection::Output
+                            || d.direction == DeviceDirection::Duplex)
+                })
+                .map_or(0, |d| d.id);
+            let def_in = s
+                .devices
+                .iter()
+                .find(|d| {
+                    d.is_default
+                        && (d.direction == DeviceDirection::Input
+                            || d.direction == DeviceDirection::Duplex)
+                })
+                .map_or(0, |d| d.id);
             (s.devices.len(), out_count, in_count, def_out, def_in, s.ops)
         }
         None => (0, 0, 0, 0, 0, 0),
@@ -483,8 +554,20 @@ pub fn self_test() {
     // hotplug API (first device of each direction auto-becomes the default).
     {
         assert_eq!(list_devices().len(), 0);
-        let spk = add_device("Built-in Speakers", AudioDeviceType::Speakers, DeviceDirection::Output, "hda").unwrap();
-        let mic = add_device("Built-in Microphone", AudioDeviceType::Microphone, DeviceDirection::Input, "hda").unwrap();
+        let spk = add_device(
+            "Built-in Speakers",
+            AudioDeviceType::Speakers,
+            DeviceDirection::Output,
+            "hda",
+        )
+        .unwrap();
+        let mic = add_device(
+            "Built-in Microphone",
+            AudioDeviceType::Microphone,
+            DeviceDirection::Input,
+            "hda",
+        )
+        .unwrap();
         assert_eq!(list_devices().len(), 2);
         let out = default_output().unwrap();
         assert_eq!(out.id, spk);
@@ -497,7 +580,13 @@ pub fn self_test() {
 
     // Test 2: add device.
     {
-        let id = add_device("USB Headset", AudioDeviceType::Usb, DeviceDirection::Duplex, "snd-usb-audio").unwrap();
+        let id = add_device(
+            "USB Headset",
+            AudioDeviceType::Usb,
+            DeviceDirection::Duplex,
+            "snd-usb-audio",
+        )
+        .unwrap();
         let dev = get_device(id).unwrap();
         assert_eq!(dev.name, "USB Headset");
         assert_eq!(dev.device_type, AudioDeviceType::Usb);
@@ -566,7 +655,13 @@ pub fn self_test() {
     {
         set_auto_switch(false).unwrap();
         // Add device — should NOT auto-switch.
-        let _ = add_device("BT Speaker", AudioDeviceType::Bluetooth, DeviceDirection::Output, "snd-bt").unwrap();
+        let _ = add_device(
+            "BT Speaker",
+            AudioDeviceType::Bluetooth,
+            DeviceDirection::Output,
+            "snd-bt",
+        )
+        .unwrap();
         // Default should still be USB Headset from test 4.
         set_auto_switch(true).unwrap();
     }

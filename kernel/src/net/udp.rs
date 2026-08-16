@@ -32,9 +32,9 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -170,7 +170,7 @@ static SOCKETS: Mutex<[UdpSocket; MAX_SOCKETS]> = Mutex::new(
     {
         const EMPTY: UdpSocket = UdpSocket::empty();
         [EMPTY; MAX_SOCKETS]
-    }
+    },
 );
 
 /// Global table of multicast group addresses we have joined.
@@ -188,7 +188,10 @@ struct McastEntry {
 
 impl McastEntry {
     const fn empty() -> Self {
-        Self { addr: Ipv4Addr::UNSPECIFIED, refcount: 0 }
+        Self {
+            addr: Ipv4Addr::UNSPECIFIED,
+            refcount: 0,
+        }
     }
 }
 
@@ -260,7 +263,10 @@ struct McastEntryV6 {
 
 impl McastEntryV6 {
     const fn empty() -> Self {
-        Self { addr: Ipv6Addr::UNSPECIFIED, refcount: 0 }
+        Self {
+            addr: Ipv6Addr::UNSPECIFIED,
+            refcount: 0,
+        }
     }
 }
 
@@ -457,7 +463,9 @@ pub fn join_group(handle: usize, group: Ipv4Addr) -> KernelResult<()> {
     }
 
     let mut sockets = SOCKETS.lock();
-    let sock = sockets.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    let sock = sockets
+        .get_mut(handle)
+        .ok_or(KernelError::InvalidArgument)?;
     if !sock.active {
         return Err(KernelError::InvalidArgument);
     }
@@ -485,10 +493,7 @@ pub fn join_group(handle: usize, group: Ipv4Addr) -> KernelResult<()> {
     // Notify IGMP so the network receives our membership report.
     super::igmp::join(group);
 
-    crate::serial_println!(
-        "[udp] Socket {} joined multicast group {}",
-        handle, group
-    );
+    crate::serial_println!("[udp] Socket {} joined multicast group {}", handle, group);
     Ok(())
 }
 
@@ -500,7 +505,9 @@ pub fn join_group(handle: usize, group: Ipv4Addr) -> KernelResult<()> {
 /// - `NotFound` — socket is not a member of this group.
 pub fn leave_group(handle: usize, group: Ipv4Addr) -> KernelResult<()> {
     let mut sockets = SOCKETS.lock();
-    let sock = sockets.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    let sock = sockets
+        .get_mut(handle)
+        .ok_or(KernelError::InvalidArgument)?;
     if !sock.active {
         return Err(KernelError::InvalidArgument);
     }
@@ -530,10 +537,7 @@ pub fn leave_group(handle: usize, group: Ipv4Addr) -> KernelResult<()> {
     // Notify IGMP so the network receives our leave message.
     super::igmp::leave(group);
 
-    crate::serial_println!(
-        "[udp] Socket {} left multicast group {}",
-        handle, group
-    );
+    crate::serial_println!("[udp] Socket {} left multicast group {}", handle, group);
     Ok(())
 }
 
@@ -554,7 +558,9 @@ pub fn join_group_v6(handle: usize, group: Ipv6Addr) -> KernelResult<()> {
     }
 
     let mut sockets = SOCKETS.lock();
-    let sock = sockets.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    let sock = sockets
+        .get_mut(handle)
+        .ok_or(KernelError::InvalidArgument)?;
     if !sock.active {
         return Err(KernelError::InvalidArgument);
     }
@@ -584,7 +590,8 @@ pub fn join_group_v6(handle: usize, group: Ipv6Addr) -> KernelResult<()> {
 
     crate::serial_println!(
         "[udp] Socket {} joined IPv6 multicast group {}",
-        handle, group
+        handle,
+        group
     );
     Ok(())
 }
@@ -597,7 +604,9 @@ pub fn join_group_v6(handle: usize, group: Ipv6Addr) -> KernelResult<()> {
 /// - `NotFound` — socket is not a member of this group.
 pub fn leave_group_v6(handle: usize, group: Ipv6Addr) -> KernelResult<()> {
     let mut sockets = SOCKETS.lock();
-    let sock = sockets.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    let sock = sockets
+        .get_mut(handle)
+        .ok_or(KernelError::InvalidArgument)?;
     if !sock.active {
         return Err(KernelError::InvalidArgument);
     }
@@ -629,7 +638,8 @@ pub fn leave_group_v6(handle: usize, group: Ipv6Addr) -> KernelResult<()> {
 
     crate::serial_println!(
         "[udp] Socket {} left IPv6 multicast group {}",
-        handle, group
+        handle,
+        group
     );
     Ok(())
 }
@@ -656,7 +666,9 @@ pub fn rx_ready(handle: usize) -> usize {
 /// Returns 0 if no matching datagram is queued.
 pub fn rx_front_bytes(handle: usize) -> usize {
     let sockets = SOCKETS.lock();
-    let Some(sock) = sockets.get(handle) else { return 0 };
+    let Some(sock) = sockets.get(handle) else {
+        return 0;
+    };
     if !sock.active {
         return 0;
     }
@@ -744,7 +756,9 @@ pub fn local_port(handle: usize) -> Option<u16> {
 /// disconnect (remove filter).
 pub fn connect(handle: usize, peer_ip: Ipv4Addr, peer_port: u16) -> KernelResult<()> {
     let mut sockets = SOCKETS.lock();
-    let sock = sockets.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    let sock = sockets
+        .get_mut(handle)
+        .ok_or(KernelError::InvalidArgument)?;
     if !sock.active {
         return Err(KernelError::InvalidArgument);
     }
@@ -788,9 +802,7 @@ pub fn send(src_port: u16, dst_ip: Ipv4Addr, dst_port: u16, data: &[u8]) -> Kern
     udp_packet.extend_from_slice(data);
 
     // Compute and fill in the UDP checksum.
-    let cksum = ipv4::compute_transport_checksum(
-        src_ip, dst_ip, PROTO_UDP, &udp_packet,
-    );
+    let cksum = ipv4::compute_transport_checksum(src_ip, dst_ip, PROTO_UDP, &udp_packet);
     udp_packet[6] = (cksum >> 8) as u8;
     udp_packet[7] = cksum as u8;
 
@@ -814,9 +826,7 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>, ns_id: NetNsId) -> KernelResult<(
     // Verify UDP checksum (pseudo-header + segment).
     // verify_transport_checksum handles the "checksum = 0 means no
     // checksum" case for UDP over IPv4 (RFC 768).
-    if !ipv4::verify_transport_checksum(
-        ip_packet.src, ip_packet.dst, PROTO_UDP, data,
-    ) {
+    if !ipv4::verify_transport_checksum(ip_packet.src, ip_packet.dst, PROTO_UDP, data) {
         crate::serial_println!(
             "[udp] Dropped datagram from {} — bad checksum",
             ip_packet.src
@@ -837,7 +847,8 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>, ns_id: NetNsId) -> KernelResult<(
         // Malformed length — less than the minimum 8-byte header.
         crate::serial_println!(
             "[udp] Dropped datagram from {} — malformed length {}",
-            ip_packet.src, udp_length
+            ip_packet.src,
+            udp_length
         );
         return Ok(());
     } else {
@@ -932,11 +943,8 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>, ns_id: NetNsId) -> KernelResult<(
     if !is_mcast && !ip_packet.dst.is_broadcast() {
         // First 8 bytes of the UDP header for the ICMP error payload.
         if data.len() >= 8 {
-            let _ = super::icmp::send_port_unreachable(
-                ip_packet.src,
-                ip_packet.raw_header,
-                &data[..8],
-            );
+            let _ =
+                super::icmp::send_port_unreachable(ip_packet.src, ip_packet.raw_header, &data[..8]);
         }
     }
 
@@ -972,9 +980,7 @@ pub fn process_udp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResul
     }
 
     // Verify UDP checksum using the IPv6 pseudo-header.
-    if !ipv6::verify_transport_checksum(
-        &ip_packet.src, &ip_packet.dst, ipv6::NH_UDP, data,
-    ) {
+    if !ipv6::verify_transport_checksum(&ip_packet.src, &ip_packet.dst, ipv6::NH_UDP, data) {
         crate::serial_println!(
             "[udp] Dropped IPv6 datagram from {} — bad checksum",
             ip_packet.src
@@ -993,7 +999,8 @@ pub fn process_udp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResul
     } else if udp_length < UDP_HEADER_SIZE {
         crate::serial_println!(
             "[udp] Dropped IPv6 datagram from {} — malformed length {}",
-            ip_packet.src, udp_length
+            ip_packet.src,
+            udp_length
         );
         return Ok(());
     } else {
@@ -1145,9 +1152,7 @@ pub fn send_v6(src_port: u16, dst_ip: Ipv6Addr, dst_port: u16, data: &[u8]) -> K
     // Compute checksum using the IPv6 pseudo-header.
     // For UDP over IPv6, a computed checksum of 0 is transmitted as
     // 0xFFFF (handled inside compute_transport_checksum).
-    let cksum = ipv6::compute_transport_checksum(
-        &src_ip, &dst_ip, ipv6::NH_UDP, &udp_packet,
-    );
+    let cksum = ipv6::compute_transport_checksum(&src_ip, &dst_ip, ipv6::NH_UDP, &udp_packet);
     udp_packet[6] = (cksum >> 8) as u8;
     udp_packet[7] = cksum as u8;
 
@@ -1361,7 +1366,10 @@ fn test_multicast_join_leave() -> KernelResult<()> {
     match join_group(handle, mcast) {
         Err(KernelError::AlreadyExists) => {} // Expected.
         other => {
-            crate::serial_println!("[udp]   FAIL: double join didn't return AlreadyExists: {:?}", other);
+            crate::serial_println!(
+                "[udp]   FAIL: double join didn't return AlreadyExists: {:?}",
+                other
+            );
             close(handle);
             return Err(KernelError::InternalError);
         }
@@ -1397,10 +1405,7 @@ fn test_multicast_join_leave_v6() -> KernelResult<()> {
     let handle = bind(crate::netns::ROOT_NS, 55570)?;
 
     // ff02::fb is the mDNS IPv6 multicast address.
-    let mcast_v6 = Ipv6Addr([
-        0xFF, 0x02, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0xFB,
-    ]);
+    let mcast_v6 = Ipv6Addr([0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFB]);
 
     // Not a member before join.
     if is_multicast_member_v6(mcast_v6) {
@@ -1429,10 +1434,7 @@ fn test_multicast_join_leave_v6() -> KernelResult<()> {
     }
 
     // Non-multicast IPv6 address should be rejected.
-    let unicast_v6 = Ipv6Addr([
-        0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 1,
-    ]);
+    let unicast_v6 = Ipv6Addr([0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
     match join_group_v6(handle, unicast_v6) {
         Err(KernelError::InvalidArgument) => {} // Expected.
         other => {
@@ -1608,7 +1610,8 @@ fn test_v6_process_and_deliver() -> KernelResult<()> {
             if dg.src_port != src_port {
                 crate::serial_println!(
                     "[udp]   FAIL: v6 datagram src_port = {}, expected {}",
-                    dg.src_port, src_port
+                    dg.src_port,
+                    src_port
                 );
                 close(handle);
                 return Err(KernelError::InternalError);
@@ -1616,7 +1619,8 @@ fn test_v6_process_and_deliver() -> KernelResult<()> {
             if dg.data.as_slice() != payload {
                 crate::serial_println!(
                     "[udp]   FAIL: v6 datagram payload len = {}, expected {}",
-                    dg.data.len(), payload.len()
+                    dg.data.len(),
+                    payload.len()
                 );
                 close(handle);
                 return Err(KernelError::InternalError);
@@ -1674,7 +1678,8 @@ fn test_namespace_isolation() -> KernelResult<()> {
     // builds a valid UDP-over-IPv4 datagram for port 55580.
     let build_dgram = |src: super::interface::Ipv4Addr,
                        dst: super::interface::Ipv4Addr,
-                       src_port: u16| -> Vec<u8> {
+                       src_port: u16|
+     -> Vec<u8> {
         let payload = b"ns-scoped";
         let udp_len = UDP_HEADER_SIZE + payload.len();
         let mut seg = Vec::with_capacity(udp_len);
@@ -1699,7 +1704,8 @@ fn test_namespace_isolation() -> KernelResult<()> {
     if rx_ready(h1) != 1 || rx_ready(h0) != 0 {
         crate::serial_println!(
             "[udp]   FAIL: ns1 delivery — h1={}, h0={} (want 1, 0)",
-            rx_ready(h1), rx_ready(h0)
+            rx_ready(h1),
+            rx_ready(h0)
         );
         close(h0);
         close(h1);
@@ -1713,10 +1719,7 @@ fn test_namespace_isolation() -> KernelResult<()> {
     let parsed_root = Ipv4Packet::parse(&pkt_root)?;
     process_udp(&parsed_root, ns0)?;
     if rx_ready(h0) != 1 {
-        crate::serial_println!(
-            "[udp]   FAIL: root delivery — h0={} (want 1)",
-            rx_ready(h0)
-        );
+        crate::serial_println!("[udp]   FAIL: root delivery — h0={} (want 1)", rx_ready(h0));
         close(h0);
         close(h1);
         return Err(KernelError::InternalError);

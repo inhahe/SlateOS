@@ -28,8 +28,8 @@
 //! - Linux `arch/x86/mm/tlb.c` — TLB flush IPI mechanism
 //! - Intel SDM Vol. 3A §4.10.4 "Invalidation of TLBs and Paging-Structure Caches"
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // TLB shootdown statistics
@@ -215,10 +215,7 @@ pub fn flush_all() {
 ///
 /// Must be fast — no allocations, no lock contention, no serial output.
 #[unsafe(no_mangle)]
-pub extern "C" fn handle_tlb_shootdown_irq(
-    _frame: &crate::idt::InterruptStackFrame,
-    _error: u64,
-) {
+pub extern "C" fn handle_tlb_shootdown_irq(_frame: &crate::idt::InterruptStackFrame, _error: u64) {
     let addr = FLUSH_ADDR.load(Ordering::Acquire);
     let pages = FLUSH_PAGES.load(Ordering::Acquire);
 

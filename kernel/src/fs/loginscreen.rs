@@ -21,9 +21,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::KernelResult;
 
@@ -367,9 +367,11 @@ pub fn init_defaults() {
 /// Return (synced, changes, ops).
 pub fn stats() -> (bool, u64, u64) {
     let state = STATE.lock();
-    (state.config.synced_with_desktop,
-     state.changes,
-     OP_COUNT.load(Ordering::Relaxed))
+    (
+        state.config.synced_with_desktop,
+        state.changes,
+        OP_COUNT.load(Ordering::Relaxed),
+    )
 }
 
 pub fn reset_stats() {

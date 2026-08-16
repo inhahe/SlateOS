@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -116,7 +116,9 @@ where
 /// 150 misses, and 1.1s of overhead, with global tracing enabled.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         probes: Vec::new(),
         total_hits: 0,
@@ -130,13 +132,24 @@ pub fn init_defaults() {
 /// Add a probe.
 pub fn add_probe(func_name: &str, kind: ProbeKind) -> KernelResult<()> {
     with_state(|state| {
-        if state.probes.len() >= MAX_PROBES { return Err(KernelError::ResourceExhausted); }
-        if state.probes.iter().any(|p| p.func_name == func_name && p.kind == kind) {
+        if state.probes.len() >= MAX_PROBES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state
+            .probes
+            .iter()
+            .any(|p| p.func_name == func_name && p.kind == kind)
+        {
             return Err(KernelError::AlreadyExists);
         }
         state.probes.push(ProbeStats {
-            func_name: String::from(func_name), kind,
-            hits: 0, misses: 0, total_ns: 0, max_ns: 0, enabled: true,
+            func_name: String::from(func_name),
+            kind,
+            hits: 0,
+            misses: 0,
+            total_ns: 0,
+            max_ns: 0,
+            enabled: true,
         });
         Ok(())
     })
@@ -145,7 +158,10 @@ pub fn add_probe(func_name: &str, kind: ProbeKind) -> KernelResult<()> {
 /// Remove a probe.
 pub fn remove_probe(func_name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.probes.iter().position(|p| p.func_name == func_name)
+        let idx = state
+            .probes
+            .iter()
+            .position(|p| p.func_name == func_name)
             .ok_or(KernelError::NotFound)?;
         state.probes.remove(idx);
         Ok(())
@@ -155,7 +171,10 @@ pub fn remove_probe(func_name: &str) -> KernelResult<()> {
 /// Enable/disable a probe.
 pub fn set_enabled(func_name: &str, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.probes.iter_mut().find(|p| p.func_name == func_name)
+        let p = state
+            .probes
+            .iter_mut()
+            .find(|p| p.func_name == func_name)
             .ok_or(KernelError::NotFound)?;
         p.enabled = enabled;
         Ok(())
@@ -165,7 +184,10 @@ pub fn set_enabled(func_name: &str, enabled: bool) -> KernelResult<()> {
 /// Record a probe hit.
 pub fn record_hit(func_name: &str, duration_ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.probes.iter_mut().find(|p| p.func_name == func_name)
+        let p = state
+            .probes
+            .iter_mut()
+            .find(|p| p.func_name == func_name)
             .ok_or(KernelError::NotFound)?;
         if !p.enabled {
             p.misses += 1;
@@ -174,7 +196,9 @@ pub fn record_hit(func_name: &str, duration_ns: u64) -> KernelResult<()> {
         }
         p.hits += 1;
         p.total_ns += duration_ns;
-        if duration_ns > p.max_ns { p.max_ns = duration_ns; }
+        if duration_ns > p.max_ns {
+            p.max_ns = duration_ns;
+        }
         state.total_hits += 1;
         state.total_overhead_ns += duration_ns;
         Ok(())
@@ -191,7 +215,10 @@ pub fn set_global_enabled(enabled: bool) -> KernelResult<()> {
 
 /// Per-probe stats.
 pub fn per_probe() -> Vec<ProbeStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.probes.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.probes.clone())
 }
 
 /// Global enabled state.
@@ -203,7 +230,13 @@ pub fn is_enabled() -> bool {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.probes.len(), s.total_hits, s.total_misses, s.total_overhead_ns, s.ops),
+        Some(s) => (
+            s.probes.len(),
+            s.total_hits,
+            s.total_misses,
+            s.total_overhead_ns,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -230,14 +263,20 @@ pub fn self_test() {
     add_probe("test_fn", ProbeKind::Function).expect("add");
     assert_eq!(per_probe().len(), 1);
     assert!(add_probe("test_fn", ProbeKind::Function).is_err());
-    let p = per_probe().into_iter().find(|p| p.func_name == "test_fn").expect("find");
+    let p = per_probe()
+        .into_iter()
+        .find(|p| p.func_name == "test_fn")
+        .expect("find");
     assert_eq!((p.hits, p.misses, p.total_ns, p.max_ns), (0, 0, 0, 0));
     assert!(p.enabled);
     crate::serial_println!("  [2/8] add probe: OK");
 
     // 3: Hit — enabled probe accrues hit, total_ns, max_ns; globals follow.
     record_hit("test_fn", 100).expect("hit");
-    let p = per_probe().into_iter().find(|p| p.func_name == "test_fn").expect("p3");
+    let p = per_probe()
+        .into_iter()
+        .find(|p| p.func_name == "test_fn")
+        .expect("p3");
     assert_eq!((p.hits, p.total_ns, p.max_ns), (1, 100, 100));
     let (_, hits, _, overhead, _) = stats();
     assert_eq!((hits, overhead), (1, 100));
@@ -246,7 +285,10 @@ pub fn self_test() {
     // 4: Disabled probe counts a miss, not a hit; total_ns unchanged.
     set_enabled("test_fn", false).expect("disable");
     record_hit("test_fn", 50).expect("miss");
-    let p = per_probe().into_iter().find(|p| p.func_name == "test_fn").expect("p4");
+    let p = per_probe()
+        .into_iter()
+        .find(|p| p.func_name == "test_fn")
+        .expect("p4");
     assert_eq!((p.hits, p.misses, p.total_ns), (1, 1, 100));
     assert_eq!(stats().2, 1); // total_misses
     crate::serial_println!("  [4/8] disable: OK");
@@ -254,7 +296,10 @@ pub fn self_test() {
     // 5: Re-enable — hit accrues again; max_ns rises to the larger duration.
     set_enabled("test_fn", true).expect("enable");
     record_hit("test_fn", 200).expect("hit2");
-    let p = per_probe().into_iter().find(|p| p.func_name == "test_fn").expect("p5");
+    let p = per_probe()
+        .into_iter()
+        .find(|p| p.func_name == "test_fn")
+        .expect("p5");
     assert_eq!((p.hits, p.max_ns, p.total_ns), (2, 200, 300));
     crate::serial_println!("  [5/8] re-enable: OK");
 

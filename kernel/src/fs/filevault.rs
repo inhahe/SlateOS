@@ -20,11 +20,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -132,7 +132,9 @@ fn simple_hash(password: &str) -> u64 {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         vaults: Vec::new(),
         next_id: 1,
@@ -144,7 +146,12 @@ pub fn init_defaults() {
 }
 
 /// Create a new vault.
-pub fn create_vault(name: &str, path: &str, password: &str, cipher: VaultCipher) -> KernelResult<u32> {
+pub fn create_vault(
+    name: &str,
+    path: &str,
+    password: &str,
+    cipher: VaultCipher,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.vaults.len() >= MAX_VAULTS {
             return Err(KernelError::ResourceExhausted);
@@ -156,14 +163,16 @@ pub fn create_vault(name: &str, path: &str, password: &str, cipher: VaultCipher)
         state.next_id += 1;
         let mount = format!("/vault/{}", id);
         state.vaults.push(Vault {
-            id, name: String::from(name),
+            id,
+            name: String::from(name),
             path: String::from(path),
             mount_point: mount,
             state: VaultState::Locked,
             cipher,
             auto_lock_secs: 300,
             password_hash: simple_hash(password),
-            file_count: 0, size_bytes: 0,
+            file_count: 0,
+            size_bytes: 0,
             created_ns: crate::hpet::elapsed_ns(),
             last_accessed_ns: 0,
         });
@@ -174,7 +183,10 @@ pub fn create_vault(name: &str, path: &str, password: &str, cipher: VaultCipher)
 /// Unlock a vault with password.
 pub fn unlock(vault_id: u32, password: &str) -> KernelResult<()> {
     with_state(|state| {
-        let v = state.vaults.iter_mut().find(|v| v.id == vault_id)
+        let v = state
+            .vaults
+            .iter_mut()
+            .find(|v| v.id == vault_id)
             .ok_or(KernelError::NotFound)?;
         if v.state == VaultState::Unlocked {
             return Err(KernelError::InvalidArgument);
@@ -193,7 +205,10 @@ pub fn unlock(vault_id: u32, password: &str) -> KernelResult<()> {
 /// Lock a vault.
 pub fn lock(vault_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let v = state.vaults.iter_mut().find(|v| v.id == vault_id)
+        let v = state
+            .vaults
+            .iter_mut()
+            .find(|v| v.id == vault_id)
             .ok_or(KernelError::NotFound)?;
         v.state = VaultState::Locked;
         state.total_locks += 1;
@@ -204,7 +219,10 @@ pub fn lock(vault_id: u32) -> KernelResult<()> {
 /// Change vault password.
 pub fn change_password(vault_id: u32, old_password: &str, new_password: &str) -> KernelResult<()> {
     with_state(|state| {
-        let v = state.vaults.iter_mut().find(|v| v.id == vault_id)
+        let v = state
+            .vaults
+            .iter_mut()
+            .find(|v| v.id == vault_id)
             .ok_or(KernelError::NotFound)?;
         if simple_hash(old_password) != v.password_hash {
             state.total_failed_auths += 1;
@@ -221,7 +239,10 @@ pub fn change_password(vault_id: u32, old_password: &str, new_password: &str) ->
 /// Set auto-lock timeout.
 pub fn set_auto_lock(vault_id: u32, secs: u32) -> KernelResult<()> {
     with_state(|state| {
-        let v = state.vaults.iter_mut().find(|v| v.id == vault_id)
+        let v = state
+            .vaults
+            .iter_mut()
+            .find(|v| v.id == vault_id)
             .ok_or(KernelError::NotFound)?;
         v.auto_lock_secs = secs;
         Ok(())
@@ -231,7 +252,10 @@ pub fn set_auto_lock(vault_id: u32, secs: u32) -> KernelResult<()> {
 /// Delete a vault.
 pub fn delete_vault(vault_id: u32, password: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.vaults.iter().position(|v| v.id == vault_id)
+        let pos = state
+            .vaults
+            .iter()
+            .position(|v| v.id == vault_id)
             .ok_or(KernelError::NotFound)?;
         if simple_hash(password) != state.vaults[pos].password_hash {
             state.total_failed_auths += 1;
@@ -244,13 +268,21 @@ pub fn delete_vault(vault_id: u32, password: &str) -> KernelResult<()> {
 
 /// List all vaults (doesn't expose passwords).
 pub fn list_vaults() -> Vec<Vault> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.vaults.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.vaults.clone())
 }
 
 /// Get vault info.
 pub fn get_vault(id: u32) -> KernelResult<Vault> {
     with_state(|state| {
-        state.vaults.iter().find(|v| v.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .vaults
+            .iter()
+            .find(|v| v.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -259,8 +291,18 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let unlocked = s.vaults.iter().filter(|v| v.state == VaultState::Unlocked).count();
-            (s.vaults.len(), unlocked, s.total_unlocks, s.total_failed_auths, s.ops)
+            let unlocked = s
+                .vaults
+                .iter()
+                .filter(|v| v.state == VaultState::Unlocked)
+                .count();
+            (
+                s.vaults.len(),
+                unlocked,
+                s.total_unlocks,
+                s.total_failed_auths,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }
@@ -279,7 +321,13 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] no vaults: OK");
 
     // 2: Create vault.
-    let id = create_vault("Personal", "/home/user/vault", "secret123", VaultCipher::Aes256Gcm).expect("create");
+    let id = create_vault(
+        "Personal",
+        "/home/user/vault",
+        "secret123",
+        VaultCipher::Aes256Gcm,
+    )
+    .expect("create");
     assert_eq!(list_vaults().len(), 1);
     let v = get_vault(id).expect("get");
     assert_eq!(v.state, VaultState::Locked);

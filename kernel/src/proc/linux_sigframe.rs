@@ -238,9 +238,8 @@ pub mod si_fault_code {
 
 /// Size of `struct rt_sigframe` *excluding* any trailing fpstate, i.e. the
 /// `pretcode` word + `ucontext` + `siginfo`.
-pub const RT_SIGFRAME_SIZE: usize = 8
-    + core::mem::size_of::<LinuxUcontext>()
-    + core::mem::size_of::<LinuxSiginfo>();
+pub const RT_SIGFRAME_SIZE: usize =
+    8 + core::mem::size_of::<LinuxUcontext>() + core::mem::size_of::<LinuxSiginfo>();
 
 /// Computed placement of an `rt_sigframe` on the user stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,7 +351,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     if (off_flags, off_link, off_stack, off_mctx, off_mask) != (0, 8, 16, 40, 296) {
         serial_println!(
             "[sigframe]   FAIL: ucontext offsets = ({}, {}, {}, {}, {}) want (0,8,16,40,296)",
-            off_flags, off_link, off_stack, off_mctx, off_mask
+            off_flags,
+            off_link,
+            off_stack,
+            off_mctx,
+            off_mask
         );
         return Err(KernelError::InvalidArgument);
     }
@@ -367,7 +370,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     if (off_rip, off_eflags, off_cs, off_fpstate) != (128, 136, 144, 184) {
         serial_println!(
             "[sigframe]   FAIL: sigcontext offsets rip/eflags/cs/fpstate = ({}, {}, {}, {}) want (128,136,144,184)",
-            off_rip, off_eflags, off_cs, off_fpstate
+            off_rip,
+            off_eflags,
+            off_cs,
+            off_fpstate
         );
         return Err(KernelError::InvalidArgument);
     }
@@ -381,7 +387,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     if (off_signo, off_code, off_union) != (0, 8, 16) {
         serial_println!(
             "[sigframe]   FAIL: siginfo offsets signo/code/union = ({}, {}, {}) want (0,8,16)",
-            off_signo, off_code, off_union
+            off_signo,
+            off_code,
+            off_union
         );
         return Err(KernelError::InvalidArgument);
     }
@@ -431,12 +439,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
         return Err(KernelError::InvalidArgument);
     }
-    if layout.uc_addr != layout.frame_addr + 8
-        || layout.info_addr != layout.uc_addr + 304
-    {
+    if layout.uc_addr != layout.frame_addr + 8 || layout.info_addr != layout.uc_addr + 304 {
         serial_println!(
             "[sigframe]   FAIL: layout linkage uc={:#x} info={:#x} frame={:#x}",
-            layout.uc_addr, layout.info_addr, layout.frame_addr
+            layout.uc_addr,
+            layout.info_addr,
+            layout.frame_addr
         );
         return Err(KernelError::InvalidArgument);
     }

@@ -144,7 +144,8 @@ pub fn charge(typ: MemType, count: u64) {
     if idx >= NUM_TYPES {
         return;
     }
-    let new_val = COUNTERS[idx].fetch_add(count, Ordering::Relaxed)
+    let new_val = COUNTERS[idx]
+        .fetch_add(count, Ordering::Relaxed)
         .saturating_add(count);
     // Update peak via CAS loop.
     loop {
@@ -152,9 +153,10 @@ pub fn charge(typ: MemType, count: u64) {
         if new_val <= peak {
             break;
         }
-        if PEAKS[idx].compare_exchange_weak(
-            peak, new_val, Ordering::Relaxed, Ordering::Relaxed
-        ).is_ok() {
+        if PEAKS[idx]
+            .compare_exchange_weak(peak, new_val, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
             break;
         }
     }
@@ -205,7 +207,9 @@ pub fn stats() -> MemTypeStats {
 #[inline]
 pub fn current(typ: MemType) -> u64 {
     let idx = typ as usize;
-    if idx >= NUM_TYPES { return 0; }
+    if idx >= NUM_TYPES {
+        return 0;
+    }
     COUNTERS[idx].load(Ordering::Relaxed)
 }
 
@@ -213,7 +217,9 @@ pub fn current(typ: MemType) -> u64 {
 #[must_use]
 pub fn type_name(typ: MemType) -> &'static str {
     let idx = typ as usize;
-    if idx >= NUM_TYPES { return "Unknown"; }
+    if idx >= NUM_TYPES {
+        return "Unknown";
+    }
     TYPE_NAMES[idx]
 }
 
@@ -258,8 +264,7 @@ pub fn self_test() {
     // Test 3: Peak is at least as high as current after charge.
     let st = stats();
     let idx = MemType::Other as usize;
-    assert!(st.peak[idx] >= st.current[idx],
-        "peak should be >= current");
+    assert!(st.peak[idx] >= st.current[idx], "peak should be >= current");
     serial_println!("[memtype]   Peak tracking: OK");
 
     // Test 4: Uncharge below zero saturates to 0 (no underflow).

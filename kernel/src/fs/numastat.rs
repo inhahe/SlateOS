@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -75,7 +75,7 @@ pub struct NumaNode {
 pub struct NodeDistance {
     pub from_node: u32,
     pub to_node: u32,
-    pub distance: u32,  // 10 = local, higher = farther.
+    pub distance: u32, // 10 = local, higher = farther.
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +134,9 @@ where
 /// from the ACPI topology and the record_* functions as memory is placed.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         nodes: Vec::new(),
         distances: Vec::new(),
@@ -154,14 +156,25 @@ pub fn init_defaults() {
 /// unregistered node id.
 pub fn register_node(id: u32, total_memory: u64, cpus: &[u32]) -> KernelResult<()> {
     with_state(|state| {
-        if state.nodes.iter().any(|n| n.id == id) { return Err(KernelError::AlreadyExists); }
-        if state.nodes.len() >= MAX_NODES { return Err(KernelError::ResourceExhausted); }
+        if state.nodes.iter().any(|n| n.id == id) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if state.nodes.len() >= MAX_NODES {
+            return Err(KernelError::ResourceExhausted);
+        }
         state.nodes.push(NumaNode {
-            id, state: NodeState::Online,
-            total_memory, free_memory: total_memory, used_memory: 0,
-            local_allocs: 0, remote_allocs: 0,
-            local_accesses: 0, remote_accesses: 0,
-            avg_latency_ns: 0, migrations_in: 0, migrations_out: 0,
+            id,
+            state: NodeState::Online,
+            total_memory,
+            free_memory: total_memory,
+            used_memory: 0,
+            local_allocs: 0,
+            remote_allocs: 0,
+            local_accesses: 0,
+            remote_accesses: 0,
+            avg_latency_ns: 0,
+            migrations_in: 0,
+            migrations_out: 0,
             cpus: cpus.to_vec(),
         });
         Ok(())
@@ -174,10 +187,18 @@ pub fn register_node(id: u32, total_memory: u64, cpus: &[u32]) -> KernelResult<(
 /// the same (from, to) pair so a re-read of the SLIT is idempotent.
 pub fn set_distance(from: u32, to: u32, distance: u32) -> KernelResult<()> {
     with_state(|state| {
-        if let Some(d) = state.distances.iter_mut().find(|d| d.from_node == from && d.to_node == to) {
+        if let Some(d) = state
+            .distances
+            .iter_mut()
+            .find(|d| d.from_node == from && d.to_node == to)
+        {
             d.distance = distance;
         } else {
-            state.distances.push(NodeDistance { from_node: from, to_node: to, distance });
+            state.distances.push(NodeDistance {
+                from_node: from,
+                to_node: to,
+                distance,
+            });
         }
         Ok(())
     })
@@ -185,18 +206,28 @@ pub fn set_distance(from: u32, to: u32, distance: u32) -> KernelResult<()> {
 
 /// Get node statistics.
 pub fn get_node(id: u32) -> Option<NumaNode> {
-    STATE.lock().as_ref().and_then(|s| s.nodes.iter().find(|n| n.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.nodes.iter().find(|n| n.id == id).cloned())
 }
 
 /// List all nodes.
 pub fn list_nodes() -> Vec<NumaNode> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.nodes.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.nodes.clone())
 }
 
 /// Record a local allocation.
 pub fn record_local_alloc(node_id: u32, bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let n = state.nodes.iter_mut().find(|n| n.id == node_id).ok_or(KernelError::NotFound)?;
+        let n = state
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == node_id)
+            .ok_or(KernelError::NotFound)?;
         n.local_allocs += 1;
         n.used_memory = n.used_memory.saturating_add(bytes);
         n.free_memory = n.total_memory.saturating_sub(n.used_memory);
@@ -208,7 +239,11 @@ pub fn record_local_alloc(node_id: u32, bytes: u64) -> KernelResult<()> {
 /// Record a remote allocation (allocated on node_id but accessed from another).
 pub fn record_remote_alloc(node_id: u32, bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let n = state.nodes.iter_mut().find(|n| n.id == node_id).ok_or(KernelError::NotFound)?;
+        let n = state
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == node_id)
+            .ok_or(KernelError::NotFound)?;
         n.remote_allocs += 1;
         n.used_memory = n.used_memory.saturating_add(bytes);
         n.free_memory = n.total_memory.saturating_sub(n.used_memory);
@@ -221,7 +256,11 @@ pub fn record_remote_alloc(node_id: u32, bytes: u64) -> KernelResult<()> {
 /// Record a memory access.
 pub fn record_access(node_id: u32, is_local: bool, latency_ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let n = state.nodes.iter_mut().find(|n| n.id == node_id).ok_or(KernelError::NotFound)?;
+        let n = state
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == node_id)
+            .ok_or(KernelError::NotFound)?;
         if is_local {
             n.local_accesses += 1;
         } else {
@@ -253,13 +292,19 @@ pub fn record_migration(from_node: u32, to_node: u32) -> KernelResult<()> {
 /// Get inter-node distance.
 pub fn get_distance(from: u32, to: u32) -> Option<u32> {
     STATE.lock().as_ref().and_then(|s| {
-        s.distances.iter().find(|d| d.from_node == from && d.to_node == to).map(|d| d.distance)
+        s.distances
+            .iter()
+            .find(|d| d.from_node == from && d.to_node == to)
+            .map(|d| d.distance)
     })
 }
 
 /// List distances.
 pub fn list_distances() -> Vec<NodeDistance> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.distances.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.distances.clone())
 }
 
 /// Balance report: percentage of remote allocations.
@@ -276,8 +321,19 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let pct = if s.total_allocs > 0 { s.total_remote * 100 / s.total_allocs } else { 0 };
-            (s.nodes.len(), s.total_allocs, s.total_remote, s.total_migrations, pct, s.ops)
+            let pct = if s.total_allocs > 0 {
+                s.total_remote * 100 / s.total_allocs
+            } else {
+                0
+            };
+            (
+                s.nodes.len(),
+                s.total_allocs,
+                s.total_remote,
+                s.total_migrations,
+                pct,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0, 0),
     }

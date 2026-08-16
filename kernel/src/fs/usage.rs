@@ -29,11 +29,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::KernelResult;
 use crate::fs::path::{Path, PathBuf};
@@ -294,7 +294,8 @@ impl Collector {
         // Extension stats.
         let ext = name.extension().map_or(&[][..], Path::as_bytes);
         if !ext.is_empty() {
-            let entry = self.ext_stats
+            let entry = self
+                .ext_stats
                 .entry(ext.to_ascii_lowercase())
                 .or_insert((0, 0));
             entry.0 = entry.0.saturating_add(size);
@@ -317,14 +318,16 @@ impl Collector {
         }
 
         // Size histogram bucket (log2 scale).
-        let bucket_idx = if size == 0 { 0 } else { (64 - size.leading_zeros()) as usize };
+        let bucket_idx = if size == 0 {
+            0
+        } else {
+            (64 - size.leading_zeros()) as usize
+        };
         let clamped = if bucket_idx >= 16 { 15 } else { bucket_idx };
         self.size_buckets[clamped] = self.size_buckets[clamped].saturating_add(1);
 
         // Duplicate name tracking.
-        let count = self.name_counts
-            .entry(name.to_path_buf())
-            .or_insert(0);
+        let count = self.name_counts.entry(name.to_path_buf()).or_insert(0);
         *count = count.saturating_add(1);
     }
 
@@ -376,23 +379,32 @@ impl Collector {
     /// Build the final report.
     fn build_report(self, root: &Path) -> UsageReport {
         // Top directories by size.
-        let mut dir_entries: Vec<SizeEntry> = self.dir_sizes
+        let mut dir_entries: Vec<SizeEntry> = self
+            .dir_sizes
             .iter()
-            .map(|(p, s)| SizeEntry { path: p.clone(), size: *s })
+            .map(|(p, s)| SizeEntry {
+                path: p.clone(),
+                size: *s,
+            })
             .collect();
         dir_entries.sort_by_key(|e| core::cmp::Reverse(e.size));
         dir_entries.truncate(TOP_N);
 
         // Top files by size.
-        let mut file_entries: Vec<SizeEntry> = self.files
+        let mut file_entries: Vec<SizeEntry> = self
+            .files
             .iter()
-            .map(|(p, s)| SizeEntry { path: p.clone(), size: *s })
+            .map(|(p, s)| SizeEntry {
+                path: p.clone(),
+                size: *s,
+            })
             .collect();
         file_entries.sort_by_key(|e| core::cmp::Reverse(e.size));
         file_entries.truncate(TOP_N);
 
         // Extension groups, sorted by total size.
-        let mut ext_groups: Vec<ExtensionGroup> = self.ext_stats
+        let mut ext_groups: Vec<ExtensionGroup> = self
+            .ext_stats
             .iter()
             .map(|(ext, (size, count))| ExtensionGroup {
                 extension: ext.clone(),
@@ -463,12 +475,7 @@ impl Collector {
 // ---------------------------------------------------------------------------
 
 /// Recursively walk a directory tree collecting usage data.
-fn walk(
-    path: &Path,
-    config: &UsageConfig,
-    collector: &mut Collector,
-    depth: usize,
-) {
+fn walk(path: &Path, config: &UsageConfig, collector: &mut Collector, depth: usize) {
     if depth > config.max_depth {
         return;
     }
@@ -578,8 +585,16 @@ fn test_basic_analysis() {
     Vfs::write_file("/tmp/usage_basic/sub/c.txt", b"nested file content").expect("write");
 
     let report = analyze_path("/tmp/usage_basic").expect("analyze");
-    assert!(report.file_count >= 3, "should find 3 files, got {}", report.file_count);
-    assert!(report.dir_count >= 2, "should find 2 dirs, got {}", report.dir_count);
+    assert!(
+        report.file_count >= 3,
+        "should find 3 files, got {}",
+        report.file_count
+    );
+    assert!(
+        report.dir_count >= 2,
+        "should find 2 dirs, got {}",
+        report.dir_count
+    );
     assert!(report.total_size > 0, "should have nonzero size");
     assert!(report.avg_file_size > 0, "should have nonzero avg");
 
@@ -599,7 +614,10 @@ fn test_extension_stats() {
     Vfs::write_file("/tmp/usage_ext/c.log", b"log data here is longer").expect("write");
 
     let report = analyze_path("/tmp/usage_ext").expect("analyze");
-    assert!(!report.by_extension.is_empty(), "should have extension stats");
+    assert!(
+        !report.by_extension.is_empty(),
+        "should have extension stats"
+    );
 
     // Find the .txt group.
     let txt = report.by_extension.iter().find(|g| g.extension == b"txt");
@@ -645,7 +663,11 @@ fn test_wasted_space() {
     let _ = Vfs::mkdir("/tmp/usage_waste");
     Vfs::write_file("/tmp/usage_waste/empty.txt", b"").expect("write");
     Vfs::write_file("/tmp/usage_waste/tiny.txt", b"x").expect("write");
-    Vfs::write_file("/tmp/usage_waste/normal.txt", b"this is a normal sized file content").expect("write");
+    Vfs::write_file(
+        "/tmp/usage_waste/normal.txt",
+        b"this is a normal sized file content",
+    )
+    .expect("write");
 
     let report = analyze_path("/tmp/usage_waste").expect("analyze");
     assert!(report.wasted.empty_files >= 1, "should detect empty file");

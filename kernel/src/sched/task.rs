@@ -21,11 +21,11 @@
 //!                          └──► Dead        (exited / killed)
 //! ```
 
+use super::fpu::FpuState;
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::page_table;
 use crate::serial_println;
-use super::fpu::FpuState;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -229,7 +229,6 @@ pub fn init_canary() {
     crate::serial_println!("[sched] Stack canary randomized (per-boot CSPRNG)");
 }
 
-
 /// Sentinel pattern used to paint stack memory for watermark tracking.
 ///
 /// On task creation, the stack is filled with this repeating 8-byte
@@ -379,7 +378,6 @@ pub struct Task {
     pub gs_base: u64,
 
     // --- Interactive task detection fields ---
-
     /// Number of timer ticks the task has run in the current burst.
     ///
     /// Reset to 0 each time the task transitions from Blocked → Ready
@@ -453,7 +451,6 @@ pub struct Task {
     pub cpu_affinity: u64,
 
     // --- CPU time accounting ---
-
     /// Total CPU time consumed by this task, in timer ticks.
     ///
     /// Incremented on every timer tick while the task is Running.
@@ -536,7 +533,6 @@ pub struct Task {
     pub start_tick: u64,
 
     // --- Wait time tracking (starvation detection) ---
-
     /// Tick count when the task last entered the Ready state.
     ///
     /// Set when transitioning from any state to Ready (blocked→ready,
@@ -562,7 +558,6 @@ pub struct Task {
     pub max_wait_ticks: u64,
 
     // --- CPU bandwidth limiting ---
-
     /// CPU bandwidth quota as a percentage (0 = unlimited, 1–100).
     ///
     /// Limits how many ticks per bandwidth period (100 ticks = 1 second)
@@ -653,7 +648,9 @@ impl Task {
     /// Check whether this task is allowed to run on `cpu`.
     #[must_use]
     pub fn can_run_on(&self, cpu: usize) -> bool {
-        if cpu >= 64 { return false; }
+        if cpu >= 64 {
+            return false;
+        }
         (self.cpu_affinity >> cpu) & 1 != 0
     }
 
@@ -668,7 +665,8 @@ impl Task {
         // Simplified: avg_x8 = avg_x8 - avg_x8/8 + burst
         #[allow(clippy::arithmetic_side_effects)]
         {
-            self.avg_burst_x8 = self.avg_burst_x8
+            self.avg_burst_x8 = self
+                .avg_burst_x8
                 .saturating_sub(self.avg_burst_x8 / 8)
                 .saturating_add(self.burst_ticks);
         }
@@ -793,7 +791,9 @@ impl Task {
     pub fn stack_usage_pct(&self) -> Option<u8> {
         let used = self.stack_usage_bytes()?;
         let total = TASK_STACK_SIZE.saturating_sub(8); // Exclude canary.
-        if total == 0 { return Some(0); }
+        if total == 0 {
+            return Some(0);
+        }
         #[allow(clippy::arithmetic_side_effects)]
         let pct = (used * 100) / total;
         Some(pct.min(100) as u8)
@@ -821,9 +821,9 @@ impl Task {
             stack_phys: 0,
             stack_bottom: 0,
             planted_canary: 0, // No allocated stack — canary never checked.
-            pml4_phys: 0, // Kernel address space.
-            fs_base: 0,   // Kernel task — never reads %fs.
-            gs_base: 0,   // Kernel task — never sets a userspace %gs base.
+            pml4_phys: 0,      // Kernel address space.
+            fs_base: 0,        // Kernel task — never reads %fs.
+            gs_base: 0,        // Kernel task — never sets a userspace %gs base.
             burst_ticks: 0,
             avg_burst_x8: 0,
             interactive: false,
@@ -975,11 +975,18 @@ impl Task {
                 // Guard-page stack: the kstack allocator maps physical frames
                 // into a dedicated virtual region with an unmapped guard page
                 // below.  Any stack overflow triggers an immediate page fault.
-                (info.stack_phys, info.stack_bottom, info.stack_top, Some(info.slot))
+                (
+                    info.stack_phys,
+                    info.stack_bottom,
+                    info.stack_top,
+                    Some(info.slot),
+                )
             } else {
                 // Fallback: allocate via buddy allocator + HHDM (no guard page).
                 // Only used during early boot before kstack::init().
-                let order = if TASK_STACK_FRAMES <= 1 { 0 } else {
+                let order = if TASK_STACK_FRAMES <= 1 {
+                    0
+                } else {
                     TASK_STACK_FRAMES.next_power_of_two().trailing_zeros() as usize
                 };
                 let stack_frame = frame::alloc_order(order)?;
@@ -1094,17 +1101,15 @@ impl Task {
     ///   [trampoline address]  ← context.rsp points here
     /// ```
     #[allow(clippy::arithmetic_side_effects)]
-    fn prepare_context(
-        stack_top: u64,
-        entry: extern "C" fn(u64),
-        arg: u64,
-    ) -> Context {
+    fn prepare_context(stack_top: u64, entry: extern "C" fn(u64), arg: u64) -> Context {
         // Resolve the trampoline address.
         //
         // SAFETY: We take the address of the extern symbol declared
         // adjacent to the global_asm! in context.rs.
         let trampoline_addr: u64 = {
-            unsafe extern "C" { fn task_entry_trampoline(); }
+            unsafe extern "C" {
+                fn task_entry_trampoline();
+            }
             task_entry_trampoline as *const () as u64
         };
 
@@ -1165,16 +1170,22 @@ impl Task {
                 slot,
             };
             // SAFETY: Caller guarantees no CPU is using this stack.
-            unsafe { crate::mm::kstack::free(info)?; }
+            unsafe {
+                crate::mm::kstack::free(info)?;
+            }
         } else {
             // Legacy HHDM-based stack: free via buddy allocator.
-            let order = if TASK_STACK_FRAMES <= 1 { 0 } else {
+            let order = if TASK_STACK_FRAMES <= 1 {
+                0
+            } else {
                 TASK_STACK_FRAMES.next_power_of_two().trailing_zeros() as usize
             };
 
             if let Some(frame) = frame::PhysFrame::from_addr(self.stack_phys) {
                 // SAFETY: Caller guarantees no CPU is using this stack.
-                unsafe { frame::free_order(frame, order)?; }
+                unsafe {
+                    frame::free_order(frame, order)?;
+                }
             }
         }
 
@@ -1206,9 +1217,7 @@ impl Task {
         }
         // SAFETY: stack_bottom is a valid HHDM address for this task's
         // allocated stack.  The canary was written during new_kernel().
-        let canary = unsafe {
-            ptr::read_volatile(self.stack_bottom as *const u64)
-        };
+        let canary = unsafe { ptr::read_volatile(self.stack_bottom as *const u64) };
         // Compare against the value planted into THIS stack at creation,
         // not the global canary (which may have been randomized after this
         // task was created — see `planted_canary` docs).
@@ -1218,20 +1227,20 @@ impl Task {
             // trying to print, but it's better than silent corruption.
             serial_println!(
                 "FATAL: Stack canary corrupted for task {} ({})!",
-                self.id, self.name_str()
+                self.id,
+                self.name_str()
             );
             serial_println!(
                 "  Expected: {:#018x}, Found: {:#018x}",
-                self.planted_canary, canary
+                self.planted_canary,
+                canary
             );
             serial_println!(
                 "  stack_bottom={:#x}, stack_top={:#x}",
                 self.stack_bottom,
                 self.stack_bottom.wrapping_add(TASK_STACK_SIZE as u64)
             );
-            serial_println!(
-                "FATAL: Kernel stack overflow is unrecoverable. Halting."
-            );
+            serial_println!("FATAL: Kernel stack overflow is unrecoverable. Halting.");
             crate::cpu::halt_loop();
         }
     }

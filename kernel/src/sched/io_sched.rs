@@ -50,10 +50,10 @@
 //! - Valente & Checconi, "High Throughput Disk Scheduling with Fair Bandwidth
 //!   Distribution" (2010) — BFQ theory
 
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
 use crate::serial_println;
 use crate::sync::Mutex;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Priority classes
@@ -228,7 +228,8 @@ impl ProcessIoQueue {
 
     /// Insert a request in sector-sorted order (elevator/C-SCAN).
     fn insert_sorted(&mut self, req: IoRequest) {
-        let pos = self.requests
+        let pos = self
+            .requests
             .binary_search_by_key(&req.sector, |r| r.sector)
             .unwrap_or_else(|p| p);
 
@@ -334,7 +335,8 @@ impl IoSchedulerInner {
         let priority = req.priority;
 
         // Get or create the per-process queue.
-        let queue = self.queues
+        let queue = self
+            .queues
             .entry(pid)
             .or_insert_with(|| ProcessIoQueue::new(priority));
 
@@ -664,9 +666,21 @@ fn test_elevator_ordering() {
     let r2 = dispatch(0).expect("dispatch 2");
     let r3 = dispatch(0).expect("dispatch 3");
 
-    assert!(r1.sector == 100, "first should be sector 100, got {}", r1.sector);
-    assert!(r2.sector == 300, "second should be sector 300, got {}", r2.sector);
-    assert!(r3.sector == 500, "third should be sector 500, got {}", r3.sector);
+    assert!(
+        r1.sector == 100,
+        "first should be sector 100, got {}",
+        r1.sector
+    );
+    assert!(
+        r2.sector == 300,
+        "second should be sector 300, got {}",
+        r2.sector
+    );
+    assert!(
+        r3.sector == 500,
+        "third should be sector 500, got {}",
+        r3.sector
+    );
 
     assert!(dispatch(0).is_none(), "no more");
     serial_println!("[io_sched]   Elevator ordering: OK");
@@ -682,7 +696,11 @@ fn test_request_merging() {
     // Should merge into one request: 100-115 (16 sectors).
     let merged = dispatch(0).expect("dispatch merged");
     assert!(merged.sector == 100, "merged start should be 100");
-    assert!(merged.count == 16, "merged count should be 16, got {}", merged.count);
+    assert!(
+        merged.count == 16,
+        "merged count should be 16, got {}",
+        merged.count
+    );
 
     assert!(dispatch(0).is_none(), "no more");
 
@@ -732,7 +750,11 @@ fn test_budget_fairness() {
     // SMALL_IO_THRESHOLD, so budget_cost = 32), each process gets
     // 4 requests per round (128/32 = 4).  With 16 requests per
     // process, we expect ~4 rounds each.
-    assert!(dispatched == 32, "expected 32 dispatched, got {}", dispatched);
+    assert!(
+        dispatched == 32,
+        "expected 32 dispatched, got {}",
+        dispatched
+    );
     assert!(
         max_consecutive <= 6, // 4 + some slack
         "max consecutive {} too high (budget fairness broken)",
@@ -850,7 +872,9 @@ fn test_small_io_passthrough() {
     assert!(
         total == 260,
         "expected 260 total, got {} (small={}, large={})",
-        total, small_count, large_count
+        total,
+        small_count,
+        large_count
     );
 
     // Key invariant: the small-I/O process should get a long consecutive

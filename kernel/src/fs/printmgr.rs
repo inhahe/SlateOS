@@ -28,10 +28,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -398,7 +398,9 @@ pub fn remove_printer(id: u64) -> KernelResult<()> {
 pub fn get_printer(id: u64) -> KernelResult<Printer> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.printers.iter()
+    state
+        .printers
+        .iter()
         .find(|p| p.id == id)
         .cloned()
         .ok_or(KernelError::NotFound)
@@ -426,14 +428,17 @@ pub fn set_default(id: u64) -> KernelResult<()> {
 /// Get the default printer.
 pub fn default_printer() -> Option<Printer> {
     let guard = STATE.lock();
-    guard.as_ref()
+    guard
+        .as_ref()
         .and_then(|s| s.printers.iter().find(|p| p.is_default).cloned())
 }
 
 /// Set printer status.
 pub fn set_printer_status(id: u64, status: PrinterStatus) -> KernelResult<()> {
     with_state(|state| {
-        let printer = state.printers.iter_mut()
+        let printer = state
+            .printers
+            .iter_mut()
             .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         printer.status = status;
@@ -444,7 +449,9 @@ pub fn set_printer_status(id: u64, status: PrinterStatus) -> KernelResult<()> {
 /// Set printer location string.
 pub fn set_location(id: u64, location: &str) -> KernelResult<()> {
     with_state(|state| {
-        let printer = state.printers.iter_mut()
+        let printer = state
+            .printers
+            .iter_mut()
             .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         printer.location = String::from(location);
@@ -455,7 +462,9 @@ pub fn set_location(id: u64, location: &str) -> KernelResult<()> {
 /// Configure printer capabilities.
 pub fn set_capabilities(id: u64, color: bool, duplex: bool) -> KernelResult<()> {
     with_state(|state| {
-        let printer = state.printers.iter_mut()
+        let printer = state
+            .printers
+            .iter_mut()
             .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         printer.supports_color = color;
@@ -473,7 +482,9 @@ pub fn set_defaults(
     duplex: Duplex,
 ) -> KernelResult<()> {
     with_state(|state| {
-        let printer = state.printers.iter_mut()
+        let printer = state
+            .printers
+            .iter_mut()
             .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         printer.default_paper = paper;
@@ -500,7 +511,9 @@ pub fn submit_job(
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        let printer = state.printers.iter()
+        let printer = state
+            .printers
+            .iter()
             .find(|p| p.id == printer_id)
             .ok_or(KernelError::NotFound)?;
         if printer.status == PrinterStatus::Offline || printer.status == PrinterStatus::Error {
@@ -537,7 +550,9 @@ pub fn submit_job(
 /// Cancel a print job.
 pub fn cancel_job(job_id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let job = state.jobs.iter_mut()
+        let job = state
+            .jobs
+            .iter_mut()
             .find(|j| j.id == job_id)
             .ok_or(KernelError::NotFound)?;
         if job.status == JobStatus::Completed {
@@ -551,7 +566,9 @@ pub fn cancel_job(job_id: u64) -> KernelResult<()> {
 /// Complete a print job (called by print driver after finishing).
 pub fn complete_job(job_id: u64, success: bool) -> KernelResult<()> {
     with_state(|state| {
-        let job = state.jobs.iter_mut()
+        let job = state
+            .jobs
+            .iter_mut()
             .find(|j| j.id == job_id)
             .ok_or(KernelError::NotFound)?;
 
@@ -560,9 +577,7 @@ pub fn complete_job(job_id: u64, success: bool) -> KernelResult<()> {
             job.status = JobStatus::Completed;
             job.pages_printed = job.pages * job.copies;
             // Update printer stats.
-            if let Some(printer) = state.printers.iter_mut()
-                .find(|p| p.id == job.printer_id)
-            {
+            if let Some(printer) = state.printers.iter_mut().find(|p| p.id == job.printer_id) {
                 printer.total_jobs += 1;
                 printer.total_pages += job.pages_printed as u64;
             }
@@ -584,7 +599,9 @@ pub fn complete_job(job_id: u64, success: bool) -> KernelResult<()> {
 pub fn get_job(job_id: u64) -> KernelResult<PrintJob> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.jobs.iter()
+    state
+        .jobs
+        .iter()
         .find(|j| j.id == job_id)
         .or_else(|| state.history.iter().find(|j| j.id == job_id))
         .cloned()
@@ -595,8 +612,14 @@ pub fn get_job(job_id: u64) -> KernelResult<PrintJob> {
 pub fn list_jobs() -> Vec<PrintJob> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.jobs.iter()
-            .filter(|j| matches!(j.status, JobStatus::Queued | JobStatus::Printing | JobStatus::Held))
+        s.jobs
+            .iter()
+            .filter(|j| {
+                matches!(
+                    j.status,
+                    JobStatus::Queued | JobStatus::Printing | JobStatus::Held
+                )
+            })
             .cloned()
             .collect()
     })
@@ -606,7 +629,8 @@ pub fn list_jobs() -> Vec<PrintJob> {
 pub fn jobs_for_printer(printer_id: u64) -> Vec<PrintJob> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.jobs.iter()
+        s.jobs
+            .iter()
             .filter(|j| j.printer_id == printer_id)
             .cloned()
             .collect()
@@ -623,8 +647,12 @@ pub fn job_history() -> Vec<PrintJob> {
 pub fn clear_completed() -> KernelResult<usize> {
     with_state(|state| {
         let before = state.jobs.len();
-        state.jobs.retain(|j| !matches!(j.status,
-            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled));
+        state.jobs.retain(|j| {
+            !matches!(
+                j.status,
+                JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+            )
+        });
         Ok(before - state.jobs.len())
     })
 }
@@ -638,11 +666,19 @@ pub fn stats() -> (usize, usize, u64, usize, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let pending = s.jobs.iter()
+            let pending = s
+                .jobs
+                .iter()
                 .filter(|j| matches!(j.status, JobStatus::Queued | JobStatus::Printing))
                 .count();
             let total_pages: u64 = s.printers.iter().map(|p| p.total_pages).sum();
-            (s.printers.len(), pending, total_pages, s.history.len(), s.ops)
+            (
+                s.printers.len(),
+                pending,
+                total_pages,
+                s.history.len(),
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }
@@ -674,7 +710,13 @@ pub fn self_test() {
 
     // Test 2: add printer.
     {
-        let id = add_printer("HP LaserJet", "HP LaserJet Pro", PrinterType::Network, "ipp://192.168.1.100").unwrap();
+        let id = add_printer(
+            "HP LaserJet",
+            "HP LaserJet Pro",
+            PrinterType::Network,
+            "ipp://192.168.1.100",
+        )
+        .unwrap();
         let printer = get_printer(id).unwrap();
         assert_eq!(printer.name, "HP LaserJet");
         assert_eq!(printer.printer_type, PrinterType::Network);
@@ -684,7 +726,11 @@ pub fn self_test() {
     // Test 3: set default.
     {
         let printers = list_printers();
-        let hp_id = printers.iter().find(|p| p.name == "HP LaserJet").unwrap().id;
+        let hp_id = printers
+            .iter()
+            .find(|p| p.name == "HP LaserJet")
+            .unwrap()
+            .id;
         set_default(hp_id).unwrap();
         let def = default_printer().unwrap();
         assert_eq!(def.name, "HP LaserJet");

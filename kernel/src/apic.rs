@@ -121,8 +121,7 @@ pub const TICK_RATE_HZ: u32 = 100;
 // ---------------------------------------------------------------------------
 
 /// Virtual address of the APIC base (set during init).
-static APIC_BASE_VIRT: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static APIC_BASE_VIRT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Whether the local APIC has been mapped and is safe to read.
 ///
@@ -137,8 +136,7 @@ pub fn is_ready() -> bool {
 }
 
 /// Whether the APIC timer is running.
-static TIMER_ACTIVE: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static TIMER_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // ISR latency measurement (for benchmarking)
@@ -149,20 +147,16 @@ static ISR_MEASURE_ACTIVE: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 /// Minimum hard-IRQ cycles observed (entry → EOI, interrupts disabled).
-static ISR_HARD_MIN: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(u64::MAX);
+static ISR_HARD_MIN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
 
 /// Maximum hard-IRQ cycles observed.
-static ISR_HARD_MAX: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static ISR_HARD_MAX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Total hard-IRQ cycles accumulated during measurement window.
-static ISR_HARD_TOTAL: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static ISR_HARD_TOTAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Number of ticks measured.
-static ISR_MEASURE_COUNT: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static ISR_MEASURE_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Timer jitter tracking (always-on, measures inter-tick interval variance)
@@ -172,33 +166,27 @@ static ISR_MEASURE_COUNT: core::sync::atomic::AtomicU64 =
 ///
 /// Used to compute the interval between consecutive timer interrupts.
 /// Zero means "not yet initialized" (first tick hasn't fired).
-static JITTER_LAST_TSC: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static JITTER_LAST_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Minimum inter-tick interval in TSC cycles observed since boot.
-static JITTER_MIN: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(u64::MAX);
+static JITTER_MIN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
 
 /// Maximum inter-tick interval in TSC cycles observed since boot.
-static JITTER_MAX: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static JITTER_MAX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Sum of all inter-tick intervals (for average computation).
 /// Wraps on overflow, but that takes centuries at typical TSC rates.
-static JITTER_SUM: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static JITTER_SUM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Number of inter-tick intervals recorded.
-static JITTER_COUNT: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static JITTER_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Tick counter
 // ---------------------------------------------------------------------------
 
 /// Tick counter — incremented on every timer interrupt.
-static TICK_COUNT: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static TICK_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Calibrated APIC timer initial count (ticks per 10 ms).
 ///
@@ -208,8 +196,7 @@ static CALIBRATED_TIMER_COUNT: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
 /// BSP's Local APIC ID (set during init).
-static BSP_APIC_ID: core::sync::atomic::AtomicU8 =
-    core::sync::atomic::AtomicU8::new(0);
+static BSP_APIC_ID: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
 // ---------------------------------------------------------------------------
 // Register access helpers
@@ -423,7 +410,9 @@ pub unsafe fn init() -> KernelResult<()> {
 
     serial_println!(
         "[apic] APIC base: {:#x}, BSP={}, global_enable={}",
-        apic_base_phys, bsp, global_enable
+        apic_base_phys,
+        bsp,
+        global_enable
     );
 
     // Step 2: Map the APIC MMIO region into the kernel address space.
@@ -435,8 +424,7 @@ pub unsafe fn init() -> KernelResult<()> {
 
     // Map the APIC MMIO page (16 KiB frame covering 0xFEE00000).
     // Use PRESENT | WRITABLE | NO_CACHE flags for MMIO.
-    let apic_frame = PhysFrame::from_addr(apic_base_phys)
-        .ok_or(KernelError::BadAlignment)?;
+    let apic_frame = PhysFrame::from_addr(apic_base_phys).ok_or(KernelError::BadAlignment)?;
     let apic_virt = VirtAddr::new(apic_base_virt);
     let pml4_phys = page_table::cr3_to_pml4(page_table::read_cr3());
     let mmio_flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE;
@@ -444,9 +432,7 @@ pub unsafe fn init() -> KernelResult<()> {
     // SAFETY: APIC physical address is valid MMIO. We're mapping it
     // into the HHDM range where it would naturally live.  No existing
     // mapping conflicts because Limine didn't map this region.
-    if let Err(e) = unsafe {
-        page_table::map_frame(pml4_phys, apic_virt, apic_frame, mmio_flags)
-    } {
+    if let Err(e) = unsafe { page_table::map_frame(pml4_phys, apic_virt, apic_frame, mmio_flags) } {
         serial_println!("[apic] WARNING: Failed to map APIC MMIO: {:?}", e);
         serial_println!("[apic] Attempting access via existing HHDM mapping...");
         // If mapping fails (e.g., already mapped), try to proceed anyway —
@@ -480,11 +466,7 @@ pub unsafe fn init() -> KernelResult<()> {
     // SAFETY: APIC base is set and the APIC is enabled.
     let apic_id = unsafe { apic_read(APIC_ID) } >> 24;
     let apic_ver = unsafe { apic_read(APIC_VERSION) };
-    serial_println!(
-        "[apic] APIC ID={}, version={:#x}",
-        apic_id,
-        apic_ver & 0xFF
-    );
+    serial_println!("[apic] APIC ID={}, version={:#x}", apic_id, apic_ver & 0xFF);
 
     // Step 4: Set the spurious interrupt vector and enable the APIC.
     // Bit 8 = APIC software enable, bits [7:0] = spurious vector.
@@ -542,7 +524,10 @@ fn configure_periodic_timer(initial_count: u32) {
         apic_write(APIC_TIMER_DIVIDE, 0x03);
 
         // Set the LVT timer entry: periodic mode, vector TIMER_VECTOR, unmasked.
-        apic_write(APIC_TIMER_LVT, TIMER_MODE_PERIODIC | u32::from(TIMER_VECTOR));
+        apic_write(
+            APIC_TIMER_LVT,
+            TIMER_MODE_PERIODIC | u32::from(TIMER_VECTOR),
+        );
 
         // Set the initial count — this starts the timer.
         apic_write(APIC_TIMER_INITIAL, initial_count);
@@ -815,7 +800,10 @@ pub unsafe fn stop_timer() {
     //
     // SAFETY: APIC is initialized, timer LVT is a valid register.
     unsafe {
-        apic_write(APIC_TIMER_LVT, LVT_MASKED | TIMER_MODE_PERIODIC | u32::from(TIMER_VECTOR));
+        apic_write(
+            APIC_TIMER_LVT,
+            LVT_MASKED | TIMER_MODE_PERIODIC | u32::from(TIMER_VECTOR),
+        );
     }
 }
 
@@ -837,7 +825,10 @@ pub unsafe fn restart_timer() {
     // SAFETY: APIC is initialized, writing valid register values.
     unsafe {
         // Unmask and set periodic mode.
-        apic_write(APIC_TIMER_LVT, TIMER_MODE_PERIODIC | u32::from(TIMER_VECTOR));
+        apic_write(
+            APIC_TIMER_LVT,
+            TIMER_MODE_PERIODIC | u32::from(TIMER_VECTOR),
+        );
         // Restart the countdown from the calibrated 10 ms value.
         // Writing initial_count restarts the counter from this value.
         apic_write(APIC_TIMER_INITIAL, count);
@@ -926,8 +917,7 @@ fn restore_periodic_rate() {
 }
 
 /// Whether the current tick period has been shortened for an hrtimer.
-static TICK_SHORTENED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static TICK_SHORTENED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Initialize the Local APIC on an Application Processor.
 ///
@@ -959,7 +949,9 @@ pub unsafe fn init_ap() {
         configure_periodic_timer(count);
         serial_println!(
             "[apic] AP {} timer started (count={}, {} Hz)",
-            apic_id, count, TICK_RATE_HZ
+            apic_id,
+            count,
+            TICK_RATE_HZ
         );
     } else {
         serial_println!("[apic] WARNING: AP {} — no calibrated timer count", apic_id);
@@ -1165,7 +1157,11 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
             core::sync::atomic::Ordering::Relaxed,
             core::sync::atomic::Ordering::Relaxed,
             |current| {
-                if elapsed < current { Some(elapsed) } else { None }
+                if elapsed < current {
+                    Some(elapsed)
+                } else {
+                    None
+                }
             },
         );
         // Update max (CAS loop to atomically compute max).
@@ -1173,7 +1169,11 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
             core::sync::atomic::Ordering::Relaxed,
             core::sync::atomic::Ordering::Relaxed,
             |current| {
-                if elapsed > current { Some(elapsed) } else { None }
+                if elapsed > current {
+                    Some(elapsed)
+                } else {
+                    None
+                }
             },
         );
         ISR_HARD_TOTAL.fetch_add(elapsed, core::sync::atomic::Ordering::Relaxed);
@@ -1191,9 +1191,7 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
     //
     // TIMER_SOFTIRQ: sleep-queue wakeups + IPC timer expirations.
     // IRQ_POLL_SOFTIRQ: retry deferred IRQ wakes for userspace drivers.
-    crate::softirq::raise(
-        crate::softirq::TIMER_SOFTIRQ | crate::softirq::IRQ_POLL_SOFTIRQ,
-    );
+    crate::softirq::raise(crate::softirq::TIMER_SOFTIRQ | crate::softirq::IRQ_POLL_SOFTIRQ);
 
     // Process all pending softirqs (including any raised by device ISRs
     // that fired on this CPU since the last timer tick).  This re-enables
@@ -1274,10 +1272,7 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
 /// No scheduling is done in the ISR itself to avoid deadlock with code
 /// that holds the SCHED lock when interrupted.
 #[unsafe(no_mangle)]
-pub extern "C" fn handle_reschedule_irq(
-    _frame: &crate::idt::InterruptStackFrame,
-    _error: u64,
-) {
+pub extern "C" fn handle_reschedule_irq(_frame: &crate::idt::InterruptStackFrame, _error: u64) {
     // SAFETY: APIC is initialized.  EOI is required for all non-spurious
     // interrupts to clear the in-service bit and allow further interrupts.
     unsafe {
@@ -1291,10 +1286,7 @@ pub extern "C" fn handle_reschedule_irq(
 /// that was retracted before delivery.  No EOI is sent for spurious
 /// interrupts (per Intel SDM).
 #[unsafe(no_mangle)]
-pub extern "C" fn handle_spurious_irq(
-    _frame: &crate::idt::InterruptStackFrame,
-    _error: u64,
-) {
+pub extern "C" fn handle_spurious_irq(_frame: &crate::idt::InterruptStackFrame, _error: u64) {
     // No EOI for spurious interrupts.
     // Optionally count them for diagnostics.
 }

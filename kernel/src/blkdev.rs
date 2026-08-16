@@ -21,10 +21,10 @@
 //! and can be looked up by name.  The registry stores trait objects
 //! behind a mutex — fine for the current single-CPU design.
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -79,7 +79,8 @@ pub trait BlockDevice: Send {
     // Multi-sector arithmetic uses checked ops on small values.
     #[allow(clippy::arithmetic_side_effects)]
     fn read_sectors(&mut self, start_lba: u64, count: u32, buf: &mut [u8]) -> KernelResult<()> {
-        let needed = (count as usize).checked_mul(SECTOR_SIZE)
+        let needed = (count as usize)
+            .checked_mul(SECTOR_SIZE)
             .ok_or(KernelError::InvalidArgument)?;
         if buf.len() < needed {
             return Err(KernelError::InvalidArgument);
@@ -87,7 +88,8 @@ pub trait BlockDevice: Send {
 
         let mut sector_buf = [0u8; SECTOR_SIZE];
         for i in 0..count {
-            let lba = start_lba.checked_add(u64::from(i))
+            let lba = start_lba
+                .checked_add(u64::from(i))
                 .ok_or(KernelError::InvalidArgument)?;
             self.read_sector(lba, &mut sector_buf)?;
 
@@ -108,7 +110,8 @@ pub trait BlockDevice: Send {
     /// in a loop; drivers may override for efficiency.
     #[allow(clippy::arithmetic_side_effects)]
     fn write_sectors(&mut self, start_lba: u64, count: u32, buf: &[u8]) -> KernelResult<()> {
-        let needed = (count as usize).checked_mul(SECTOR_SIZE)
+        let needed = (count as usize)
+            .checked_mul(SECTOR_SIZE)
             .ok_or(KernelError::InvalidArgument)?;
         if buf.len() < needed {
             return Err(KernelError::InvalidArgument);
@@ -116,7 +119,8 @@ pub trait BlockDevice: Send {
 
         let mut sector_buf = [0u8; SECTOR_SIZE];
         for i in 0..count {
-            let lba = start_lba.checked_add(u64::from(i))
+            let lba = start_lba
+                .checked_add(u64::from(i))
                 .ok_or(KernelError::InvalidArgument)?;
 
             let offset = (i as usize) * SECTOR_SIZE;
@@ -424,9 +428,7 @@ impl RamBlockDevice {
 
     /// Byte offset of sector `lba`, or `None` if it lies outside the device.
     fn sector_range(&self, lba: u64) -> Option<(usize, usize)> {
-        let start = usize::try_from(lba)
-            .ok()?
-            .checked_mul(SECTOR_SIZE)?;
+        let start = usize::try_from(lba).ok()?.checked_mul(SECTOR_SIZE)?;
         let end = start.checked_add(SECTOR_SIZE)?;
         if end > self.data.len() {
             return None;
@@ -446,9 +448,7 @@ impl BlockDevice for RamBlockDevice {
     }
 
     fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> KernelResult<()> {
-        let (start, end) = self
-            .sector_range(lba)
-            .ok_or(KernelError::InvalidArgument)?;
+        let (start, end) = self.sector_range(lba).ok_or(KernelError::InvalidArgument)?;
         let src = self
             .data
             .get(start..end)
@@ -461,9 +461,7 @@ impl BlockDevice for RamBlockDevice {
         if self.read_only {
             return Err(KernelError::ReadOnlyFilesystem);
         }
-        let (start, end) = self
-            .sector_range(lba)
-            .ok_or(KernelError::InvalidArgument)?;
+        let (start, end) = self.sector_range(lba).ok_or(KernelError::InvalidArgument)?;
         let dst = self
             .data
             .get_mut(start..end)
@@ -545,8 +543,7 @@ pub fn self_test_discard() -> KernelResult<()> {
         // Fill sectors 0..8 with 0xAB so we can tell discarded from untouched.
         let pattern = [0xABu8; SECTOR_SIZE];
         for lba in 0..8u64 {
-            with_device(dev, |d| d.write_sector(lba, &pattern))
-                .ok_or(KernelError::NotFound)??;
+            with_device(dev, |d| d.write_sector(lba, &pattern)).ok_or(KernelError::NotFound)??;
         }
 
         // Discard the middle run: sectors 2..6 (count = 4).
@@ -555,8 +552,7 @@ pub fn self_test_discard() -> KernelResult<()> {
         // Sectors 2..6 must now read back zero; 0..2 and 6..8 stay 0xAB.
         for lba in 0..8u64 {
             let mut buf = [0u8; SECTOR_SIZE];
-            with_device(dev, |d| d.read_sector(lba, &mut buf))
-                .ok_or(KernelError::NotFound)??;
+            with_device(dev, |d| d.read_sector(lba, &mut buf)).ok_or(KernelError::NotFound)??;
             let expect_zero = (2..6).contains(&lba);
             let ok = if expect_zero {
                 buf.iter().all(|&b| b == 0)
@@ -578,7 +574,10 @@ pub fn self_test_discard() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // Overflow at the u64 boundary must be rejected, not wrap.
-        if discard(dev, u64::MAX, 2).ok_or(KernelError::NotFound)?.is_ok() {
+        if discard(dev, u64::MAX, 2)
+            .ok_or(KernelError::NotFound)?
+            .is_ok()
+        {
             crate::serial_println!("[blkdev]   FAIL: overflowing discard was accepted");
             return Err(KernelError::InternalError);
         }

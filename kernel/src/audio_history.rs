@@ -210,7 +210,13 @@ pub fn recent(max: usize) -> alloc::vec::Vec<(alloc::string::String, u64, u64, u
         let name = alloc::string::String::from(entry.name_str());
         let still_playing = entry.close_tsc == 0;
         let duration = entry.duration_ms();
-        result.push((name, duration, entry.bytes_played, entry.volume, still_playing));
+        result.push((
+            name,
+            duration,
+            entry.bytes_played,
+            entry.volume,
+            still_playing,
+        ));
     }
 
     result
@@ -240,14 +246,25 @@ pub fn self_test() {
 
     // Test 3: Query stats.
     let (events, bytes, active) = stats();
-    serial_println!("[soundhist]   Stats: events={}, bytes={}, active={}", events, bytes, active);
+    serial_println!(
+        "[soundhist]   Stats: events={}, bytes={}, active={}",
+        events,
+        bytes,
+        active
+    );
 
     // Test 4: Query recent history.
     let history = recent(5);
     if !history.is_empty() {
         let (name, dur, bytes, vol, playing) = &history[0];
-        serial_println!("[soundhist]   Recent[0]: \"{}\" {}ms {}B vol={} playing={}",
-            name, dur, bytes, vol, playing);
+        serial_println!(
+            "[soundhist]   Recent[0]: \"{}\" {}ms {}B vol={} playing={}",
+            name,
+            dur,
+            bytes,
+            vol,
+            playing
+        );
     } else {
         serial_println!("[soundhist]   Recent: empty (unexpected)");
     }

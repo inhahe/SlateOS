@@ -151,10 +151,7 @@ pub fn warn(msg: &str, file: &str, line: u32) {
     TOTAL_WARNINGS.fetch_add(1, Ordering::Relaxed);
 
     // Also log to serial for immediate visibility.
-    crate::serial_println!(
-        "KWARN: {} ({}:{})",
-        msg, file, line,
-    );
+    crate::serial_println!("KWARN: {} ({}:{})", msg, file, line,);
 }
 
 /// Get all active warnings from the ring buffer (newest first).

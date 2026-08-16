@@ -133,9 +133,9 @@ pub fn success_beep() {
 
 /// Play a startup chime (ascending three-note sequence).
 pub fn startup_chime() {
-    beep(523, 80);  // C5
+    beep(523, 80); // C5
     delay_ms(20);
-    beep(659, 80);  // E5
+    beep(659, 80); // E5
     delay_ms(20);
     beep(784, 120); // G5
 }
@@ -202,7 +202,10 @@ pub fn self_test() {
 
     // Bits 0 and 1 should have been set.
     let gate_ok = (during & 0x03) == 0x03;
-    serial_println!("[pcspk]   Speaker gate toggle: {}", if gate_ok { "OK" } else { "FAIL" });
+    serial_println!(
+        "[pcspk]   Speaker gate toggle: {}",
+        if gate_ok { "OK" } else { "FAIL" }
+    );
 
     // Test 2: Program PIT channel 2 with a known divisor.
     // 440 Hz → divisor 2712 (0x0A98).

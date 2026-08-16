@@ -202,7 +202,10 @@ struct RenewalRetry {
 
 impl RenewalRetry {
     const fn new() -> Self {
-        Self { last_attempt_ns: 0, retries: 0 }
+        Self {
+            last_attempt_ns: 0,
+            retries: 0,
+        }
     }
 
     /// Reset retry state (e.g., when transitioning to a new renewal phase).
@@ -299,20 +302,20 @@ fn build_dhcp_message(msg_type: u8, our_mac: &MacAddress, options: &[(u8, &[u8])
 fn build_dhcp_renew_message(our_mac: &MacAddress, our_ip: Ipv4Addr) -> Vec<u8> {
     let mut msg = Vec::with_capacity(300);
 
-    msg.push(1);  // op = BOOTREQUEST
-    msg.push(1);  // htype = Ethernet
-    msg.push(6);  // hlen = 6
-    msg.push(0);  // hops
+    msg.push(1); // op = BOOTREQUEST
+    msg.push(1); // htype = Ethernet
+    msg.push(6); // hlen = 6
+    msg.push(0); // hops
     msg.extend_from_slice(&current_xid().to_be_bytes());
     msg.extend_from_slice(&0u16.to_be_bytes()); // secs
     msg.extend_from_slice(&0u16.to_be_bytes()); // flags = 0 (unicast OK)
-    msg.extend_from_slice(&our_ip.0);           // ciaddr = our current IP
-    msg.extend_from_slice(&[0, 0, 0, 0]);       // yiaddr
-    msg.extend_from_slice(&[0, 0, 0, 0]);       // siaddr
-    msg.extend_from_slice(&[0, 0, 0, 0]);       // giaddr
+    msg.extend_from_slice(&our_ip.0); // ciaddr = our current IP
+    msg.extend_from_slice(&[0, 0, 0, 0]); // yiaddr
+    msg.extend_from_slice(&[0, 0, 0, 0]); // siaddr
+    msg.extend_from_slice(&[0, 0, 0, 0]); // giaddr
     msg.extend_from_slice(&our_mac.0);
     msg.extend_from_slice(&[0u8; 10]);
-    msg.extend_from_slice(&[0u8; 64]);  // sname
+    msg.extend_from_slice(&[0u8; 64]); // sname
     msg.extend_from_slice(&[0u8; 128]); // file
     msg.extend_from_slice(&MAGIC_COOKIE);
 
@@ -342,13 +345,13 @@ fn build_dhcp_ip_udp(dhcp_payload: &[u8]) -> Vec<u8> {
     let mut pkt = Vec::with_capacity(ip_total_len);
 
     // --- IPv4 header (20 bytes) ---
-    pkt.push(0x45);        // Version + IHL.
-    pkt.push(0);           // DSCP/ECN.
+    pkt.push(0x45); // Version + IHL.
+    pkt.push(0); // DSCP/ECN.
     pkt.extend_from_slice(&(ip_total_len as u16).to_be_bytes());
     pkt.extend_from_slice(&0u16.to_be_bytes()); // ID.
     pkt.extend_from_slice(&0u16.to_be_bytes()); // Flags + Fragment.
-    pkt.push(128);         // TTL.
-    pkt.push(17);          // Protocol = UDP.
+    pkt.push(128); // TTL.
+    pkt.push(17); // Protocol = UDP.
     let checksum_offset = pkt.len();
     pkt.extend_from_slice(&[0, 0]); // Checksum placeholder.
     pkt.extend_from_slice(&[0, 0, 0, 0]); // Src IP: 0.0.0.0.
@@ -360,10 +363,10 @@ fn build_dhcp_ip_udp(dhcp_payload: &[u8]) -> Vec<u8> {
     pkt[checksum_offset + 1] = checksum as u8;
 
     // --- UDP header (8 bytes) ---
-    pkt.extend_from_slice(&DHCP_CLIENT_PORT.to_be_bytes());  // Src port: 68.
-    pkt.extend_from_slice(&DHCP_SERVER_PORT.to_be_bytes());  // Dst port: 67.
-    pkt.extend_from_slice(&(udp_len as u16).to_be_bytes());  // UDP length.
-    pkt.extend_from_slice(&0u16.to_be_bytes());               // Checksum (0 = disabled).
+    pkt.extend_from_slice(&DHCP_CLIENT_PORT.to_be_bytes()); // Src port: 68.
+    pkt.extend_from_slice(&DHCP_SERVER_PORT.to_be_bytes()); // Dst port: 67.
+    pkt.extend_from_slice(&(udp_len as u16).to_be_bytes()); // UDP length.
+    pkt.extend_from_slice(&0u16.to_be_bytes()); // Checksum (0 = disabled).
 
     // --- DHCP payload ---
     pkt.extend_from_slice(dhcp_payload);
@@ -387,8 +390,8 @@ fn build_dhcp_ip_udp_unicast(dhcp_payload: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4
     pkt.extend_from_slice(&(ip_total_len as u16).to_be_bytes());
     pkt.extend_from_slice(&0u16.to_be_bytes());
     pkt.extend_from_slice(&0u16.to_be_bytes());
-    pkt.push(128);  // TTL
-    pkt.push(17);   // Protocol = UDP
+    pkt.push(128); // TTL
+    pkt.push(17); // Protocol = UDP
     let checksum_offset = pkt.len();
     pkt.extend_from_slice(&[0, 0]);
     pkt.extend_from_slice(&src_ip.0);
@@ -420,12 +423,7 @@ fn send_discover() -> KernelResult<()> {
     let ip_udp_packet = build_dhcp_ip_udp(&dhcp_msg);
 
     // Wrap in Ethernet frame (broadcast).
-    let frame = ethernet::build_frame(
-        &BROADCAST_MAC,
-        &our_mac,
-        ETHERTYPE_IPV4,
-        &ip_udp_packet,
-    );
+    let frame = ethernet::build_frame(&BROADCAST_MAC, &our_mac, ETHERTYPE_IPV4, &ip_udp_packet);
 
     super::send_frame(&frame)?;
 
@@ -447,12 +445,7 @@ fn send_request(requested_ip: Ipv4Addr, server_ip: Ipv4Addr) -> KernelResult<()>
     let dhcp_msg = build_dhcp_message(DHCP_REQUEST, &our_mac, options);
     let ip_udp_packet = build_dhcp_ip_udp(&dhcp_msg);
 
-    let frame = ethernet::build_frame(
-        &BROADCAST_MAC,
-        &our_mac,
-        ETHERTYPE_IPV4,
-        &ip_udp_packet,
-    );
+    let frame = ethernet::build_frame(&BROADCAST_MAC, &our_mac, ETHERTYPE_IPV4, &ip_udp_packet);
 
     super::send_frame(&frame)?;
 
@@ -483,12 +476,7 @@ fn send_renew(our_ip: Ipv4Addr, server_ip: Ipv4Addr) -> KernelResult<()> {
         })
         .unwrap_or(BROADCAST_MAC);
 
-    let frame = ethernet::build_frame(
-        &dst_mac,
-        &our_mac,
-        ETHERTYPE_IPV4,
-        &ip_udp_packet,
-    );
+    let frame = ethernet::build_frame(&dst_mac, &our_mac, ETHERTYPE_IPV4, &ip_udp_packet);
 
     super::send_frame(&frame)?;
 
@@ -508,12 +496,7 @@ fn send_rebind(our_ip: Ipv4Addr) -> KernelResult<()> {
     let dhcp_msg = build_dhcp_renew_message(&our_mac, our_ip);
     let ip_udp_packet = build_dhcp_ip_udp(&dhcp_msg);
 
-    let frame = ethernet::build_frame(
-        &BROADCAST_MAC,
-        &our_mac,
-        ETHERTYPE_IPV4,
-        &ip_udp_packet,
-    );
+    let frame = ethernet::build_frame(&BROADCAST_MAC, &our_mac, ETHERTYPE_IPV4, &ip_udp_packet);
 
     super::send_frame(&frame)?;
 
@@ -619,7 +602,9 @@ pub fn tick_renewal() {
                     drop(retry);
                     crate::serial_println!(
                         "[dhcp] RENEW retransmit #{} to {} for {}",
-                        attempt, server, our_ip
+                        attempt,
+                        server,
+                        our_ip
                     );
                     // Send failure is non-fatal — will retry with backoff.
                     let _ = send_renew(our_ip, server);
@@ -666,9 +651,7 @@ pub fn tick_renewal() {
                     retry.retries = retry.retries.saturating_add(1);
                     let attempt = retry.retries;
                     drop(retry);
-                    crate::serial_println!(
-                        "[dhcp] REBIND retransmit #{} for {}", attempt, our_ip
-                    );
+                    crate::serial_println!("[dhcp] REBIND retransmit #{} for {}", attempt, our_ip);
                     let _ = send_rebind(our_ip);
                 }
             }
@@ -776,19 +759,16 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
                 server_id = Ipv4Addr(s);
             }
             OPT_LEASE_TIME if opt_len >= 4 => {
-                lease_time = u32::from_be_bytes([
-                    opt_data[0], opt_data[1], opt_data[2], opt_data[3],
-                ]);
+                lease_time =
+                    u32::from_be_bytes([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]);
             }
             OPT_RENEWAL_TIME if opt_len >= 4 => {
-                renewal_time = u32::from_be_bytes([
-                    opt_data[0], opt_data[1], opt_data[2], opt_data[3],
-                ]);
+                renewal_time =
+                    u32::from_be_bytes([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]);
             }
             OPT_REBINDING_TIME if opt_len >= 4 => {
-                rebinding_time = u32::from_be_bytes([
-                    opt_data[0], opt_data[1], opt_data[2], opt_data[3],
-                ]);
+                rebinding_time =
+                    u32::from_be_bytes([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]);
             }
             OPT_DOMAIN_NAME => {
                 // Copy domain name (truncate to buffer size, leave room
@@ -817,10 +797,7 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
 
     match msg_type {
         Some(DHCP_OFFER) if state == DhcpState::Discovering => {
-            crate::serial_println!(
-                "[dhcp] OFFER: IP {} from server {}",
-                offered_ip, server_id
-            );
+            crate::serial_println!("[dhcp] OFFER: IP {} from server {}", offered_ip, server_id);
 
             // Store the offer.
             *PENDING_OFFER.lock() = Some(DhcpOffer {
@@ -834,9 +811,11 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
             // Send REQUEST for this offer.
             send_request(offered_ip, server_id)?;
         }
-        Some(DHCP_ACK) if state == DhcpState::Requesting
-            || state == DhcpState::Renewing
-            || state == DhcpState::Rebinding => {
+        Some(DHCP_ACK)
+            if state == DhcpState::Requesting
+                || state == DhcpState::Renewing
+                || state == DhcpState::Rebinding =>
+        {
             // During renewal/rebinding, the server may leave yiaddr=0
             // (RFC 2131 §4.3.2) meaning "keep your current IP".  Substitute
             // the current lease IP so downstream logic works correctly.
@@ -858,7 +837,8 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
                 if !current.is_unspecified() && offered_ip != current {
                     crate::serial_println!(
                         "[dhcp] ACK IP {} doesn't match current lease {} — ignoring",
-                        offered_ip, current,
+                        offered_ip,
+                        current,
                     );
                     return Ok(());
                 }
@@ -870,9 +850,7 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
                 || offered_ip.is_multicast()
                 || offered_ip.0[0] == 127
             {
-                crate::serial_println!(
-                    "[dhcp] ACK offered invalid IP {} — ignoring", offered_ip,
-                );
+                crate::serial_println!("[dhcp] ACK offered invalid IP {} — ignoring", offered_ip,);
                 return Ok(());
             }
 
@@ -909,8 +887,13 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
 
             crate::serial_println!(
                 "[dhcp] ACK: IP {} mask {} gw {} dns {} lease={}s T1={}s T2={}s",
-                offered_ip, subnet_mask, router, dns,
-                lease_time, t1, t2
+                offered_ip,
+                subnet_mask,
+                router,
+                dns,
+                lease_time,
+                t1,
+                t2
             );
             if domain_name_len > 0 {
                 // Log domain name as best-effort UTF-8 (only for serial
@@ -957,9 +940,11 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
             lease.gateway = router;
             lease.dns = dns;
         }
-        Some(DHCP_NAK) if state == DhcpState::Requesting
-            || state == DhcpState::Renewing
-            || state == DhcpState::Rebinding => {
+        Some(DHCP_NAK)
+            if state == DhcpState::Requesting
+                || state == DhcpState::Renewing
+                || state == DhcpState::Rebinding =>
+        {
             crate::serial_println!(
                 "[dhcp] NAK from server {} — offer rejected, restarting",
                 server_id
@@ -977,9 +962,7 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
                 super::dns::flush_cache();
                 super::arp::flush_cache();
                 *CURRENT_LEASE.lock() = DhcpLease::empty();
-                crate::serial_println!(
-                    "[dhcp] Released IP configuration after renewal NAK"
-                );
+                crate::serial_println!("[dhcp] Released IP configuration after renewal NAK");
             }
             // Clear offer and return to Idle so discovery can retry.
             *PENDING_OFFER.lock() = None;

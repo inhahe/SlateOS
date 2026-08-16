@@ -12,7 +12,7 @@
 //! are 4 KiB aligned), a single frame allocation satisfies the
 //! contiguity and alignment requirements.
 
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{Ordering, fence};
 
 use crate::error::KernelResult;
 use crate::mm::frame::{self, PhysFrame};
@@ -22,8 +22,8 @@ use crate::mm::frame::{self, PhysFrame};
 // ---------------------------------------------------------------------------
 
 /// Descriptor flags.
-pub const VRING_DESC_F_NEXT: u16 = 1;      // Descriptor chains to next.
-pub const VRING_DESC_F_WRITE: u16 = 2;     // Device writes (vs. reads).
+pub const VRING_DESC_F_NEXT: u16 = 1; // Descriptor chains to next.
+pub const VRING_DESC_F_WRITE: u16 = 2; // Device writes (vs. reads).
 
 /// A single virtqueue descriptor (16 bytes, repr(C) for device compatibility).
 #[repr(C)]
@@ -133,11 +133,11 @@ impl Virtqueue {
         let qs = queue_size as usize;
 
         // Compute offsets per the virtio spec.
-        let desc_size = qs * 16;                         // 16 bytes per descriptor
-        let avail_size = 4 + (qs * 2) + 2;               // header + ring + used_event
+        let desc_size = qs * 16; // 16 bytes per descriptor
+        let avail_size = 4 + (qs * 2) + 2; // header + ring + used_event
         let avail_end = desc_size + avail_size;
-        let used_start = align_up(avail_end, 4096);       // Used ring is page-aligned
-        let used_size = 4 + (qs * 8);                     // header + used_elem array
+        let used_start = align_up(avail_end, 4096); // Used ring is page-aligned
+        let used_size = 4 + (qs * 8); // header + used_elem array
         let total = used_start + used_size;
 
         // Verify it fits in a single 16 KiB frame.
@@ -216,7 +216,11 @@ impl Virtqueue {
             // SAFETY: i < queue_size, and queue_size * 16 < FRAME_SIZE
             // (checked in new()), so the pointer stays within the frame.
             let desc = unsafe { &mut *(self.virt_base.add(i as usize * 16) as *mut VirtqDesc) };
-            desc.next = if i + 1 < self.queue_size { i + 1 } else { 0xFFFF };
+            desc.next = if i + 1 < self.queue_size {
+                i + 1
+            } else {
+                0xFFFF
+            };
         }
 
         self.free_head = 0;
@@ -345,11 +349,11 @@ impl Virtqueue {
 
         // Ring entry offset: 4 (header) + (avail_idx % queue_size) * 2.
         let ring_slot = (self.avail_idx % self.queue_size) as usize;
-        let entry_ptr = unsafe {
-            avail_ring_base.add(4 + ring_slot * 2) as *mut u16
-        };
+        let entry_ptr = unsafe { avail_ring_base.add(4 + ring_slot * 2) as *mut u16 };
         // SAFETY: entry_ptr is within the available ring (see above).
-        unsafe { core::ptr::write_volatile(entry_ptr, indices[0]); }
+        unsafe {
+            core::ptr::write_volatile(entry_ptr, indices[0]);
+        }
 
         // Memory fence before updating avail idx.
         fence(Ordering::SeqCst);
@@ -358,10 +362,10 @@ impl Virtqueue {
         self.avail_idx = self.avail_idx.wrapping_add(1);
         // SAFETY: avail_ring_base + 2 = the idx field of the available ring
         // header, within the same allocated frame.
-        let avail_idx_field = unsafe {
-            avail_ring_base.add(2) as *mut u16
-        };
-        unsafe { core::ptr::write_volatile(avail_idx_field, self.avail_idx); }
+        let avail_idx_field = unsafe { avail_ring_base.add(2) as *mut u16 };
+        unsafe {
+            core::ptr::write_volatile(avail_idx_field, self.avail_idx);
+        }
 
         // Another fence to ensure the index update is visible before
         // the device is notified.
@@ -385,9 +389,8 @@ impl Virtqueue {
         // exclusively owned.  Volatile reads are necessary because the
         // device writes the used ring asynchronously.
         let used_ring_base = unsafe { self.virt_base.add(self.used_offset) };
-        let device_used_idx = unsafe {
-            core::ptr::read_volatile(used_ring_base.add(2) as *const u16)
-        };
+        let device_used_idx =
+            unsafe { core::ptr::read_volatile(used_ring_base.add(2) as *const u16) };
 
         if self.last_used_idx == device_used_idx {
             return None; // No new completions.
@@ -395,9 +398,7 @@ impl Virtqueue {
 
         // Read the used ring entry.
         let ring_slot = (self.last_used_idx % self.queue_size) as usize;
-        let elem_ptr = unsafe {
-            used_ring_base.add(4 + ring_slot * 8) as *const VirtqUsedElem
-        };
+        let elem_ptr = unsafe { used_ring_base.add(4 + ring_slot * 8) as *const VirtqUsedElem };
         let elem = unsafe { core::ptr::read_volatile(elem_ptr) };
 
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
@@ -411,10 +412,7 @@ impl Drop for Virtqueue {
         // Free the backing frame.
         // SAFETY: We own this frame and are being dropped.
         if let Err(e) = unsafe { frame::free_frame(self.phys_frame) } {
-            crate::serial_println!(
-                "[virtio] WARNING: failed to free virtqueue frame: {:?}",
-                e
-            );
+            crate::serial_println!("[virtio] WARNING: failed to free virtqueue frame: {:?}", e);
         }
     }
 }

@@ -63,6 +63,7 @@ extern crate alloc;
 // Module declarations.
 mod ac97;
 mod acpi;
+mod ahci;
 mod alternatives;
 mod apic;
 mod audio_alsa;
@@ -73,29 +74,30 @@ mod audio_notify;
 mod backtrace;
 mod bench;
 mod blkdev;
-mod ahci;
 mod boot;
+mod boot_timing;
 mod bytestr;
 mod cap;
 mod cet;
 mod cgroup;
+mod cnetwork;
 mod compositor;
-mod container;
 mod console;
+mod container;
 mod cpu;
 mod cpu_hotplug;
 mod cpu_topology;
 mod cpufreq;
-mod e1000;
-mod fb;
 mod cputime;
 mod crypto;
 mod devhotplug;
 mod devpower;
 mod drm;
 mod drvmon;
+mod e1000;
 mod error;
 mod eventlog;
+mod fb;
 mod font;
 mod fs;
 mod gdt;
@@ -104,63 +106,62 @@ mod hda;
 mod hpet;
 mod hrtimer;
 mod hypervisor;
-mod idt;
 mod idle;
+mod idt;
 mod initproc;
-mod iommu;
-mod iommu_remap;
 mod invariant;
 mod ioapic;
+mod iommu;
+mod iommu_remap;
+mod ipc;
 mod irq_storm;
 mod irqbalance;
-mod ipc;
 mod json;
 mod kcounters;
 mod kdiag;
 mod kevent;
 mod keyboard;
-mod kobject;
-mod mouse;
 mod klog;
+mod kobject;
+mod kprofile;
 mod kshell;
 mod ksnapshot;
-mod ksyms;
-mod boot_timing;
-mod kprofile;
 mod kstat;
-mod kwarn;
+mod ksyms;
 mod ktimer;
-mod loadavg;
 mod ktrace;
+mod kwarn;
 mod limine;
+mod loadavg;
 mod lockdep;
 mod logpersist;
 mod mm;
+mod mouse;
 mod msi;
 mod net;
 mod netns;
 mod numa;
 mod nvme;
 mod oci;
+mod pacct;
 mod pci;
 mod pciids;
 mod pcspk;
-mod pacct;
 mod pidns;
 mod pmc;
 mod port;
 mod power;
 mod proc;
 mod ratelimit;
-mod reslimit;
 mod rcu;
+mod reslimit;
 mod rip_sample;
 mod rng;
 mod rtc;
 mod rtl8139;
+mod scfilter;
 mod sched;
 mod sched_fairness;
-mod scfilter;
 mod sched_migrate;
 mod sclatency;
 mod security;
@@ -168,9 +169,9 @@ mod selftest;
 mod serial;
 mod smep_smap;
 mod smp;
-mod spectre;
 mod sockact;
 mod softirq;
+mod spectre;
 mod svcstart;
 mod sync;
 mod syscall;
@@ -186,14 +187,13 @@ mod unicode;
 mod userns;
 mod virtio;
 mod vmguest;
-mod watchdog;
-#[allow(dead_code)]
-mod xhci;
-mod cnetwork;
 mod volume;
+mod watchdog;
 mod watchpoint;
 mod wchan;
 mod workqueue;
+#[allow(dead_code)]
+mod xhci;
 
 // ---------------------------------------------------------------------------
 // Kernel entry point
@@ -568,9 +568,7 @@ extern "C" fn kernel_main() -> ! {
     // Limine.  This is the first and only call to frame::init.  We are
     // single-threaded with interrupts disabled.
     console::boot_step(console::BootStatus::Running, "Memory manager");
-    if let Err(e) = unsafe {
-        mm::frame::init(boot_info.hhdm_offset, boot_info.memory_map)
-    } {
+    if let Err(e) = unsafe { mm::frame::init(boot_info.hhdm_offset, boot_info.memory_map) } {
         serial_println!("FATAL: Frame allocator init failed: {}", e);
         cpu::halt_loop();
     }
@@ -1177,7 +1175,6 @@ extern "C" fn kernel_main() -> ! {
                 serial_println!("[net] DHCP failed: {:?} (non-fatal)", e);
             }
         }
-
     }
 
     console::boot_step_update(console::BootStatus::Ok, "Network stack");
@@ -1225,7 +1222,10 @@ extern "C" fn kernel_main() -> ! {
             continue;
         }
         if mm::swap::init_disk(swap_dev, 0, 512).is_ok() {
-            serial_println!("[boot] Disk swap added on {} (zram + disk tiered)", swap_dev);
+            serial_println!(
+                "[boot] Disk swap added on {} (zram + disk tiered)",
+                swap_dev
+            );
             // Run the disk-specific self-test now that a disk backend
             // is active.
             mm::swap::self_test_disk();
@@ -1294,7 +1294,8 @@ extern "C" fn kernel_main() -> ! {
                 Err(e) => {
                     serial_println!(
                         "[boot] WARNING: ext4 detected on {} but mount failed: {:?}",
-                        ext4_dev, e
+                        ext4_dev,
+                        e
                     );
                 }
             }
@@ -1310,7 +1311,8 @@ extern "C" fn kernel_main() -> ! {
                 Err(e) => {
                     serial_println!(
                         "[boot] WARNING: ISO 9660 detected on {} but mount failed: {:?}",
-                        iso_dev, e
+                        iso_dev,
+                        e
                     );
                 }
             }
@@ -1482,7 +1484,10 @@ extern "C" fn kernel_main() -> ! {
     // right here.  It is also the regression test for the timerfd half of
     // BUG-PIPE-SINGLE-WAITER-SLOT (several readers parked on one timerfd).
     if let Err(e) = ipc::timerfd::self_test_blocking_multi_waiter() {
-        serial_println!("FATAL: Timerfd blocking multi-waiter self-test failed: {}", e);
+        serial_println!(
+            "FATAL: Timerfd blocking multi-waiter self-test failed: {}",
+            e
+        );
         cpu::halt_loop();
     }
 
@@ -1492,7 +1497,10 @@ extern "C" fn kernel_main() -> ! {
     // filesystem and verifies the kernel loads + enters it for a
     // dynamically-linked Linux binary.  See proc::spawn for details.
     if let Err(e) = proc::spawn::self_test_linux_dynamic_interp() {
-        serial_println!("WARNING: Linux dynamic-interpreter self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux dynamic-interpreter self-test failed: {:?}",
+            e
+        );
     }
 
     // Atomic RENAME_NOREPLACE test (needs the writable /tmp memfs to exercise
@@ -1579,7 +1587,10 @@ extern "C" fn kernel_main() -> ! {
     // issues open(2)+mmap(2) itself and exits with a mapped second-frame byte,
     // proving the whole syscall path (fd install, caller_pid, ring-3 read).
     if let Err(e) = proc::spawn::self_test_linux_file_mmap() {
-        serial_println!("WARNING: Linux file-backed mmap (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux file-backed mmap (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Net→userspace migration (Path B, §63/§66). The `net.userspace` boot switch
@@ -1604,7 +1615,10 @@ extern "C" fn kernel_main() -> ! {
         // proves the raw-frame TX/RX path end-to-end with an ARP round-trip.
         // Skips gracefully when there's no network.
         if let Err(e) = proc::spawn::self_test_userspace_netstack() {
-            serial_println!("WARNING: userspace netstack daemon (ring 3) self-test failed: {:?}", e);
+            serial_println!(
+                "WARNING: userspace netstack daemon (ring 3) self-test failed: {:?}",
+                e
+            );
         }
 
         // Phase 4: forward a DNS resolve from the kernel to the userspace
@@ -1612,7 +1626,10 @@ extern "C" fn kernel_main() -> ! {
         // socket-syscall → IPC path end-to-end. Bounded self-test (the daemon
         // owns the NIC only briefly); skips gracefully with no network.
         if let Err(e) = proc::spawn::self_test_netstack_dns_ipc() {
-            serial_println!("WARNING: netstack DNS-over-IPC (ring 3) self-test failed: {:?}", e);
+            serial_println!(
+                "WARNING: netstack DNS-over-IPC (ring 3) self-test failed: {:?}",
+                e
+            );
         }
     }
 
@@ -1622,7 +1639,10 @@ extern "C" fn kernel_main() -> ! {
     // — proving set_brk_region at load, sys_brk's grow path, and demand-paging
     // of the new heap frames.
     if let Err(e) = proc::spawn::self_test_linux_brk() {
-        serial_println!("WARNING: Linux brk(2) heap (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux brk(2) heap (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 end-to-end test of the SA_RESTART transparent-restart path — the
@@ -1633,7 +1653,10 @@ extern "C" fn kernel_main() -> ! {
     // pipe, and the read is transparently restarted to return it.  Proves the
     // park is interruptible AND that SA_RESTART resumes the syscall.
     if let Err(e) = proc::spawn::self_test_linux_sa_restart() {
-        serial_println!("WARNING: Linux SA_RESTART (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux SA_RESTART (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 test that a blocking signalfd read is interrupted by a signal NOT
@@ -1643,7 +1666,10 @@ extern "C" fn kernel_main() -> ! {
     // installed; the kernel posts SIGUSR1, the read wakes and returns -EINTR.
     // Before the fix the read parked forever for the out-of-mask signal.
     if let Err(e) = proc::spawn::self_test_linux_signalfd_interrupt() {
-        serial_println!("WARNING: Linux signalfd-read interruptibility (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux signalfd-read interruptibility (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 eventfd-read signal-interruptibility test: a child blocks in
@@ -1652,7 +1678,10 @@ extern "C" fn kernel_main() -> ! {
     // -EINTR.  Before the fix the read parked forever (single-slot waiter only
     // wakeable by a writer), the same hang-bug class as pipe/signalfd.
     if let Err(e) = proc::spawn::self_test_linux_eventfd_interrupt() {
-        serial_println!("WARNING: Linux eventfd-read interruptibility (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux eventfd-read interruptibility (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 timerfd-read signal-interruptibility test: a child blocks in
@@ -1662,7 +1691,10 @@ extern "C" fn kernel_main() -> ! {
     // reader waiter only wakeable by settime/the expiry hrtimer), the same
     // hang-bug class as pipe/signalfd/eventfd.
     if let Err(e) = proc::spawn::self_test_linux_timerfd_interrupt() {
-        serial_println!("WARNING: Linux timerfd-read interruptibility (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux timerfd-read interruptibility (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 inotify-read signal-interruptibility test: a child blocks in
@@ -1672,7 +1704,10 @@ extern "C" fn kernel_main() -> ! {
     // notify-waiter and parked uninterruptibly, the same hang-bug class as
     // pipe/signalfd/eventfd/timerfd.
     if let Err(e) = proc::spawn::self_test_linux_inotify_interrupt() {
-        serial_println!("WARNING: Linux inotify-read interruptibility (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux inotify-read interruptibility (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 test that a blocking poll() is signal-interruptible and surfaces
@@ -1680,7 +1715,10 @@ extern "C" fn kernel_main() -> ! {
     // taxonomy).  Before the fix, poll_core busy-polled in sleep_ms slices and
     // never checked for a pending signal, so the thread parked forever.
     if let Err(e) = proc::spawn::self_test_linux_poll_interrupt() {
-        serial_println!("WARNING: Linux poll() interruptibility (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux poll() interruptibility (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 test that poll(NULL, 0, -1) (no fds, infinite timeout) BLOCKS
@@ -1688,14 +1726,20 @@ extern "C" fn kernel_main() -> ! {
     // (the empty-set infinite-wait quick-path bug fixed alongside the
     // poll/select/epoll signal-interruptibility work).
     if let Err(e) = proc::spawn::self_test_linux_poll_empty_infinite() {
-        serial_println!("WARNING: Linux poll(NULL,0,-1) empty-set infinite-wait (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux poll(NULL,0,-1) empty-set infinite-wait (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 test that the SysV stack builder's argv *pointers* (not just the
     // scalar argc) are valid in the mapped user stack: a real Linux-ABI
     // process dereferences argv[0] and exits with its first byte.
     if let Err(e) = proc::spawn::self_test_linux_argv0_deref() {
-        serial_println!("WARNING: Linux argv[0] deref (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux argv[0] deref (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 test that the SysV stack builder places the envp array at the
@@ -1704,7 +1748,10 @@ extern "C" fn kernel_main() -> ! {
     // byte.  Distinct from the argv[0] test (fixed offset) — catches a
     // misplaced envp array that getenv()-dependent toolchains would fault on.
     if let Err(e) = proc::spawn::self_test_linux_envp0_deref() {
-        serial_println!("WARNING: Linux envp[0] deref (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux envp[0] deref (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 end-to-end test of a native fastpy-compiled binary (initiative
@@ -1714,7 +1761,10 @@ extern "C" fn kernel_main() -> ! {
     // fastpy runtime's `__thread` accesses don't fault.  Bounded yield loop,
     // so it can never hang the boot.
     if let Err(e) = proc::spawn::self_test_fastpy_slateos_tls() {
-        serial_println!("WARNING: fastpy-on-SlateOS TLS (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS TLS (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // The other half of the TLS story: a native C binary whose *child*
@@ -1724,7 +1774,10 @@ extern "C" fn kernel_main() -> ! {
     // fixture also verifies the block's contents and isolation from the
     // parent's.  Bounded yield loop, so it can never hang the boot.
     if let Err(e) = proc::spawn::self_test_ctls_thread() {
-        serial_println!("WARNING: child-thread ELF TLS (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: child-thread ELF TLS (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // The sysroot is compiled for x86_64-unknown-none (soft-float) but linked
@@ -2516,7 +2569,10 @@ extern "C" fn kernel_main() -> ! {
     // harness drives the scheduler with a bounded yield loop, so this can
     // never hang the boot: worst case is a clean failed assertion.
     if let Err(e) = proc::spawn::self_test_linux_fork_wait() {
-        serial_println!("WARNING: Linux fork()+wait4() (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux fork()+wait4() (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 end-to-end test of the full fork → child execve → parent wait4
@@ -2570,14 +2626,20 @@ extern "C" fn kernel_main() -> ! {
     // instead of returning EROFS).  Runs on the memfs root and verifies the
     // kernel-side metadata matches the requested atime/mtime exactly.
     if let Err(e) = proc::spawn::self_test_linux_utimensat() {
-        serial_println!("WARNING: Linux utimensat() (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux utimensat() (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 test that chmod()/chown() mutate file metadata (the chmod/chown
     // family now routes to Vfs::set_permissions/set_owner for ring-3 callers
     // instead of returning EROFS).  Verifies kernel-side mode + owner.
     if let Err(e) = proc::spawn::self_test_linux_chmod_chown() {
-        serial_println!("WARNING: Linux chmod()/chown() (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux chmod()/chown() (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 test that truncate()/ftruncate() resize files (both now route to
@@ -2585,27 +2647,39 @@ extern "C" fn kernel_main() -> ! {
     // via the path syscall, grows via a writable fd, and verifies the
     // kernel-side final length + zero-fill.
     if let Err(e) = proc::spawn::self_test_linux_truncate() {
-        serial_println!("WARNING: Linux truncate()/ftruncate() (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux truncate()/ftruncate() (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 test that fchmodat2(AT_EMPTY_PATH) chmods the file an O_RDWR fd
     // points to (the genuinely new path-resolution branch in the fchmodat2
     // wiring: dirfd -> handle_path -> Vfs::set_permissions).
     if let Err(e) = proc::spawn::self_test_linux_fchmodat2() {
-        serial_println!("WARNING: Linux fchmodat2(AT_EMPTY_PATH) (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux fchmodat2(AT_EMPTY_PATH) (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 regression test for fallocate(mode=0) growing a file via the
     // posix_fallocate path (fd -> handle_path -> Vfs::file_size/Vfs::truncate).
     if let Err(e) = proc::spawn::self_test_linux_fallocate() {
-        serial_println!("WARNING: Linux fallocate(mode=0 grow) (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux fallocate(mode=0 grow) (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 regression test for the virtio-gpu GETPARAM render ioctl on
     // /dev/dri/renderD128 (honest no-3D reporting; Q18/§59). Skips cleanly when
     // no DRM device is bound.
     if let Err(e) = proc::spawn::self_test_linux_virtgpu_getparam() {
-        serial_println!("WARNING: virtio-gpu GETPARAM (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: virtio-gpu GETPARAM (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // Ring-3 regression test that IA32_FS_BASE (the glibc %fs/TLS pointer) is
@@ -2638,7 +2712,10 @@ extern "C" fn kernel_main() -> ! {
     // (AT_EMPTY_PATH / fexecve), proving execveat replaces the image and
     // transfers control to the target (which exits with a sentinel).
     if let Err(e) = proc::spawn::self_test_linux_execveat() {
-        serial_println!("WARNING: Linux execveat(2) (ring 3) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux execveat(2) (ring 3) self-test failed: {:?}",
+            e
+        );
     }
 
     // B-KNULLJUMP corruption hunt (opt-in via `mm.corruption_hunt` cmdline
@@ -2770,10 +2847,7 @@ extern "C" fn kernel_main() -> ! {
     // waitpid()s. Proves pipe-fd inheritance across fork, dup2, and an
     // open fd surviving execve. No-op when rootfs.ext4 is absent.
     if let Err(e) = proc::spawn::self_test_linux_real_glibc_pipe() {
-        serial_println!(
-            "WARNING: Path-Z real glibc pipe self-test failed: {:?}",
-            e
-        );
+        serial_println!("WARNING: Path-Z real glibc pipe self-test failed: {:?}", e);
     }
 
     // Path Z: a real glibc program performs its OWN `cmd > file` output
@@ -2782,10 +2856,7 @@ extern "C" fn kernel_main() -> ! {
     // dup2 onto a pipe) and the displaced-console close. No-op without
     // rootfs.ext4.
     if let Err(e) = proc::spawn::self_test_linux_real_glibc_redir() {
-        serial_println!(
-            "WARNING: Path-Z real glibc redir self-test failed: {:?}",
-            e
-        );
+        serial_println!("WARNING: Path-Z real glibc redir self-test failed: {:?}", e);
     }
 
     // Path Z: the mirror image — a real glibc program performs its OWN
@@ -2991,7 +3062,10 @@ extern "C" fn kernel_main() -> ! {
     // program — both in ring 3.  The next rung after make: the OS hosts a
     // real toolchain, not merely runs prebuilt binaries.
     if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc() {
-        serial_println!("WARNING: Path-Z real C compiler (tcc) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Path-Z real C compiler (tcc) self-test failed: {:?}",
+            e
+        );
     }
 
     // Path Z Part 36: the *hosted* compile rung — tcc links a C program against
@@ -2999,7 +3073,10 @@ extern "C" fn kernel_main() -> ! {
     // that freshly-built *dynamic* binary runs through ld.so in ring 3.  This is
     // the realistic compile mode (vs Part 35's freestanding -nostdlib -static).
     if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_hosted() {
-        serial_println!("WARNING: Path-Z hosted C compiler (tcc) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Path-Z hosted C compiler (tcc) self-test failed: {:?}",
+            e
+        );
     }
 
     // Path Z Part 37: the hosted compile rung exercising more of the glibc ABI
@@ -3082,10 +3159,7 @@ extern "C" fn kernel_main() -> ! {
     // "B" markers. Exercises glibc's sigaction wrapper, the kernel's asynchronous
     // signal-frame setup, and rt_sigreturn — end-to-end from compiled source.
     if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_signal() {
-        serial_println!(
-            "WARNING: Path-Z signal C runtime self-test failed: {:?}",
-            e
-        );
+        serial_println!("WARNING: Path-Z signal C runtime self-test failed: {:?}", e);
     }
 
     // Path Z Part 44: non-local control flow (setjmp/longjmp) in a tcc-built
@@ -3331,8 +3405,14 @@ extern "C" fn kernel_main() -> ! {
             "[hunt] Path-Z checkpoint: quarantine parked={} total_parked={} \
              evicted={} corruptions={} (scan found {}); kasan violations={} \
              shadow_frames={} giveups={}",
-            qs.parked_now, qs.total_parked, qs.total_evicted, qs.corruptions,
-            corrupted, ks.violations, ks.shadow_frames_mapped, ks.map_lock_giveups
+            qs.parked_now,
+            qs.total_parked,
+            qs.total_evicted,
+            qs.corruptions,
+            corrupted,
+            ks.violations,
+            ks.shadow_frames_mapped,
+            ks.map_lock_giveups
         );
         mm::quarantine::disable();
         mm::kasan::disable();
@@ -3353,7 +3433,10 @@ extern "C" fn kernel_main() -> ! {
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live
     // process + page tables, so it runs here alongside the other MM tests.
     if let Err(e) = syscall::linux::self_test_madvise_dontneed() {
-        serial_println!("WARNING: Linux madvise(MADV_DONTNEED) self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux madvise(MADV_DONTNEED) self-test failed: {:?}",
+            e
+        );
     }
 
     // Q6 / design-decisions §24: cross-address-space process_vm_readv/writev
@@ -3361,7 +3444,10 @@ extern "C" fn kernel_main() -> ! {
     // Exercises the authorization predicate + the remote read/write transfer
     // mechanism against a throwaway target process's page table.
     if let Err(e) = syscall::linux::self_test_process_vm_cross_as() {
-        serial_println!("WARNING: Linux process_vm cross-AS self-test failed: {:?}", e);
+        serial_println!(
+            "WARNING: Linux process_vm cross-AS self-test failed: {:?}",
+            e
+        );
     }
 
     boot_timing::mark(boot_timing::Milestone::Filesystem);
@@ -4761,6 +4847,15 @@ extern "C" fn kernel_main() -> ! {
     // Keeps `smep_smap`'s SMAP-enable gate honest about what the stubs do.
     idt::ac_on_entry_self_test();
 
+    // Step 22e⅞+: #UD trap-decode self-test.
+    // Sits with the other IDT self-tests because it guards what the #UD
+    // handler *says*, not what it does: a CFI violation in a C program is a
+    // ring-3 `ud1`, and until this decoder existed the kernel could only
+    // report it as an undecoded byte dump.  Pinned to byte sequences captured
+    // from real clang output, so a toolchain bump that changes the encoding
+    // fails here rather than silently mis-naming every fault thereafter.
+    idt::ud_trap_decode_self_test();
+
     // Step 22e⅞+: Serial print re-entrancy self-test.
     // Guards the escape hatch that keeps a fault taken *during* a print from
     // deadlocking on the console lock — the difference between a diagnosable
@@ -5201,11 +5296,11 @@ extern "C" fn kernel_main() -> ! {
             hhdm_hardened
         );
 
-        let (sections_hardened, section_errors) =
-            mm::protect::harden_kernel_sections(pml4);
+        let (sections_hardened, section_errors) = mm::protect::harden_kernel_sections(pml4);
         serial_println!(
             "[protect] Kernel section permissions hardened: {} PTEs updated, {} errors",
-            sections_hardened, section_errors
+            sections_hardened,
+            section_errors
         );
     }
 
@@ -5440,9 +5535,7 @@ extern "C" fn kernel_main() -> ! {
                     sched::yield_now();
                     spins = spins.saturating_add(1);
                     if spins >= 2_000_000 {
-                        serial_println!(
-                            "[boot] WARNING: cgroup e2e task did not finish in time"
-                        );
+                        serial_println!("[boot] WARNING: cgroup e2e task did not finish in time");
                         break;
                     }
                 }
@@ -5585,15 +5678,12 @@ extern "C" fn kernel_main() -> ! {
     // is the first step toward Phase 2 (boot to a shell prompt).
     //
     // If init spawning fails, fall back to the kernel debug shell.
-    static INIT_ELF: &[u8] = include_bytes!(
-        "../../services/init/target/x86_64-unknown-none/release/init"
-    );
-    static HELLO_ELF: &[u8] = include_bytes!(
-        "../../services/hello/target/x86_64-unknown-none/release/hello"
-    );
-    static TICKER_ELF: &[u8] = include_bytes!(
-        "../../services/ticker/target/x86_64-unknown-none/release/ticker"
-    );
+    static INIT_ELF: &[u8] =
+        include_bytes!("../../services/init/target/x86_64-unknown-none/release/init");
+    static HELLO_ELF: &[u8] =
+        include_bytes!("../../services/hello/target/x86_64-unknown-none/release/hello");
+    static TICKER_ELF: &[u8] =
+        include_bytes!("../../services/ticker/target/x86_64-unknown-none/release/ticker");
 
     // Write embedded binaries to the VFS so init can spawn them.
     if let Err(e) = fs::Vfs::mkdir("/bin") {
@@ -5627,7 +5717,10 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("[init] Created /etc/startup.conf");
     }
 
-    serial_println!("[init] Spawning init process ({} bytes ELF)", INIT_ELF.len());
+    serial_println!(
+        "[init] Spawning init process ({} bytes ELF)",
+        INIT_ELF.len()
+    );
 
     // Emit boot-complete event to the system event log.
     syslog!("system.boot", Info, "Kernel boot complete, spawning init");
@@ -5662,9 +5755,16 @@ extern "C" fn kernel_main() -> ! {
         Ok(result) => {
             serial_println!(
                 "[init] Init process spawned: pid={}, tid={}, entry={:#x}",
-                result.pid, result.task_id, result.entry_point
+                result.pid,
+                result.task_id,
+                result.entry_point
             );
-            syslog!("process.launch", Info, "Init process spawned (pid={})", result.pid);
+            syslog!(
+                "process.launch",
+                Info,
+                "Init process spawned (pid={})",
+                result.pid
+            );
             // The init process is now in the scheduler's run queue.
             // Drop into the idle loop — the scheduler will switch to
             // init when it gets a time slice.
@@ -5673,7 +5773,12 @@ extern "C" fn kernel_main() -> ! {
         Err(e) => {
             serial_println!("[init] FAILED to spawn init: {:?}", e);
             serial_println!("[init] Falling back to kernel debug shell");
-            syslog!("process.launch", Error, "Init spawn failed: {:?}, falling back to kshell", e);
+            syslog!(
+                "process.launch",
+                Error,
+                "Init spawn failed: {:?}, falling back to kshell",
+                e
+            );
             kshell::run();
         }
     }
@@ -5734,7 +5839,8 @@ extern "C" fn cgroup_e2e_test_task(_arg: u64) {
 
     // Limit comfortably above N so the test's own allocations succeed;
     // over-limit rejection is covered by the frame-allocator self-tests.
-    if let Err(e) = cgroup::set_mem_limit(cg, cgroup::MemLimit::frames((N as u64).saturating_mul(4)))
+    if let Err(e) =
+        cgroup::set_mem_limit(cg, cgroup::MemLimit::frames((N as u64).saturating_mul(4)))
     {
         serial_println!("[cgroup-e2e] SKIP: set_mem_limit failed: {:?}", e);
         let _ = cgroup::delete(cg);
@@ -5789,12 +5895,20 @@ extern "C" fn cgroup_e2e_test_task(_arg: u64) {
     if ok {
         serial_println!(
             "[cgroup-e2e] PASS: alloc_frame charged {} frames to cgroup {} (usage {}->{}->{}), uncharge balanced",
-            charged, cg, base, after_alloc, after_free
+            charged,
+            cg,
+            base,
+            after_alloc,
+            after_free
         );
     } else {
         serial_println!(
             "[cgroup-e2e] FAIL: allocated={} charged={} (want {}) base={} after_free={}",
-            allocated, charged, N, base, after_free
+            allocated,
+            charged,
+            N,
+            base,
+            after_free
         );
     }
 
@@ -5809,8 +5923,7 @@ extern "C" fn cgroup_e2e_test_task(_arg: u64) {
 /// Set true by [`cgroup_e2e_test_task`] when the end-to-end cgroup test
 /// completes, so kmain can wait for its serial output before the boot
 /// harness observes `BOOT_OK` and tears down QEMU.
-static CGROUP_E2E_DONE: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static CGROUP_E2E_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Idle loop
@@ -6016,7 +6129,9 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     if nesting >= 2 {
         // Triple+ panic: absolutely nothing is safe. Halt immediately.
         // SAFETY: cli is valid in ring 0; we're about to halt forever.
-        unsafe { cpu::cli(); }
+        unsafe {
+            cpu::cli();
+        }
         cpu::halt_loop();
     }
     if nesting == 1 {
@@ -6024,7 +6139,9 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         // Print a minimal message and halt — don't attempt full diagnostics
         // since they may trigger yet another panic.
         // SAFETY: cli is valid in ring 0; we're about to halt forever.
-        unsafe { cpu::cli(); }
+        unsafe {
+            cpu::cli();
+        }
         serial_println!("!!! DOUBLE PANIC (panic inside panic handler) !!!");
         serial_println!("{}", info);
         cpu::halt_loop();
@@ -6078,7 +6195,11 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     serial_println!(
         "  Interrupts were {}",
-        if interrupts_were_enabled { "enabled" } else { "disabled" },
+        if interrupts_were_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
     );
     // CR2 holds the last page fault address — useful if the panic
     // was triggered by a page fault handler or UAF in paged memory.
@@ -6092,7 +6213,11 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         serial_println!(
             "  Tasks: {} total (ready={}, running={}, blocked={}, suspended={}, dead={})",
             sched_info.total_tasks,
-            ready, running, blocked, suspended, dead,
+            ready,
+            running,
+            blocked,
+            suspended,
+            dead,
         );
     } else {
         serial_println!("  Tasks: <scheduler lock held, cannot inspect>");
@@ -6106,7 +6231,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         let used_kb = used.saturating_mul(mm::frame::FRAME_SIZE) / 1024;
         serial_println!(
             "  Memory: {} KiB total, {} KiB used, {} KiB free ({} frames free)",
-            total_kb, used_kb, free_kb, stats.free_frames,
+            total_kb,
+            used_kb,
+            free_kb,
+            stats.free_frames,
         );
     } else {
         serial_println!("  Memory: <allocator lock held or not initialized>");
@@ -6116,9 +6244,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     let heap = mm::heap::stats();
     serial_println!(
         "  Heap: slab={}/{} allocs/frees, large={}/{}, refills={}, failures={}",
-        heap.slab_allocs, heap.slab_frees,
-        heap.large_allocs, heap.large_frees,
-        heap.slab_refills, heap.alloc_failures,
+        heap.slab_allocs,
+        heap.slab_frees,
+        heap.large_allocs,
+        heap.large_frees,
+        heap.slab_refills,
+        heap.alloc_failures,
     );
 
     // --- Stack backtrace (with symbol resolution) ---
@@ -6133,7 +6264,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
                 let sym = ksyms::format_addr(f.return_addr);
                 serial_println!("    #{:2}: {} (rbp={:#018x})", i, sym, f.frame_ptr);
             } else {
-                serial_println!("    #{:2}: {:#018x} (rbp={:#018x})", i, f.return_addr, f.frame_ptr);
+                serial_println!(
+                    "    #{:2}: {:#018x} (rbp={:#018x})",
+                    i,
+                    f.return_addr,
+                    f.frame_ptr
+                );
             }
         }
     }

@@ -53,12 +53,12 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -216,9 +216,7 @@ impl Predicate {
     fn matches(&self, stored: &AttrValue) -> bool {
         match (&self.op, &self.value, stored) {
             // Text equality.
-            (CompareOp::Equal, AttrValue::Text(a), AttrValue::Text(b)) => {
-                a.eq_ignore_ascii_case(b)
-            }
+            (CompareOp::Equal, AttrValue::Text(a), AttrValue::Text(b)) => a.eq_ignore_ascii_case(b),
             (CompareOp::NotEqual, AttrValue::Text(a), AttrValue::Text(b)) => {
                 !a.eq_ignore_ascii_case(b)
             }
@@ -383,7 +381,11 @@ fn value_to_key(val: &AttrValue) -> String {
             alloc::format!("I:{:020}", mapped)
         }
         AttrValue::Bool(b) => {
-            if *b { String::from("B:1") } else { String::from("B:0") }
+            if *b {
+                String::from("B:1")
+            } else {
+                String::from("B:0")
+            }
         }
         AttrValue::Bytes(b) => {
             let mut key = String::from("X:");
@@ -415,12 +417,8 @@ fn validate_name(name: &str) -> KernelResult<()> {
 /// Validate an attribute value.
 fn validate_value(val: &AttrValue) -> KernelResult<()> {
     match val {
-        AttrValue::Text(s) if s.len() > MAX_TEXT_VALUE_LEN => {
-            Err(KernelError::InvalidArgument)
-        }
-        AttrValue::Bytes(b) if b.len() > MAX_TEXT_VALUE_LEN => {
-            Err(KernelError::InvalidArgument)
-        }
+        AttrValue::Text(s) if s.len() > MAX_TEXT_VALUE_LEN => Err(KernelError::InvalidArgument),
+        AttrValue::Bytes(b) if b.len() > MAX_TEXT_VALUE_LEN => Err(KernelError::InvalidArgument),
         _ => Ok(()),
     }
 }
@@ -488,9 +486,9 @@ pub fn set_attr(path: &str, name: &str, value: AttrValue) -> KernelResult<()> {
         }
         // Insert new index entry.
         let new_key = value_to_key(&value);
-        let val_map = store.indexes.entry(attr_name_owned.clone())
-            .or_default();
-        val_map.entry(new_key)
+        let val_map = store.indexes.entry(attr_name_owned.clone()).or_default();
+        val_map
+            .entry(new_key)
             .or_default()
             .insert(String::from(path));
     }
@@ -548,7 +546,11 @@ pub fn list_attrs(path: &str) -> KernelResult<Vec<(String, AttrValue)>> {
     let store = STORE.lock();
     let idx = store.path_index.get(path).ok_or(KernelError::NotFound)?;
     let file = &store.files[*idx];
-    Ok(file.attrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    Ok(file
+        .attrs
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect())
 }
 
 /// Remove all attributes from a file.
@@ -559,7 +561,9 @@ pub fn clear_attrs(path: &str) -> KernelResult<usize> {
     let count = store.files[idx].attrs.len();
 
     // Collect index cleanup info before mutating.
-    let to_clean: Vec<(String, String)> = store.files[idx].attrs.iter()
+    let to_clean: Vec<(String, String)> = store.files[idx]
+        .attrs
+        .iter()
         .filter(|(name, _)| store.indexed_names.contains(name.as_str()))
         .map(|(name, val)| (name.clone(), value_to_key(val)))
         .collect();
@@ -607,9 +611,7 @@ pub fn create_index(attr_name: &str) -> KernelResult<()> {
     for file in &store.files {
         if let Some(val) = file.attrs.get(attr_name) {
             let key = value_to_key(val);
-            val_map.entry(key)
-                .or_default()
-                .insert(file.path.clone());
+            val_map.entry(key).or_default().insert(file.path.clone());
         }
     }
     if !val_map.is_empty() {
@@ -640,16 +642,23 @@ pub fn list_indexes() -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// Register an attribute schema.
-pub fn register_schema(name: &str, value_type: &'static str, description: &str) -> KernelResult<()> {
+pub fn register_schema(
+    name: &str,
+    value_type: &'static str,
+    description: &str,
+) -> KernelResult<()> {
     validate_name(name)?;
     let mut store = STORE.lock();
     let is_indexed = store.indexed_names.contains(name);
-    store.schemas.insert(String::from(name), AttrSchema {
-        name: String::from(name),
-        value_type,
-        indexed: is_indexed,
-        description: String::from(description),
-    });
+    store.schemas.insert(
+        String::from(name),
+        AttrSchema {
+            name: String::from(name),
+            value_type,
+            indexed: is_indexed,
+            description: String::from(description),
+        },
+    );
     Ok(())
 }
 
@@ -766,7 +775,11 @@ pub fn indexed_query(attr_name: &str, value: &AttrValue) -> Vec<String> {
 /// Count files that have a given attribute (any value).
 pub fn count_with_attr(attr_name: &str) -> usize {
     let store = STORE.lock();
-    store.files.iter().filter(|f| f.attrs.contains_key(attr_name)).count()
+    store
+        .files
+        .iter()
+        .filter(|f| f.attrs.contains_key(attr_name))
+        .count()
 }
 
 /// Get all unique values for a given attribute name.
@@ -792,7 +805,10 @@ pub fn unique_values(attr_name: &str) -> Vec<AttrValue> {
 /// Update all attributes when a file is renamed/moved.
 pub fn rename_path(old_path: &str, new_path: &str) -> KernelResult<()> {
     let mut store = STORE.lock();
-    let idx = store.path_index.remove(old_path).ok_or(KernelError::NotFound)?;
+    let idx = store
+        .path_index
+        .remove(old_path)
+        .ok_or(KernelError::NotFound)?;
     store.path_index.insert(String::from(new_path), idx);
     store.files[idx].path = String::from(new_path);
 
@@ -820,7 +836,9 @@ pub fn rename_path(old_path: &str, new_path: &str) -> KernelResult<()> {
 pub fn stats() -> (usize, usize, u64, u64, u64, usize) {
     let store = STORE.lock();
     let file_count = store.path_index.len();
-    let total_attrs: usize = store.files.iter()
+    let total_attrs: usize = store
+        .files
+        .iter()
         .filter(|f| !f.attrs.is_empty())
         .map(|f| f.attrs.len())
         .sum();
@@ -872,7 +890,11 @@ pub fn register_builtins() -> KernelResult<()> {
     // Image attributes.
     register_schema("Image:Width", "int", "Image width in pixels")?;
     register_schema("Image:Height", "int", "Image height in pixels")?;
-    register_schema("Image:ColorSpace", "text", "Color space (sRGB, AdobeRGB, etc.)")?;
+    register_schema(
+        "Image:ColorSpace",
+        "text",
+        "Color space (sRGB, AdobeRGB, etc.)",
+    )?;
     register_schema("Image:Camera", "text", "Camera make and model")?;
     register_schema("Image:DateTaken", "int", "Timestamp when photo was taken")?;
 
@@ -911,7 +933,11 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: set and get attributes.
     {
-        set_attr("/test/song.mp3", "Audio:Artist", AttrValue::Text(String::from("Beatles")))?;
+        set_attr(
+            "/test/song.mp3",
+            "Audio:Artist",
+            AttrValue::Text(String::from("Beatles")),
+        )?;
         set_attr("/test/song.mp3", "Audio:Bitrate", AttrValue::Int(320))?;
         let artist = get_attr("/test/song.mp3", "Audio:Artist")?;
         assert_eq!(artist, AttrValue::Text(String::from("Beatles")));
@@ -929,8 +955,16 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 3: query with equality.
     {
-        set_attr("/test/song2.mp3", "Audio:Artist", AttrValue::Text(String::from("Beatles")))?;
-        set_attr("/test/song3.mp3", "Audio:Artist", AttrValue::Text(String::from("Stones")))?;
+        set_attr(
+            "/test/song2.mp3",
+            "Audio:Artist",
+            AttrValue::Text(String::from("Beatles")),
+        )?;
+        set_attr(
+            "/test/song3.mp3",
+            "Audio:Artist",
+            AttrValue::Text(String::from("Stones")),
+        )?;
         let results = query(
             &[Predicate::eq_text("Audio:Artist", "Beatles")],
             QueryMode::All,

@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -144,7 +144,9 @@ where
 /// dirtying / writeback completion / flush cycle.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         flushers: Vec::new(),
@@ -174,12 +176,20 @@ pub fn register_device(device: &str) -> KernelResult<u32> {
         // unregister path, so this stays unique for the table's lifetime).
         let id = state.flushers.iter().map(|f| f.id).max().unwrap_or(0) + 1;
         state.devices.push(DeviceWriteback {
-            device: String::from(device), dirty_pages: 0, writeback_pages: 0,
-            written_pages: 0, written_bytes: 0, flushes: 0, congestion_count: 0,
+            device: String::from(device),
+            dirty_pages: 0,
+            writeback_pages: 0,
+            written_pages: 0,
+            written_bytes: 0,
+            flushes: 0,
+            congestion_count: 0,
         });
         state.flushers.push(FlusherThread {
-            id, device: String::from(device), active: false,
-            pages_written: 0, last_flush_ns: 0,
+            id,
+            device: String::from(device),
+            active: false,
+            pages_written: 0,
+            last_flush_ns: 0,
         });
         Ok(id)
     })
@@ -188,7 +198,10 @@ pub fn register_device(device: &str) -> KernelResult<u32> {
 /// Record pages becoming dirty.
 pub fn record_dirty(device: &str, pages: u64) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         dev.dirty_pages += pages;
         state.total_dirty += pages;
@@ -199,7 +212,10 @@ pub fn record_dirty(device: &str, pages: u64) -> KernelResult<()> {
 /// Record pages written back.
 pub fn record_written(device: &str, pages: u64) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         dev.dirty_pages = dev.dirty_pages.saturating_sub(pages);
         dev.writeback_pages = dev.writeback_pages.saturating_sub(pages);
@@ -237,19 +253,32 @@ pub fn set_threshold(pct: u32) -> KernelResult<()> {
 
 /// Get device writeback stats.
 pub fn device_stats() -> Vec<DeviceWriteback> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Get flusher thread info.
 pub fn flusher_stats() -> Vec<FlusherThread> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.flushers.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.flushers.clone())
 }
 
 /// Statistics: (device_count, total_dirty, total_written, total_flushes, threshold_pct, ops).
 pub fn stats() -> (usize, u64, u64, u64, u32, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.total_dirty, s.total_written, s.total_flushes, s.dirty_threshold_pct, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.total_dirty,
+            s.total_written,
+            s.total_flushes,
+            s.dirty_threshold_pct,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -286,19 +315,28 @@ pub fn self_test() {
     assert_eq!(device_stats().len(), 2);
     assert_eq!(flusher_stats().len(), 2);
     assert!(register_device("sda").is_err());
-    let dev = device_stats().into_iter().find(|d| d.device == "sda").expect("find");
+    let dev = device_stats()
+        .into_iter()
+        .find(|d| d.device == "sda")
+        .expect("find");
     assert_eq!((dev.dirty_pages, dev.written_pages, dev.flushes), (0, 0, 0));
     crate::serial_println!("  [2/8] register: OK");
 
     // 3: Record dirty — count and aggregate rise.
     record_dirty("sda", 100).expect("dirty");
-    let dev = device_stats().into_iter().find(|d| d.device == "sda").expect("find");
+    let dev = device_stats()
+        .into_iter()
+        .find(|d| d.device == "sda")
+        .expect("find");
     assert_eq!(dev.dirty_pages, 100);
     crate::serial_println!("  [3/8] dirty: OK");
 
     // 4: Record written — written counters rise (4096 bytes/page); dirty drops.
     record_written("sda", 50).expect("written");
-    let dev = device_stats().into_iter().find(|d| d.device == "sda").expect("find");
+    let dev = device_stats()
+        .into_iter()
+        .find(|d| d.device == "sda")
+        .expect("find");
     assert_eq!(dev.written_pages, 50);
     assert_eq!(dev.written_bytes, 50 * 4096);
     assert_eq!(dev.dirty_pages, 50); // 100 - 50
@@ -307,8 +345,14 @@ pub fn self_test() {
     // 5: Start flush — flusher goes active, flush counted, half the remaining
     // dirty pages move to writeback (50 / 2 = 25).
     start_flush("sda", FlushReason::Periodic).expect("flush");
-    let dev = device_stats().into_iter().find(|d| d.device == "sda").expect("find");
-    let fl = flusher_stats().into_iter().find(|f| f.device == "sda").expect("find fl");
+    let dev = device_stats()
+        .into_iter()
+        .find(|d| d.device == "sda")
+        .expect("find");
+    let fl = flusher_stats()
+        .into_iter()
+        .find(|f| f.device == "sda")
+        .expect("find fl");
     assert_eq!(dev.flushes, 1);
     assert_eq!(dev.writeback_pages, 25);
     assert!(fl.active);
@@ -329,7 +373,10 @@ pub fn self_test() {
     assert!(record_written("fake", 1).is_err());
     record_dirty("nvme0n1", 200).expect("nvme_dirty");
     record_written("nvme0n1", 100).expect("nvme_written");
-    let dev = device_stats().into_iter().find(|d| d.device == "nvme0n1").expect("find");
+    let dev = device_stats()
+        .into_iter()
+        .find(|d| d.device == "nvme0n1")
+        .expect("find");
     assert_eq!(dev.written_pages, 100);
     assert_eq!(dev.dirty_pages, 100); // 200 - 100
     crate::serial_println!("  [7/8] nvme + not found: OK");

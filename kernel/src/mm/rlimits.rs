@@ -121,9 +121,10 @@ impl core::fmt::Display for ResourceLimits {
             write!(f, "unlimited")?;
         } else {
             #[allow(clippy::arithmetic_side_effects)]
-            let kib = self.max_rss_frames.saturating_mul(
-                super::frame::FRAME_SIZE as u64,
-            ) / 1024;
+            let kib = self
+                .max_rss_frames
+                .saturating_mul(super::frame::FRAME_SIZE as u64)
+                / 1024;
             write!(f, "{} frames ({} KiB)", self.max_rss_frames, kib)?;
         }
 
@@ -182,9 +183,8 @@ impl LimitEntry {
 ///
 /// Uses a fixed-size array to avoid heap allocation.  Protected by a
 /// spinlock (lock ordering: RLIMITS < SCHED < `frame_allocator`).
-static RLIMITS: Mutex<[LimitEntry; MAX_PROCESSES]> = Mutex::named(
-    [LimitEntry::EMPTY; MAX_PROCESSES], b"RLIMITS"
-);
+static RLIMITS: Mutex<[LimitEntry; MAX_PROCESSES]> =
+    Mutex::named([LimitEntry::EMPTY; MAX_PROCESSES], b"RLIMITS");
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -206,12 +206,7 @@ static RLIMITS: Mutex<[LimitEntry; MAX_PROCESSES]> = Mutex::named(
 ///
 /// Returns `true` on success, `false` if the table is full.
 #[allow(dead_code)] // Public API for proc/init zones (process launch).
-pub fn apply_limits(
-    pid: u64,
-    pml4_phys: u64,
-    main_task_id: u64,
-    limits: &ResourceLimits,
-) -> bool {
+pub fn apply_limits(pid: u64, pml4_phys: u64, main_task_id: u64, limits: &ResourceLimits) -> bool {
     if pid == 0 {
         return false; // PID 0 is reserved.
     }
@@ -235,7 +230,8 @@ pub fn apply_limits(
             let Some(slot) = table.iter_mut().find(|e| e.pid == 0) else {
                 serial_println!(
                     "[rlimits] WARNING: table full ({} slots), cannot track PID {}",
-                    MAX_PROCESSES, pid,
+                    MAX_PROCESSES,
+                    pid,
                 );
                 return false;
             };
@@ -318,17 +314,24 @@ pub fn update_limit(
         }
         LimitField::MaxThreads => {
             #[allow(clippy::cast_possible_truncation)] // Clamped to u32::MAX above.
-            { entry.limits.max_threads = value.min(u64::from(u32::MAX)) as u32; }
+            {
+                entry.limits.max_threads = value.min(u64::from(u32::MAX)) as u32;
+            }
         }
         LimitField::MaxHandles => {
             #[allow(clippy::cast_possible_truncation)] // Clamped to u32::MAX above.
-            { entry.limits.max_handles = value.min(u64::from(u32::MAX)) as u32; }
+            {
+                entry.limits.max_handles = value.min(u64::from(u32::MAX)) as u32;
+            }
         }
     }
 
     serial_println!(
         "[rlimits] PID {} updated {:?}={} ({})",
-        pid, field, value, entry.limits,
+        pid,
+        field,
+        value,
+        entry.limits,
     );
     true
 }
@@ -353,9 +356,7 @@ pub enum LimitField {
 #[must_use]
 pub fn query(pid: u64) -> Option<ResourceLimits> {
     let table = RLIMITS.lock();
-    table.iter()
-        .find(|e| e.pid == pid)
-        .map(|e| e.limits)
+    table.iter().find(|e| e.pid == pid).map(|e| e.limits)
 }
 
 /// Remove resource limit tracking for a process.
@@ -378,7 +379,8 @@ pub fn remove(pid: u64) {
 #[must_use]
 pub fn thread_limit(pid: u64) -> u32 {
     let table = RLIMITS.lock();
-    table.iter()
+    table
+        .iter()
         .find(|e| e.pid == pid)
         .map_or(0, |e| e.limits.max_threads)
 }
@@ -390,7 +392,8 @@ pub fn thread_limit(pid: u64) -> u32 {
 #[must_use]
 pub fn handle_limit(pid: u64) -> u32 {
     let table = RLIMITS.lock();
-    table.iter()
+    table
+        .iter()
         .find(|e| e.pid == pid)
         .map_or(0, |e| e.limits.max_handles)
 }
@@ -439,7 +442,10 @@ pub fn self_test() {
     // directly.
     {
         let mut table = RLIMITS.lock();
-        let slot = table.iter_mut().find(|e| e.pid == 0).expect("Table not full");
+        let slot = table
+            .iter_mut()
+            .find(|e| e.pid == 0)
+            .expect("Table not full");
         slot.pid = test_pid;
         slot.limits = test_limits;
     }
@@ -464,22 +470,37 @@ pub fn self_test() {
         let entry = table.iter_mut().find(|e| e.pid == test_pid).expect("found");
         entry.limits.max_threads = 32;
     }
-    assert!(thread_limit(test_pid) == 32, "Updated thread limit should be 32");
+    assert!(
+        thread_limit(test_pid) == 32,
+        "Updated thread limit should be 32"
+    );
     serial_println!("[rlimits]   Field update: OK");
 
     // --- 6. Remove ---
     remove(test_pid);
-    assert!(query(test_pid).is_none(), "Query after remove should be None");
-    assert!(thread_limit(test_pid) == 0, "Thread limit after remove should be 0");
+    assert!(
+        query(test_pid).is_none(),
+        "Query after remove should be None"
+    );
+    assert!(
+        thread_limit(test_pid) == 0,
+        "Thread limit after remove should be 0"
+    );
     serial_println!("[rlimits]   Remove: OK");
 
     // --- 7. Nonexistent PID ---
     assert!(query(88888).is_none(), "Nonexistent PID should be None");
-    assert!(thread_limit(88888) == 0, "Nonexistent thread limit should be 0");
+    assert!(
+        thread_limit(88888) == 0,
+        "Nonexistent thread limit should be 0"
+    );
     serial_println!("[rlimits]   Nonexistent PID: OK");
 
     // --- 8. is_unlimited check on non-default ---
-    assert!(!test_limits.is_unlimited(), "Non-default should not be unlimited");
+    assert!(
+        !test_limits.is_unlimited(),
+        "Non-default should not be unlimited"
+    );
     serial_println!("[rlimits]   is_unlimited check: OK");
 
     serial_println!("[rlimits] Self-test PASSED");

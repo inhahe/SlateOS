@@ -68,9 +68,9 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::serial_println;
 use crate::smp;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -270,8 +270,7 @@ pub fn synchronize() {
     // Snapshot all CPUs' current quiescent state counters.
     let cpu_count = smp::cpu_count();
     for i in 0..cpu_count.min(MAX_CPUS) {
-        let current = QS_COUNTERS.get(i)
-            .map_or(0, |c| c.load(Ordering::Acquire));
+        let current = QS_COUNTERS.get(i).map_or(0, |c| c.load(Ordering::Acquire));
         if let Some(snap) = QS_SNAPSHOT.get(i) {
             snap.store(current, Ordering::Release);
         }
@@ -325,29 +324,29 @@ pub fn synchronize() {
             // with no RCU read-side critical section active.  Skip it.
             // Without this, tickless idle CPUs (whose APIC timer is
             // stopped) would prevent grace periods from completing.
-            let idle = CPU_IDLE.get(i)
-                .is_some_and(|f| f.load(Ordering::Acquire));
+            let idle = CPU_IDLE.get(i).is_some_and(|f| f.load(Ordering::Acquire));
             if idle {
                 continue;
             }
 
             // A CPU in an RCU read-side critical section is not quiescent.
-            let nesting = READ_NESTING.get(i)
-                .map_or(0, |n| n.load(Ordering::Relaxed));
+            let nesting = READ_NESTING.get(i).map_or(0, |n| n.load(Ordering::Relaxed));
             if nesting > 0 {
                 all_quiescent = false;
-                if not_quiescent_cpu == usize::MAX { not_quiescent_cpu = i; }
+                if not_quiescent_cpu == usize::MAX {
+                    not_quiescent_cpu = i;
+                }
                 continue;
             }
 
-            let snap = QS_SNAPSHOT.get(i)
-                .map_or(0, |s| s.load(Ordering::Acquire));
-            let current = QS_COUNTERS.get(i)
-                .map_or(0, |c| c.load(Ordering::Acquire));
+            let snap = QS_SNAPSHOT.get(i).map_or(0, |s| s.load(Ordering::Acquire));
+            let current = QS_COUNTERS.get(i).map_or(0, |c| c.load(Ordering::Acquire));
 
             if current <= snap {
                 all_quiescent = false;
-                if not_quiescent_cpu == usize::MAX { not_quiescent_cpu = i; }
+                if not_quiescent_cpu == usize::MAX {
+                    not_quiescent_cpu = i;
+                }
             }
         }
 
@@ -362,7 +361,9 @@ pub fn synchronize() {
             // never reach this with the self-QS bump above.
             serial_println!(
                 "[rcu] WARNING: synchronize() exceeded {} iterations (gp={}, stuck_cpu={}); proceeding",
-                MAX_WAIT_ITERS, gp, not_quiescent_cpu
+                MAX_WAIT_ITERS,
+                gp,
+                not_quiescent_cpu
             );
             break;
         }
@@ -389,7 +390,11 @@ pub fn synchronize() {
 /// callback queue is full.
 pub fn call(arg: u64, func: fn(u64)) -> bool {
     let gp = GP_COUNTER.load(Ordering::SeqCst);
-    let cb = RcuCallback { arg, func, gp_num: gp };
+    let cb = RcuCallback {
+        arg,
+        func,
+        gp_num: gp,
+    };
     // IRQ-safe critical section: the same CALLBACKS lock is acquired
     // from rcu::tick() running in softirq context (which dispatches
     // with interrupts enabled), so a timer ISR that interrupts a
@@ -509,7 +514,8 @@ fn process_callbacks(completed_gp: u64) {
                     serial_println!(
                         "[rcu] CRITICAL: refusing to invoke corrupt callback func={:#x} \
                          arg={:#x} — queue corruption; skipping (see B-KNULLJUMP-SIGNAL)",
-                        func_addr, cb.arg
+                        func_addr,
+                        cb.arg
                     );
                 }
             }
@@ -576,13 +582,19 @@ pub fn self_test() {
 
     // Test 3: Quiescent state reporting.
     let cpu = smp::current_cpu_index();
-    let before = QS_COUNTERS.get(cpu)
+    let before = QS_COUNTERS
+        .get(cpu)
         .map_or(0, |c| c.load(Ordering::Relaxed));
     quiescent_state();
-    let after = QS_COUNTERS.get(cpu)
+    let after = QS_COUNTERS
+        .get(cpu)
         .map_or(0, |c| c.load(Ordering::Relaxed));
     assert!(after > before, "quiescent_state should increment counter");
-    serial_println!("[rcu]   Quiescent state: OK (counter {} → {})", before, after);
+    serial_println!(
+        "[rcu]   Quiescent state: OK (counter {} → {})",
+        before,
+        after
+    );
 
     // Test 4: Deferred callback.
     static TEST_FLAG: AtomicU64 = AtomicU64::new(0);
@@ -590,7 +602,10 @@ pub fn self_test() {
         TEST_FLAG.store(arg, Ordering::Relaxed);
     }
 
-    assert!(call(42, test_callback), "callback registration should succeed");
+    assert!(
+        call(42, test_callback),
+        "callback registration should succeed"
+    );
     serial_println!("[rcu]   Callback registration: OK");
 
     // Test 5: Synchronize (on single-CPU, should complete immediately
@@ -601,24 +616,38 @@ pub fn self_test() {
     // is the last serial output, the hang is inside synchronize();
     // if it's "Synchronize: post" without "Callback invoked", the
     // callback dispatch path is the problem.
-    serial_println!("[rcu]   Synchronize: pre (gp_counter={})",
-        GP_COUNTER.load(Ordering::Relaxed));
+    serial_println!(
+        "[rcu]   Synchronize: pre (gp_counter={})",
+        GP_COUNTER.load(Ordering::Relaxed)
+    );
     synchronize();
-    serial_println!("[rcu]   Synchronize: post (gp_completed={})",
-        GP_COMPLETED.load(Ordering::Relaxed));
+    serial_println!(
+        "[rcu]   Synchronize: post (gp_completed={})",
+        GP_COMPLETED.load(Ordering::Relaxed)
+    );
     serial_println!("[rcu]   Synchronize: OK");
 
     // The callback should have been invoked during synchronize().
     let flag_val = TEST_FLAG.load(Ordering::Relaxed);
-    assert_eq!(flag_val, 42, "callback should have been invoked with arg=42");
+    assert_eq!(
+        flag_val, 42,
+        "callback should have been invoked with arg=42"
+    );
     serial_println!("[rcu]   Callback invoked: OK (flag={})", flag_val);
 
     // Test 6: Stats.
     let st = stats();
-    assert!(st.gp_completed >= 1, "at least one GP should have completed");
+    assert!(
+        st.gp_completed >= 1,
+        "at least one GP should have completed"
+    );
     assert!(st.callbacks_invoked >= 1);
-    serial_println!("[rcu]   Stats: OK (gp={}, sync={}, callbacks={})",
-        st.gp_completed, st.sync_calls, st.callbacks_invoked);
+    serial_println!(
+        "[rcu]   Stats: OK (gp={}, sync={}, callbacks={})",
+        st.gp_completed,
+        st.sync_calls,
+        st.callbacks_invoked
+    );
 
     serial_println!("[rcu] Self-test PASSED");
 }

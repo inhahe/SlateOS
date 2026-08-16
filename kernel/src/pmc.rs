@@ -180,12 +180,16 @@ pub fn configure(counter: u8, event: Event) -> bool {
     let msr = MSR_PERFEVTSEL_BASE.wrapping_add(u32::from(counter));
     // SAFETY: We verified the PMU is available and the counter index is
     // valid.  Writing PERFEVTSELx configures what to count.
-    unsafe { cpu::wrmsr(msr, evtsel); }
+    unsafe {
+        cpu::wrmsr(msr, evtsel);
+    }
 
     // Zero the counter so measurements start fresh.
     let pmc_msr = MSR_PMC_BASE.wrapping_add(u32::from(counter));
     // SAFETY: Same as above — counter MSR is valid.
-    unsafe { cpu::wrmsr(pmc_msr, 0); }
+    unsafe {
+        cpu::wrmsr(pmc_msr, 0);
+    }
 
     true
 }
@@ -273,7 +277,9 @@ pub fn reset(counter: u8) -> bool {
 
     let pmc_msr = MSR_PMC_BASE.wrapping_add(u32::from(counter));
     // SAFETY: PMU is available, counter index is valid.
-    unsafe { cpu::wrmsr(pmc_msr, 0); }
+    unsafe {
+        cpu::wrmsr(pmc_msr, 0);
+    }
 
     true
 }
@@ -333,7 +339,9 @@ pub fn self_test() {
     let features = cpu::features().unwrap();
     serial_println!(
         "[pmc]   PMU v{}: {} counters × {}-bit",
-        features.pmu_version, features.pmu_counters, features.pmu_counter_width,
+        features.pmu_version,
+        features.pmu_counters,
+        features.pmu_counter_width,
     );
 
     // Test 1: Configure and read Instructions Retired.
@@ -352,7 +360,10 @@ pub fn self_test() {
     let count = read(0);
     serial_println!("[pmc]   Instructions retired (1000-iter loop): {}", count);
     // Should be at least a few hundred instructions.
-    assert!(count > 0, "Instructions Retired counter is zero — PMU not counting");
+    assert!(
+        count > 0,
+        "Instructions Retired counter is zero — PMU not counting"
+    );
 
     // Test 2: Reset zeroes the counter.
     assert!(reset(0), "reset failed");
@@ -361,7 +372,10 @@ pub fn self_test() {
     serial_println!("[pmc]   Counter reset: OK");
 
     // Test 3: Invalid counter index returns false.
-    assert!(!configure(255, Event::LlcMisses), "should reject invalid counter");
+    assert!(
+        !configure(255, Event::LlcMisses),
+        "should reject invalid counter"
+    );
     serial_println!("[pmc]   Bounds checking: OK");
 
     serial_println!("[pmc] Self-test PASSED");

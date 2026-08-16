@@ -22,15 +22,15 @@
 //! notify, and poll for completion.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU8, AtomicU16, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame};
 use crate::pci::{self, PciDevice};
-use crate::virtio::queue::{Virtqueue, VRING_DESC_F_WRITE};
+use crate::virtio::queue::{VRING_DESC_F_WRITE, Virtqueue};
 use crate::virtio::{
-    VirtioLegacyPci, REG_ISR_STATUS, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
+    REG_ISR_STATUS, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, VirtioLegacyPci,
 };
 
 // ---------------------------------------------------------------------------
@@ -57,8 +57,8 @@ const NUM_RX_BUFS: usize = 16;
 // DMA layout:
 // TX: header at offset 0, data at offset 16 within dma_frame.
 // RX: buffers laid out sequentially from offset 0 within rx_frame.
-const DMA_TX_HEADER_OFFSET: usize = 0;          // 10 bytes
-const DMA_TX_DATA_OFFSET: usize = 16;           // Up to 1514 bytes
+const DMA_TX_HEADER_OFFSET: usize = 0; // 10 bytes
+const DMA_TX_DATA_OFFSET: usize = 16; // Up to 1514 bytes
 
 // ---------------------------------------------------------------------------
 // IRQ support — lock-free state for ISR context
@@ -113,9 +113,13 @@ pub fn enable_interrupts() {
     }
     // PCI interrupts are level-triggered, active-low.
     // SAFETY: IOAPIC is initialized (caller guarantees).
-    unsafe { crate::ioapic::set_level_triggered(irq); }
+    unsafe {
+        crate::ioapic::set_level_triggered(irq);
+    }
     // SAFETY: The IDT handler is installed and calls handle_irq().
-    unsafe { crate::ioapic::unmask_irq(irq); }
+    unsafe {
+        crate::ioapic::unmask_irq(irq);
+    }
     NET_IRQ_ENABLED.store(true, Ordering::Release);
     crate::serial_println!(
         "[virtio-net] IRQ {} enabled — interrupt notification active",
@@ -255,12 +259,16 @@ impl VirtioNetDevice {
         let dma_frame = frame::alloc_frame()?;
         let dma_virt = (dma_frame.addr() + hhdm_offset) as *mut u8;
         // SAFETY: We own this frame; HHDM maps it writable.
-        unsafe { core::ptr::write_bytes(dma_virt, 0, frame::FRAME_SIZE); }
+        unsafe {
+            core::ptr::write_bytes(dma_virt, 0, frame::FRAME_SIZE);
+        }
 
         let rx_frame = frame::alloc_frame()?;
         let rx_virt = (rx_frame.addr() + hhdm_offset) as *mut u8;
         // SAFETY: We own this frame; HHDM maps it writable.
-        unsafe { core::ptr::write_bytes(rx_virt, 0, frame::FRAME_SIZE); }
+        unsafe {
+            core::ptr::write_bytes(rx_virt, 0, frame::FRAME_SIZE);
+        }
 
         let mut dev = Self {
             transport,
@@ -363,7 +371,8 @@ impl VirtioNetDevice {
         if buf_idx >= max_bufs {
             crate::serial_println!(
                 "[virtio-net] WARNING: RX desc addr {:#x} maps to invalid slot {}",
-                desc_addr, buf_idx
+                desc_addr,
+                buf_idx
             );
             return None;
         }
@@ -442,14 +451,17 @@ impl VirtioNetDevice {
         let header_ptr = self.dma_virt as *mut VirtioNetHeader;
         // SAFETY: dma_virt points to our DMA frame, header fits.
         unsafe {
-            core::ptr::write_volatile(header_ptr, VirtioNetHeader {
-                flags: 0,
-                gso_type: 0,
-                hdr_len: 0,
-                gso_size: 0,
-                csum_start: 0,
-                csum_offset: 0,
-            });
+            core::ptr::write_volatile(
+                header_ptr,
+                VirtioNetHeader {
+                    flags: 0,
+                    gso_type: 0,
+                    hdr_len: 0,
+                    gso_size: 0,
+                    csum_start: 0,
+                    csum_offset: 0,
+                },
+            );
         }
 
         // Copy the frame data to the DMA buffer.
@@ -508,14 +520,10 @@ impl Drop for VirtioNetDevice {
 
         // SAFETY: We own these frames.
         if let Err(e) = unsafe { frame::free_frame(self.dma_frame) } {
-            crate::serial_println!(
-                "[virtio-net] WARNING: failed to free DMA frame: {:?}", e
-            );
+            crate::serial_println!("[virtio-net] WARNING: failed to free DMA frame: {:?}", e);
         }
         if let Err(e) = unsafe { frame::free_frame(self.rx_frame) } {
-            crate::serial_println!(
-                "[virtio-net] WARNING: failed to free RX frame: {:?}", e
-            );
+            crate::serial_println!("[virtio-net] WARNING: failed to free RX frame: {:?}", e);
         }
     }
 }

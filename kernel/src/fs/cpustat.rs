@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -133,7 +133,9 @@ where
 /// [`register_cpu`] per online CPU and the record_* functions on the tick path.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         cpus: Vec::new(),
         total_context_switches: 0,
@@ -150,10 +152,17 @@ pub fn init_defaults() {
 /// return `NotFound` for an unregistered CPU id.
 pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.cpus.iter().any(|c| c.cpu_id == cpu_id) { return Err(KernelError::AlreadyExists); }
-        if state.cpus.len() >= MAX_CPUS { return Err(KernelError::ResourceExhausted); }
+        if state.cpus.iter().any(|c| c.cpu_id == cpu_id) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if state.cpus.len() >= MAX_CPUS {
+            return Err(KernelError::ResourceExhausted);
+        }
         state.cpus.push(CpuTimeBreakdown {
-            cpu_id, times_ns: [0; 8], context_switches: 0, interrupts: 0,
+            cpu_id,
+            times_ns: [0; 8],
+            context_switches: 0,
+            interrupts: 0,
         });
         Ok(())
     })
@@ -162,7 +171,10 @@ pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
 /// Record time in a CPU mode.
 pub fn record_time(cpu_id: u32, mode: CpuMode, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.times_ns[mode.index()] += ns;
         Ok(())
@@ -172,7 +184,10 @@ pub fn record_time(cpu_id: u32, mode: CpuMode, ns: u64) -> KernelResult<()> {
 /// Record a context switch.
 pub fn record_context_switch(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.context_switches += 1;
         state.total_context_switches += 1;
@@ -183,7 +198,10 @@ pub fn record_context_switch(cpu_id: u32) -> KernelResult<()> {
 /// Record an interrupt.
 pub fn record_interrupt(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.interrupts += 1;
         state.total_interrupts += 1;
@@ -199,12 +217,17 @@ pub fn per_cpu() -> Vec<CpuTimeBreakdown> {
 /// Per-CPU utilization (non-idle %) * 100.
 pub fn per_cpu_util() -> Vec<(u32, u64)> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.cpus.iter().map(|c| {
-            let total: u64 = c.times_ns.iter().sum();
-            if total == 0 { return (c.cpu_id, 0); }
-            let busy = total - c.times_ns[CpuMode::Idle.index()];
-            (c.cpu_id, busy * 10000 / total)
-        }).collect()
+        s.cpus
+            .iter()
+            .map(|c| {
+                let total: u64 = c.times_ns.iter().sum();
+                if total == 0 {
+                    return (c.cpu_id, 0);
+                }
+                let busy = total - c.times_ns[CpuMode::Idle.index()];
+                (c.cpu_id, busy * 10000 / total)
+            })
+            .collect()
     })
 }
 
@@ -220,7 +243,9 @@ pub fn utilization() -> u64 {
                 total += t;
                 idle += c.times_ns[CpuMode::Idle.index()];
             }
-            if total == 0 { return 0; }
+            if total == 0 {
+                return 0;
+            }
             (total - idle) * 10000 / total
         }
         None => 0,
@@ -231,7 +256,12 @@ pub fn utilization() -> u64 {
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.cpus.len(), s.total_context_switches, s.total_interrupts, s.ops),
+        Some(s) => (
+            s.cpus.len(),
+            s.total_context_switches,
+            s.total_interrupts,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }
@@ -263,19 +293,31 @@ pub fn self_test() {
     register_cpu(1).expect("cpu1");
     assert!(register_cpu(0).is_err());
     record_time(0, CpuMode::User, 1_000_000).expect("time");
-    let c = per_cpu().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    let c = per_cpu()
+        .iter()
+        .find(|c| c.cpu_id == 0)
+        .cloned()
+        .expect("cpu0");
     assert_eq!(c.times_ns[CpuMode::User.index()], 1_000_000);
     crate::serial_println!("  [2/8] record time: OK");
 
     // 3: Context switch increments exactly from zero.
     record_context_switch(0).expect("ctxsw");
-    let c = per_cpu().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    let c = per_cpu()
+        .iter()
+        .find(|c| c.cpu_id == 0)
+        .cloned()
+        .expect("cpu0");
     assert_eq!(c.context_switches, 1);
     crate::serial_println!("  [3/8] context switch: OK");
 
     // 4: Interrupt increments exactly from zero.
     record_interrupt(0).expect("irq");
-    let c = per_cpu().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    let c = per_cpu()
+        .iter()
+        .find(|c| c.cpu_id == 0)
+        .cloned()
+        .expect("cpu0");
     assert_eq!(c.interrupts, 1);
     crate::serial_println!("  [4/8] interrupt: OK");
 
@@ -284,8 +326,16 @@ pub fn self_test() {
     record_time(0, CpuMode::Idle, 1_000_000).expect("idle");
     let utils = per_cpu_util();
     assert_eq!(utils.len(), 2);
-    let u0 = utils.iter().find(|(id, _)| *id == 0).map(|(_, u)| *u).expect("u0");
-    let u1 = utils.iter().find(|(id, _)| *id == 1).map(|(_, u)| *u).expect("u1");
+    let u0 = utils
+        .iter()
+        .find(|(id, _)| *id == 0)
+        .map(|(_, u)| *u)
+        .expect("u0");
+    let u1 = utils
+        .iter()
+        .find(|(id, _)| *id == 1)
+        .map(|(_, u)| *u)
+        .expect("u1");
     assert_eq!(u0, 5000); // 1ms busy / 2ms total
     assert_eq!(u1, 0);
     crate::serial_println!("  [5/8] per-cpu util: OK");

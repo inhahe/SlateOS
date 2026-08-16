@@ -730,13 +730,10 @@ impl KernelFdTable {
     /// Iterate over `(fd, FdEntry)` for every open fd.  Used by
     /// teardown and `close-on-exec`.
     pub fn open_entries(&self) -> impl Iterator<Item = (i32, FdEntry)> + '_ {
-        self.entries
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, slot)| {
-                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-                slot.map(|e| (idx as i32, e))
-            })
+        self.entries.iter().enumerate().filter_map(|(idx, slot)| {
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+            slot.map(|e| (idx as i32, e))
+        })
     }
 
     /// Remove every open entry whose `FD_CLOEXEC` flag is set and
@@ -837,7 +834,9 @@ pub fn self_test() -> KernelResult<()> {
     if (f3, f4, f5) != (3, 4, 5) {
         serial_println!(
             "[linux_fd] FAIL: install_lowest gave {}/{}/{}, want 3/4/5",
-            f3, f4, f5,
+            f3,
+            f4,
+            f5,
         );
         return Err(KernelError::InternalError);
     }
@@ -868,7 +867,9 @@ pub fn self_test() -> KernelResult<()> {
     {
         // Excluding fd 4 should drop the count to zero (only one ref).
     } else {
-        serial_println!("[linux_fd] FAIL: is_handle_referenced should drop to 0 when excluding the sole reference");
+        serial_println!(
+            "[linux_fd] FAIL: is_handle_referenced should drop to 0 when excluding the sole reference"
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -880,15 +881,14 @@ pub fn self_test() -> KernelResult<()> {
     }
     let dup_entry = t.lookup(dup_fd).ok_or(KernelError::InternalError)?;
     if dup_entry.raw_handle != 0x2222 || dup_entry.fd_flags != 0 {
-        serial_println!(
-            "[linux_fd] FAIL: dup entry mismatch: {:?}",
-            dup_entry,
-        );
+        serial_println!("[linux_fd] FAIL: dup entry mismatch: {:?}", dup_entry,);
         return Err(KernelError::InternalError);
     }
     // Now there are two refs to handle 0x2222.
     if !t.is_handle_referenced(HandleKind::File, 0x2222, 4) {
-        serial_println!("[linux_fd] FAIL: after dup, handle should still be referenced if we exclude fd 4");
+        serial_println!(
+            "[linux_fd] FAIL: after dup, handle should still be referenced if we exclude fd 4"
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -972,7 +972,9 @@ pub fn self_test() -> KernelResult<()> {
         if (f3, f4, f5) != (3, 4, 5) {
             serial_println!(
                 "[linux_fd] FAIL: cloexec setup install_lowest gave {}/{}/{}",
-                f3, f4, f5,
+                f3,
+                f4,
+                f5,
             );
             return Err(KernelError::InternalError);
         }
@@ -992,7 +994,9 @@ pub fn self_test() -> KernelResult<()> {
         }
         // stderr slot is empty before ensure_stdio.
         if e.lookup(STDERR_FD).is_some() {
-            serial_println!("[linux_fd] FAIL: cloexec stderr should be cleared before ensure_stdio");
+            serial_println!(
+                "[linux_fd] FAIL: cloexec stderr should be cleared before ensure_stdio"
+            );
             return Err(KernelError::InternalError);
         }
         // fd 4 (non-cloexec) survives.

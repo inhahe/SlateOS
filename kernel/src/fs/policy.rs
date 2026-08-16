@@ -81,9 +81,8 @@ impl FsProfile {
     }
 
     /// All profiles.
-    pub const ALL: &'static [FsProfile] = &[
-        Self::Desktop, Self::Server, Self::Development, Self::Gaming,
-    ];
+    pub const ALL: &'static [FsProfile] =
+        &[Self::Desktop, Self::Server, Self::Development, Self::Gaming];
 }
 
 /// A single tunable filesystem parameter.
@@ -273,7 +272,9 @@ fn setting_defs() -> &'static [SettingDef] {
                 },
                 setter: |v| {
                     let pct: u64 = v.parse().map_err(|_| "invalid number")?;
-                    if pct > 100 { return Err("percent must be 0-100"); }
+                    if pct > 100 {
+                        return Err("percent must be 0-100");
+                    }
                     super::reclaim::set_high_watermark(pct);
                     Ok(())
                 },
@@ -288,7 +289,9 @@ fn setting_defs() -> &'static [SettingDef] {
                 },
                 setter: |v| {
                     let pct: u64 = v.parse().map_err(|_| "invalid number")?;
-                    if pct > 100 { return Err("percent must be 0-100"); }
+                    if pct > 100 {
+                        return Err("percent must be 0-100");
+                    }
                     super::reclaim::set_low_watermark(pct);
                     Ok(())
                 },

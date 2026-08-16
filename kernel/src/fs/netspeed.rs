@@ -20,11 +20,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -110,7 +110,9 @@ where
 /// the real API (see [`self_test`]).
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         results: Vec::new(),
         snapshots: Vec::new(),
@@ -140,10 +142,20 @@ pub fn run_test(_interface: &str) -> KernelResult<SpeedResult> {
 }
 
 /// Update bandwidth snapshot for an interface.
-pub fn update_bandwidth(interface: &str, rx_bytes: u64, tx_bytes: u64, rx_packets: u64, tx_packets: u64) -> KernelResult<()> {
+pub fn update_bandwidth(
+    interface: &str,
+    rx_bytes: u64,
+    tx_bytes: u64,
+    rx_packets: u64,
+    tx_packets: u64,
+) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        if let Some(snap) = state.snapshots.iter_mut().find(|s| s.interface == interface) {
+        if let Some(snap) = state
+            .snapshots
+            .iter_mut()
+            .find(|s| s.interface == interface)
+        {
             snap.rx_bytes = rx_bytes;
             snap.tx_bytes = tx_bytes;
             snap.rx_packets = rx_packets;
@@ -155,8 +167,13 @@ pub fn update_bandwidth(interface: &str, rx_bytes: u64, tx_bytes: u64, rx_packet
             }
             state.snapshots.push(BandwidthSnapshot {
                 interface: String::from(interface),
-                rx_bytes, tx_bytes, rx_packets, tx_packets,
-                rx_errors: 0, tx_errors: 0, last_update_ns: now,
+                rx_bytes,
+                tx_bytes,
+                rx_packets,
+                tx_packets,
+                rx_errors: 0,
+                tx_errors: 0,
+                last_update_ns: now,
             });
         }
         Ok(())
@@ -166,7 +183,11 @@ pub fn update_bandwidth(interface: &str, rx_bytes: u64, tx_bytes: u64, rx_packet
 /// Record errors for an interface.
 pub fn record_errors(interface: &str, rx_errors: u64, tx_errors: u64) -> KernelResult<()> {
     with_state(|state| {
-        if let Some(snap) = state.snapshots.iter_mut().find(|s| s.interface == interface) {
+        if let Some(snap) = state
+            .snapshots
+            .iter_mut()
+            .find(|s| s.interface == interface)
+        {
             snap.rx_errors += rx_errors;
             snap.tx_errors += tx_errors;
             Ok(())
@@ -178,25 +199,38 @@ pub fn record_errors(interface: &str, rx_errors: u64, tx_errors: u64) -> KernelR
 
 /// Get speed test history.
 pub fn test_history() -> Vec<SpeedResult> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.results.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.results.clone())
 }
 
 /// Get bandwidth snapshots.
 pub fn bandwidth_snapshots() -> Vec<BandwidthSnapshot> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.snapshots.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.snapshots.clone())
 }
 
 /// Get snapshot for a specific interface.
 pub fn interface_bandwidth(name: &str) -> Option<BandwidthSnapshot> {
     STATE.lock().as_ref().and_then(|s| {
-        s.snapshots.iter().find(|snap| snap.interface == name).cloned()
+        s.snapshots
+            .iter()
+            .find(|snap| snap.interface == name)
+            .cloned()
     })
 }
 
 /// Format bits per second as human-readable.
 pub fn format_speed(bps: u64) -> String {
     if bps >= 1_000_000_000 {
-        format!("{}.{} Gbps", bps / 1_000_000_000, (bps % 1_000_000_000) / 100_000_000)
+        format!(
+            "{}.{} Gbps",
+            bps / 1_000_000_000,
+            (bps % 1_000_000_000) / 100_000_000
+        )
     } else if bps >= 1_000_000 {
         format!("{}.{} Mbps", bps / 1_000_000, (bps % 1_000_000) / 100_000)
     } else if bps >= 1_000 {
@@ -253,7 +287,10 @@ pub fn self_test() {
     // 4: Re-update overwrites the same interface row (no duplicate).
     update_bandwidth("eth0", 3_000_000, 1_500_000, 3000, 1500).expect("update2");
     assert_eq!(bandwidth_snapshots().len(), 1);
-    assert_eq!(interface_bandwidth("eth0").expect("get").rx_bytes, 3_000_000);
+    assert_eq!(
+        interface_bandwidth("eth0").expect("get").rx_bytes,
+        3_000_000
+    );
     crate::serial_println!("  [4/8] re-update: OK");
 
     // 5: A second interface adds a distinct row.

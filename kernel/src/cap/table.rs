@@ -24,11 +24,11 @@
 //! function marks an entry as invalid.  Subsequent operations using
 //! the handle will return `InvalidCapability`.
 
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
+use super::{ResourceType, Rights};
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
-use super::{ResourceType, Rights};
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -169,11 +169,7 @@ impl CapTable {
     ///
     /// - `InvalidCapability` — handle not found or revoked.
     /// - `PermissionDenied` — handle exists but lacks the required rights.
-    pub fn check_rights(
-        &self,
-        handle: CapHandle,
-        required: Rights,
-    ) -> KernelResult<&CapEntry> {
+    pub fn check_rights(&self, handle: CapHandle, required: Rights) -> KernelResult<&CapEntry> {
         let entry = self.lookup(handle)?;
 
         if !entry.rights.contains(required) {
@@ -195,11 +191,7 @@ impl CapTable {
     /// - `PermissionDenied` — source doesn't have DUPLICATE right,
     ///   or `new_rights` is not a subset of the source's rights.
     /// - `InvalidArgument` — table is at capacity.
-    pub fn duplicate(
-        &mut self,
-        source: CapHandle,
-        new_rights: Rights,
-    ) -> KernelResult<CapHandle> {
+    pub fn duplicate(&mut self, source: CapHandle, new_rights: Rights) -> KernelResult<CapHandle> {
         // Look up the source — must exist and be valid.
         let entry = self
             .entries
@@ -317,9 +309,7 @@ impl CapTable {
         required_rights: Rights,
     ) -> bool {
         self.entries.values().any(|e| {
-            e.valid
-                && e.resource_type == resource_type
-                && e.rights.contains(required_rights)
+            e.valid && e.resource_type == resource_type && e.rights.contains(required_rights)
         })
     }
 
@@ -344,11 +334,7 @@ impl CapTable {
     ///
     /// Called when a kernel object is destroyed (e.g., channel closed).
     /// Returns the number of entries revoked.
-    pub fn revoke_by_resource(
-        &mut self,
-        resource_type: ResourceType,
-        resource_id: u64,
-    ) -> usize {
+    pub fn revoke_by_resource(&mut self, resource_type: ResourceType, resource_id: u64) -> usize {
         let mut count = 0;
         for entry in self.entries.values_mut() {
             if entry.valid
@@ -385,11 +371,7 @@ pub fn self_test() -> KernelResult<()> {
 fn test_insert_and_lookup() -> KernelResult<()> {
     let mut table = CapTable::new();
 
-    let handle = table.insert(
-        ResourceType::Channel,
-        42,
-        Rights::READ_WRITE,
-    )?;
+    let handle = table.insert(ResourceType::Channel, 42, Rights::READ_WRITE)?;
 
     let entry = table.lookup(handle)?;
     if entry.resource_type != ResourceType::Channel {
@@ -413,11 +395,7 @@ fn test_insert_and_lookup() -> KernelResult<()> {
 fn test_rights_check() -> KernelResult<()> {
     let mut table = CapTable::new();
 
-    let handle = table.insert(
-        ResourceType::Pipe,
-        7,
-        Rights::READ,
-    )?;
+    let handle = table.insert(ResourceType::Pipe, 7, Rights::READ)?;
 
     // READ should pass.
     table.check_rights(handle, Rights::READ)?;
@@ -470,11 +448,7 @@ fn test_duplicate() -> KernelResult<()> {
 fn test_revoke() -> KernelResult<()> {
     let mut table = CapTable::new();
 
-    let handle = table.insert(
-        ResourceType::EventFd,
-        55,
-        Rights::READ | Rights::SIGNAL,
-    )?;
+    let handle = table.insert(ResourceType::EventFd, 55, Rights::READ | Rights::SIGNAL)?;
 
     // Should be valid.
     table.lookup(handle)?;
@@ -544,20 +518,13 @@ fn test_revoke_by_resource() -> KernelResult<()> {
 fn test_delegation_cannot_escalate() -> KernelResult<()> {
     let mut table = CapTable::new();
 
-    let original = table.insert(
-        ResourceType::Pipe,
-        99,
-        Rights::READ | Rights::DUPLICATE,
-    )?;
+    let original = table.insert(ResourceType::Pipe, 99, Rights::READ | Rights::DUPLICATE)?;
 
     // Try to duplicate with WRITE (which original doesn't have).
     match table.duplicate(original, Rights::READ | Rights::WRITE) {
         Err(KernelError::PermissionDenied) => {} // Expected.
         other => {
-            serial_println!(
-                "[cap]   FAIL: escalation should be denied: {:?}",
-                other
-            );
+            serial_println!("[cap]   FAIL: escalation should be denied: {:?}", other);
             return Err(KernelError::InternalError);
         }
     }
@@ -571,11 +538,7 @@ fn test_has_capability_type() -> KernelResult<()> {
     let mut table = CapTable::new();
 
     // Insert a File capability with READ+WRITE for resource_id 42.
-    table.insert(
-        ResourceType::File,
-        42,
-        Rights::READ | Rights::WRITE,
-    )?;
+    table.insert(ResourceType::File, 42, Rights::READ | Rights::WRITE)?;
 
     // Type-level check should match regardless of resource_id.
     if !table.has_capability_type(ResourceType::File, Rights::READ) {
@@ -690,13 +653,19 @@ fn test_valid_entries() -> KernelResult<()> {
         serial_println!("[cap]   FAIL: valid_entries/count disagree after revoke");
         return Err(KernelError::InternalError);
     }
-    if entries.iter().any(|e| e.resource_type == ResourceType::Pipe) {
+    if entries
+        .iter()
+        .any(|e| e.resource_type == ResourceType::Pipe)
+    {
         serial_println!("[cap]   FAIL: revoked entry still enumerated");
         return Err(KernelError::InternalError);
     }
     let ids: Vec<u64> = entries.iter().map(|e| e.resource_id).collect();
     if ids.as_slice() != [10, 30] {
-        serial_println!("[cap]   FAIL: revoke disturbed enumeration order: {:?}", ids);
+        serial_println!(
+            "[cap]   FAIL: revoke disturbed enumeration order: {:?}",
+            ids
+        );
         return Err(KernelError::InternalError);
     }
 

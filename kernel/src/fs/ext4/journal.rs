@@ -95,52 +95,52 @@ mod tag_flags {
 #[repr(C)]
 struct JournalSuperblock {
     /// Block type header.
-    s_header_magic: u32,        // 0x00
-    s_header_blocktype: u32,    // 0x04
-    s_header_sequence: u32,     // 0x08
+    s_header_magic: u32, // 0x00
+    s_header_blocktype: u32, // 0x04
+    s_header_sequence: u32,  // 0x08
 
     /// Journal device block size (usually same as fs block size).
-    s_blocksize: u32,           // 0x0C
+    s_blocksize: u32, // 0x0C
     /// Total number of blocks in the journal.
-    s_maxlen: u32,              // 0x10
+    s_maxlen: u32, // 0x10
     /// First usable block in the journal (after superblock).
-    s_first: u32,               // 0x14
+    s_first: u32, // 0x14
 
     /// First expected commit ID in the log.
-    s_sequence: u32,            // 0x18
+    s_sequence: u32, // 0x18
     /// First block of the log that still needs replaying.
-    s_start: u32,               // 0x1C
+    s_start: u32, // 0x1C
 
     /// Error value (non-zero if the journal has been aborted).
-    s_errno: u32,               // 0x20
+    s_errno: u32, // 0x20
 
     // --- V2 fields ---
     /// Feature compat flags.
-    s_feature_compat: u32,      // 0x24
+    s_feature_compat: u32, // 0x24
     /// Feature incompat flags.
-    s_feature_incompat: u32,    // 0x28
+    s_feature_incompat: u32, // 0x28
     /// Feature ro_compat flags.
-    s_feature_ro_compat: u32,   // 0x2C
+    s_feature_ro_compat: u32, // 0x2C
 
     /// Journal UUID.
-    s_uuid: [u8; 16],          // 0x30
+    s_uuid: [u8; 16], // 0x30
 
     /// Number of filesystems using this journal.
-    s_nr_users: u32,            // 0x40
+    s_nr_users: u32, // 0x40
 
     /// Location of superblock copy (dynsuper).
-    s_dynsuper: u32,            // 0x44
+    s_dynsuper: u32, // 0x44
 
     /// Max journal blocks per transaction.
-    s_max_transaction: u32,     // 0x48
+    s_max_transaction: u32, // 0x48
     /// Max data blocks per transaction.
-    s_max_trans_data: u32,      // 0x4C
+    s_max_trans_data: u32, // 0x4C
 
     /// Padding to 1024 bytes.
-    _padding: [u32; 44],       // 0x50 - 0xFF (176 bytes)
+    _padding: [u32; 44], // 0x50 - 0xFF (176 bytes)
 
     /// Filesystem UUID(s) that use this journal.
-    s_users: [u8; 768],        // 0x100 - 0x3FF
+    s_users: [u8; 768], // 0x100 - 0x3FF
 }
 
 // Compile-time size check.
@@ -311,16 +311,14 @@ impl Journal {
         if magic != JBD2_MAGIC {
             crate::serial_println!(
                 "[ext4-journal] Bad journal magic: {:#x} (expected {:#x})",
-                magic, JBD2_MAGIC
+                magic,
+                JBD2_MAGIC
             );
             return Err(KernelError::IoError);
         }
 
         if blocktype != block_type::SUPERBLOCK_V1 && blocktype != block_type::SUPERBLOCK_V2 {
-            crate::serial_println!(
-                "[ext4-journal] Bad journal superblock type: {}",
-                blocktype
-            );
+            crate::serial_println!("[ext4-journal] Bad journal superblock type: {}", blocktype);
             return Err(KernelError::IoError);
         }
 
@@ -338,7 +336,9 @@ impl Journal {
 
         crate::serial_println!(
             "[ext4-journal] Opened: {} blocks, seq={}, start={}",
-            state.max_len, state.next_sequence, state.write_pos
+            state.max_len,
+            state.next_sequence,
+            state.write_pos
         );
 
         // Create reader for the journal device (same device as fs).
@@ -373,8 +373,7 @@ impl Journal {
     /// `block_nr` is the filesystem block number.
     /// `data` is the new content of the block.
     pub fn log_block(&mut self, block_nr: u64, data: &[u8]) -> KernelResult<()> {
-        let txn = self.active.as_mut()
-            .ok_or(KernelError::InvalidArgument)?;
+        let txn = self.active.as_mut().ok_or(KernelError::InvalidArgument)?;
 
         if data.len() != self.state.block_size as usize {
             return Err(KernelError::InvalidArgument);
@@ -393,8 +392,7 @@ impl Journal {
     ///
     /// Then writes the actual blocks to their final filesystem locations.
     pub fn commit(&mut self) -> KernelResult<()> {
-        let txn = self.active.take()
-            .ok_or(KernelError::InvalidArgument)?;
+        let txn = self.active.take().ok_or(KernelError::InvalidArgument)?;
 
         if txn.blocks.is_empty() {
             // Empty transaction — nothing to do.
@@ -416,13 +414,13 @@ impl Journal {
         // Verify all tags fit in one descriptor block.  A partial commit
         // (some tags written, some silently dropped) would leave LAST_TAG
         // unset and cause journal replay to misparse the transaction.
-        let required_space = header_size.saturating_add(
-            txn.blocks.len().saturating_mul(tag_size)
-        );
+        let required_space = header_size.saturating_add(txn.blocks.len().saturating_mul(tag_size));
         if required_space > block_size {
             crate::serial_println!(
                 "[ext4-journal] Transaction too large: {} blocks, need {} bytes but descriptor block is {} bytes",
-                txn.blocks.len(), required_space, block_size,
+                txn.blocks.len(),
+                required_space,
+                block_size,
             );
             return Err(KernelError::IoError);
         }
@@ -494,7 +492,8 @@ impl Journal {
 
         crate::serial_println!(
             "[ext4-journal] Starting recovery from pos={}, seq={}",
-            start_pos, start_seq,
+            start_pos,
+            start_seq,
         );
 
         // Pass 1: scan for revoke records.
@@ -512,10 +511,7 @@ impl Journal {
             self.replay_with_revokes(start_pos, start_seq, &revoke_table)?;
 
         if replayed > 0 {
-            crate::serial_println!(
-                "[ext4-journal] Replayed {} blocks from journal",
-                replayed,
-            );
+            crate::serial_println!("[ext4-journal] Replayed {} blocks from journal", replayed,);
             self.reader.flush()?;
         }
 
@@ -528,7 +524,8 @@ impl Journal {
         if final_seq != end_seq {
             crate::serial_println!(
                 "[ext4-journal] WARNING: scan ended at seq={} but replay at seq={} (journal may be inconsistent)",
-                end_seq, final_seq,
+                end_seq,
+                final_seq,
             );
         }
 
@@ -750,7 +747,8 @@ impl Journal {
 
     /// Map a journal-relative block index to a physical block number.
     fn journal_phys_block(&self, journal_block: u32) -> KernelResult<u64> {
-        self.state.journal_blocks
+        self.state
+            .journal_blocks
             .get(journal_block as usize)
             .copied()
             .ok_or(KernelError::IoError)
@@ -863,7 +861,8 @@ fn test_read_be64() -> KernelResult<()> {
     if result != val {
         crate::serial_println!(
             "[ext4-journal]   FAIL: read_be64 = {:#018x}, expected {:#018x}",
-            result, val
+            result,
+            val
         );
         return Err(KernelError::InternalError);
     }

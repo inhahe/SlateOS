@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -148,19 +148,91 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         commands: alloc::vec![
-            VoiceCommand { id: 1, phrase: String::from("close window"), category: CommandCategory::Window, action: String::from("window.close"), enabled: true, use_count: 0 },
-            VoiceCommand { id: 2, phrase: String::from("minimize window"), category: CommandCategory::Window, action: String::from("window.minimize"), enabled: true, use_count: 0 },
-            VoiceCommand { id: 3, phrase: String::from("maximize window"), category: CommandCategory::Window, action: String::from("window.maximize"), enabled: true, use_count: 0 },
-            VoiceCommand { id: 4, phrase: String::from("open browser"), category: CommandCategory::AppLaunch, action: String::from("launch.browser"), enabled: true, use_count: 0 },
-            VoiceCommand { id: 5, phrase: String::from("open terminal"), category: CommandCategory::AppLaunch, action: String::from("launch.terminal"), enabled: true, use_count: 0 },
-            VoiceCommand { id: 6, phrase: String::from("play music"), category: CommandCategory::Media, action: String::from("media.play"), enabled: true, use_count: 0 },
-            VoiceCommand { id: 7, phrase: String::from("pause music"), category: CommandCategory::Media, action: String::from("media.pause"), enabled: true, use_count: 0 },
-            VoiceCommand { id: 8, phrase: String::from("scroll down"), category: CommandCategory::Navigation, action: String::from("nav.scrolldown"), enabled: true, use_count: 0 },
-            VoiceCommand { id: 9, phrase: String::from("scroll up"), category: CommandCategory::Navigation, action: String::from("nav.scrollup"), enabled: true, use_count: 0 },
-            VoiceCommand { id: 10, phrase: String::from("take screenshot"), category: CommandCategory::Settings, action: String::from("screenshot.take"), enabled: true, use_count: 0 },
+            VoiceCommand {
+                id: 1,
+                phrase: String::from("close window"),
+                category: CommandCategory::Window,
+                action: String::from("window.close"),
+                enabled: true,
+                use_count: 0
+            },
+            VoiceCommand {
+                id: 2,
+                phrase: String::from("minimize window"),
+                category: CommandCategory::Window,
+                action: String::from("window.minimize"),
+                enabled: true,
+                use_count: 0
+            },
+            VoiceCommand {
+                id: 3,
+                phrase: String::from("maximize window"),
+                category: CommandCategory::Window,
+                action: String::from("window.maximize"),
+                enabled: true,
+                use_count: 0
+            },
+            VoiceCommand {
+                id: 4,
+                phrase: String::from("open browser"),
+                category: CommandCategory::AppLaunch,
+                action: String::from("launch.browser"),
+                enabled: true,
+                use_count: 0
+            },
+            VoiceCommand {
+                id: 5,
+                phrase: String::from("open terminal"),
+                category: CommandCategory::AppLaunch,
+                action: String::from("launch.terminal"),
+                enabled: true,
+                use_count: 0
+            },
+            VoiceCommand {
+                id: 6,
+                phrase: String::from("play music"),
+                category: CommandCategory::Media,
+                action: String::from("media.play"),
+                enabled: true,
+                use_count: 0
+            },
+            VoiceCommand {
+                id: 7,
+                phrase: String::from("pause music"),
+                category: CommandCategory::Media,
+                action: String::from("media.pause"),
+                enabled: true,
+                use_count: 0
+            },
+            VoiceCommand {
+                id: 8,
+                phrase: String::from("scroll down"),
+                category: CommandCategory::Navigation,
+                action: String::from("nav.scrolldown"),
+                enabled: true,
+                use_count: 0
+            },
+            VoiceCommand {
+                id: 9,
+                phrase: String::from("scroll up"),
+                category: CommandCategory::Navigation,
+                action: String::from("nav.scrollup"),
+                enabled: true,
+                use_count: 0
+            },
+            VoiceCommand {
+                id: 10,
+                phrase: String::from("take screenshot"),
+                category: CommandCategory::Settings,
+                action: String::from("screenshot.take"),
+                enabled: true,
+                use_count: 0
+            },
         ],
         history: Vec::new(),
         next_id: 11,
@@ -227,7 +299,9 @@ pub fn remove_command(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.commands.len();
         state.commands.retain(|c| c.id != id);
-        if state.commands.len() == before { return Err(KernelError::NotFound); }
+        if state.commands.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -235,7 +309,10 @@ pub fn remove_command(id: u32) -> KernelResult<()> {
 /// Enable/disable a command.
 pub fn set_command_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let cmd = state.commands.iter_mut().find(|c| c.id == id)
+        let cmd = state
+            .commands
+            .iter_mut()
+            .find(|c| c.id == id)
             .ok_or(KernelError::NotFound)?;
         cmd.enabled = enabled;
         Ok(())
@@ -259,16 +336,22 @@ pub fn recognize(phrase: &str, confidence: Confidence) -> KernelResult<Option<St
 
         if !conf_ok {
             state.total_rejected += 1;
-            if state.history.len() >= MAX_HISTORY { state.history.remove(0); }
+            if state.history.len() >= MAX_HISTORY {
+                state.history.remove(0);
+            }
             state.history.push(RecognitionResult {
-                phrase: String::from(phrase), confidence,
-                matched_command_id: None, timestamp_ns: now,
+                phrase: String::from(phrase),
+                confidence,
+                matched_command_id: None,
+                timestamp_ns: now,
             });
             return Ok(None);
         }
 
         // Find matching command.
-        let matched = state.commands.iter_mut()
+        let matched = state
+            .commands
+            .iter_mut()
             .find(|c| c.enabled && c.phrase.to_lowercase() == phrase_lower);
 
         if let Some(cmd) = matched {
@@ -276,17 +359,25 @@ pub fn recognize(phrase: &str, confidence: Confidence) -> KernelResult<Option<St
             let action = cmd.action.clone();
             let cmd_id = cmd.id;
             state.total_executed += 1;
-            if state.history.len() >= MAX_HISTORY { state.history.remove(0); }
+            if state.history.len() >= MAX_HISTORY {
+                state.history.remove(0);
+            }
             state.history.push(RecognitionResult {
-                phrase: String::from(phrase), confidence,
-                matched_command_id: Some(cmd_id), timestamp_ns: now,
+                phrase: String::from(phrase),
+                confidence,
+                matched_command_id: Some(cmd_id),
+                timestamp_ns: now,
             });
             Ok(Some(action))
         } else {
-            if state.history.len() >= MAX_HISTORY { state.history.remove(0); }
+            if state.history.len() >= MAX_HISTORY {
+                state.history.remove(0);
+            }
             state.history.push(RecognitionResult {
-                phrase: String::from(phrase), confidence,
-                matched_command_id: None, timestamp_ns: now,
+                phrase: String::from(phrase),
+                confidence,
+                matched_command_id: None,
+                timestamp_ns: now,
             });
             Ok(None)
         }
@@ -295,13 +386,20 @@ pub fn recognize(phrase: &str, confidence: Confidence) -> KernelResult<Option<St
 
 /// List all commands.
 pub fn list_commands() -> Vec<VoiceCommand> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.commands.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.commands.clone())
 }
 
 /// List commands by category.
 pub fn list_by_category(category: CommandCategory) -> Vec<VoiceCommand> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.commands.iter().filter(|c| c.category == category).cloned().collect()
+        s.commands
+            .iter()
+            .filter(|c| c.category == category)
+            .cloned()
+            .collect()
     })
 }
 
@@ -317,7 +415,10 @@ pub fn get_history(max: usize) -> Vec<RecognitionResult> {
 
 /// Get current wake word.
 pub fn get_wake_word() -> String {
-    STATE.lock().as_ref().map_or(String::new(), |s| s.wake_word.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(String::new(), |s| s.wake_word.clone())
 }
 
 /// Is voice control listening?
@@ -329,7 +430,13 @@ pub fn is_listening() -> bool {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.commands.len(), s.total_recognitions, s.total_executed, s.total_rejected, s.ops),
+        Some(s) => (
+            s.commands.len(),
+            s.total_recognitions,
+            s.total_executed,
+            s.total_rejected,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

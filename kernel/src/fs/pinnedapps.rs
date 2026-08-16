@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -96,13 +96,51 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         pins: alloc::vec![
-            PinnedApp { app_name: String::from("files"), display_name: String::from("Files"), icon_path: String::from("/sys/icons/files.png"), exec_path: String::from("/usr/bin/files"), location: PinLocation::Taskbar, position: 0, group: String::new(), launch_count: 0 },
-            PinnedApp { app_name: String::from("browser"), display_name: String::from("Web Browser"), icon_path: String::from("/sys/icons/browser.png"), exec_path: String::from("/usr/bin/browser"), location: PinLocation::Taskbar, position: 1, group: String::new(), launch_count: 0 },
-            PinnedApp { app_name: String::from("terminal"), display_name: String::from("Terminal"), icon_path: String::from("/sys/icons/terminal.png"), exec_path: String::from("/usr/bin/terminal"), location: PinLocation::Taskbar, position: 2, group: String::new(), launch_count: 0 },
-            PinnedApp { app_name: String::from("settings"), display_name: String::from("Settings"), icon_path: String::from("/sys/icons/settings.png"), exec_path: String::from("/usr/bin/settings"), location: PinLocation::StartMenu, position: 0, group: String::from("System"), launch_count: 0 },
+            PinnedApp {
+                app_name: String::from("files"),
+                display_name: String::from("Files"),
+                icon_path: String::from("/sys/icons/files.png"),
+                exec_path: String::from("/usr/bin/files"),
+                location: PinLocation::Taskbar,
+                position: 0,
+                group: String::new(),
+                launch_count: 0
+            },
+            PinnedApp {
+                app_name: String::from("browser"),
+                display_name: String::from("Web Browser"),
+                icon_path: String::from("/sys/icons/browser.png"),
+                exec_path: String::from("/usr/bin/browser"),
+                location: PinLocation::Taskbar,
+                position: 1,
+                group: String::new(),
+                launch_count: 0
+            },
+            PinnedApp {
+                app_name: String::from("terminal"),
+                display_name: String::from("Terminal"),
+                icon_path: String::from("/sys/icons/terminal.png"),
+                exec_path: String::from("/usr/bin/terminal"),
+                location: PinLocation::Taskbar,
+                position: 2,
+                group: String::new(),
+                launch_count: 0
+            },
+            PinnedApp {
+                app_name: String::from("settings"),
+                display_name: String::from("Settings"),
+                icon_path: String::from("/sys/icons/settings.png"),
+                exec_path: String::from("/usr/bin/settings"),
+                location: PinLocation::StartMenu,
+                position: 0,
+                group: String::from("System"),
+                launch_count: 0
+            },
         ],
         total_pins: 4,
         total_unpins: 0,
@@ -112,17 +150,28 @@ pub fn init_defaults() {
 }
 
 /// Pin an app.
-pub fn pin(location: PinLocation, app_name: &str, display_name: &str, exec_path: &str) -> KernelResult<()> {
+pub fn pin(
+    location: PinLocation,
+    app_name: &str,
+    display_name: &str,
+    exec_path: &str,
+) -> KernelResult<()> {
     with_state(|state| {
         if state.pins.len() >= MAX_PINS {
             return Err(KernelError::ResourceExhausted);
         }
         // Check for duplicate in same location.
-        if state.pins.iter().any(|p| p.app_name == app_name && p.location == location) {
+        if state
+            .pins
+            .iter()
+            .any(|p| p.app_name == app_name && p.location == location)
+        {
             return Err(KernelError::AlreadyExists);
         }
         // Find max position in location.
-        let max_pos = state.pins.iter()
+        let max_pos = state
+            .pins
+            .iter()
             .filter(|p| p.location == location)
             .map(|p| p.position)
             .max()
@@ -146,7 +195,9 @@ pub fn pin(location: PinLocation, app_name: &str, display_name: &str, exec_path:
 pub fn unpin(location: PinLocation, app_name: &str) -> KernelResult<()> {
     with_state(|state| {
         let before = state.pins.len();
-        state.pins.retain(|p| !(p.app_name == app_name && p.location == location));
+        state
+            .pins
+            .retain(|p| !(p.app_name == app_name && p.location == location));
         if state.pins.len() == before {
             return Err(KernelError::NotFound);
         }
@@ -158,7 +209,9 @@ pub fn unpin(location: PinLocation, app_name: &str) -> KernelResult<()> {
 /// Move app to a new position.
 pub fn reorder(location: PinLocation, app_name: &str, new_position: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pin = state.pins.iter_mut()
+        let pin = state
+            .pins
+            .iter_mut()
             .find(|p| p.app_name == app_name && p.location == location)
             .ok_or(KernelError::NotFound)?;
         pin.position = new_position;
@@ -169,7 +222,9 @@ pub fn reorder(location: PinLocation, app_name: &str, new_position: u32) -> Kern
 /// Set group for a pinned app.
 pub fn set_group(location: PinLocation, app_name: &str, group: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pin = state.pins.iter_mut()
+        let pin = state
+            .pins
+            .iter_mut()
             .find(|p| p.app_name == app_name && p.location == location)
             .ok_or(KernelError::NotFound)?;
         pin.group = String::from(group);
@@ -195,7 +250,9 @@ pub fn record_launch(app_name: &str) -> KernelResult<u64> {
 /// List pinned apps for a location, sorted by position.
 pub fn list_pins(location: PinLocation) -> Vec<PinnedApp> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let mut pins: Vec<PinnedApp> = s.pins.iter()
+        let mut pins: Vec<PinnedApp> = s
+            .pins
+            .iter()
             .filter(|p| p.location == location)
             .cloned()
             .collect();
@@ -212,7 +269,9 @@ pub fn list_all() -> Vec<PinnedApp> {
 /// Check if an app is pinned in a location.
 pub fn is_pinned(location: PinLocation, app_name: &str) -> bool {
     STATE.lock().as_ref().is_some_and(|s| {
-        s.pins.iter().any(|p| p.app_name == app_name && p.location == location)
+        s.pins
+            .iter()
+            .any(|p| p.app_name == app_name && p.location == location)
     })
 }
 
@@ -221,8 +280,16 @@ pub fn stats() -> (usize, usize, usize, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let taskbar = s.pins.iter().filter(|p| p.location == PinLocation::Taskbar).count();
-            let start = s.pins.iter().filter(|p| p.location == PinLocation::StartMenu).count();
+            let taskbar = s
+                .pins
+                .iter()
+                .filter(|p| p.location == PinLocation::Taskbar)
+                .count();
+            let start = s
+                .pins
+                .iter()
+                .filter(|p| p.location == PinLocation::StartMenu)
+                .count();
             (s.pins.len(), taskbar, start, s.total_launches, s.ops)
         }
         None => (0, 0, 0, 0, 0),
@@ -249,7 +316,13 @@ pub fn self_test() {
     crate::serial_println!("  [2/8] taskbar pins: OK");
 
     // 3: Pin new app.
-    pin(PinLocation::Taskbar, "editor", "Text Editor", "/usr/bin/editor").expect("pin");
+    pin(
+        PinLocation::Taskbar,
+        "editor",
+        "Text Editor",
+        "/usr/bin/editor",
+    )
+    .expect("pin");
     assert!(is_pinned(PinLocation::Taskbar, "editor"));
     assert_eq!(list_pins(PinLocation::Taskbar).len(), 4);
     crate::serial_println!("  [3/8] pin: OK");

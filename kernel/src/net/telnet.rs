@@ -38,12 +38,12 @@
 //! - Commands execute synchronously (one at a time per session).
 //! - Maximum 512-byte command lines.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU16, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 
 use crate::error::KernelResult;
 
@@ -65,13 +65,13 @@ const MAX_LINE_LEN: usize = 512;
 const TICK_INTERVAL_NS: u64 = 500_000_000;
 
 // Telnet protocol bytes (RFC 854).
-const IAC: u8 = 255;  // Interpret As Command
+const IAC: u8 = 255; // Interpret As Command
 const DONT: u8 = 254;
 const DO: u8 = 253;
 const WONT: u8 = 252;
 const WILL: u8 = 251;
-const SB: u8 = 250;   // Sub-negotiation Begin
-const SE: u8 = 240;   // Sub-negotiation End
+const SB: u8 = 250; // Sub-negotiation Begin
+const SE: u8 = 240; // Sub-negotiation End
 
 // Telnet options.
 const OPT_ECHO: u8 = 1;
@@ -249,7 +249,10 @@ pub fn set_enabled(enabled: bool) {
         let mut state = STATE.lock();
         for session in &mut state.sessions {
             if session.active {
-                let _ = send_line(session.tcp_handle, "\r\n[telnet] Server shutting down. Goodbye.\r\n");
+                let _ = send_line(
+                    session.tcp_handle,
+                    "\r\n[telnet] Server shutting down. Goodbye.\r\n",
+                );
                 let _ = super::tcp::close(session.tcp_handle);
                 session.active = false;
             }
@@ -266,10 +269,18 @@ fn send_welcome(tcp_handle: usize) -> KernelResult<usize> {
     // Negotiate: server WILL ECHO, server WILL SUPPRESS-GO-AHEAD,
     // client DO SUPPRESS-GO-AHEAD, client DONT LINEMODE.
     let negotiate = [
-        IAC, WILL, OPT_ECHO,
-        IAC, WILL, OPT_SUPPRESS_GA,
-        IAC, DO, OPT_SUPPRESS_GA,
-        IAC, DONT, OPT_LINEMODE,
+        IAC,
+        WILL,
+        OPT_ECHO,
+        IAC,
+        WILL,
+        OPT_SUPPRESS_GA,
+        IAC,
+        DO,
+        OPT_SUPPRESS_GA,
+        IAC,
+        DONT,
+        OPT_LINEMODE,
     ];
     let mut total = super::tcp::send(tcp_handle, &negotiate)?;
 
@@ -311,8 +322,10 @@ fn accept_connections(state: &mut TelnetState) {
             None => {
                 // All slots full — accept and immediately reject.
                 if let Ok(handle) = super::tcp::accept(listener) {
-                    let _ = super::tcp::send(handle,
-                        b"\r\nServer busy (max sessions reached). Try again later.\r\n");
+                    let _ = super::tcp::send(
+                        handle,
+                        b"\r\nServer busy (max sessions reached). Try again later.\r\n",
+                    );
                     let _ = super::tcp::close(handle);
                     REJECTED_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
                 }
@@ -326,12 +339,17 @@ fn accept_connections(state: &mut TelnetState) {
                 let info = super::tcp::connection_info(handle);
                 let (remote_ip, remote_port) = match info {
                     Some(ci) => (ci.remote_ip, ci.remote_port),
-                    None => (super::interface::IpAddr::V4(super::interface::Ipv4Addr([0, 0, 0, 0])), 0),
+                    None => (
+                        super::interface::IpAddr::V4(super::interface::Ipv4Addr([0, 0, 0, 0])),
+                        0,
+                    ),
                 };
 
                 crate::serial_println!(
                     "[telnet] New connection from {}:{} (session #{})",
-                    remote_ip, remote_port, idx
+                    remote_ip,
+                    remote_port,
+                    idx
                 );
 
                 let session = &mut state.sessions[idx];
@@ -383,7 +401,9 @@ fn process_sessions(state: &mut TelnetState) {
                 // Connection error or closed — clean up.
                 crate::serial_println!(
                     "[telnet] Session #{} disconnected ({}:{})",
-                    idx, session.remote_ip, session.remote_port
+                    idx,
+                    session.remote_ip,
+                    session.remote_port
                 );
                 let _ = super::tcp::close(session.tcp_handle);
                 session.active = false;
@@ -506,21 +526,26 @@ fn process_sessions(state: &mut TelnetState) {
 
             // Check for disconnect commands.
             let trimmed = line.trim();
-            if trimmed == "exit" || trimmed == "logout" || trimmed == "quit" || trimmed == "disconnect" {
+            if trimmed == "exit"
+                || trimmed == "logout"
+                || trimmed == "quit"
+                || trimmed == "disconnect"
+            {
                 let _ = send_line(tcp_handle, "\r\nGoodbye.\r\n");
                 let _ = super::tcp::close(tcp_handle);
                 session.active = false;
                 crate::serial_println!(
                     "[telnet] Session #{} logged out ({}:{})",
-                    idx, session.remote_ip, session.remote_port
+                    idx,
+                    session.remote_ip,
+                    session.remote_port
                 );
                 break;
             }
 
             // Don't allow reboot via telnet (safety).
             if trimmed == "reboot" || trimmed == "shutdown" || trimmed == "poweroff" {
-                let n = send_line(tcp_handle,
-                    "Reboot/shutdown not permitted via telnet.\r\n");
+                let n = send_line(tcp_handle, "Reboot/shutdown not permitted via telnet.\r\n");
                 session.bytes_tx = session.bytes_tx.saturating_add(n as u64);
                 TOTAL_BYTES_TX.fetch_add(n as u64, Ordering::Relaxed);
                 let n2 = send_bytes(tcp_handle, b"neo$ ");
@@ -713,7 +738,10 @@ pub fn disconnect_session(index: usize) -> bool {
     let mut state = STATE.lock();
     if let Some(session) = state.sessions.get_mut(index) {
         if session.active {
-            let _ = send_line(session.tcp_handle, "\r\n[telnet] Disconnected by admin.\r\n");
+            let _ = send_line(
+                session.tcp_handle,
+                "\r\n[telnet] Disconnected by admin.\r\n",
+            );
             let _ = super::tcp::close(session.tcp_handle);
             session.active = false;
             return true;
@@ -735,27 +763,41 @@ pub fn procfs_content() -> String {
     out.push_str("Telnet Server\n");
     out.push_str("=============\n\n");
 
-    out.push_str(&format!("Status:       {}\n",
+    out.push_str(&format!(
+        "Status:       {}\n",
         if s.initialized {
             if s.enabled { "running" } else { "disabled" }
-        } else { "not initialized" }
+        } else {
+            "not initialized"
+        }
     ));
     out.push_str(&format!("Port:         {}\n", s.port));
-    out.push_str(&format!("Sessions:     {}/{}\n", s.active_sessions, MAX_SESSIONS));
-    out.push_str(&format!("Connections:  {} total ({} rejected)\n",
-        s.total_connections, s.rejected_connections));
+    out.push_str(&format!(
+        "Sessions:     {}/{}\n",
+        s.active_sessions, MAX_SESSIONS
+    ));
+    out.push_str(&format!(
+        "Connections:  {} total ({} rejected)\n",
+        s.total_connections, s.rejected_connections
+    ));
     out.push_str(&format!("Commands:     {} total\n", s.total_commands));
-    out.push_str(&format!("Traffic:      {} TX, {} RX bytes\n",
-        s.total_bytes_tx, s.total_bytes_rx));
+    out.push_str(&format!(
+        "Traffic:      {} TX, {} RX bytes\n",
+        s.total_bytes_tx, s.total_bytes_rx
+    ));
 
     if !sessions.is_empty() {
         out.push_str("\nActive Sessions:\n");
         for si in &sessions {
             out.push_str(&format!(
                 "  #{}: {}:{} ({}s, {} cmds, {} TX / {} RX)\n",
-                si.index, si.remote_ip, si.remote_port,
-                si.connected_secs, si.commands_run,
-                si.bytes_tx, si.bytes_rx,
+                si.index,
+                si.remote_ip,
+                si.remote_port,
+                si.connected_secs,
+                si.commands_run,
+                si.bytes_tx,
+                si.bytes_rx,
             ));
         }
     }
@@ -849,8 +891,10 @@ pub fn self_test() -> KernelResult<()> {
     {
         let input = "line1\r\nline2\nline3\r\nline4\n";
         let output = lf_to_crlf(input);
-        assert!(output == "line1\r\nline2\r\nline3\r\nline4\r\n",
-            "mixed CRLF/LF normalization");
+        assert!(
+            output == "line1\r\nline2\r\nline3\r\nline4\r\n",
+            "mixed CRLF/LF normalization"
+        );
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[telnet]   test 7 (mixed CRLF/LF) PASSED");

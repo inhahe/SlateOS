@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -156,7 +156,9 @@ where
 /// compaction runs.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         zones: Vec::new(),
         events: Vec::new(),
@@ -176,11 +178,20 @@ pub fn init_defaults() {
 /// zeroed.  [`start_compaction`] returns `NotFound` for an unregistered zone.
 pub fn register_zone(zone: CompactZone) -> KernelResult<()> {
     with_state(|state| {
-        if state.zones.iter().any(|z| z.zone == zone) { return Err(KernelError::AlreadyExists); }
+        if state.zones.iter().any(|z| z.zone == zone) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.zones.push(ZoneCompactStats {
-            zone, attempts: 0, successes: 0, failures: 0, deferred: 0,
-            pages_scanned_free: 0, pages_scanned_migrate: 0, pages_migrated: 0,
-            pages_failed: 0, stalls: 0,
+            zone,
+            attempts: 0,
+            successes: 0,
+            failures: 0,
+            deferred: 0,
+            pages_scanned_free: 0,
+            pages_scanned_migrate: 0,
+            pages_migrated: 0,
+            pages_failed: 0,
+            stalls: 0,
         });
         Ok(())
     })
@@ -191,7 +202,10 @@ pub fn start_compaction(zone: CompactZone) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         state.active_zone = Some((zone, now));
-        let zs = state.zones.iter_mut().find(|z| z.zone == zone)
+        let zs = state
+            .zones
+            .iter_mut()
+            .find(|z| z.zone == zone)
             .ok_or(KernelError::NotFound)?;
         zs.attempts += 1;
         state.total_attempts += 1;
@@ -200,12 +214,22 @@ pub fn start_compaction(zone: CompactZone) -> KernelResult<()> {
 }
 
 /// Finish a compaction run.
-pub fn finish_compaction(result: CompactResult, pages_migrated: u64, pages_scanned: u64) -> KernelResult<()> {
+pub fn finish_compaction(
+    result: CompactResult,
+    pages_migrated: u64,
+    pages_scanned: u64,
+) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let (zone, start) = state.active_zone.take().ok_or(KernelError::InvalidArgument)?;
+        let (zone, start) = state
+            .active_zone
+            .take()
+            .ok_or(KernelError::InvalidArgument)?;
         let duration = now.saturating_sub(start);
-        let zs = state.zones.iter_mut().find(|z| z.zone == zone)
+        let zs = state
+            .zones
+            .iter_mut()
+            .find(|z| z.zone == zone)
             .ok_or(KernelError::NotFound)?;
         match result {
             CompactResult::Success => zs.successes += 1,
@@ -216,10 +240,16 @@ pub fn finish_compaction(result: CompactResult, pages_migrated: u64, pages_scann
         zs.pages_migrated += pages_migrated;
         zs.pages_scanned_migrate += pages_scanned;
         state.total_migrations += pages_migrated;
-        if state.events.len() >= MAX_EVENTS { state.events.remove(0); }
+        if state.events.len() >= MAX_EVENTS {
+            state.events.remove(0);
+        }
         state.events.push(CompactionEvent {
-            zone, result, pages_migrated, pages_scanned,
-            duration_ns: duration, timestamp_ns: now,
+            zone,
+            result,
+            pages_migrated,
+            pages_scanned,
+            duration_ns: duration,
+            timestamp_ns: now,
         });
         Ok(())
     })
@@ -241,13 +271,20 @@ pub fn record_stall(duration_ns: u64) -> KernelResult<()> {
 
 /// Get per-zone compaction stats.
 pub fn zone_stats() -> Vec<ZoneCompactStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.zones.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.zones.clone())
 }
 
 /// Recent compaction events.
 pub fn recent_events(n: usize) -> Vec<CompactionEvent> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let start = if n >= s.events.len() { 0 } else { s.events.len() - n };
+        let start = if n >= s.events.len() {
+            0
+        } else {
+            s.events.len() - n
+        };
         s.events[start..].to_vec()
     })
 }
@@ -257,8 +294,9 @@ pub fn success_rate() -> u64 {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            if s.total_attempts == 0 { 100 }
-            else {
+            if s.total_attempts == 0 {
+                100
+            } else {
                 let successes: u64 = s.zones.iter().map(|z| z.successes).sum();
                 successes * 100 / s.total_attempts
             }
@@ -271,7 +309,14 @@ pub fn success_rate() -> u64 {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.zones.len(), s.total_attempts, s.total_migrations, s.total_stalls, s.total_stall_ns, s.ops),
+        Some(s) => (
+            s.zones.len(),
+            s.total_attempts,
+            s.total_migrations,
+            s.total_stalls,
+            s.total_stall_ns,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -308,7 +353,11 @@ pub fn self_test() {
 
     // 3: Start increments attempts exactly from zero.
     start_compaction(CompactZone::Normal).expect("start");
-    let z = zone_stats().iter().find(|z| z.zone == CompactZone::Normal).cloned().expect("z");
+    let z = zone_stats()
+        .iter()
+        .find(|z| z.zone == CompactZone::Normal)
+        .cloned()
+        .expect("z");
     assert_eq!(z.attempts, 1);
     crate::serial_println!("  [3/8] start: OK");
 
@@ -317,7 +366,11 @@ pub fn self_test() {
     let events = recent_events(5);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].pages_migrated, 50);
-    let z = zone_stats().iter().find(|z| z.zone == CompactZone::Normal).cloned().expect("z");
+    let z = zone_stats()
+        .iter()
+        .find(|z| z.zone == CompactZone::Normal)
+        .cloned()
+        .expect("z");
     assert_eq!(z.successes, 1);
     assert_eq!(z.pages_migrated, 50);
     crate::serial_println!("  [4/8] finish: OK");
@@ -325,7 +378,11 @@ pub fn self_test() {
     // 5: A failed run on another zone records a failure + second event.
     start_compaction(CompactZone::Movable).expect("start2");
     finish_compaction(CompactResult::Failed, 0, 100).expect("finish2");
-    let z = zone_stats().iter().find(|z| z.zone == CompactZone::Movable).cloned().expect("z");
+    let z = zone_stats()
+        .iter()
+        .find(|z| z.zone == CompactZone::Movable)
+        .cloned()
+        .expect("z");
     assert_eq!(z.failures, 1);
     assert_eq!(recent_events(5).len(), 2);
     crate::serial_println!("  [5/8] failed: OK");

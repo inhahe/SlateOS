@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -40,7 +40,7 @@ pub const MAX_ORDER: usize = 11;
 #[derive(Debug, Clone)]
 pub struct ZoneBuddyInfo {
     pub zone_name: String,
-    pub free_counts: [u64; MAX_ORDER],  // Free pages at each order
+    pub free_counts: [u64; MAX_ORDER], // Free pages at each order
     pub splits: [u64; MAX_ORDER],
     pub coalesces: [u64; MAX_ORDER],
 }
@@ -97,7 +97,9 @@ where
 /// buddy structure splits and coalesces.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         zones: Vec::new(),
         total_splits: 0,
@@ -109,8 +111,12 @@ pub fn init_defaults() {
 /// Register a zone.
 pub fn register_zone(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.zones.len() >= MAX_ZONES { return Err(KernelError::ResourceExhausted); }
-        if state.zones.iter().any(|z| z.zone_name == name) { return Err(KernelError::AlreadyExists); }
+        if state.zones.len() >= MAX_ZONES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.zones.iter().any(|z| z.zone_name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.zones.push(ZoneBuddyInfo {
             zone_name: String::from(name),
             free_counts: [0; MAX_ORDER],
@@ -124,8 +130,13 @@ pub fn register_zone(name: &str) -> KernelResult<()> {
 /// Update free counts for a zone.
 pub fn update_free(name: &str, order: usize, count: u64) -> KernelResult<()> {
     with_state(|state| {
-        if order >= MAX_ORDER { return Err(KernelError::InvalidArgument); }
-        let z = state.zones.iter_mut().find(|z| z.zone_name == name)
+        if order >= MAX_ORDER {
+            return Err(KernelError::InvalidArgument);
+        }
+        let z = state
+            .zones
+            .iter_mut()
+            .find(|z| z.zone_name == name)
             .ok_or(KernelError::NotFound)?;
         z.free_counts[order] = count;
         Ok(())
@@ -135,8 +146,13 @@ pub fn update_free(name: &str, order: usize, count: u64) -> KernelResult<()> {
 /// Record a buddy split.
 pub fn record_split(name: &str, order: usize) -> KernelResult<()> {
     with_state(|state| {
-        if order >= MAX_ORDER { return Err(KernelError::InvalidArgument); }
-        let z = state.zones.iter_mut().find(|z| z.zone_name == name)
+        if order >= MAX_ORDER {
+            return Err(KernelError::InvalidArgument);
+        }
+        let z = state
+            .zones
+            .iter_mut()
+            .find(|z| z.zone_name == name)
             .ok_or(KernelError::NotFound)?;
         z.splits[order] += 1;
         state.total_splits += 1;
@@ -147,8 +163,13 @@ pub fn record_split(name: &str, order: usize) -> KernelResult<()> {
 /// Record a buddy coalesce.
 pub fn record_coalesce(name: &str, order: usize) -> KernelResult<()> {
     with_state(|state| {
-        if order >= MAX_ORDER { return Err(KernelError::InvalidArgument); }
-        let z = state.zones.iter_mut().find(|z| z.zone_name == name)
+        if order >= MAX_ORDER {
+            return Err(KernelError::InvalidArgument);
+        }
+        let z = state
+            .zones
+            .iter_mut()
+            .find(|z| z.zone_name == name)
             .ok_or(KernelError::NotFound)?;
         z.coalesces[order] += 1;
         state.total_coalesces += 1;
@@ -158,7 +179,10 @@ pub fn record_coalesce(name: &str, order: usize) -> KernelResult<()> {
 
 /// Per-zone buddy info.
 pub fn per_zone() -> Vec<ZoneBuddyInfo> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.zones.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.zones.clone())
 }
 
 /// Statistics: (zone_count, total_splits, total_coalesces, ops).
@@ -194,26 +218,42 @@ pub fn self_test() {
     register_zone("Test").expect("register");
     assert_eq!(per_zone().len(), 1);
     assert!(register_zone("Test").is_err());
-    let z = per_zone().iter().find(|z| z.zone_name == "Test").cloned().expect("zone");
+    let z = per_zone()
+        .iter()
+        .find(|z| z.zone_name == "Test")
+        .cloned()
+        .expect("zone");
     assert_eq!(z.free_counts[0], 0);
     assert_eq!(z.splits[0], 0);
     crate::serial_println!("  [2/8] register: OK");
 
     // 3: Update free sets the per-order count exactly.
     update_free("Test", 0, 100).expect("update");
-    let z = per_zone().iter().find(|z| z.zone_name == "Test").cloned().expect("zone");
+    let z = per_zone()
+        .iter()
+        .find(|z| z.zone_name == "Test")
+        .cloned()
+        .expect("zone");
     assert_eq!(z.free_counts[0], 100);
     crate::serial_println!("  [3/8] update free: OK");
 
     // 4: Split increments the per-order counter exactly from zero.
     record_split("Test", 3).expect("split");
-    let z = per_zone().iter().find(|z| z.zone_name == "Test").cloned().expect("zone");
+    let z = per_zone()
+        .iter()
+        .find(|z| z.zone_name == "Test")
+        .cloned()
+        .expect("zone");
     assert_eq!(z.splits[3], 1);
     crate::serial_println!("  [4/8] split: OK");
 
     // 5: Coalesce increments the per-order counter exactly from zero.
     record_coalesce("Test", 2).expect("coalesce");
-    let z = per_zone().iter().find(|z| z.zone_name == "Test").cloned().expect("zone");
+    let z = per_zone()
+        .iter()
+        .find(|z| z.zone_name == "Test")
+        .cloned()
+        .expect("zone");
     assert_eq!(z.coalesces[2], 1);
     crate::serial_println!("  [5/8] coalesce: OK");
 
@@ -230,8 +270,8 @@ pub fn self_test() {
     // 8: Aggregate totals equal the exact sums of the operations above.
     let (zones, splits, coalesces, ops) = stats();
     assert_eq!(zones, 1);
-    assert_eq!(splits, 1);     // one record_split
-    assert_eq!(coalesces, 1);  // one record_coalesce
+    assert_eq!(splits, 1); // one record_split
+    assert_eq!(coalesces, 1); // one record_coalesce
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

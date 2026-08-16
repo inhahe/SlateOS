@@ -36,11 +36,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -149,9 +149,14 @@ impl WidgetKind {
     /// All built-in kinds.
     pub fn all() -> &'static [WidgetKind] {
         &[
-            Self::Clock, Self::SystemMonitor, Self::Notes,
-            Self::Calendar, Self::DiskUsage, Self::RecentFiles,
-            Self::Weather, Self::NetworkStatus,
+            Self::Clock,
+            Self::SystemMonitor,
+            Self::Notes,
+            Self::Calendar,
+            Self::DiskUsage,
+            Self::RecentFiles,
+            Self::Weather,
+            Self::NetworkStatus,
         ]
     }
 }
@@ -257,22 +262,25 @@ pub fn add(kind: WidgetKind, x: i32, y: i32) -> KernelResult<u64> {
     state.next_id = state.next_id.saturating_add(1);
     let (w, h) = kind.default_size();
 
-    state.widgets.insert(id, Widget {
+    state.widgets.insert(
         id,
-        kind,
-        type_name: String::from(kind.label()),
-        title: String::from(kind.label()),
-        x,
-        y,
-        width: w,
-        height: h,
-        size_policy: SizePolicy::Resizable,
-        refresh_ms: kind.default_refresh_ms(),
-        visible: true,
-        opacity: 100,
-        data: String::new(),
-        last_refresh_ns: 0,
-    });
+        Widget {
+            id,
+            kind,
+            type_name: String::from(kind.label()),
+            title: String::from(kind.label()),
+            x,
+            y,
+            width: w,
+            height: h,
+            size_policy: SizePolicy::Resizable,
+            refresh_ms: kind.default_refresh_ms(),
+            visible: true,
+            opacity: 100,
+            data: String::new(),
+            last_refresh_ns: 0,
+        },
+    );
 
     Ok(id)
 }
@@ -286,26 +294,33 @@ pub fn add_custom(type_id: &str, x: i32, y: i32) -> KernelResult<u64> {
         return Err(KernelError::ResourceExhausted);
     }
 
-    let wtype = state.types.get(type_id).ok_or(KernelError::NotFound)?.clone();
+    let wtype = state
+        .types
+        .get(type_id)
+        .ok_or(KernelError::NotFound)?
+        .clone();
     let id = state.next_id;
     state.next_id = state.next_id.saturating_add(1);
 
-    state.widgets.insert(id, Widget {
+    state.widgets.insert(
         id,
-        kind: WidgetKind::Custom,
-        type_name: wtype.type_id.clone(),
-        title: wtype.display_name.clone(),
-        x,
-        y,
-        width: wtype.default_width,
-        height: wtype.default_height,
-        size_policy: SizePolicy::Resizable,
-        refresh_ms: 5000,
-        visible: true,
-        opacity: 100,
-        data: String::new(),
-        last_refresh_ns: 0,
-    });
+        Widget {
+            id,
+            kind: WidgetKind::Custom,
+            type_name: wtype.type_id.clone(),
+            title: wtype.display_name.clone(),
+            x,
+            y,
+            width: wtype.default_width,
+            height: wtype.default_height,
+            size_policy: SizePolicy::Resizable,
+            refresh_ms: 5000,
+            visible: true,
+            opacity: 100,
+            data: String::new(),
+            last_refresh_ns: 0,
+        },
+    );
 
     Ok(id)
 }
@@ -326,7 +341,9 @@ pub fn get(id: u64) -> Option<Widget> {
 /// Get all visible widgets (for rendering).
 pub fn active_widgets() -> Vec<Widget> {
     let state = WIDGETS.lock();
-    state.widgets.values()
+    state
+        .widgets
+        .values()
         .filter(|w| w.visible)
         .cloned()
         .collect()
@@ -405,7 +422,9 @@ pub fn mark_refreshed(id: u64) -> KernelResult<()> {
 pub fn needs_refresh() -> Vec<u64> {
     let now = crate::timekeeping::clock_monotonic();
     let state = WIDGETS.lock();
-    state.widgets.values()
+    state
+        .widgets
+        .values()
         .filter(|w| {
             w.visible && w.refresh_ms > 0 && {
                 let interval_ns = w.refresh_ms.saturating_mul(1_000_000);
@@ -421,8 +440,13 @@ pub fn needs_refresh() -> Vec<u64> {
 // ---------------------------------------------------------------------------
 
 /// Register a custom widget type.
-pub fn register_type(type_id: &str, name: &str, width: u32, height: u32,
-                     app: &str) -> KernelResult<()> {
+pub fn register_type(
+    type_id: &str,
+    name: &str,
+    width: u32,
+    height: u32,
+    app: &str,
+) -> KernelResult<()> {
     if type_id.is_empty() || name.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -430,13 +454,16 @@ pub fn register_type(type_id: &str, name: &str, width: u32, height: u32,
     if state.types.len() >= MAX_TYPES && !state.types.contains_key(type_id) {
         return Err(KernelError::ResourceExhausted);
     }
-    state.types.insert(String::from(type_id), WidgetType {
-        type_id: String::from(type_id),
-        display_name: String::from(name),
-        default_width: width,
-        default_height: height,
-        provider_app: String::from(app),
-    });
+    state.types.insert(
+        String::from(type_id),
+        WidgetType {
+            type_id: String::from(type_id),
+            display_name: String::from(name),
+            default_width: width,
+            default_height: height,
+            provider_app: String::from(app),
+        },
+    );
     Ok(())
 }
 

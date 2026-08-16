@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -187,7 +187,9 @@ where
 /// seeded with a phantom keyboard and mouse.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     *guard = Some(State {
         devices: Vec::new(),
@@ -200,8 +202,15 @@ pub fn init_defaults() {
 
 /// Register a newly connected USB device.
 pub fn device_connected(
-    bus: u8, port: u8, vendor_id: u16, product_id: u16,
-    manufacturer: &str, product: &str, class: UsbClass, speed: UsbSpeed, power_ma: u16,
+    bus: u8,
+    port: u8,
+    vendor_id: u16,
+    product_id: u16,
+    manufacturer: &str,
+    product: &str,
+    class: UsbClass,
+    speed: UsbSpeed,
+    power_ma: u16,
 ) -> KernelResult<u8> {
     with_state(|state| {
         if state.devices.len() >= MAX_DEVICES {
@@ -210,12 +219,17 @@ pub fn device_connected(
         // Assign next address.
         let address = state.devices.iter().map(|d| d.address).max().unwrap_or(0) + 1;
         state.devices.push(UsbDevice {
-            bus, port, address,
-            vendor_id, product_id,
+            bus,
+            port,
+            address,
+            vendor_id,
+            product_id,
             manufacturer: String::from(manufacturer),
             product: String::from(product),
             serial: String::new(),
-            class, speed, power_ma,
+            class,
+            speed,
+            power_ma,
             removable: true,
             driver: String::new(),
             connected_ns: crate::hpet::elapsed_ns(),
@@ -228,7 +242,10 @@ pub fn device_connected(
 /// Remove a disconnected device.
 pub fn device_disconnected(bus: u8, port: u8) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.devices.iter().position(|d| d.bus == bus && d.port == port)
+        let pos = state
+            .devices
+            .iter()
+            .position(|d| d.bus == bus && d.port == port)
             .ok_or(KernelError::NotFound)?;
         state.devices.remove(pos);
         state.total_disconnects += 1;
@@ -239,7 +256,10 @@ pub fn device_disconnected(bus: u8, port: u8) -> KernelResult<()> {
 /// Safely remove a device (flush caches, unmount, etc.).
 pub fn safe_remove(bus: u8, port: u8) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.devices.iter().position(|d| d.bus == bus && d.port == port)
+        let pos = state
+            .devices
+            .iter()
+            .position(|d| d.bus == bus && d.port == port)
             .ok_or(KernelError::NotFound)?;
         if !state.devices[pos].removable {
             return Err(KernelError::PermissionDenied);
@@ -253,22 +273,30 @@ pub fn safe_remove(bus: u8, port: u8) -> KernelResult<()> {
 
 /// List all connected devices.
 pub fn list_devices() -> Vec<UsbDevice> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Get device by bus and port.
 pub fn get_device(bus: u8, port: u8) -> KernelResult<UsbDevice> {
     with_state(|state| {
-        state.devices.iter().find(|d| d.bus == bus && d.port == port).cloned()
+        state
+            .devices
+            .iter()
+            .find(|d| d.bus == bus && d.port == port)
+            .cloned()
             .ok_or(KernelError::NotFound)
     })
 }
 
 /// Total power draw in milliamps.
 pub fn total_power_draw() -> u32 {
-    STATE.lock().as_ref().map_or(0, |s| {
-        s.devices.iter().map(|d| d.power_ma as u32).sum()
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(0, |s| s.devices.iter().map(|d| d.power_ma as u32).sum())
 }
 
 /// Statistics: (device_count, connects, disconnects, safe_removes, total_power_ma, ops).
@@ -277,7 +305,14 @@ pub fn stats() -> (usize, u64, u64, u64, u32, u64) {
     match guard.as_ref() {
         Some(s) => {
             let power: u32 = s.devices.iter().map(|d| d.power_ma as u32).sum();
-            (s.devices.len(), s.total_connects, s.total_disconnects, s.total_safe_removes, power, s.ops)
+            (
+                s.devices.len(),
+                s.total_connects,
+                s.total_disconnects,
+                s.total_safe_removes,
+                power,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0, 0),
     }
@@ -304,10 +339,30 @@ pub fn self_test() {
     // Build deterministic fixtures via the real connect entry point: a
     // keyboard and a mouse (what the old fabricated default invented, now
     // installed explicitly inside the test rather than at boot).
-    device_connected(1, 1, 0x046d, 0xc52b, "Logitech", "USB Keyboard",
-        UsbClass::HumanInterface, UsbSpeed::Full, 100).expect("connect kb");
-    device_connected(1, 2, 0x046d, 0xc077, "Logitech", "USB Mouse",
-        UsbClass::HumanInterface, UsbSpeed::Full, 100).expect("connect mouse");
+    device_connected(
+        1,
+        1,
+        0x046d,
+        0xc52b,
+        "Logitech",
+        "USB Keyboard",
+        UsbClass::HumanInterface,
+        UsbSpeed::Full,
+        100,
+    )
+    .expect("connect kb");
+    device_connected(
+        1,
+        2,
+        0x046d,
+        0xc077,
+        "Logitech",
+        "USB Mouse",
+        UsbClass::HumanInterface,
+        UsbSpeed::Full,
+        100,
+    )
+    .expect("connect mouse");
     assert_eq!(list_devices().len(), 2);
 
     // 2: Device info.
@@ -318,9 +373,17 @@ pub fn self_test() {
 
     // 3: Connect new device.
     let addr = device_connected(
-        1, 3, 0x0781, 0x5583, "SanDisk", "Ultra USB 3.0",
-        UsbClass::MassStorage, UsbSpeed::Super, 896,
-    ).expect("connect flash");
+        1,
+        3,
+        0x0781,
+        0x5583,
+        "SanDisk",
+        "Ultra USB 3.0",
+        UsbClass::MassStorage,
+        UsbSpeed::Super,
+        896,
+    )
+    .expect("connect flash");
     assert!(addr > 0);
     assert_eq!(list_devices().len(), 3);
     crate::serial_println!("  [3/11] connect device: OK");
@@ -335,8 +398,18 @@ pub fn self_test() {
     crate::serial_println!("  [5/11] safe remove: OK");
 
     // 6: Disconnect.
-    device_connected(2, 1, 0x1234, 0x5678, "Generic", "USB Hub",
-        UsbClass::Hub, UsbSpeed::High, 0).expect("connect hub");
+    device_connected(
+        2,
+        1,
+        0x1234,
+        0x5678,
+        "Generic",
+        "USB Hub",
+        UsbClass::Hub,
+        UsbSpeed::High,
+        0,
+    )
+    .expect("connect hub");
     device_disconnected(2, 1).expect("disconnect hub");
     assert_eq!(list_devices().len(), 2);
     crate::serial_println!("  [6/11] disconnect: OK");
@@ -358,8 +431,18 @@ pub fn self_test() {
 
     // 10: Multiple connects.
     for i in 0..5u8 {
-        device_connected(3, i, 0xAAAA, i as u16, "Test", "Device",
-            UsbClass::Other, UsbSpeed::High, 50).expect("connect batch");
+        device_connected(
+            3,
+            i,
+            0xAAAA,
+            i as u16,
+            "Test",
+            "Device",
+            UsbClass::Other,
+            UsbSpeed::High,
+            50,
+        )
+        .expect("connect batch");
     }
     assert_eq!(list_devices().len(), 7);
     crate::serial_println!("  [10/11] batch connect: OK");

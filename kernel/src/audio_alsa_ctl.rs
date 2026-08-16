@@ -248,8 +248,12 @@ const fn struct_size<T>() -> u32 {
 /// `PVERSION` — query the control protocol version (`int` out).
 pub const SNDRV_CTL_IOCTL_PVERSION: u32 = ior_int(0x00);
 /// `CARD_INFO` — query card identification (`_IOR`).
-pub const SNDRV_CTL_IOCTL_CARD_INFO: u32 =
-    ioc(IOC_READ, SNDRV_CTL_IOCTL_MAGIC, 0x01, struct_size::<SndCtlCardInfo>());
+pub const SNDRV_CTL_IOCTL_CARD_INFO: u32 = ioc(
+    IOC_READ,
+    SNDRV_CTL_IOCTL_MAGIC,
+    0x01,
+    struct_size::<SndCtlCardInfo>(),
+);
 /// `ELEM_LIST` — enumerate control element IDs (`_IOWR`).
 pub const SNDRV_CTL_IOCTL_ELEM_LIST: u32 = ioc(
     IOC_READ | IOC_WRITE,
@@ -501,14 +505,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     // --- card's element model -------------------------------------------
     check!(ELEM_COUNT == 2, "two control elements");
-    check!(NUMID_MASTER_VOLUME == 1 && NUMID_MASTER_SWITCH == 2, "numids");
+    check!(
+        NUMID_MASTER_VOLUME == 1 && NUMID_MASTER_SWITCH == 2,
+        "numids"
+    );
     check!(MASTER_VOLUME_MAX == 100, "volume scale matches mixer");
 
     // --- element id resolution ------------------------------------------
     // numid form resolves directly.
     let mut probe = elem_id_for(NUMID_MASTER_VOLUME);
-    check!(resolve_numid(&probe) == NUMID_MASTER_VOLUME, "resolve vol by numid");
-    check!(probe.iface == SNDRV_CTL_ELEM_IFACE_MIXER, "vol iface is MIXER");
+    check!(
+        resolve_numid(&probe) == NUMID_MASTER_VOLUME,
+        "resolve vol by numid"
+    );
+    check!(
+        probe.iface == SNDRV_CTL_ELEM_IFACE_MIXER,
+        "vol iface is MIXER"
+    );
     check!(
         name_field_matches(&probe.name, MASTER_VOLUME_NAME),
         "vol name populated"
@@ -524,11 +537,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // name form: numid 0 + iface MIXER + matching name resolves.
     probe.numid = 0;
     probe.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
-    let n = MASTER_SWITCH_NAME.len().min(probe.name.len().saturating_sub(1));
+    let n = MASTER_SWITCH_NAME
+        .len()
+        .min(probe.name.len().saturating_sub(1));
     if let (Some(d), Some(s)) = (probe.name.get_mut(..n), MASTER_SWITCH_NAME.get(..n)) {
         d.copy_from_slice(s);
     }
-    check!(resolve_numid(&probe) == NUMID_MASTER_SWITCH, "resolve switch by name");
+    check!(
+        resolve_numid(&probe) == NUMID_MASTER_SWITCH,
+        "resolve switch by name"
+    );
     // wrong iface with the right name does not resolve.
     probe.iface = SNDRV_CTL_ELEM_IFACE_PCM;
     check!(resolve_numid(&probe) == 0, "name form requires MIXER iface");
@@ -537,7 +555,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // SAFETY: SndCtlElemInfo is a plain `#[repr(C)]` integer/byte aggregate, so
     // an all-zero value is a valid initialised value.
     let mut info: SndCtlElemInfo = unsafe { core::mem::zeroed() };
-    check!(fill_elem_info(NUMID_MASTER_VOLUME, &mut info), "fill vol info");
+    check!(
+        fill_elem_info(NUMID_MASTER_VOLUME, &mut info),
+        "fill vol info"
+    );
     check!(info.r#type == SNDRV_CTL_ELEM_TYPE_INTEGER, "vol is INTEGER");
     check!(info.count == 1, "vol count 1");
     check!(info.access == SNDRV_CTL_ELEM_ACCESS_READWRITE, "vol rw");
@@ -545,13 +566,22 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         info.value_integer_min == 0 && info.value_integer_max == MASTER_VOLUME_MAX,
         "vol range 0..max"
     );
-    check!(fill_elem_info(NUMID_MASTER_SWITCH, &mut info), "fill switch info");
-    check!(info.r#type == SNDRV_CTL_ELEM_TYPE_BOOLEAN, "switch is BOOLEAN");
+    check!(
+        fill_elem_info(NUMID_MASTER_SWITCH, &mut info),
+        "fill switch info"
+    );
+    check!(
+        info.r#type == SNDRV_CTL_ELEM_TYPE_BOOLEAN,
+        "switch is BOOLEAN"
+    );
     check!(
         info.value_integer_min == 0 && info.value_integer_max == 1,
         "switch range 0..1"
     );
-    check!(!fill_elem_info(99, &mut info), "unknown numid info -> false");
+    check!(
+        !fill_elem_info(99, &mut info),
+        "unknown numid info -> false"
+    );
 
     serial_println!("[alsactl] ALSA control ABI self-test PASSED");
     Ok(())

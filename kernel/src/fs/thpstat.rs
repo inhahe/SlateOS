@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -35,8 +35,8 @@ use crate::error::{KernelError, KernelResult};
 /// THP size class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThpSize {
-    Pmd,     // 2 MiB (standard huge page)
-    Pud,     // 1 GiB (gigantic page)
+    Pmd, // 2 MiB (standard huge page)
+    Pud, // 1 GiB (gigantic page)
 }
 
 impl ThpSize {
@@ -154,17 +154,29 @@ fn size_stats_mut(state: &mut State, size: ThpSize) -> &mut SizeClassStats {
 /// promotion/demotion/split/compaction/khugepaged event.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         pmd_stats: SizeClassStats {
-            size: ThpSize::Pmd, promotions: 0, demotions: 0,
-            splits: 0, alloc_attempts: 0, alloc_failures: 0,
-            bytes_promoted: 0, bytes_demoted: 0,
+            size: ThpSize::Pmd,
+            promotions: 0,
+            demotions: 0,
+            splits: 0,
+            alloc_attempts: 0,
+            alloc_failures: 0,
+            bytes_promoted: 0,
+            bytes_demoted: 0,
         },
         pud_stats: SizeClassStats {
-            size: ThpSize::Pud, promotions: 0, demotions: 0,
-            splits: 0, alloc_attempts: 0, alloc_failures: 0,
-            bytes_promoted: 0, bytes_demoted: 0,
+            size: ThpSize::Pud,
+            promotions: 0,
+            demotions: 0,
+            splits: 0,
+            alloc_attempts: 0,
+            alloc_failures: 0,
+            bytes_promoted: 0,
+            bytes_demoted: 0,
         },
         compact_success: 0,
         compact_failed: 0,
@@ -237,7 +249,9 @@ pub fn record_compaction(result: CompactResult) -> KernelResult<()> {
 pub fn record_khugepaged_scan(collapsed: bool) -> KernelResult<()> {
     with_state(|state| {
         state.khugepaged_scans += 1;
-        if collapsed { state.khugepaged_collapses += 1; }
+        if collapsed {
+            state.khugepaged_collapses += 1;
+        }
         Ok(())
     })
 }
@@ -253,7 +267,12 @@ pub fn per_size() -> Vec<SizeClassStats> {
 pub fn compaction_stats() -> (u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.compact_success, s.compact_failed, s.compact_deferred, s.compact_skipped),
+        Some(s) => (
+            s.compact_success,
+            s.compact_failed,
+            s.compact_deferred,
+            s.compact_skipped,
+        ),
         None => (0, 0, 0, 0),
     }
 }
@@ -262,7 +281,13 @@ pub fn compaction_stats() -> (u64, u64, u64, u64) {
 pub fn stats() -> (u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.total_promotions, s.total_demotions, s.khugepaged_scans, s.khugepaged_collapses, s.ops),
+        Some(s) => (
+            s.total_promotions,
+            s.total_demotions,
+            s.khugepaged_scans,
+            s.khugepaged_collapses,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -284,7 +309,15 @@ pub fn self_test() {
     // 1: Zeroed after init — two size classes exist but every counter is 0.
     let s = per_size();
     assert_eq!(s.len(), 2);
-    assert_eq!((s[0].promotions, s[0].demotions, s[0].splits, s[0].alloc_failures), (0, 0, 0, 0));
+    assert_eq!(
+        (
+            s[0].promotions,
+            s[0].demotions,
+            s[0].splits,
+            s[0].alloc_failures
+        ),
+        (0, 0, 0, 0)
+    );
     assert_eq!((s[1].promotions, s[1].bytes_promoted), (0, 0));
     assert_eq!(compaction_stats(), (0, 0, 0, 0));
     let (p, d, sc, co, _o) = stats();

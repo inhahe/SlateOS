@@ -16,7 +16,6 @@
 // (`sanitize` is nightly-only, so it is gated on the `kasan_instrumented` cfg
 // that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
 #![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
-
 // Diagnostic/profiling subsystem — all public API for tooling and kshell
 // commands; many helpers may not have call sites in production paths yet.
 #![allow(dead_code)]
@@ -87,7 +86,7 @@ pub fn mark(milestone: Milestone) {
 /// Returns an array of (name, tick) pairs.  Tick=0 means the milestone
 /// hasn't been reached.
 #[must_use]
-pub fn milestones() -> [(& 'static str, u64); NUM_MILESTONES] {
+pub fn milestones() -> [(&'static str, u64); NUM_MILESTONES] {
     const NAMES: [&str; NUM_MILESTONES] = [
         "Kernel entry",
         "Serial console",

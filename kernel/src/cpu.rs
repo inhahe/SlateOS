@@ -184,7 +184,9 @@ where
     let were_enabled = interrupts_enabled();
     if were_enabled {
         // SAFETY: We restore the interrupt state after the closure.
-        unsafe { cli(); }
+        unsafe {
+            cli();
+        }
         irqoff_tracker::record_disable();
     }
     let result = f();
@@ -192,7 +194,9 @@ where
         irqoff_tracker::record_enable();
         // SAFETY: The IDT was already set up (interrupts were enabled
         // before we disabled them).
-        unsafe { sti(); }
+        unsafe {
+            sti();
+        }
     }
     result
 }
@@ -254,13 +258,11 @@ impl CacheInfo {
 static mut CACHE_TOPOLOGY: [CacheInfo; MAX_CACHE_LEVELS] = [CacheInfo::empty(); MAX_CACHE_LEVELS];
 
 /// Number of valid entries in CACHE_TOPOLOGY.
-static CACHE_LEVELS_DETECTED: core::sync::atomic::AtomicU8 =
-    core::sync::atomic::AtomicU8::new(0);
+static CACHE_LEVELS_DETECTED: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
 /// Cache line size (bytes) — the L1 data cache line size.
 /// Defaults to 64 if detection fails.
-static CACHE_LINE_SIZE: core::sync::atomic::AtomicU16 =
-    core::sync::atomic::AtomicU16::new(64);
+static CACHE_LINE_SIZE: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(64);
 
 /// Detect cache topology via CPUID leaf 4 (Intel) or leaf 0x8000001D (AMD).
 ///
@@ -550,7 +552,8 @@ pub mod irqoff_tracker {
             return;
         }
         let cpu = crate::smp::current_cpu_index();
-        let start = DISABLE_TSC.get(cpu)
+        let start = DISABLE_TSC
+            .get(cpu)
             .map_or(0, |s| s.load(Ordering::Relaxed));
         if start == 0 {
             return; // No matching disable recorded.
@@ -565,7 +568,10 @@ pub mod irqoff_tracker {
         let mut cur = MAX_OFF_CYCLES.load(Ordering::Relaxed);
         while duration > cur {
             match MAX_OFF_CYCLES.compare_exchange_weak(
-                cur, duration, Ordering::Relaxed, Ordering::Relaxed,
+                cur,
+                duration,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(actual) => cur = actual,
@@ -697,9 +703,7 @@ pub fn delay_ns(ns: u64) {
     // target_cycles = ns * freq / 1_000_000_000
     // To avoid overflow on large ns values: split the division.
     // freq / 1000 loses at most 999 Hz of precision (~0.0001% for GHz clocks).
-    let target_cycles = ns
-        .saturating_mul(freq / 1000)
-        / 1_000_000;
+    let target_cycles = ns.saturating_mul(freq / 1000) / 1_000_000;
     if target_cycles == 0 {
         // Sub-cycle delay — just do a single spin.
         core::hint::spin_loop();
@@ -946,19 +950,54 @@ impl CpuFeatures {
     /// Create an empty features struct (all false/zero).
     const fn empty() -> Self {
         Self {
-            sse3: false, ssse3: false, sse4_1: false, sse4_2: false,
-            popcnt: false, avx: false, xsave: false, osxsave: false,
-            mwait: false, aes_ni: false, rdrand: false, f16c: false,
-            fxsr: false, sse: false, sse2: false, tsc: false, apic: false,
-            avx2: false, bmi1: false, bmi2: false, avx512f: false,
-            sha: false, rdseed: false, smep: false, smap: false,
-            umip: false, vaes: false, rdpid: false, cet_ss: false, cet_ibt: false,
-            rdtscp: false, page_1g: false,
-            xsave_area_size: 0, xcr0_supported: 0,
-            xsaveopt: false, xsavec: false, xsaves: false,
-            pmu_version: 0, pmu_counters: 0, pmu_counter_width: 0,
-            ibrs_ibpb: false, stibp: false, arch_capabilities: false, ssbd: false,
-            amd_ibpb: false, amd_ssbd: false, amd_stibp: false, amd_ibrs: false,
+            sse3: false,
+            ssse3: false,
+            sse4_1: false,
+            sse4_2: false,
+            popcnt: false,
+            avx: false,
+            xsave: false,
+            osxsave: false,
+            mwait: false,
+            aes_ni: false,
+            rdrand: false,
+            f16c: false,
+            fxsr: false,
+            sse: false,
+            sse2: false,
+            tsc: false,
+            apic: false,
+            avx2: false,
+            bmi1: false,
+            bmi2: false,
+            avx512f: false,
+            sha: false,
+            rdseed: false,
+            smep: false,
+            smap: false,
+            umip: false,
+            vaes: false,
+            rdpid: false,
+            cet_ss: false,
+            cet_ibt: false,
+            rdtscp: false,
+            page_1g: false,
+            xsave_area_size: 0,
+            xcr0_supported: 0,
+            xsaveopt: false,
+            xsavec: false,
+            xsaves: false,
+            pmu_version: 0,
+            pmu_counters: 0,
+            pmu_counter_width: 0,
+            ibrs_ibpb: false,
+            stibp: false,
+            arch_capabilities: false,
+            ssbd: false,
+            amd_ibpb: false,
+            amd_ssbd: false,
+            amd_stibp: false,
+            amd_ibrs: false,
         }
     }
 }
@@ -1015,7 +1054,7 @@ pub fn detect_features() {
         f.vaes = ecx7 & (1 << 9) != 0;
         f.rdpid = ecx7 & (1 << 22) != 0;
         // Intel CET (Control-flow Enforcement Technology).
-        f.cet_ss = ecx7 & (1 << 7) != 0;   // Shadow Stack support
+        f.cet_ss = ecx7 & (1 << 7) != 0; // Shadow Stack support
         f.cet_ibt = edx7 & (1 << 20) != 0; // Indirect Branch Tracking
         // Speculation control (Spectre/Meltdown mitigations).
         f.ibrs_ibpb = edx7 & (1 << 26) != 0;
@@ -1050,8 +1089,8 @@ pub fn detect_features() {
         // --- Leaf 0xD, subleaf 1: XSAVE extensions ---
         let eax_d1 = cpuid_leaf_d_sub1_eax();
         f.xsaveopt = eax_d1 & (1 << 0) != 0; // XSAVEOPT available
-        f.xsavec   = eax_d1 & (1 << 1) != 0; // XSAVEC available
-        f.xsaves   = eax_d1 & (1 << 3) != 0; // XSAVES/XRSTORS available
+        f.xsavec = eax_d1 & (1 << 1) != 0; // XSAVEC available
+        f.xsaves = eax_d1 & (1 << 3) != 0; // XSAVES/XRSTORS available
     }
 
     // --- Leaf 0x0A: Architectural Performance Monitoring ---
@@ -1096,45 +1135,65 @@ pub fn log_features() {
     crate::serial_println!("[cpu] Feature detection:");
     crate::serial_println!(
         "[cpu]   SSE3={} SSSE3={} SSE4.1={} SSE4.2={} POPCNT={}",
-        f.sse3, f.ssse3, f.sse4_1, f.sse4_2, f.popcnt
+        f.sse3,
+        f.ssse3,
+        f.sse4_1,
+        f.sse4_2,
+        f.popcnt
     );
     crate::serial_println!(
         "[cpu]   AVX={} AVX2={} AVX-512F={} XSAVE={}",
-        f.avx, f.avx2, f.avx512f, f.xsave
+        f.avx,
+        f.avx2,
+        f.avx512f,
+        f.xsave
     );
     if f.xsave {
         crate::serial_println!(
             "[cpu]   XSAVE area: {} bytes, XCR0 supported: {:#x}",
-            f.xsave_area_size, f.xcr0_supported
+            f.xsave_area_size,
+            f.xcr0_supported
         );
         crate::serial_println!(
             "[cpu]   XSAVEOPT={} XSAVEC={} XSAVES={}",
-            f.xsaveopt, f.xsavec, f.xsaves
+            f.xsaveopt,
+            f.xsavec,
+            f.xsaves
         );
     }
     crate::serial_println!(
         "[cpu]   AES-NI={} SHA={} RDRAND={} RDSEED={} MWAIT={}",
-        f.aes_ni, f.sha, f.rdrand, f.rdseed, f.mwait
+        f.aes_ni,
+        f.sha,
+        f.rdrand,
+        f.rdseed,
+        f.mwait
     );
     crate::serial_println!(
         "[cpu]   RDTSCP={} 1GiB pages={} TSC={}",
-        f.rdtscp, f.page_1g, f.tsc
+        f.rdtscp,
+        f.page_1g,
+        f.tsc
     );
-    crate::serial_println!(
-        "[cpu]   SMEP={} SMAP={} UMIP={}", f.smep, f.smap, f.umip
-    );
+    crate::serial_println!("[cpu]   SMEP={} SMAP={} UMIP={}", f.smep, f.smap, f.umip);
     crate::serial_println!(
         "[cpu]   CET: shadow_stack={} indirect_branch_tracking={}",
-        f.cet_ss, f.cet_ibt
+        f.cet_ss,
+        f.cet_ibt
     );
     crate::serial_println!(
         "[cpu]   Speculation: IBRS/IBPB={} STIBP={} SSBD={} ARCH_CAP={}",
-        f.ibrs_ibpb, f.stibp, f.ssbd, f.arch_capabilities
+        f.ibrs_ibpb,
+        f.stibp,
+        f.ssbd,
+        f.arch_capabilities
     );
     if f.pmu_version > 0 {
         crate::serial_println!(
             "[cpu]   PMU v{}: {} counters × {}-bit",
-            f.pmu_version, f.pmu_counters, f.pmu_counter_width
+            f.pmu_version,
+            f.pmu_counters,
+            f.pmu_counter_width
         );
     }
 }
@@ -1394,7 +1453,10 @@ pub fn brand_string() -> [u8; 48] {
 
     // Leaves 0x80000002, 0x80000003, 0x80000004 each return 16 bytes
     // in EAX:EBX:ECX:EDX.
-    for (i, leaf) in [0x8000_0002u32, 0x8000_0003, 0x8000_0004].iter().enumerate() {
+    for (i, leaf) in [0x8000_0002u32, 0x8000_0003, 0x8000_0004]
+        .iter()
+        .enumerate()
+    {
         let eax: u32;
         let ebx: u32;
         let ecx: u32;

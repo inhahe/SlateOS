@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -206,9 +206,19 @@ pub fn init_defaults() {
 }
 
 /// Install a package.
-pub fn install(name: &str, version: &str, description: &str, section: PkgSection, size: u64) -> KernelResult<()> {
+pub fn install(
+    name: &str,
+    version: &str,
+    description: &str,
+    section: PkgSection,
+    size: u64,
+) -> KernelResult<()> {
     with_state(|state| {
-        if state.packages.iter().any(|p| p.name == name && p.status == PkgStatus::Installed) {
+        if state
+            .packages
+            .iter()
+            .any(|p| p.name == name && p.status == PkgStatus::Installed)
+        {
             return Err(KernelError::AlreadyExists);
         }
         if state.packages.len() >= MAX_PACKAGES {
@@ -245,7 +255,10 @@ pub fn install(name: &str, version: &str, description: &str, section: PkgSection
 /// Remove a package.
 pub fn remove(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pkg = state.packages.iter_mut().find(|p| p.name == name)
+        let pkg = state
+            .packages
+            .iter_mut()
+            .find(|p| p.name == name)
             .ok_or(KernelError::NotFound)?;
         if pkg.status != PkgStatus::Installed && pkg.status != PkgStatus::Upgradeable {
             return Err(KernelError::InvalidArgument);
@@ -268,7 +281,10 @@ pub fn remove(name: &str) -> KernelResult<()> {
 /// Mark a package as having an available upgrade.
 pub fn mark_upgradeable(name: &str, new_version: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pkg = state.packages.iter_mut().find(|p| p.name == name)
+        let pkg = state
+            .packages
+            .iter_mut()
+            .find(|p| p.name == name)
             .ok_or(KernelError::NotFound)?;
         if pkg.status != PkgStatus::Installed {
             return Err(KernelError::InvalidArgument);
@@ -282,7 +298,10 @@ pub fn mark_upgradeable(name: &str, new_version: &str) -> KernelResult<()> {
 /// Upgrade a package to its available version.
 pub fn upgrade(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pkg = state.packages.iter_mut().find(|p| p.name == name)
+        let pkg = state
+            .packages
+            .iter_mut()
+            .find(|p| p.name == name)
             .ok_or(KernelError::NotFound)?;
         if pkg.status != PkgStatus::Upgradeable {
             return Err(KernelError::InvalidArgument);
@@ -314,7 +333,9 @@ pub fn upgrade_all() -> KernelResult<usize> {
 pub fn search(query: &str) -> Vec<Package> {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => s.packages.iter()
+        Some(s) => s
+            .packages
+            .iter()
             .filter(|p| p.name.contains(query) || p.description.contains(query))
             .cloned()
             .collect(),
@@ -325,7 +346,10 @@ pub fn search(query: &str) -> Vec<Package> {
 /// Get package info.
 pub fn get_package(name: &str) -> KernelResult<Package> {
     with_state(|state| {
-        state.packages.iter().find(|p| p.name == name)
+        state
+            .packages
+            .iter()
+            .find(|p| p.name == name)
             .cloned()
             .ok_or(KernelError::NotFound)
     })
@@ -335,7 +359,9 @@ pub fn get_package(name: &str) -> KernelResult<Package> {
 pub fn list_installed() -> Vec<Package> {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => s.packages.iter()
+        Some(s) => s
+            .packages
+            .iter()
             .filter(|p| p.status == PkgStatus::Installed || p.status == PkgStatus::Upgradeable)
             .cloned()
             .collect(),
@@ -347,7 +373,9 @@ pub fn list_installed() -> Vec<Package> {
 pub fn list_upgradeable() -> Vec<Package> {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => s.packages.iter()
+        Some(s) => s
+            .packages
+            .iter()
             .filter(|p| p.status == PkgStatus::Upgradeable)
             .cloned()
             .collect(),
@@ -374,7 +402,10 @@ pub fn add_repo(name: &str, url: &str) -> KernelResult<()> {
 /// Remove a repository.
 pub fn remove_repo(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.repos.iter().position(|r| r.name == name)
+        let pos = state
+            .repos
+            .iter()
+            .position(|r| r.name == name)
             .ok_or(KernelError::NotFound)?;
         state.repos.remove(pos);
         Ok(())
@@ -394,7 +425,9 @@ pub fn list_repos() -> Vec<Repository> {
 pub fn total_installed_size() -> u64 {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => s.packages.iter()
+        Some(s) => s
+            .packages
+            .iter()
             .filter(|p| p.status == PkgStatus::Installed || p.status == PkgStatus::Upgradeable)
             .map(|p| p.installed_size)
             .sum(),
@@ -407,9 +440,21 @@ pub fn stats() -> (usize, usize, usize, usize, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let installed = s.packages.iter().filter(|p| p.status == PkgStatus::Installed || p.status == PkgStatus::Upgradeable).count();
-            let available = s.packages.iter().filter(|p| p.status == PkgStatus::Available).count();
-            let upgradeable = s.packages.iter().filter(|p| p.status == PkgStatus::Upgradeable).count();
+            let installed = s
+                .packages
+                .iter()
+                .filter(|p| p.status == PkgStatus::Installed || p.status == PkgStatus::Upgradeable)
+                .count();
+            let available = s
+                .packages
+                .iter()
+                .filter(|p| p.status == PkgStatus::Available)
+                .count();
+            let upgradeable = s
+                .packages
+                .iter()
+                .filter(|p| p.status == PkgStatus::Upgradeable)
+                .count();
             (installed, available, upgradeable, s.repos.len(), s.ops)
         }
         None => (0, 0, 0, 0, 0),
@@ -439,20 +484,54 @@ pub fn self_test() {
     // explicitly inside the test rather than at boot).
     add_repo("main", "https://packages.example.os/main").expect("add main repo");
     add_repo("community", "https://packages.example.os/community").expect("add community repo");
-    install("kernel", "0.1.0", "OS kernel", PkgSection::System, 4 * 1024 * 1024).expect("install kernel");
-    install("coreutils", "1.0.0", "Core system utilities", PkgSection::System, 2 * 1024 * 1024).expect("install coreutils");
-    install("libc", "1.0.0", "C standard library", PkgSection::Libraries, 8 * 1024 * 1024).expect("install libc");
+    install(
+        "kernel",
+        "0.1.0",
+        "OS kernel",
+        PkgSection::System,
+        4 * 1024 * 1024,
+    )
+    .expect("install kernel");
+    install(
+        "coreutils",
+        "1.0.0",
+        "Core system utilities",
+        PkgSection::System,
+        2 * 1024 * 1024,
+    )
+    .expect("install coreutils");
+    install(
+        "libc",
+        "1.0.0",
+        "C standard library",
+        PkgSection::Libraries,
+        8 * 1024 * 1024,
+    )
+    .expect("install libc");
     assert_eq!(list_installed().len(), 3);
     crate::serial_println!("  [1/11] empty db + base fixtures: OK");
 
     // Test 2: Install new package.
-    install("editor", "2.0.0", "Text editor", PkgSection::Editors, 5 * 1024 * 1024).expect("install");
+    install(
+        "editor",
+        "2.0.0",
+        "Text editor",
+        PkgSection::Editors,
+        5 * 1024 * 1024,
+    )
+    .expect("install");
     let pkg = get_package("editor").expect("get editor");
     assert_eq!(pkg.status, PkgStatus::Installed);
     crate::serial_println!("  [2/11] install package: OK");
 
     // Test 3: Duplicate install fails.
-    let result = install("editor", "2.0.0", "Text editor", PkgSection::Editors, 5 * 1024 * 1024);
+    let result = install(
+        "editor",
+        "2.0.0",
+        "Text editor",
+        PkgSection::Editors,
+        5 * 1024 * 1024,
+    );
     assert!(result.is_err());
     crate::serial_println!("  [3/11] duplicate rejected: OK");
 

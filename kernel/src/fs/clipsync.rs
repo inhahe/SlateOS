@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -136,7 +136,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         queue: Vec::new(),
@@ -145,7 +147,11 @@ pub fn init_defaults() {
         enabled: false,
         encrypted: true,
         max_size_bytes: 10 * 1024 * 1024, // 10 MB.
-        allowed_types: alloc::vec![SyncContentType::Text, SyncContentType::Url, SyncContentType::RichText],
+        allowed_types: alloc::vec![
+            SyncContentType::Text,
+            SyncContentType::Url,
+            SyncContentType::RichText
+        ],
         total_sent: 0,
         total_received: 0,
         total_bytes_synced: 0,
@@ -192,9 +198,13 @@ pub fn add_device(name: &str, direction: SyncDirection) -> KernelResult<u32> {
         let id = state.next_device_id;
         state.next_device_id += 1;
         state.devices.push(SyncDevice {
-            id, name: String::from(name), direction,
-            enabled: true, last_sync_ns: 0,
-            items_sent: 0, items_received: 0,
+            id,
+            name: String::from(name),
+            direction,
+            enabled: true,
+            last_sync_ns: 0,
+            items_sent: 0,
+            items_received: 0,
         });
         Ok(id)
     })
@@ -205,7 +215,9 @@ pub fn remove_device(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.devices.len();
         state.devices.retain(|d| d.id != id);
-        if state.devices.len() == before { return Err(KernelError::NotFound); }
+        if state.devices.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -229,9 +241,12 @@ pub fn on_copy(content_type: SyncContentType, preview: &str, size_bytes: u64) ->
         state.next_entry_id += 1;
         let now = crate::hpet::elapsed_ns();
         state.queue.push(SyncEntry {
-            id, content_type,
+            id,
+            content_type,
             preview: String::from(preview),
-            size_bytes, synced: false, timestamp_ns: now,
+            size_bytes,
+            synced: false,
+            timestamp_ns: now,
         });
         Ok(id)
     })
@@ -240,7 +255,10 @@ pub fn on_copy(content_type: SyncContentType, preview: &str, size_bytes: u64) ->
 /// Simulate syncing to a device.
 pub fn sync_to_device(device_id: u32) -> KernelResult<usize> {
     with_state(|state| {
-        let device = state.devices.iter_mut().find(|d| d.id == device_id)
+        let device = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         if !device.enabled {
             return Err(KernelError::NotSupported);
@@ -262,22 +280,35 @@ pub fn sync_to_device(device_id: u32) -> KernelResult<usize> {
 }
 
 /// Receive content from a remote device.
-pub fn receive(device_id: u32, content_type: SyncContentType, preview: &str, size_bytes: u64) -> KernelResult<()> {
+pub fn receive(
+    device_id: u32,
+    content_type: SyncContentType,
+    preview: &str,
+    size_bytes: u64,
+) -> KernelResult<()> {
     with_state(|state| {
-        let device = state.devices.iter_mut().find(|d| d.id == device_id)
+        let device = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         device.items_received += 1;
         let now = crate::hpet::elapsed_ns();
         device.last_sync_ns = now;
         state.total_received += 1;
         state.total_bytes_synced += size_bytes;
-        if state.queue.len() >= MAX_QUEUE { state.queue.remove(0); }
+        if state.queue.len() >= MAX_QUEUE {
+            state.queue.remove(0);
+        }
         let id = state.next_entry_id;
         state.next_entry_id += 1;
         state.queue.push(SyncEntry {
-            id, content_type,
+            id,
+            content_type,
             preview: String::from(preview),
-            size_bytes, synced: true, timestamp_ns: now,
+            size_bytes,
+            synced: true,
+            timestamp_ns: now,
         });
         Ok(())
     })
@@ -285,7 +316,10 @@ pub fn receive(device_id: u32, content_type: SyncContentType, preview: &str, siz
 
 /// List devices.
 pub fn list_devices() -> Vec<SyncDevice> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Get sync queue.
@@ -307,7 +341,13 @@ pub fn is_enabled() -> bool {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.total_sent, s.total_received, s.total_bytes_synced, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.total_sent,
+            s.total_received,
+            s.total_bytes_synced,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

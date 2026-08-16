@@ -19,10 +19,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -117,7 +117,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         config: FocusConfig {
             focus_mins: 25,
@@ -267,7 +269,10 @@ pub fn set_break_durations(short_mins: u32, long_mins: u32) -> KernelResult<()> 
 
 /// Get current state.
 pub fn current_state() -> SessionState {
-    STATE.lock().as_ref().map_or(SessionState::Idle, |s| s.state)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(SessionState::Idle, |s| s.state)
 }
 
 /// Get config.
@@ -289,7 +294,12 @@ pub fn get_history(max: usize) -> Vec<SessionRecord> {
 pub fn stats() -> (u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.total_sessions, s.total_abandoned, s.total_focus_mins, s.ops),
+        Some(s) => (
+            s.total_sessions,
+            s.total_abandoned,
+            s.total_focus_mins,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }

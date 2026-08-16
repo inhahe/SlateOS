@@ -111,8 +111,7 @@ pub fn confine_under<B: AsRef<Path> + ?Sized, R: AsRef<Path> + ?Sized>(
     }
     let base_trimmed = base_bytes.get(..end).unwrap_or(base_bytes);
 
-    let mut out =
-        PathBuf::with_capacity(base.len().saturating_add(rel.len()).saturating_add(1));
+    let mut out = PathBuf::with_capacity(base.len().saturating_add(rel.len()).saturating_add(1));
     out.extend_bytes(base_trimmed);
 
     // `components()` already drops empty components, so a leading `/`, a
@@ -235,13 +234,25 @@ mod tests {
 
     #[test]
     fn confine_under_normal_joins() {
-        assert_eq!(confine_under("/dest", "a/b.txt").unwrap(), PathBuf::from("/dest/a/b.txt"));
+        assert_eq!(
+            confine_under("/dest", "a/b.txt").unwrap(),
+            PathBuf::from("/dest/a/b.txt")
+        );
         // Trailing separators on either side collapse to exactly one.
-        assert_eq!(confine_under("/dest/", "a/").unwrap(), PathBuf::from("/dest/a"));
+        assert_eq!(
+            confine_under("/dest/", "a/").unwrap(),
+            PathBuf::from("/dest/a")
+        );
         // A leading slash on the member is stripped, not honoured.
-        assert_eq!(confine_under("/dest", "/etc/passwd").unwrap(), PathBuf::from("/dest/etc/passwd"));
+        assert_eq!(
+            confine_under("/dest", "/etc/passwd").unwrap(),
+            PathBuf::from("/dest/etc/passwd")
+        );
         // `.` components are dropped.
-        assert_eq!(confine_under("/dest", "./a/./b").unwrap(), PathBuf::from("/dest/a/b"));
+        assert_eq!(
+            confine_under("/dest", "./a/./b").unwrap(),
+            PathBuf::from("/dest/a/b")
+        );
         // Bytes that are not UTF-8 survive intact.
         assert_eq!(
             confine_under("/dest", Path::new(b"re\xffport")).unwrap(),

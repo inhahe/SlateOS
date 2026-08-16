@@ -46,9 +46,9 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
-use alloc::vec::Vec;
 use crate::crypto;
 use crate::error::{KernelError, KernelResult};
+use alloc::vec::Vec;
 
 // ===========================================================================
 // TLS 1.3 constants
@@ -218,7 +218,11 @@ fn hkdf_expand_label(
 ///
 /// Derive-Secret(Secret, Label, Messages) =
 ///     HKDF-Expand-Label(Secret, Label, Transcript-Hash(Messages), Hash.length)
-fn derive_secret(secret: &[u8; HASH_LEN], label: &[u8], transcript_hash: &[u8; HASH_LEN]) -> [u8; HASH_LEN] {
+fn derive_secret(
+    secret: &[u8; HASH_LEN],
+    label: &[u8],
+    transcript_hash: &[u8; HASH_LEN],
+) -> [u8; HASH_LEN] {
     let expanded = hkdf_expand_label(secret, label, transcript_hash, HASH_LEN);
     let mut out = [0u8; HASH_LEN];
     let len = expanded.len().min(HASH_LEN);
@@ -324,8 +328,14 @@ fn decrypt_record(
 
     // Split ciphertext and tag.
     let ct_len = ciphertext_and_tag.len() - TAG_LEN;
-    let mut ciphertext = Vec::from(ciphertext_and_tag.get(..ct_len).ok_or(KernelError::InternalError)?);
-    let tag_slice = ciphertext_and_tag.get(ct_len..).ok_or(KernelError::InternalError)?;
+    let mut ciphertext = Vec::from(
+        ciphertext_and_tag
+            .get(..ct_len)
+            .ok_or(KernelError::InternalError)?,
+    );
+    let tag_slice = ciphertext_and_tag
+        .get(ct_len..)
+        .ok_or(KernelError::InternalError)?;
     let mut tag = [0u8; TAG_LEN];
     tag.copy_from_slice(tag_slice);
 
@@ -348,7 +358,10 @@ fn decrypt_record(
         return Err(KernelError::InvalidArgument);
     }
 
-    let inner_content_type = ciphertext.get(real_len - 1).copied().ok_or(KernelError::InternalError)?;
+    let inner_content_type = ciphertext
+        .get(real_len - 1)
+        .copied()
+        .ok_or(KernelError::InternalError)?;
     ciphertext.truncate(real_len - 1);
 
     Ok((inner_content_type, ciphertext))
@@ -454,7 +467,7 @@ fn build_supported_versions_extension() -> Vec<u8> {
     let mut ext = Vec::with_capacity(7);
     push_u16(&mut ext, extension_type::SUPPORTED_VERSIONS);
     push_u16(&mut ext, 3); // Extension data length
-    ext.push(2);           // List length (1 version × 2 bytes)
+    ext.push(2); // List length (1 version × 2 bytes)
     push_u16(&mut ext, TLS_13_VERSION);
     ext
 }
@@ -488,7 +501,7 @@ fn build_key_share_extension(x25519_public: &[u8; 32]) -> Vec<u8> {
     let mut ext = Vec::with_capacity(4 + 2 + entry_len);
     push_u16(&mut ext, extension_type::KEY_SHARE);
     push_u16(&mut ext, 2 + entry_len); // Extension data length
-    push_u16(&mut ext, entry_len);     // client_shares length
+    push_u16(&mut ext, entry_len); // client_shares length
     push_u16(&mut ext, X25519_GROUP);
     push_u16(&mut ext, 32);
     ext.extend_from_slice(x25519_public);
@@ -526,7 +539,9 @@ fn parse_server_hello(data: &[u8]) -> KernelResult<ServerHello> {
     }
 
     let msg_len = read_u24(data, 1)?;
-    let body = data.get(4..4 + msg_len).ok_or(KernelError::InvalidArgument)?;
+    let body = data
+        .get(4..4 + msg_len)
+        .ok_or(KernelError::InvalidArgument)?;
 
     // legacy_version (2)
     let _version = read_u16(body, 0)?;
@@ -566,7 +581,8 @@ fn parse_server_hello(data: &[u8]) -> KernelResult<ServerHello> {
     while eoff + 4 <= ext_end {
         let ext_type = read_u16(body, eoff)?;
         let ext_len = read_u16(body, eoff + 2)? as usize;
-        let ext_data = body.get(eoff + 4..eoff + 4 + ext_len)
+        let ext_data = body
+            .get(eoff + 4..eoff + 4 + ext_len)
             .ok_or(KernelError::InvalidArgument)?;
         eoff += 4 + ext_len;
 
@@ -581,9 +597,7 @@ fn parse_server_hello(data: &[u8]) -> KernelResult<ServerHello> {
                 crate::serial_println!("[tls] Unsupported key share group: 0x{:04x}", group);
                 return Err(KernelError::NotSupported);
             }
-            server_x25519.copy_from_slice(
-                ext_data.get(4..36).ok_or(KernelError::InvalidArgument)?
-            );
+            server_x25519.copy_from_slice(ext_data.get(4..36).ok_or(KernelError::InvalidArgument)?);
             found_key_share = true;
         }
     }
@@ -658,7 +672,10 @@ pub fn tls_connect(tcp_handle: usize, server_name: &str) -> KernelResult<TlsSess
     // Update transcript with ServerHello.
     transcript.update(&server_hello_raw);
 
-    crate::serial_println!("[tls] ServerHello received, cipher=0x{:04x}", server_hello.cipher_suite);
+    crate::serial_println!(
+        "[tls] ServerHello received, cipher=0x{:04x}",
+        server_hello.cipher_suite
+    );
 
     // --- 3. Compute handshake secrets (RFC 8446 §7.1) ---
     let shared_secret = crypto::x25519(&client_private, &server_hello.server_x25519_public);
@@ -684,12 +701,10 @@ pub fn tls_connect(tcp_handle: usize, server_name: &str) -> KernelResult<TlsSess
 
     // client/server handshake traffic secrets
     let transcript_hash_ch_sh = transcript.current_hash();
-    let client_hs_traffic_secret = derive_secret(
-        &handshake_secret, b"c hs traffic", &transcript_hash_ch_sh,
-    );
-    let server_hs_traffic_secret = derive_secret(
-        &handshake_secret, b"s hs traffic", &transcript_hash_ch_sh,
-    );
+    let client_hs_traffic_secret =
+        derive_secret(&handshake_secret, b"c hs traffic", &transcript_hash_ch_sh);
+    let server_hs_traffic_secret =
+        derive_secret(&handshake_secret, b"s hs traffic", &transcript_hash_ch_sh);
 
     // Derive handshake traffic keys.
     let server_hs_key = derive_traffic_key(&server_hs_traffic_secret);
@@ -731,25 +746,34 @@ pub fn tls_connect(tcp_handle: usize, server_name: &str) -> KernelResult<TlsSess
 
         // Must be application_data (encrypted handshake).
         if record_type != content_type::APPLICATION_DATA {
-            crate::serial_println!("[tls] Unexpected record type during handshake: {}", record_type);
+            crate::serial_println!(
+                "[tls] Unexpected record type during handshake: {}",
+                record_type
+            );
             return Err(KernelError::InvalidArgument);
         }
 
         // Decrypt.
-        let (inner_type, plaintext) = decrypt_record(
-            &server_hs_key, &server_hs_iv, server_hs_seq, &record,
-        )?;
+        let (inner_type, plaintext) =
+            decrypt_record(&server_hs_key, &server_hs_iv, server_hs_seq, &record)?;
         server_hs_seq = server_hs_seq.wrapping_add(1);
 
         if inner_type == content_type::ALERT {
             let level = plaintext.first().copied().unwrap_or(0);
             let desc = plaintext.get(1).copied().unwrap_or(0);
-            crate::serial_println!("[tls] Alert during handshake: level={}, desc={}", level, desc);
+            crate::serial_println!(
+                "[tls] Alert during handshake: level={}, desc={}",
+                level,
+                desc
+            );
             return Err(KernelError::ChannelClosed);
         }
 
         if inner_type != content_type::HANDSHAKE {
-            crate::serial_println!("[tls] Unexpected inner type during handshake: {}", inner_type);
+            crate::serial_println!(
+                "[tls] Unexpected inner type during handshake: {}",
+                inner_type
+            );
             return Err(KernelError::InvalidArgument);
         }
 
@@ -795,7 +819,8 @@ pub fn tls_connect(tcp_handle: usize, server_name: &str) -> KernelResult<TlsSess
                         &transcript.current_hash(),
                     );
 
-                    let received_verify = msg_data.get(4..4 + HASH_LEN)
+                    let received_verify = msg_data
+                        .get(4..4 + HASH_LEN)
                         .ok_or(KernelError::InvalidArgument)?;
 
                     if !constant_time_eq(&expected_verify, received_verify) {
@@ -832,9 +857,8 @@ pub fn tls_connect(tcp_handle: usize, server_name: &str) -> KernelResult<TlsSess
 
     // --- 5. Send client Finished ---
     let client_finished_hash = transcript.current_hash();
-    let client_finished_verify = compute_finished_verify(
-        &client_hs_traffic_secret, &client_finished_hash,
-    );
+    let client_finished_verify =
+        compute_finished_verify(&client_hs_traffic_secret, &client_finished_hash);
 
     // Build Finished handshake message.
     let mut finished_msg = Vec::with_capacity(4 + HASH_LEN);
@@ -848,8 +872,11 @@ pub fn tls_connect(tcp_handle: usize, server_name: &str) -> KernelResult<TlsSess
     // Encrypt and send.
     let mut client_hs_seq: u64 = 0;
     let finished_record = encrypt_record(
-        &client_hs_key, &client_hs_iv, client_hs_seq,
-        content_type::HANDSHAKE, &finished_msg,
+        &client_hs_key,
+        &client_hs_iv,
+        client_hs_seq,
+        content_type::HANDSHAKE,
+        &finished_msg,
     );
     client_hs_seq = client_hs_seq.wrapping_add(1);
     let _ = client_hs_seq; // Only one client handshake record.
@@ -861,12 +888,10 @@ pub fn tls_connect(tcp_handle: usize, server_name: &str) -> KernelResult<TlsSess
     let master_secret = crypto::hkdf_extract(&derived_hs, &zero_ikm);
 
     let transcript_hash_final = transcript.current_hash();
-    let client_app_traffic_secret = derive_secret(
-        &master_secret, b"c ap traffic", &transcript_hash_final,
-    );
-    let server_app_traffic_secret = derive_secret(
-        &master_secret, b"s ap traffic", &transcript_hash_final,
-    );
+    let client_app_traffic_secret =
+        derive_secret(&master_secret, b"c ap traffic", &transcript_hash_final);
+    let server_app_traffic_secret =
+        derive_secret(&master_secret, b"s ap traffic", &transcript_hash_final);
 
     let client_write_key = derive_traffic_key(&client_app_traffic_secret);
     let client_write_iv = derive_traffic_iv(&client_app_traffic_secret);
@@ -905,7 +930,9 @@ pub fn tls_send(session: &mut TlsSession, data: &[u8]) -> KernelResult<usize> {
 
     while !remaining.is_empty() {
         let chunk_len = remaining.len().min(MAX_PLAINTEXT_SIZE);
-        let chunk = remaining.get(..chunk_len).ok_or(KernelError::InternalError)?;
+        let chunk = remaining
+            .get(..chunk_len)
+            .ok_or(KernelError::InternalError)?;
 
         let record = encrypt_record(
             &session.client_write_key,
@@ -981,9 +1008,9 @@ pub fn tls_recv(session: &mut TlsSession, max_bytes: usize) -> KernelResult<Vec<
             let take = plaintext.len().min(max_bytes);
             let result = Vec::from(plaintext.get(..take).unwrap_or(&[]));
             if take < plaintext.len() {
-                session.recv_buf.extend_from_slice(
-                    plaintext.get(take..).unwrap_or(&[])
-                );
+                session
+                    .recv_buf
+                    .extend_from_slice(plaintext.get(take..).unwrap_or(&[]));
             }
             Ok(result)
         }
@@ -1117,7 +1144,9 @@ fn parse_client_hello(data: &[u8]) -> KernelResult<ParsedClientHello> {
     }
 
     let msg_len = read_u24(data, 1)?;
-    let body = data.get(4..4 + msg_len).ok_or(KernelError::InvalidArgument)?;
+    let body = data
+        .get(4..4 + msg_len)
+        .ok_or(KernelError::InvalidArgument)?;
 
     // legacy_version (2)
     let mut offset = 2;
@@ -1127,11 +1156,17 @@ fn parse_client_hello(data: &[u8]) -> KernelResult<ParsedClientHello> {
         return Err(KernelError::InvalidArgument);
     }
     let mut client_random = [0u8; 32];
-    client_random.copy_from_slice(body.get(offset..offset + 32).ok_or(KernelError::InvalidArgument)?);
+    client_random.copy_from_slice(
+        body.get(offset..offset + 32)
+            .ok_or(KernelError::InvalidArgument)?,
+    );
     offset += 32;
 
     // legacy_session_id (variable)
-    let session_id_len = body.get(offset).copied().ok_or(KernelError::InvalidArgument)? as usize;
+    let session_id_len = body
+        .get(offset)
+        .copied()
+        .ok_or(KernelError::InvalidArgument)? as usize;
     offset += 1 + session_id_len;
 
     // cipher_suites
@@ -1154,7 +1189,10 @@ fn parse_client_hello(data: &[u8]) -> KernelResult<ParsedClientHello> {
     offset = cs_end;
 
     // legacy_compression_methods
-    let comp_len = body.get(offset).copied().ok_or(KernelError::InvalidArgument)? as usize;
+    let comp_len = body
+        .get(offset)
+        .copied()
+        .ok_or(KernelError::InvalidArgument)? as usize;
     offset += 1 + comp_len;
 
     // extensions
@@ -1173,7 +1211,8 @@ fn parse_client_hello(data: &[u8]) -> KernelResult<ParsedClientHello> {
     while offset + 4 <= ext_end {
         let ext_type = read_u16(body, offset)? as usize;
         let ext_len = read_u16(body, offset + 2)? as usize;
-        let ext_data = body.get(offset + 4..offset + 4 + ext_len)
+        let ext_data = body
+            .get(offset + 4..offset + 4 + ext_len)
             .ok_or(KernelError::InvalidArgument)?;
         offset += 4 + ext_len;
 
@@ -1192,7 +1231,9 @@ fn parse_client_hello(data: &[u8]) -> KernelResult<ParsedClientHello> {
                     soff += 4;
                     if group == X25519_GROUP && kx_len == 32 && soff + 32 <= ext_data.len() {
                         client_x25519_public.copy_from_slice(
-                            ext_data.get(soff..soff + 32).ok_or(KernelError::InvalidArgument)?
+                            ext_data
+                                .get(soff..soff + 32)
+                                .ok_or(KernelError::InvalidArgument)?,
                         );
                         found_key_share = true;
                     }
@@ -1204,7 +1245,10 @@ fn parse_client_hello(data: &[u8]) -> KernelResult<ParsedClientHello> {
                 if ext_data.is_empty() {
                     continue;
                 }
-                let list_len = ext_data.first().copied().ok_or(KernelError::InvalidArgument)? as usize;
+                let list_len = ext_data
+                    .first()
+                    .copied()
+                    .ok_or(KernelError::InvalidArgument)? as usize;
                 let mut voff = 1usize;
                 let vend = 1 + list_len;
                 while voff + 2 <= vend && voff + 2 <= ext_data.len() {
@@ -1287,7 +1331,9 @@ fn build_self_signed_certificate(seed: &[u8; 32], public_key: &[u8; 32]) -> Vec<
     name.push(0x03); // attributeType is OID, this is length of value
     name.push(0x0C); // UTF8String
     #[allow(clippy::cast_possible_truncation)]
-    { name.push(cn_value.len() as u8); }
+    {
+        name.push(cn_value.len() as u8);
+    }
     name.extend_from_slice(cn_value);
 
     // Serial number (random 8 bytes)
@@ -1297,7 +1343,7 @@ fn build_self_signed_certificate(seed: &[u8; 32], public_key: &[u8; 32]) -> Vec<
 
     // Validity: not before 2024-01-01, not after 2034-12-31
     let not_before = b"\x17\x0D241231000000Z"; // UTCTime
-    let not_after  = b"\x17\x0D341231235959Z";
+    let not_after = b"\x17\x0D341231235959Z";
 
     // Build TBSCertificate
     let mut tbs = Vec::with_capacity(256);
@@ -1308,7 +1354,9 @@ fn build_self_signed_certificate(seed: &[u8; 32], public_key: &[u8; 32]) -> Vec<
     // serialNumber
     tbs.push(0x02); // INTEGER
     #[allow(clippy::cast_possible_truncation)]
-    { tbs.push(serial.len() as u8); }
+    {
+        tbs.push(serial.len() as u8);
+    }
     tbs.extend_from_slice(&serial);
 
     // signature algorithm: Ed25519 (OID 1.3.101.112)
@@ -1354,7 +1402,10 @@ fn build_self_signed_certificate(seed: &[u8; 32], public_key: &[u8; 32]) -> Vec<
 
     let mut cert = Vec::with_capacity(4 + inner_len);
     cert.push(0x30); // SEQUENCE
-    push_der_len(&mut cert, tbs_for_signing.len() + sig_alg.len() + 2 + sig_bitstring_len);
+    push_der_len(
+        &mut cert,
+        tbs_for_signing.len() + sig_alg.len() + 2 + sig_bitstring_len,
+    );
 
     cert.extend_from_slice(&tbs_for_signing);
     cert.extend_from_slice(&sig_alg);
@@ -1433,10 +1484,7 @@ fn build_certificate_message(cert_der: &[u8]) -> Vec<u8> {
 /// Signs the transcript hash with the server's Ed25519 key.
 /// RFC 8446 §4.4.3: The signature is over:
 ///   64 × 0x20 + "TLS 1.3, server CertificateVerify" + 0x00 + transcript_hash
-fn build_certificate_verify(
-    seed: &[u8; 32],
-    transcript_hash: &[u8; HASH_LEN],
-) -> Vec<u8> {
+fn build_certificate_verify(seed: &[u8; 32], transcript_hash: &[u8; HASH_LEN]) -> Vec<u8> {
     // Build the content to sign.
     let mut to_sign = Vec::with_capacity(64 + 34 + 1 + HASH_LEN);
     to_sign.extend_from_slice(&[0x20u8; 64]); // 64 spaces
@@ -1463,10 +1511,7 @@ fn build_certificate_verify(
 }
 
 /// Build a ServerHello handshake message (server side).
-fn build_server_hello(
-    server_random: &[u8; 32],
-    x25519_public: &[u8; 32],
-) -> Vec<u8> {
+fn build_server_hello(server_random: &[u8; 32], x25519_public: &[u8; 32]) -> Vec<u8> {
     // Extensions: supported_versions (server) + key_share (server)
     let sv_ext = build_server_supported_versions_extension();
     let ks_ext = build_server_key_share_extension(x25519_public);
@@ -1570,8 +1615,12 @@ pub fn tls_accept(
         return Err(KernelError::NotSupported);
     }
 
-    crate::serial_println!("[tls] Server: ClientHello received (tls13={}, cipher={}, ed25519={})",
-        ch.has_tls13, ch.has_our_cipher, ch.has_ed25519_sig);
+    crate::serial_println!(
+        "[tls] Server: ClientHello received (tls13={}, cipher={}, ed25519={})",
+        ch.has_tls13,
+        ch.has_our_cipher,
+        ch.has_ed25519_sig
+    );
 
     // Start transcript with ClientHello.
     let mut transcript = TranscriptHash::new();
@@ -1609,12 +1658,10 @@ pub fn tls_accept(
     let handshake_secret = crypto::hkdf_extract(&derived_early, &shared_secret);
 
     let transcript_hash_ch_sh = transcript.current_hash();
-    let client_hs_traffic_secret = derive_secret(
-        &handshake_secret, b"c hs traffic", &transcript_hash_ch_sh,
-    );
-    let server_hs_traffic_secret = derive_secret(
-        &handshake_secret, b"s hs traffic", &transcript_hash_ch_sh,
-    );
+    let client_hs_traffic_secret =
+        derive_secret(&handshake_secret, b"c hs traffic", &transcript_hash_ch_sh);
+    let server_hs_traffic_secret =
+        derive_secret(&handshake_secret, b"s hs traffic", &transcript_hash_ch_sh);
 
     let server_hs_key = derive_traffic_key(&server_hs_traffic_secret);
     let server_hs_iv = derive_traffic_iv(&server_hs_traffic_secret);
@@ -1630,8 +1677,11 @@ pub fn tls_accept(
     let ee_msg = build_encrypted_extensions();
     transcript.update(&ee_msg);
     let ee_record = encrypt_record(
-        &server_hs_key, &server_hs_iv, server_hs_seq,
-        content_type::HANDSHAKE, &ee_msg,
+        &server_hs_key,
+        &server_hs_iv,
+        server_hs_seq,
+        content_type::HANDSHAKE,
+        &ee_msg,
     );
     server_hs_seq = server_hs_seq.wrapping_add(1);
     super::tcp::send(tcp_handle, &ee_record)?;
@@ -1641,8 +1691,11 @@ pub fn tls_accept(
     let cert_msg = build_certificate_message(&cert_der);
     transcript.update(&cert_msg);
     let cert_record = encrypt_record(
-        &server_hs_key, &server_hs_iv, server_hs_seq,
-        content_type::HANDSHAKE, &cert_msg,
+        &server_hs_key,
+        &server_hs_iv,
+        server_hs_seq,
+        content_type::HANDSHAKE,
+        &cert_msg,
     );
     server_hs_seq = server_hs_seq.wrapping_add(1);
     super::tcp::send(tcp_handle, &cert_record)?;
@@ -1652,17 +1705,19 @@ pub fn tls_accept(
     let cv_msg = build_certificate_verify(ed25519_seed, &cv_transcript);
     transcript.update(&cv_msg);
     let cv_record = encrypt_record(
-        &server_hs_key, &server_hs_iv, server_hs_seq,
-        content_type::HANDSHAKE, &cv_msg,
+        &server_hs_key,
+        &server_hs_iv,
+        server_hs_seq,
+        content_type::HANDSHAKE,
+        &cv_msg,
     );
     server_hs_seq = server_hs_seq.wrapping_add(1);
     super::tcp::send(tcp_handle, &cv_record)?;
 
     // Server Finished
     let server_finished_hash = transcript.current_hash();
-    let server_finished_verify = compute_finished_verify(
-        &server_hs_traffic_secret, &server_finished_hash,
-    );
+    let server_finished_verify =
+        compute_finished_verify(&server_hs_traffic_secret, &server_finished_hash);
     let mut finished_msg = Vec::with_capacity(4 + HASH_LEN);
     finished_msg.push(handshake_type::FINISHED);
     push_u24(&mut finished_msg, HASH_LEN);
@@ -1670,8 +1725,11 @@ pub fn tls_accept(
     transcript.update(&finished_msg);
 
     let finished_record = encrypt_record(
-        &server_hs_key, &server_hs_iv, server_hs_seq,
-        content_type::HANDSHAKE, &finished_msg,
+        &server_hs_key,
+        &server_hs_iv,
+        server_hs_seq,
+        content_type::HANDSHAKE,
+        &finished_msg,
     );
     let _ = server_hs_seq.wrapping_add(1);
     super::tcp::send(tcp_handle, &finished_record)?;
@@ -1696,9 +1754,8 @@ pub fn tls_accept(
             return Err(KernelError::InvalidArgument);
         }
 
-        let (inner_type, plaintext) = decrypt_record(
-            &client_hs_key, &client_hs_iv, client_hs_seq, &record,
-        )?;
+        let (inner_type, plaintext) =
+            decrypt_record(&client_hs_key, &client_hs_iv, client_hs_seq, &record)?;
         client_hs_seq = client_hs_seq.wrapping_add(1);
 
         if inner_type == content_type::ALERT {
@@ -1716,18 +1773,20 @@ pub fn tls_accept(
         if plaintext.len() < 4 {
             return Err(KernelError::InvalidArgument);
         }
-        let hs_type = plaintext.first().copied().ok_or(KernelError::InternalError)?;
+        let hs_type = plaintext
+            .first()
+            .copied()
+            .ok_or(KernelError::InternalError)?;
         if hs_type != handshake_type::FINISHED {
             crate::serial_println!("[tls] Server: expected Finished (20), got {}", hs_type);
             return Err(KernelError::InvalidArgument);
         }
 
         // Verify client Finished.
-        let expected_verify = compute_finished_verify(
-            &client_hs_traffic_secret,
-            &transcript.current_hash(),
-        );
-        let received_verify = plaintext.get(4..4 + HASH_LEN)
+        let expected_verify =
+            compute_finished_verify(&client_hs_traffic_secret, &transcript.current_hash());
+        let received_verify = plaintext
+            .get(4..4 + HASH_LEN)
             .ok_or(KernelError::InvalidArgument)?;
 
         if !constant_time_eq(&expected_verify, received_verify) {
@@ -1746,12 +1805,10 @@ pub fn tls_accept(
     let master_secret = crypto::hkdf_extract(&derived_hs, &zero_ikm);
 
     let transcript_hash_final = transcript.current_hash();
-    let client_app_traffic_secret = derive_secret(
-        &master_secret, b"c ap traffic", &transcript_hash_final,
-    );
-    let server_app_traffic_secret = derive_secret(
-        &master_secret, b"s ap traffic", &transcript_hash_final,
-    );
+    let client_app_traffic_secret =
+        derive_secret(&master_secret, b"c ap traffic", &transcript_hash_final);
+    let server_app_traffic_secret =
+        derive_secret(&master_secret, b"s ap traffic", &transcript_hash_final);
 
     let server_write_key = derive_traffic_key(&server_app_traffic_secret);
     let server_write_iv = derive_traffic_iv(&server_app_traffic_secret);
@@ -1784,7 +1841,9 @@ pub fn tls_server_send(session: &mut TlsServerSession, data: &[u8]) -> KernelRes
 
     while !remaining.is_empty() {
         let chunk_len = remaining.len().min(MAX_PLAINTEXT_SIZE);
-        let chunk = remaining.get(..chunk_len).ok_or(KernelError::InternalError)?;
+        let chunk = remaining
+            .get(..chunk_len)
+            .ok_or(KernelError::InternalError)?;
 
         let record = encrypt_record(
             &session.server_write_key,
@@ -1849,9 +1908,9 @@ pub fn tls_server_recv(session: &mut TlsServerSession, max_bytes: usize) -> Kern
             let take = plaintext.len().min(max_bytes);
             let result = Vec::from(plaintext.get(..take).unwrap_or(&[]));
             if take < plaintext.len() {
-                session.recv_buf.extend_from_slice(
-                    plaintext.get(take..).unwrap_or(&[])
-                );
+                session
+                    .recv_buf
+                    .extend_from_slice(plaintext.get(take..).unwrap_or(&[]));
             }
             Ok(result)
         }
@@ -1910,7 +1969,9 @@ struct TranscriptHash {
 
 impl TranscriptHash {
     fn new() -> Self {
-        Self { messages: Vec::new() }
+        Self {
+            messages: Vec::new(),
+        }
     }
 
     fn update(&mut self, handshake_msg: &[u8]) {
@@ -1939,7 +2000,6 @@ fn compute_finished_verify(
     let fk_len = finished_key_vec.len().min(HASH_LEN);
     finished_key[..fk_len].copy_from_slice(finished_key_vec.get(..fk_len).unwrap_or(&[]));
 
-    
     crypto::hmac_sha256(&finished_key, transcript_hash)
 }
 
@@ -2076,7 +2136,9 @@ fn read_handshake_record(tcp_handle: usize, timeout_polls: u32) -> KernelResult<
     }
 
     // Return just the handshake payload (without record header).
-    Ok(Vec::from(record.get(5..).ok_or(KernelError::InternalError)?))
+    Ok(Vec::from(
+        record.get(5..).ok_or(KernelError::InternalError)?,
+    ))
 }
 
 // ===========================================================================
@@ -2095,15 +2157,30 @@ fn push_u24(buf: &mut Vec<u8>, val: usize) {
 }
 
 fn read_u16(data: &[u8], offset: usize) -> KernelResult<u16> {
-    let hi = data.get(offset).copied().ok_or(KernelError::InvalidArgument)?;
-    let lo = data.get(offset + 1).copied().ok_or(KernelError::InvalidArgument)?;
+    let hi = data
+        .get(offset)
+        .copied()
+        .ok_or(KernelError::InvalidArgument)?;
+    let lo = data
+        .get(offset + 1)
+        .copied()
+        .ok_or(KernelError::InvalidArgument)?;
     Ok(u16::from_be_bytes([hi, lo]))
 }
 
 fn read_u24(data: &[u8], offset: usize) -> KernelResult<usize> {
-    let b0 = data.get(offset).copied().ok_or(KernelError::InvalidArgument)? as usize;
-    let b1 = data.get(offset + 1).copied().ok_or(KernelError::InvalidArgument)? as usize;
-    let b2 = data.get(offset + 2).copied().ok_or(KernelError::InvalidArgument)? as usize;
+    let b0 = data
+        .get(offset)
+        .copied()
+        .ok_or(KernelError::InvalidArgument)? as usize;
+    let b1 = data
+        .get(offset + 1)
+        .copied()
+        .ok_or(KernelError::InvalidArgument)? as usize;
+    let b2 = data
+        .get(offset + 2)
+        .copied()
+        .ok_or(KernelError::InvalidArgument)? as usize;
     Ok((b0 << 16) | (b1 << 8) | b2)
 }
 
@@ -2174,14 +2251,19 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 2: record nonce XOR is correct.
     {
-        let iv = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c];
+        let iv = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+        ];
         let nonce = record_nonce(&iv, 0);
         assert!(nonce == iv, "Record nonce seq=0 should equal IV");
 
         let nonce1 = record_nonce(&iv, 1);
         // Last byte should be XORed with 1.
         assert!(nonce1[11] == iv[11] ^ 1, "Record nonce seq=1 XOR");
-        assert!(nonce1[0] == iv[0], "Record nonce seq=1 high bytes unchanged");
+        assert!(
+            nonce1[0] == iv[0],
+            "Record nonce seq=1 high bytes unchanged"
+        );
         passed = passed.saturating_add(1);
         crate::serial_println!("[tls]   Record nonce XOR: PASSED");
     }
@@ -2194,7 +2276,10 @@ pub fn self_test() -> KernelResult<()> {
 
         let record = encrypt_record(&key, &iv, 0, content_type::APPLICATION_DATA, plaintext);
         let (inner_type, decrypted) = decrypt_record(&key, &iv, 0, &record)?;
-        assert!(inner_type == content_type::APPLICATION_DATA, "Round-trip content type");
+        assert!(
+            inner_type == content_type::APPLICATION_DATA,
+            "Round-trip content type"
+        );
         assert!(decrypted == plaintext, "Round-trip plaintext");
         passed = passed.saturating_add(1);
         crate::serial_println!("[tls]   Record encrypt/decrypt round-trip: PASSED");
@@ -2224,7 +2309,10 @@ pub fn self_test() -> KernelResult<()> {
         let hello = build_client_hello("example.com", &random, &pubkey);
 
         // Must start with handshake type CLIENT_HELLO (1).
-        assert!(hello.first().copied() == Some(handshake_type::CLIENT_HELLO), "ClientHello type");
+        assert!(
+            hello.first().copied() == Some(handshake_type::CLIENT_HELLO),
+            "ClientHello type"
+        );
         // Length field (3 bytes) should match remaining data.
         let len = read_u24_slice(&hello, 1);
         assert!(hello.len() == 4 + len, "ClientHello length field");
@@ -2312,11 +2400,20 @@ pub fn self_test() -> KernelResult<()> {
         let hello = build_client_hello("test.example.com", &random, &pubkey);
 
         let parsed = parse_client_hello(&hello)?;
-        assert!(parsed.client_random == random, "ClientHello random round-trip");
-        assert!(parsed.client_x25519_public == pubkey, "ClientHello X25519 round-trip");
+        assert!(
+            parsed.client_random == random,
+            "ClientHello random round-trip"
+        );
+        assert!(
+            parsed.client_x25519_public == pubkey,
+            "ClientHello X25519 round-trip"
+        );
         assert!(parsed.has_our_cipher, "ClientHello includes our cipher");
         assert!(parsed.has_tls13, "ClientHello includes TLS 1.3");
-        assert!(parsed.has_ed25519_sig, "ClientHello includes Ed25519 sig alg");
+        assert!(
+            parsed.has_ed25519_sig,
+            "ClientHello includes Ed25519 sig alg"
+        );
         passed = passed.saturating_add(1);
         crate::serial_println!("[tls]   ClientHello parse round-trip: PASSED");
     }
@@ -2328,14 +2425,19 @@ pub fn self_test() -> KernelResult<()> {
         let server_hello = build_server_hello(&random, &pubkey);
 
         // Verify structure: type=2, length matches.
-        assert!(server_hello.first().copied() == Some(handshake_type::SERVER_HELLO),
-                "ServerHello type");
+        assert!(
+            server_hello.first().copied() == Some(handshake_type::SERVER_HELLO),
+            "ServerHello type"
+        );
         let len = read_u24_slice(&server_hello, 1);
         assert!(server_hello.len() == 4 + len, "ServerHello length");
 
         // Parse it with the existing client-side parser.
         let parsed = parse_server_hello(&server_hello)?;
-        assert!(parsed.cipher_suite as usize == CIPHER_SUITE, "ServerHello cipher");
+        assert!(
+            parsed.cipher_suite as usize == CIPHER_SUITE,
+            "ServerHello cipher"
+        );
         assert!(parsed.server_x25519_public == pubkey, "ServerHello X25519");
         passed = passed.saturating_add(1);
         crate::serial_println!("[tls]   ServerHello build/parse: PASSED");
@@ -2348,7 +2450,10 @@ pub fn self_test() -> KernelResult<()> {
         let cert = build_self_signed_certificate(&seed, &pubkey);
 
         // Must start with SEQUENCE tag (0x30).
-        assert!(cert.first().copied() == Some(0x30), "Certificate is DER SEQUENCE");
+        assert!(
+            cert.first().copied() == Some(0x30),
+            "Certificate is DER SEQUENCE"
+        );
         // Must be at least 100 bytes (minimal X.509 + Ed25519 key + signature).
         assert!(cert.len() > 100, "Certificate has reasonable size");
         // Should contain the Ed25519 OID (1.3.101.112 = 06 03 2B 65 70).
@@ -2366,11 +2471,16 @@ pub fn self_test() -> KernelResult<()> {
         let cv_msg = build_certificate_verify(&seed, &transcript);
 
         // Type = CERTIFICATE_VERIFY (15).
-        assert!(cv_msg.first().copied() == Some(handshake_type::CERTIFICATE_VERIFY),
-                "CertificateVerify type");
+        assert!(
+            cv_msg.first().copied() == Some(handshake_type::CERTIFICATE_VERIFY),
+            "CertificateVerify type"
+        );
         // Body should contain Ed25519 algorithm (0x0807).
         assert!(cv_msg.get(4).copied() == Some(0x08), "CertVerify alg high");
-        assert!(cv_msg.get(5).copied() == Some(0x07), "CertVerify alg low (ed25519)");
+        assert!(
+            cv_msg.get(5).copied() == Some(0x07),
+            "CertVerify alg low (ed25519)"
+        );
         // Signature length should be 64 bytes.
         let sig_len = read_u16_slice(&cv_msg, 6) as usize;
         assert!(sig_len == 64, "CertVerify Ed25519 signature length");

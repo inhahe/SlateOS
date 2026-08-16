@@ -31,10 +31,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -180,7 +180,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         current_step: SetupStep::Welcome,
         choices: SetupChoices::new(),
@@ -194,7 +196,10 @@ pub fn init_defaults() {
 
 /// Get current step.
 pub fn current_step() -> SetupStep {
-    STATE.lock().as_ref().map_or(SetupStep::Complete, |s| s.current_step)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(SetupStep::Complete, |s| s.current_step)
 }
 
 /// Advance to next step.
@@ -219,14 +224,12 @@ pub fn advance() -> KernelResult<SetupStep> {
 
 /// Go back to previous step.
 pub fn go_back() -> KernelResult<SetupStep> {
-    with_state(|state| {
-        match state.current_step.prev() {
-            Some(prev) => {
-                state.current_step = prev;
-                Ok(prev)
-            }
-            None => Err(KernelError::InvalidArgument),
+    with_state(|state| match state.current_step.prev() {
+        Some(prev) => {
+            state.current_step = prev;
+            Ok(prev)
         }
+        None => Err(KernelError::InvalidArgument),
     })
 }
 
@@ -321,14 +324,22 @@ pub fn force_complete() -> KernelResult<()> {
 
 /// Get skipped steps.
 pub fn skipped_steps() -> Vec<SetupStep> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.skipped_steps.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.skipped_steps.clone())
 }
 
 /// Statistics: (current_step_number, completed, skipped_count, ops).
 pub fn stats() -> (u8, bool, usize, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.current_step.step_number(), s.completed, s.skipped_steps.len(), s.ops),
+        Some(s) => (
+            s.current_step.step_number(),
+            s.completed,
+            s.skipped_steps.len(),
+            s.ops,
+        ),
         None => (8, true, 0, 0),
     }
 }

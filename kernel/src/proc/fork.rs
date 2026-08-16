@@ -129,23 +129,23 @@ struct ForkChildImage {
 /// the caller-provided stack (see [`fork_process_vfork`]).
 fn build_reg_image(frame: &SyscallFrame, rsp_override: Option<u64>) -> [u64; REG_IMAGE_LEN] {
     [
-        frame.user_rip,                       // 0: RIP
-        u64::from(crate::gdt::USER_CS),       // 1: CS
-        frame.user_rflags,                    // 2: RFLAGS
+        frame.user_rip,                         // 0: RIP
+        u64::from(crate::gdt::USER_CS),         // 1: CS
+        frame.user_rflags,                      // 2: RFLAGS
         rsp_override.unwrap_or(frame.user_rsp), // 3: RSP
-        u64::from(crate::gdt::USER_DS),  // 4: SS
-        frame.arg0,                      // 5: RDI
-        frame.arg1,                      // 6: RSI
-        frame.arg2,                      // 7: RDX
-        frame.arg3,                      // 8: R10
-        frame.arg4,                      // 9: R8
-        frame.arg5,                      // 10: R9
-        frame.rbx,                       // 11: RBX
-        frame.rbp,                       // 12: RBP
-        frame.r12,                       // 13: R12
-        frame.r13,                       // 14: R13
-        frame.r14,                       // 15: R14
-        frame.r15,                       // 16: R15
+        u64::from(crate::gdt::USER_DS),         // 4: SS
+        frame.arg0,                             // 5: RDI
+        frame.arg1,                             // 6: RSI
+        frame.arg2,                             // 7: RDX
+        frame.arg3,                             // 8: R10
+        frame.arg4,                             // 9: R8
+        frame.arg5,                             // 10: R9
+        frame.rbx,                              // 11: RBX
+        frame.rbp,                              // 12: RBP
+        frame.r12,                              // 13: R12
+        frame.r13,                              // 14: R13
+        frame.r14,                              // 15: R14
+        frame.r15,                              // 16: R15
     ]
 }
 
@@ -274,9 +274,7 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             // Bump the memfd refcount so the child gets its own
             // independent reference.  Same id — memfd has no per-process
             // identity, just a shared in-memory file.
-            crate::ipc::memfd::dup(
-                crate::ipc::memfd::MemFdHandle::from_raw(id),
-            )?;
+            crate::ipc::memfd::dup(crate::ipc::memfd::MemFdHandle::from_raw(id))?;
             Ok(Some((rtype, id)))
         }
         ResourceType::Epoll => {
@@ -284,9 +282,7 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             // own one reference to the shared interest set — same id.  An
             // `epoll_ctl` from either is visible to the other, matching
             // Linux's shared-kernel-object semantics across fork.
-            crate::ipc::epoll::dup(
-                crate::ipc::epoll::EpollHandle::from_raw(id),
-            )?;
+            crate::ipc::epoll::dup(crate::ipc::epoll::EpollHandle::from_raw(id))?;
             Ok(Some((rtype, id)))
         }
         ResourceType::SignalFd => {
@@ -294,9 +290,7 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             // own one reference to the shared signal mask — same id.  A
             // `signalfd` mask update from either is visible to the other,
             // matching Linux's shared-kernel-object semantics across fork.
-            crate::ipc::signalfd::dup(
-                crate::ipc::signalfd::SignalFdHandle::from_raw(id),
-            )?;
+            crate::ipc::signalfd::dup(crate::ipc::signalfd::SignalFdHandle::from_raw(id))?;
             Ok(Some((rtype, id)))
         }
         ResourceType::Timerfd => {
@@ -304,9 +298,7 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             // one reference to the shared armed timer — same id.  A
             // `timerfd_settime` from either is visible to the other, matching
             // Linux's shared-kernel-object semantics across fork.
-            crate::ipc::timerfd::dup(
-                crate::ipc::timerfd::TimerFdHandle::from_raw(id),
-            )?;
+            crate::ipc::timerfd::dup(crate::ipc::timerfd::TimerFdHandle::from_raw(id))?;
             Ok(Some((rtype, id)))
         }
         ResourceType::Inotify => {
@@ -314,9 +306,7 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             // one reference to the shared watch table — same id.  A watch
             // added/removed from either is visible to the other, matching
             // Linux's shared-kernel-object semantics across fork.
-            crate::ipc::inotify::dup(
-                crate::ipc::inotify::InotifyHandle::from_raw(id),
-            )?;
+            crate::ipc::inotify::dup(crate::ipc::inotify::InotifyHandle::from_raw(id))?;
             Ok(Some((rtype, id)))
         }
         ResourceType::AlsaPcm => {
@@ -325,9 +315,7 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             // mixer slot) — same id.  Frames written through either reach the
             // same mixer stream, matching Linux's shared-kernel-object
             // semantics across fork.
-            crate::ipc::alsa_pcm::dup(
-                crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(id),
-            )?;
+            crate::ipc::alsa_pcm::dup(crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(id))?;
             Ok(Some((rtype, id)))
         }
         ResourceType::Drm => {
@@ -336,9 +324,7 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             // render-node flag, and DRM_CLIENT_CAP_* opt-ins) — same id.
             // A cap set through either fd is visible to the other, matching
             // Linux's shared `struct drm_file` across fork.
-            crate::drm::card_fd::dup(
-                crate::drm::card_fd::DrmCardHandle::from_raw(id),
-            )?;
+            crate::drm::card_fd::dup(crate::drm::card_fd::DrmCardHandle::from_raw(id))?;
             Ok(Some((rtype, id)))
         }
         ResourceType::NetSocket => {
@@ -346,9 +332,7 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             // reference to the same daemon connection (open-file-description
             // semantics across fork) — same id.  The connection is torn down
             // only when the last of them closes.
-            crate::net::socket::dup(
-                crate::net::socket::SocketHandle::from_raw(id),
-            )?;
+            crate::net::socket::dup(crate::net::socket::SocketHandle::from_raw(id))?;
             Ok(Some((rtype, id)))
         }
         // No refcounted same-id dup yet — not inherited.  Documented
@@ -359,7 +343,8 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
         | ResourceType::Timer => {
             serial_println!(
                 "[fork] Skipping non-inheritable handle: {:?} id={}",
-                rtype, id
+                rtype,
+                id
             );
             Ok(None)
         }
@@ -400,44 +385,28 @@ fn close_one(rtype: ResourceType, id: u64) {
             );
         }
         ResourceType::MemFd => {
-            crate::ipc::memfd::close(
-                crate::ipc::memfd::MemFdHandle::from_raw(id),
-            );
+            crate::ipc::memfd::close(crate::ipc::memfd::MemFdHandle::from_raw(id));
         }
         ResourceType::Epoll => {
-            crate::ipc::epoll::close(
-                crate::ipc::epoll::EpollHandle::from_raw(id),
-            );
+            crate::ipc::epoll::close(crate::ipc::epoll::EpollHandle::from_raw(id));
         }
         ResourceType::SignalFd => {
-            crate::ipc::signalfd::close(
-                crate::ipc::signalfd::SignalFdHandle::from_raw(id),
-            );
+            crate::ipc::signalfd::close(crate::ipc::signalfd::SignalFdHandle::from_raw(id));
         }
         ResourceType::Timerfd => {
-            crate::ipc::timerfd::close(
-                crate::ipc::timerfd::TimerFdHandle::from_raw(id),
-            );
+            crate::ipc::timerfd::close(crate::ipc::timerfd::TimerFdHandle::from_raw(id));
         }
         ResourceType::Inotify => {
-            crate::ipc::inotify::close(
-                crate::ipc::inotify::InotifyHandle::from_raw(id),
-            );
+            crate::ipc::inotify::close(crate::ipc::inotify::InotifyHandle::from_raw(id));
         }
         ResourceType::AlsaPcm => {
-            crate::ipc::alsa_pcm::close(
-                crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(id),
-            );
+            crate::ipc::alsa_pcm::close(crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(id));
         }
         ResourceType::Drm => {
-            crate::drm::card_fd::close(
-                crate::drm::card_fd::DrmCardHandle::from_raw(id),
-            );
+            crate::drm::card_fd::close(crate::drm::card_fd::DrmCardHandle::from_raw(id));
         }
         ResourceType::NetSocket => {
-            crate::net::socket::close(
-                crate::net::socket::SocketHandle::from_raw(id),
-            );
+            crate::net::socket::close(crate::net::socket::SocketHandle::from_raw(id));
         }
         // Nothing was duped for these in `dup_one`.
         _ => {}
@@ -476,8 +445,7 @@ fn build_fork_child(parent_pid: ProcessId) -> KernelResult<ProcessId> {
 
     // 2. Snapshot parent's tracked handles (drops the table lock before
     //    we do any blocking dup work).
-    let parent_handles =
-        pcb::ipc_handles_snapshot(parent_pid).ok_or(KernelError::NoSuchProcess)?;
+    let parent_handles = pcb::ipc_handles_snapshot(parent_pid).ok_or(KernelError::NoSuchProcess)?;
 
     // 3. Copy-on-write clone of the address space.
     //
@@ -510,22 +478,18 @@ fn build_fork_child(parent_pid: ProcessId) -> KernelResult<ProcessId> {
 
     // 5. Create the child PCB (clones name/caps/credentials/VMAs from
     //    the parent and takes ownership of the duplicated handles).
-    let child_pid = match pcb::fork_create(
-        parent_pid,
-        child_pml4,
-        child_handles.clone(),
-        Vec::new(),
-    ) {
-        Ok(pid) => pid,
-        Err(e) => {
-            close_child_handles(&child_handles);
-            // SAFETY: see above — child_pml4 is unowned.
-            unsafe {
-                crate::mm::page_table::destroy_user_address_space(child_pml4);
+    let child_pid =
+        match pcb::fork_create(parent_pid, child_pml4, child_handles.clone(), Vec::new()) {
+            Ok(pid) => pid,
+            Err(e) => {
+                close_child_handles(&child_handles);
+                // SAFETY: see above — child_pml4 is unowned.
+                unsafe {
+                    crate::mm::page_table::destroy_user_address_space(child_pml4);
+                }
+                return Err(e);
             }
-            return Err(e);
-        }
-    };
+        };
 
     // 6. Inherit the parent's signal mask / trampoline (pending signals
     //    are *not* inherited, matching POSIX fork semantics).
@@ -543,7 +507,9 @@ fn build_fork_child(parent_pid: ProcessId) -> KernelResult<ProcessId> {
         if let Err(e) = crate::ipc::namespace::attach(child_pid, parent_ns) {
             serial_println!(
                 "[fork] Warning: failed to attach child {} to namespace {}: {:?}",
-                child_pid, parent_ns, e
+                child_pid,
+                parent_ns,
+                e
             );
         }
     }
@@ -558,12 +524,12 @@ fn build_fork_child(parent_pid: ProcessId) -> KernelResult<ProcessId> {
             | Rights::WAIT
             | Rights::SIGNAL
             | Rights::DUPLICATE;
-        if let Err(e) =
-            pcb::grant_capability(parent_pid, ResourceType::Process, child_pid, rights)
+        if let Err(e) = pcb::grant_capability(parent_pid, ResourceType::Process, child_pid, rights)
         {
             serial_println!(
                 "[fork] Warning: failed to grant Process cap to parent {}: {:?}",
-                parent_pid, e
+                parent_pid,
+                e
             );
             // Non-fatal — parent retains implicit parent authority.
         }
@@ -753,10 +719,7 @@ fn fork_process_clone_inner(
             if (clone_tid.flags & clone_flags::CLONE_CHILD_CLEARTID) != 0
                 && clone_tid.child_tid_ptr != 0
             {
-                super::thread_clone::register_clear_child_tid(
-                    task_id,
-                    clone_tid.child_tid_ptr,
-                );
+                super::thread_clone::register_clear_child_tid(task_id, clone_tid.child_tid_ptr);
             }
 
             // Phase 2: all exit-path state is registered — let the child run.
@@ -895,7 +858,8 @@ fn test_fork_clones_pcb() -> KernelResult<()> {
     if rc_after != rc_before.saturating_add(1) {
         serial_println!(
             "[fork]   FAIL: refcount {} -> {} (expected +1)",
-            rc_before, rc_after
+            rc_before,
+            rc_after
         );
         failed = Some("refcount");
     }
@@ -905,7 +869,8 @@ fn test_fork_clones_pcb() -> KernelResult<()> {
     if child_pml4 == 0 || child_pml4 == parent_pml4 {
         serial_println!(
             "[fork]   FAIL: child pml4 {:#x} invalid (parent {:#x})",
-            child_pml4, parent_pml4
+            child_pml4,
+            parent_pml4
         );
         failed = Some("pml4");
     }
@@ -917,7 +882,8 @@ fn test_fork_clones_pcb() -> KernelResult<()> {
             other => {
                 serial_println!(
                     "[fork]   FAIL: child maps {:?}, parent {:#x}",
-                    other, parent_phys
+                    other,
+                    parent_phys
                 );
                 failed = Some("mapping");
             }

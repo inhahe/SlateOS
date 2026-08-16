@@ -36,12 +36,12 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::vec;
-use alloc::format;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
@@ -296,9 +296,8 @@ pub fn scan() -> KernelResult<ScanReport> {
         // Build category summaries
         let mut categories = Vec::new();
         for cat in CleanCategory::all() {
-            let items: Vec<&CleanItem> = state.items.iter()
-                .filter(|i| i.category == *cat)
-                .collect();
+            let items: Vec<&CleanItem> =
+                state.items.iter().filter(|i| i.category == *cat).collect();
             if !items.is_empty() {
                 let total: u64 = items.iter().map(|i| i.size_bytes).sum();
                 categories.push(CategorySummary {
@@ -310,8 +309,13 @@ pub fn scan() -> KernelResult<ScanReport> {
             }
         }
 
-        let total_bytes = trash_bytes + temp_bytes + thumb_bytes + log_bytes
-            + pkg_bytes + large_bytes + download_bytes;
+        let total_bytes = trash_bytes
+            + temp_bytes
+            + thumb_bytes
+            + log_bytes
+            + pkg_bytes
+            + large_bytes
+            + download_bytes;
 
         let elapsed_us = (crate::hpet::elapsed_ns() - start_ns) / 1000;
 
@@ -336,7 +340,9 @@ pub fn scan() -> KernelResult<ScanReport> {
 ///
 /// [`path_in_subtree`]: crate::fs::pathutil::path_in_subtree
 fn is_excluded(path: &Path, exclusions: &[PathBuf]) -> bool {
-    exclusions.iter().any(|e| crate::fs::pathutil::path_in_subtree(path, e))
+    exclusions
+        .iter()
+        .any(|e| crate::fs::pathutil::path_in_subtree(path, e))
 }
 
 /// Shared body of the directory-walking scanners.
@@ -534,7 +540,11 @@ pub fn scan_items() -> Vec<CleanItem> {
 pub fn items_for_category(cat: CleanCategory) -> Vec<CleanItem> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.items.iter().filter(|i| i.category == cat).cloned().collect()
+        s.items
+            .iter()
+            .filter(|i| i.category == cat)
+            .cloned()
+            .collect()
     })
 }
 
@@ -559,7 +569,9 @@ pub fn clean(categories: &[CleanCategory]) -> KernelResult<CleanResult> {
                 continue;
             }
             let mut cat_freed = 0u64;
-            let items_to_clean: Vec<CleanItem> = state.items.iter()
+            let items_to_clean: Vec<CleanItem> = state
+                .items
+                .iter()
                 .filter(|i| i.category == *cat)
                 .cloned()
                 .collect();
@@ -588,7 +600,9 @@ pub fn clean(categories: &[CleanCategory]) -> KernelResult<CleanResult> {
                     }
                     CleanCategory::DuplicateFiles
                     | CleanCategory::LargeFiles
-                    | CleanCategory::OldDownloads => unreachable!("advisory categories skipped above"),
+                    | CleanCategory::OldDownloads => {
+                        unreachable!("advisory categories skipped above")
+                    }
                 }
             }
 
@@ -601,7 +615,8 @@ pub fn clean(categories: &[CleanCategory]) -> KernelResult<CleanResult> {
         // Drop the cleaned items from the cache. Advisory categories were left
         // untouched on disk, so their items must survive here too — otherwise
         // the UI would show the recommendations vanishing as if acted upon.
-        state.items
+        state
+            .items
             .retain(|i| i.category.is_advisory() || !categories.contains(&i.category));
         state.total_freed = state.total_freed.saturating_add(freed);
         state.total_cleans = state.total_cleans.saturating_add(1);
@@ -634,7 +649,9 @@ pub fn clean_paths<P: AsRef<Path>>(paths: &[P]) -> KernelResult<CleanResult> {
 
         for want in paths {
             let want = want.as_ref();
-            let Some(item) = state.items.iter()
+            let Some(item) = state
+                .items
+                .iter()
                 .find(|i| i.path.as_deref() == Some(want))
                 .cloned()
             else {
@@ -779,7 +796,11 @@ pub fn add_exclusion<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<()> {
 pub fn remove_exclusion<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<()> {
     let path = path.as_ref();
     with_state(|state| {
-        let idx = state.config.exclusions.iter().position(|e| e.as_path() == path)
+        let idx = state
+            .config
+            .exclusions
+            .iter()
+            .position(|e| e.as_path() == path)
             .ok_or(KernelError::NotFound)?;
         state.config.exclusions.remove(idx);
         Ok(())
@@ -789,7 +810,9 @@ pub fn remove_exclusion<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<()> {
 /// List exclusion paths.
 pub fn exclusions() -> Vec<PathBuf> {
     let guard = STATE.lock();
-    guard.as_ref().map_or_else(Vec::new, |s| s.config.exclusions.clone())
+    guard
+        .as_ref()
+        .map_or_else(Vec::new, |s| s.config.exclusions.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -799,11 +822,17 @@ pub fn exclusions() -> Vec<PathBuf> {
 /// Format byte count as human-readable string.
 pub fn format_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
-        format!("{}.{} GiB", bytes / (1024 * 1024 * 1024),
-            (bytes % (1024 * 1024 * 1024)) / (100 * 1024 * 1024))
+        format!(
+            "{}.{} GiB",
+            bytes / (1024 * 1024 * 1024),
+            (bytes % (1024 * 1024 * 1024)) / (100 * 1024 * 1024)
+        )
     } else if bytes >= 1024 * 1024 {
-        format!("{}.{} MiB", bytes / (1024 * 1024),
-            (bytes % (1024 * 1024)) / (100 * 1024))
+        format!(
+            "{}.{} MiB",
+            bytes / (1024 * 1024),
+            (bytes % (1024 * 1024)) / (100 * 1024)
+        )
     } else if bytes >= 1024 {
         format!("{}.{} KiB", bytes / 1024, (bytes % 1024) / 100)
     } else {
@@ -834,7 +863,13 @@ pub fn parse_category(name: &str) -> Option<CleanCategory> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.items.len(), s.total_freed, s.total_scans, s.total_cleans, s.ops),
+        Some(s) => (
+            s.items.len(),
+            s.total_freed,
+            s.total_scans,
+            s.total_cleans,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

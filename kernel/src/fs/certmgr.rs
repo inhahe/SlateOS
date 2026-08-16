@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -257,7 +257,10 @@ pub fn import_cert(
 /// Remove a certificate (fails if pinned).
 pub fn remove_cert(cert_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let cert = state.certs.iter().find(|c| c.id == cert_id)
+    let cert = state
+        .certs
+        .iter()
+        .find(|c| c.id == cert_id)
         .ok_or(KernelError::NotFound)?;
     if cert.pinned {
         return Err(KernelError::PermissionDenied);
@@ -270,7 +273,12 @@ pub fn remove_cert(cert_id: u64) -> KernelResult<()> {
 
 /// Get certificate by ID.
 pub fn get_cert(cert_id: u64) -> KernelResult<CertInfo> {
-    STATE.lock().certs.iter().find(|c| c.id == cert_id).cloned()
+    STATE
+        .lock()
+        .certs
+        .iter()
+        .find(|c| c.id == cert_id)
+        .cloned()
         .ok_or(KernelError::NotFound)
 }
 
@@ -282,15 +290,21 @@ pub fn list_certs() -> Vec<CertInfo> {
 /// Find certificates matching a domain.
 pub fn certs_for_domain(domain: &str) -> Vec<CertInfo> {
     let state = STATE.lock();
-    state.certs.iter().filter(|c| {
-        c.common_name == domain || c.alt_names.iter().any(|n| n == domain)
-    }).cloned().collect()
+    state
+        .certs
+        .iter()
+        .filter(|c| c.common_name == domain || c.alt_names.iter().any(|n| n == domain))
+        .cloned()
+        .collect()
 }
 
 /// Add a Subject Alternative Name to a certificate.
 pub fn add_san(cert_id: u64, name: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let cert = state.certs.iter_mut().find(|c| c.id == cert_id)
+    let cert = state
+        .certs
+        .iter_mut()
+        .find(|c| c.id == cert_id)
         .ok_or(KernelError::NotFound)?;
     if cert.alt_names.len() >= 100 {
         return Err(KernelError::ResourceExhausted);
@@ -306,7 +320,10 @@ pub fn add_san(cert_id: u64, name: &str) -> KernelResult<()> {
 /// Set the service/application a certificate is bound to.
 pub fn set_service(cert_id: u64, service: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let cert = state.certs.iter_mut().find(|c| c.id == cert_id)
+    let cert = state
+        .certs
+        .iter_mut()
+        .find(|c| c.id == cert_id)
         .ok_or(KernelError::NotFound)?;
     cert.service = String::from(service);
     state.changes += 1;
@@ -316,7 +333,10 @@ pub fn set_service(cert_id: u64, service: &str) -> KernelResult<()> {
 /// Set certificate status (e.g., disable/revoke).
 pub fn set_status(cert_id: u64, status: CertStatus) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let cert = state.certs.iter_mut().find(|c| c.id == cert_id)
+    let cert = state
+        .certs
+        .iter_mut()
+        .find(|c| c.id == cert_id)
         .ok_or(KernelError::NotFound)?;
     cert.status = status;
     state.changes += 1;
@@ -326,7 +346,10 @@ pub fn set_status(cert_id: u64, status: CertStatus) -> KernelResult<()> {
 /// Toggle auto-renewal.
 pub fn set_auto_renew(cert_id: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let cert = state.certs.iter_mut().find(|c| c.id == cert_id)
+    let cert = state
+        .certs
+        .iter_mut()
+        .find(|c| c.id == cert_id)
         .ok_or(KernelError::NotFound)?;
     cert.auto_renew = enabled;
     state.changes += 1;
@@ -336,7 +359,10 @@ pub fn set_auto_renew(cert_id: u64, enabled: bool) -> KernelResult<()> {
 /// Pin or unpin a certificate.
 pub fn set_pinned(cert_id: u64, pinned: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let cert = state.certs.iter_mut().find(|c| c.id == cert_id)
+    let cert = state
+        .certs
+        .iter_mut()
+        .find(|c| c.id == cert_id)
         .ok_or(KernelError::NotFound)?;
     cert.pinned = pinned;
     state.changes += 1;
@@ -360,7 +386,10 @@ pub fn renewal_threshold() -> u32 {
 /// Check if a certificate needs renewal.
 pub fn needs_renewal(cert_id: u64) -> KernelResult<bool> {
     let state = STATE.lock();
-    let cert = state.certs.iter().find(|c| c.id == cert_id)
+    let cert = state
+        .certs
+        .iter()
+        .find(|c| c.id == cert_id)
         .ok_or(KernelError::NotFound)?;
     if !cert.auto_renew {
         return Ok(false);
@@ -373,7 +402,10 @@ pub fn needs_renewal(cert_id: u64) -> KernelResult<bool> {
 /// Simulate renewing a certificate (increment count, extend expiry).
 pub fn renew_cert(cert_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let cert = state.certs.iter_mut().find(|c| c.id == cert_id)
+    let cert = state
+        .certs
+        .iter_mut()
+        .find(|c| c.id == cert_id)
         .ok_or(KernelError::NotFound)?;
     let now = crate::hpet::elapsed_ns();
     cert.not_before_ns = now;
@@ -420,7 +452,10 @@ pub fn request_cert(
 /// Complete an ACME request (simulated: creates the cert in the store).
 pub fn complete_request(request_id: u64) -> KernelResult<u64> {
     let mut state = STATE.lock();
-    let req_idx = state.requests.iter().position(|r| r.id == request_id)
+    let req_idx = state
+        .requests
+        .iter()
+        .position(|r| r.id == request_id)
         .ok_or(KernelError::NotFound)?;
     {
         let req = &state.requests[req_idx];
@@ -495,7 +530,10 @@ pub fn complete_request(request_id: u64) -> KernelResult<u64> {
 /// Cancel an ACME request.
 pub fn cancel_request(request_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let idx = state.requests.iter().position(|r| r.id == request_id)
+    let idx = state
+        .requests
+        .iter()
+        .position(|r| r.id == request_id)
         .ok_or(KernelError::NotFound)?;
     state.requests.remove(idx);
     state.changes += 1;
@@ -513,17 +551,33 @@ pub fn list_requests() -> Vec<AcmeRequest> {
 
 /// Count certificates by type.
 pub fn count_by_type(cert_type: CertType) -> usize {
-    STATE.lock().certs.iter().filter(|c| c.cert_type == cert_type).count()
+    STATE
+        .lock()
+        .certs
+        .iter()
+        .filter(|c| c.cert_type == cert_type)
+        .count()
 }
 
 /// Count certificates by status.
 pub fn count_by_status(status: CertStatus) -> usize {
-    STATE.lock().certs.iter().filter(|c| c.status == status).count()
+    STATE
+        .lock()
+        .certs
+        .iter()
+        .filter(|c| c.status == status)
+        .count()
 }
 
 /// List all expired certificates.
 pub fn list_expired() -> Vec<CertInfo> {
-    STATE.lock().certs.iter().filter(|c| c.status == CertStatus::Expired).cloned().collect()
+    STATE
+        .lock()
+        .certs
+        .iter()
+        .filter(|c| c.status == CertStatus::Expired)
+        .cloned()
+        .collect()
 }
 
 /// List certificates needing renewal.
@@ -531,9 +585,12 @@ pub fn list_needing_renewal() -> Vec<CertInfo> {
     let state = STATE.lock();
     let now = crate::hpet::elapsed_ns();
     let threshold_ns = state.renewal_threshold_days as u64 * 24 * 3600 * 1_000_000_000;
-    state.certs.iter().filter(|c| {
-        c.auto_renew && c.not_after_ns.saturating_sub(now) < threshold_ns
-    }).cloned().collect()
+    state
+        .certs
+        .iter()
+        .filter(|c| c.auto_renew && c.not_after_ns.saturating_sub(now) < threshold_ns)
+        .cloned()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -575,8 +632,16 @@ pub fn init_defaults() {
 pub fn stats() -> (usize, usize, usize, usize, u64) {
     let state = STATE.lock();
     let total = state.certs.len();
-    let roots = state.certs.iter().filter(|c| c.cert_type == CertType::Root).count();
-    let servers = state.certs.iter().filter(|c| c.cert_type == CertType::Server).count();
+    let roots = state
+        .certs
+        .iter()
+        .filter(|c| c.cert_type == CertType::Root)
+        .count();
+    let servers = state
+        .certs
+        .iter()
+        .filter(|c| c.cert_type == CertType::Server)
+        .count();
     let requests = state.requests.len();
     let ops = OP_COUNT.load(Ordering::Relaxed);
     (total, roots, servers, requests, ops)
@@ -608,12 +673,22 @@ pub fn self_test() -> KernelResult<()> {
     // Test 1: import certificates.
     serial_println!("certmgr::self_test 1: import certs");
     let c1 = import_cert(
-        "example.com", CertType::Server, CertSource::UserImported,
-        KeyType::EcdsaP256, "DigiCert", "/etc/ssl/certs/example.pem", "/etc/ssl/private/example.key",
+        "example.com",
+        CertType::Server,
+        CertSource::UserImported,
+        KeyType::EcdsaP256,
+        "DigiCert",
+        "/etc/ssl/certs/example.pem",
+        "/etc/ssl/private/example.key",
     )?;
     let c2 = import_cert(
-        "ISRG Root X1", CertType::Root, CertSource::System,
-        KeyType::Rsa4096, "ISRG", "/etc/ssl/certs/isrg.pem", "",
+        "ISRG Root X1",
+        CertType::Root,
+        CertSource::System,
+        KeyType::Rsa4096,
+        "ISRG",
+        "/etc/ssl/certs/isrg.pem",
+        "",
     )?;
     assert_eq!(list_certs().len(), 2);
 
@@ -652,7 +727,12 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 6: ACME request.
     serial_println!("certmgr::self_test 6: ACME request");
-    let req = request_cert("test.example.com", "admin@example.com", KeyType::EcdsaP256, ChallengeType::Http01)?;
+    let req = request_cert(
+        "test.example.com",
+        "admin@example.com",
+        KeyType::EcdsaP256,
+        ChallengeType::Http01,
+    )?;
     assert_eq!(list_requests().len(), 1);
     let cert_id = complete_request(req)?;
     let le_cert = get_cert(cert_id)?;

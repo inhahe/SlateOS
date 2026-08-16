@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -35,12 +35,12 @@ use crate::error::{KernelError, KernelResult};
 /// Erasure method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EraseMethod {
-    ZeroFill,       // Single pass of zeros.
-    RandomFill,     // Single pass of random data.
-    DoD3Pass,       // DoD 5220.22-M (3-pass).
-    DoD7Pass,       // DoD 5220.22-M ECE (7-pass).
-    Gutmann,        // Gutmann 35-pass.
-    CustomPasses,   // User-specified pass count.
+    ZeroFill,     // Single pass of zeros.
+    RandomFill,   // Single pass of random data.
+    DoD3Pass,     // DoD 5220.22-M (3-pass).
+    DoD7Pass,     // DoD 5220.22-M ECE (7-pass).
+    Gutmann,      // Gutmann 35-pass.
+    CustomPasses, // User-specified pass count.
 }
 
 impl EraseMethod {
@@ -106,9 +106,12 @@ pub struct EraseJob {
 
 impl EraseJob {
     pub fn progress_pct(&self) -> u32 {
-        if self.total_bytes == 0 { return 0; }
+        if self.total_bytes == 0 {
+            return 0;
+        }
         let pass_progress = (self.erased_bytes * 100) / self.total_bytes;
-        let total_progress = ((self.current_pass as u64 - 1) * 100 + pass_progress) / self.total_passes as u64;
+        let total_progress =
+            ((self.current_pass as u64 - 1) * 100 + pass_progress) / self.total_passes as u64;
         total_progress.min(100) as u32
     }
 }
@@ -148,7 +151,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         jobs: Vec::new(),
         next_id: 1,
@@ -160,7 +165,12 @@ pub fn init_defaults() {
 }
 
 /// Start an erase job.
-pub fn start_erase(target: &str, method: EraseMethod, size_bytes: u64, custom_passes: Option<u32>) -> KernelResult<u32> {
+pub fn start_erase(
+    target: &str,
+    method: EraseMethod,
+    size_bytes: u64,
+    custom_passes: Option<u32>,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.jobs.len() >= MAX_JOBS {
             return Err(KernelError::ResourceExhausted);
@@ -170,10 +180,16 @@ pub fn start_erase(target: &str, method: EraseMethod, size_bytes: u64, custom_pa
         let id = state.next_id;
         state.next_id += 1;
         state.jobs.push(EraseJob {
-            id, target: String::from(target), method,
-            status: JobStatus::Running, total_bytes: size_bytes,
-            erased_bytes: 0, current_pass: 1, total_passes: passes,
-            started_ns: now, completed_ns: None,
+            id,
+            target: String::from(target),
+            method,
+            status: JobStatus::Running,
+            total_bytes: size_bytes,
+            erased_bytes: 0,
+            current_pass: 1,
+            total_passes: passes,
+            started_ns: now,
+            completed_ns: None,
         });
         state.total_started += 1;
         Ok(id)
@@ -183,7 +199,10 @@ pub fn start_erase(target: &str, method: EraseMethod, size_bytes: u64, custom_pa
 /// Update erase progress (simulation).
 pub fn update_progress(id: u32, erased_bytes: u64, current_pass: u32) -> KernelResult<()> {
     with_state(|state| {
-        let job = state.jobs.iter_mut().find(|j| j.id == id)
+        let job = state
+            .jobs
+            .iter_mut()
+            .find(|j| j.id == id)
             .ok_or(KernelError::NotFound)?;
         job.erased_bytes = erased_bytes;
         job.current_pass = current_pass;
@@ -195,7 +214,10 @@ pub fn update_progress(id: u32, erased_bytes: u64, current_pass: u32) -> KernelR
 pub fn complete_erase(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let job = state.jobs.iter_mut().find(|j| j.id == id)
+        let job = state
+            .jobs
+            .iter_mut()
+            .find(|j| j.id == id)
             .ok_or(KernelError::NotFound)?;
         job.status = JobStatus::Completed;
         job.erased_bytes = job.total_bytes;
@@ -210,7 +232,10 @@ pub fn complete_erase(id: u32) -> KernelResult<()> {
 /// Cancel an erase job.
 pub fn cancel_erase(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let job = state.jobs.iter_mut().find(|j| j.id == id)
+        let job = state
+            .jobs
+            .iter_mut()
+            .find(|j| j.id == id)
             .ok_or(KernelError::NotFound)?;
         if job.status != JobStatus::Running && job.status != JobStatus::Queued {
             return Err(KernelError::InvalidArgument);
@@ -222,7 +247,10 @@ pub fn cancel_erase(id: u32) -> KernelResult<()> {
 
 /// Get job status.
 pub fn get_job(id: u32) -> Option<EraseJob> {
-    STATE.lock().as_ref().and_then(|s| s.jobs.iter().find(|j| j.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.jobs.iter().find(|j| j.id == id).cloned())
 }
 
 /// List all jobs.
@@ -234,7 +262,13 @@ pub fn list_jobs() -> Vec<EraseJob> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.jobs.len(), s.total_started, s.total_completed, s.total_bytes_erased, s.ops),
+        Some(s) => (
+            s.jobs.len(),
+            s.total_started,
+            s.total_completed,
+            s.total_bytes_erased,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -252,7 +286,8 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] defaults: OK");
 
     // 2: Start erase.
-    let id = start_erase("/tmp/secret.dat", EraseMethod::DoD3Pass, 10_000_000, None).expect("start");
+    let id =
+        start_erase("/tmp/secret.dat", EraseMethod::DoD3Pass, 10_000_000, None).expect("start");
     let job = get_job(id).expect("get");
     assert_eq!(job.method, EraseMethod::DoD3Pass);
     assert_eq!(job.total_passes, 3);

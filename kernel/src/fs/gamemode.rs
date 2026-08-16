@@ -28,10 +28,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -164,7 +164,9 @@ fn default_optimizations() -> Vec<Optimization> {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     *guard = Some(State {
         mode_state: GameModeState::Inactive,
@@ -199,7 +201,10 @@ pub fn activate(game_id: u32) -> KernelResult<()> {
         state.total_activations += 1;
 
         // Record session start.
-        let game_name = state.games.iter().find(|g| g.id == game_id)
+        let game_name = state
+            .games
+            .iter()
+            .find(|g| g.id == game_id)
             .map_or(String::from("Unknown"), |g| g.name.clone());
         if let Some(g) = state.games.iter_mut().find(|g| g.id == game_id) {
             g.total_sessions += 1;
@@ -208,9 +213,11 @@ pub fn activate(game_id: u32) -> KernelResult<()> {
             state.sessions.remove(0);
         }
         state.sessions.push(GameSession {
-            game_id, game_name,
+            game_id,
+            game_name,
             started_ns: crate::hpet::elapsed_ns(),
-            ended_ns: 0, duration_secs: 0,
+            ended_ns: 0,
+            duration_secs: 0,
         });
         Ok(())
     })
@@ -253,11 +260,13 @@ pub fn register_game(name: &str, process_name: &str) -> KernelResult<u32> {
         let id = state.next_game_id;
         state.next_game_id += 1;
         state.games.push(RegisteredGame {
-            id, name: String::from(name),
+            id,
+            name: String::from(name),
             process_name: String::from(process_name),
             auto_detect: true,
             custom_optimizations: Vec::new(),
-            total_sessions: 0, total_play_secs: 0,
+            total_sessions: 0,
+            total_play_secs: 0,
         });
         Ok(id)
     })
@@ -266,7 +275,10 @@ pub fn register_game(name: &str, process_name: &str) -> KernelResult<u32> {
 /// Unregister a game.
 pub fn unregister_game(game_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.games.iter().position(|g| g.id == game_id)
+        let pos = state
+            .games
+            .iter()
+            .position(|g| g.id == game_id)
             .ok_or(KernelError::NotFound)?;
         state.games.remove(pos);
         Ok(())
@@ -275,7 +287,10 @@ pub fn unregister_game(game_id: u32) -> KernelResult<()> {
 
 /// Get current mode state.
 pub fn current_state() -> GameModeState {
-    STATE.lock().as_ref().map_or(GameModeState::Inactive, |s| s.mode_state)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(GameModeState::Inactive, |s| s.mode_state)
 }
 
 /// Toggle FPS overlay.
@@ -296,7 +311,10 @@ pub fn set_auto_detect(enabled: bool) -> KernelResult<()> {
 
 /// List registered games.
 pub fn list_games() -> Vec<RegisteredGame> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.games.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.games.clone())
 }
 
 /// Recent sessions.
@@ -311,7 +329,12 @@ pub fn list_sessions(count: usize) -> Vec<GameSession> {
 pub fn stats() -> (usize, u64, bool, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.games.len(), s.total_activations, s.mode_state != GameModeState::Inactive, s.ops),
+        Some(s) => (
+            s.games.len(),
+            s.total_activations,
+            s.mode_state != GameModeState::Inactive,
+            s.ops,
+        ),
         None => (0, 0, false, 0),
     }
 }

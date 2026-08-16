@@ -147,7 +147,12 @@ impl<R> LimineRequest<R> {
     /// Create a new request with the given feature-specific ID.
     const fn new(feature_id: [u64; 2]) -> Self {
         Self {
-            id: [COMMON_MAGIC[0], COMMON_MAGIC[1], feature_id[0], feature_id[1]],
+            id: [
+                COMMON_MAGIC[0],
+                COMMON_MAGIC[1],
+                feature_id[0],
+                feature_id[1],
+            ],
             revision: 0,
             response: ptr::null(),
         }
@@ -423,8 +428,7 @@ impl LimineRequest<ExecutableAddressResponse> {
     /// Reference: Limine Protocol v8.x, Executable Address Feature
     /// (`LIMINE_EXECUTABLE_ADDRESS_REQUEST`, formerly
     /// `LIMINE_KERNEL_ADDRESS_REQUEST` — same ID, renamed at API revision 2).
-    pub const EXECUTABLE_ADDRESS: Self =
-        Self::new([0x71ba_7686_3cc5_5f63, 0xb264_4a48_c516_a487]);
+    pub const EXECUTABLE_ADDRESS: Self = Self::new([0x71ba_7686_3cc5_5f63, 0xb264_4a48_c516_a487]);
 }
 
 // ---------------------------------------------------------------------------

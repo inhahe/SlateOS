@@ -200,7 +200,9 @@ pub fn register_device(info: DeviceTrimInfo) {
 /// Check if TRIM is supported for a device.
 pub fn is_trim_supported(device: &str) -> bool {
     let devices = DEVICE_INFO.lock();
-    devices.iter().any(|d| d.device == device && d.trim_supported)
+    devices
+        .iter()
+        .any(|d| d.device == device && d.trim_supported)
 }
 
 // ---------------------------------------------------------------------------
@@ -254,12 +256,17 @@ pub fn flush(device_filter: &str) -> TrimResult {
     drop(queue);
 
     if ranges.is_empty() {
-        return TrimResult { ranges_trimmed: 0, bytes_trimmed: 0, ranges_coalesced: 0 };
+        return TrimResult {
+            ranges_trimmed: 0,
+            bytes_trimmed: 0,
+            ranges_coalesced: 0,
+        };
     }
 
     // Coalesce adjacent ranges per device.
     let coalesced = coalesce_ranges(ranges);
-    let coalesce_count = coalesced.iter()
+    let coalesce_count = coalesced
+        .iter()
         .map(|(_, ranges)| ranges.len().saturating_sub(1) as u32)
         .sum::<u32>();
 
@@ -506,7 +513,10 @@ fn test_mode_parse() {
     assert_eq!(TrimMode::from_name("off"), Some(TrimMode::Manual));
     assert_eq!(TrimMode::from_name("periodic"), Some(TrimMode::Periodic));
     assert_eq!(TrimMode::from_name("timer"), Some(TrimMode::Periodic));
-    assert_eq!(TrimMode::from_name("continuous"), Some(TrimMode::Continuous));
+    assert_eq!(
+        TrimMode::from_name("continuous"),
+        Some(TrimMode::Continuous)
+    );
     assert_eq!(TrimMode::from_name("immediate"), Some(TrimMode::Continuous));
     assert_eq!(TrimMode::from_name("bogus"), None);
 

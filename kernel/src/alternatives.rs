@@ -247,12 +247,14 @@ macro_rules! alternative_site {
             // --- the record tying them together ---
             ".pushsection .altinstructions, \"a\"\n",
             ".balign 8\n",
-            ".quad 661b\n",              // site
-            ".quad 663b\n",              // replacement
-            ".word ", stringify!($feature), "\n", // feature discriminant
-            ".byte 662b-661b\n",         // site_len
-            ".byte 664b-663b\n",         // repl_len
-            ".zero 4\n",                 // _pad
+            ".quad 661b\n", // site
+            ".quad 663b\n", // replacement
+            ".word ",
+            stringify!($feature),
+            "\n",                // feature discriminant
+            ".byte 662b-661b\n", // site_len
+            ".byte 664b-663b\n", // repl_len
+            ".zero 4\n",         // _pad
             ".popsection\n",
             // A replacement longer than the site would run off the end of the
             // reserved bytes and shred the following instruction.  Catch it at
@@ -312,9 +314,7 @@ impl TextAlias {
         // higher-half address (~0xFFFF_FFFF_8000_0000) and phys_base is small,
         // so `delta` is a large negative number in two's complement and every
         // use of it wraps back down into the HHDM.
-        let delta = phys_base
-            .wrapping_add(hhdm)
-            .wrapping_sub(virt_base);
+        let delta = phys_base.wrapping_add(hhdm).wrapping_sub(virt_base);
         Some(Self { delta })
     }
 

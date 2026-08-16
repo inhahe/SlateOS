@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -55,12 +55,20 @@ pub struct DeviceIoStats {
 impl DeviceIoStats {
     /// Average read latency in nanoseconds.
     pub fn avg_read_latency_ns(&self) -> u64 {
-        if self.reads == 0 { 0 } else { self.read_latency_total_ns / self.reads }
+        if self.reads == 0 {
+            0
+        } else {
+            self.read_latency_total_ns / self.reads
+        }
     }
 
     /// Average write latency in nanoseconds.
     pub fn avg_write_latency_ns(&self) -> u64 {
-        if self.writes == 0 { 0 } else { self.write_latency_total_ns / self.writes }
+        if self.writes == 0 {
+            0
+        } else {
+            self.write_latency_total_ns / self.writes
+        }
     }
 
     /// Total I/O operations.
@@ -113,11 +121,19 @@ fn find_or_create_device(state: &mut State, name: &str) -> KernelResult<usize> {
     let now = crate::hpet::elapsed_ns();
     state.devices.push(DeviceIoStats {
         device_name: String::from(name),
-        reads: 0, writes: 0, bytes_read: 0, bytes_written: 0,
-        read_latency_total_ns: 0, write_latency_total_ns: 0,
-        read_latency_max_ns: 0, write_latency_max_ns: 0,
-        read_errors: 0, write_errors: 0, queue_depth: 0,
-        first_io_ns: now, last_io_ns: now,
+        reads: 0,
+        writes: 0,
+        bytes_read: 0,
+        bytes_written: 0,
+        read_latency_total_ns: 0,
+        write_latency_total_ns: 0,
+        read_latency_max_ns: 0,
+        write_latency_max_ns: 0,
+        read_errors: 0,
+        write_errors: 0,
+        queue_depth: 0,
+        first_io_ns: now,
+        last_io_ns: now,
     });
     Ok(state.devices.len() - 1)
 }
@@ -128,7 +144,9 @@ fn find_or_create_device(state: &mut State, name: &str) -> KernelResult<usize> {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         global_reads: 0,
@@ -197,14 +215,18 @@ pub fn record_write_error(device: &str) -> KernelResult<()> {
 
 /// Get stats for a specific device.
 pub fn device_stats(name: &str) -> Option<DeviceIoStats> {
-    STATE.lock().as_ref().and_then(|s| {
-        s.devices.iter().find(|d| d.device_name == name).cloned()
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.devices.iter().find(|d| d.device_name == name).cloned())
 }
 
 /// Get stats for all devices.
 pub fn all_devices() -> Vec<DeviceIoStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Reset stats for a device.
@@ -212,7 +234,9 @@ pub fn reset_device(name: &str) -> KernelResult<()> {
     with_state(|state| {
         let before = state.devices.len();
         state.devices.retain(|d| d.device_name != name);
-        if state.devices.len() == before { return Err(KernelError::NotFound); }
+        if state.devices.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -221,8 +245,14 @@ pub fn reset_device(name: &str) -> KernelResult<()> {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.global_reads, s.global_writes,
-                     s.global_bytes_read, s.global_bytes_written, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.global_reads,
+            s.global_writes,
+            s.global_bytes_read,
+            s.global_bytes_written,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }

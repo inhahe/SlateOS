@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -99,7 +99,9 @@ where
 /// flow.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         rings: Vec::new(),
         next_id: 1,
@@ -113,12 +115,22 @@ pub fn init_defaults() {
 /// Create a ring.
 pub fn create_ring(pid: u32, sq_size: u32, cq_size: u32) -> KernelResult<u32> {
     with_state(|state| {
-        if state.rings.len() >= MAX_RINGS { return Err(KernelError::ResourceExhausted); }
+        if state.rings.len() >= MAX_RINGS {
+            return Err(KernelError::ResourceExhausted);
+        }
         let id = state.next_id;
         state.next_id += 1;
         state.rings.push(RingStats {
-            ring_id: id, pid, sq_size, cq_size, sq_pending: 0, cq_pending: 0,
-            submitted: 0, completed: 0, overflows: 0, sq_full_count: 0,
+            ring_id: id,
+            pid,
+            sq_size,
+            cq_size,
+            sq_pending: 0,
+            cq_pending: 0,
+            submitted: 0,
+            completed: 0,
+            overflows: 0,
+            sq_full_count: 0,
         });
         Ok(id)
     })
@@ -127,7 +139,10 @@ pub fn create_ring(pid: u32, sq_size: u32, cq_size: u32) -> KernelResult<u32> {
 /// Destroy a ring.
 pub fn destroy_ring(ring_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.rings.iter().position(|r| r.ring_id == ring_id)
+        let idx = state
+            .rings
+            .iter()
+            .position(|r| r.ring_id == ring_id)
             .ok_or(KernelError::NotFound)?;
         state.rings.remove(idx);
         Ok(())
@@ -137,11 +152,16 @@ pub fn destroy_ring(ring_id: u32) -> KernelResult<()> {
 /// Submit entries.
 pub fn submit(ring_id: u32, count: u32) -> KernelResult<()> {
     with_state(|state| {
-        let r = state.rings.iter_mut().find(|r| r.ring_id == ring_id)
+        let r = state
+            .rings
+            .iter_mut()
+            .find(|r| r.ring_id == ring_id)
             .ok_or(KernelError::NotFound)?;
         r.submitted += count as u64;
         r.sq_pending += count;
-        if r.sq_pending >= r.sq_size { r.sq_full_count += 1; }
+        if r.sq_pending >= r.sq_size {
+            r.sq_full_count += 1;
+        }
         state.total_submitted += count as u64;
         Ok(())
     })
@@ -150,7 +170,10 @@ pub fn submit(ring_id: u32, count: u32) -> KernelResult<()> {
 /// Complete entries.
 pub fn complete(ring_id: u32, count: u32) -> KernelResult<()> {
     with_state(|state| {
-        let r = state.rings.iter_mut().find(|r| r.ring_id == ring_id)
+        let r = state
+            .rings
+            .iter_mut()
+            .find(|r| r.ring_id == ring_id)
             .ok_or(KernelError::NotFound)?;
         r.completed += count as u64;
         r.sq_pending = r.sq_pending.saturating_sub(count);
@@ -163,7 +186,10 @@ pub fn complete(ring_id: u32, count: u32) -> KernelResult<()> {
 /// CQ overflow.
 pub fn overflow(ring_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let r = state.rings.iter_mut().find(|r| r.ring_id == ring_id)
+        let r = state
+            .rings
+            .iter_mut()
+            .find(|r| r.ring_id == ring_id)
             .ok_or(KernelError::NotFound)?;
         r.overflows += 1;
         state.total_overflows += 1;
@@ -173,14 +199,23 @@ pub fn overflow(ring_id: u32) -> KernelResult<()> {
 
 /// Per-ring stats.
 pub fn ring_stats() -> Vec<RingStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.rings.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.rings.clone())
 }
 
 /// Statistics: (ring_count, total_submitted, total_completed, total_overflows, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.rings.len(), s.total_submitted, s.total_completed, s.total_overflows, s.ops),
+        Some(s) => (
+            s.rings.len(),
+            s.total_submitted,
+            s.total_completed,
+            s.total_overflows,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -213,14 +248,22 @@ pub fn self_test() {
 
     // 3: Submit (exact, from zero; sq_pending tracks SQEs in flight).
     submit(id, 10).expect("submit");
-    let r = ring_stats().iter().find(|r| r.ring_id == id).cloned().expect("ring");
+    let r = ring_stats()
+        .iter()
+        .find(|r| r.ring_id == id)
+        .cloned()
+        .expect("ring");
     assert_eq!(r.submitted, 10);
     assert_eq!(r.sq_pending, 10);
     crate::serial_println!("  [3/8] submit: OK");
 
     // 4: Complete drains the submission queue.
     complete(id, 5).expect("complete");
-    let r = ring_stats().iter().find(|r| r.ring_id == id).cloned().expect("ring");
+    let r = ring_stats()
+        .iter()
+        .find(|r| r.ring_id == id)
+        .cloned()
+        .expect("ring");
     assert_eq!(r.completed, 5);
     assert_eq!(r.sq_pending, 5);
     assert_eq!(r.cq_pending, 5);
@@ -229,7 +272,11 @@ pub fn self_test() {
     // 5: A CQ overflow bumps the overflow counter; submitting on an unknown id
     //    fails with NotFound.
     overflow(id).expect("overflow");
-    let r = ring_stats().iter().find(|r| r.ring_id == id).cloned().expect("ring");
+    let r = ring_stats()
+        .iter()
+        .find(|r| r.ring_id == id)
+        .cloned()
+        .expect("ring");
     assert_eq!(r.overflows, 1);
     assert!(submit(9999, 1).is_err());
     crate::serial_println!("  [5/8] overflow: OK");

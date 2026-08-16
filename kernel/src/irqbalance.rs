@@ -41,9 +41,9 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use crate::serial_println;
 use crate::smp;
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -137,7 +137,8 @@ pub fn init() {
     ENABLED.store(true, Ordering::Release);
     serial_println!(
         "[irqbalance] Initialized: {} CPUs, interval={}s",
-        cpu_count, BALANCE_INTERVAL_TICKS / 100
+        cpu_count,
+        BALANCE_INTERVAL_TICKS / 100
     );
 }
 
@@ -197,7 +198,10 @@ pub fn clear_hint(irq: u8) {
 /// Enable or disable the balancer at runtime.
 pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, Ordering::Release);
-    serial_println!("[irqbalance] {}", if enabled { "enabled" } else { "disabled" });
+    serial_println!(
+        "[irqbalance] {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
 }
 
 /// Check if the balancer is enabled.
@@ -319,10 +323,14 @@ fn balance() {
             && crate::cpu_hotplug::is_online(hint as usize)
         {
             // Honor hint if the hinted CPU isn't overloaded (< 2x average).
-            let avg_load = cpu_load.iter().take(online_cpus.len()).sum::<u64>()
+            let avg_load = cpu_load
+                .iter()
+                .take(online_cpus.len())
+                .sum::<u64>()
                 .checked_div(online_cpus.len() as u64)
                 .unwrap_or(0);
-            if cpu_load.get(hint as usize).copied().unwrap_or(u64::MAX) < avg_load.saturating_mul(2) {
+            if cpu_load.get(hint as usize).copied().unwrap_or(u64::MAX) < avg_load.saturating_mul(2)
+            {
                 hint as usize
             } else {
                 find_least_loaded(&cpu_load, &online_cpus)
@@ -344,7 +352,9 @@ fn balance() {
             let target_lapic = cpu_to_lapic(target_cpu);
             if let Some(lapic_id) = target_lapic {
                 // SAFETY: target CPU is online, IOAPIC is initialized.
-                unsafe { crate::ioapic::set_irq_affinity(irq, lapic_id); }
+                unsafe {
+                    crate::ioapic::set_irq_affinity(irq, lapic_id);
+                }
                 #[allow(clippy::cast_possible_truncation)]
                 state.current_cpu.store(target_cpu as u8, Ordering::Relaxed);
                 MIGRATIONS.fetch_add(1, Ordering::Relaxed);
@@ -468,8 +478,12 @@ pub fn self_test() {
     // Test 6: Stats.
     let st = stats();
     assert_eq!(st.cpu_count, smp::cpu_count());
-    serial_println!("[irqbalance]   Stats: OK (ops={}, migrations={}, cpus={})",
-        st.balance_ops, st.migrations, st.cpu_count);
+    serial_println!(
+        "[irqbalance]   Stats: OK (ops={}, migrations={}, cpus={})",
+        st.balance_ops,
+        st.migrations,
+        st.cpu_count
+    );
 
     // Test 7: Out-of-range IRQ doesn't panic.
     pin_irq(255, 0);

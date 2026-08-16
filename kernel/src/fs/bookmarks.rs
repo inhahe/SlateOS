@@ -145,11 +145,35 @@ pub fn init() {
 
     let defaults = [
         ("home", "/home/user", "Home", "folder-home", 0),
-        ("desktop", "/home/user/Desktop", "Desktop", "user-desktop", 1),
-        ("documents", "/home/user/Documents", "Documents", "folder-documents", 2),
-        ("downloads", "/home/user/Downloads", "Downloads", "folder-download", 3),
+        (
+            "desktop",
+            "/home/user/Desktop",
+            "Desktop",
+            "user-desktop",
+            1,
+        ),
+        (
+            "documents",
+            "/home/user/Documents",
+            "Documents",
+            "folder-documents",
+            2,
+        ),
+        (
+            "downloads",
+            "/home/user/Downloads",
+            "Downloads",
+            "folder-download",
+            3,
+        ),
         ("music", "/home/user/Music", "Music", "folder-music", 4),
-        ("pictures", "/home/user/Pictures", "Pictures", "folder-pictures", 5),
+        (
+            "pictures",
+            "/home/user/Pictures",
+            "Pictures",
+            "folder-pictures",
+            5,
+        ),
         ("videos", "/home/user/Videos", "Videos", "folder-videos", 6),
         ("root", "/", "Filesystem", "drive-harddisk", 10),
     ];
@@ -199,7 +223,8 @@ pub fn add<P: AsRef<Path>>(
     }
 
     // Find highest order in category for placement.
-    let max_order = bm.iter()
+    let max_order = bm
+        .iter()
         .filter(|b| b.category == category)
         .map(|b| b.order)
         .max()
@@ -208,7 +233,11 @@ pub fn add<P: AsRef<Path>>(
     bm.push(Bookmark {
         name: String::from(name),
         path: path.to_path_buf(),
-        label: if label.is_empty() { String::from(name) } else { String::from(label) },
+        label: if label.is_empty() {
+            String::from(name)
+        } else {
+            String::from(label)
+        },
         category,
         icon: String::new(),
         order: max_order + 1,
@@ -340,7 +369,8 @@ pub fn list() -> Vec<Bookmark> {
     let bm = BOOKMARKS.lock();
     let mut result: Vec<Bookmark> = bm.clone();
     result.sort_by(|a, b| {
-        (a.category as u8).cmp(&(b.category as u8))
+        (a.category as u8)
+            .cmp(&(b.category as u8))
             .then(a.order.cmp(&b.order))
     });
     result
@@ -353,7 +383,10 @@ pub fn list_visible() -> Vec<Bookmark> {
 
 /// List bookmarks in a specific category.
 pub fn list_category(category: Category) -> Vec<Bookmark> {
-    list().into_iter().filter(|b| b.category == category).collect()
+    list()
+        .into_iter()
+        .filter(|b| b.category == category)
+        .collect()
 }
 
 /// Get a specific bookmark by name.
@@ -442,7 +475,12 @@ fn test_init() {
 }
 
 fn test_add_and_resolve() {
-    let result = add("work", "/home/user/work", "Work Projects", Category::Favorites);
+    let result = add(
+        "work",
+        "/home/user/work",
+        "Work Projects",
+        Category::Favorites,
+    );
     assert!(result.is_ok());
 
     let path = resolve("work");
@@ -491,7 +529,12 @@ fn test_rename() {
 }
 
 fn test_categories() {
-    let _ = add("net_share", "/mnt/network", "Network Share", Category::Network);
+    let _ = add(
+        "net_share",
+        "/mnt/network",
+        "Network Share",
+        Category::Network,
+    );
 
     let net_bm = list_category(Category::Network);
     assert!(net_bm.iter().any(|b| b.name == "net_share"));

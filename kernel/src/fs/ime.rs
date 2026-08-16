@@ -24,11 +24,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -73,8 +73,7 @@ pub struct InputMethod {
 }
 
 /// Current composition state.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CompositionState {
     /// Raw keystroke buffer.
     pub buffer: String,
@@ -85,7 +84,6 @@ pub struct CompositionState {
     /// Whether composition is active.
     pub active: bool,
 }
-
 
 /// An emoji entry.
 #[derive(Debug, Clone)]
@@ -167,14 +165,17 @@ pub fn register_method(
     if state.methods.contains_key(id) {
         return Err(KernelError::AlreadyExists);
     }
-    state.methods.insert(String::from(id), InputMethod {
-        id: String::from(id),
-        name: String::from(name),
-        language: String::from(language),
-        indicator: String::from(indicator),
-        uses_composition,
-        builtin: false,
-    });
+    state.methods.insert(
+        String::from(id),
+        InputMethod {
+            id: String::from(id),
+            name: String::from(name),
+            language: String::from(language),
+            indicator: String::from(indicator),
+            uses_composition,
+            builtin: false,
+        },
+    );
     Ok(())
 }
 
@@ -222,7 +223,9 @@ pub fn active_indicator() -> String {
     if state.active.is_empty() {
         return String::from("EN");
     }
-    state.methods.get(&state.active)
+    state
+        .methods
+        .get(&state.active)
         .map(|m| m.indicator.clone())
         .unwrap_or_else(|| String::from("?"))
 }
@@ -338,7 +341,10 @@ pub fn composition() -> CompositionState {
 /// Commit a specific candidate by index.
 pub fn commit_candidate(index: usize) -> KernelResult<String> {
     let mut state = STATE.lock();
-    let text = state.composition.candidates.get(index)
+    let text = state
+        .composition
+        .candidates
+        .get(index)
         .cloned()
         .ok_or(KernelError::InvalidArgument)?;
     state.composition = CompositionState::default();
@@ -388,10 +394,14 @@ pub fn add_emoji(emoji: &str, name: &str, category: &str, keywords: &[&str]) -> 
 pub fn search_emoji(query: &str) -> Vec<EmojiEntry> {
     let state = STATE.lock();
     let q = query.to_ascii_lowercase();
-    state.emoji.iter()
+    state
+        .emoji
+        .iter()
         .filter(|e| {
             e.name.to_ascii_lowercase().contains(&q)
-            || e.keywords.iter().any(|k| k.to_ascii_lowercase().contains(&q))
+                || e.keywords
+                    .iter()
+                    .any(|k| k.to_ascii_lowercase().contains(&q))
         })
         .take(20)
         .cloned()
@@ -401,7 +411,9 @@ pub fn search_emoji(query: &str) -> Vec<EmojiEntry> {
 /// List emoji by category.
 pub fn emoji_by_category(category: &str) -> Vec<EmojiEntry> {
     let state = STATE.lock();
-    state.emoji.iter()
+    state
+        .emoji
+        .iter()
         .filter(|e| e.category == category)
         .cloned()
         .collect()
@@ -436,8 +448,18 @@ pub fn emoji_picker_open() -> bool {
 pub fn init_emoji_defaults() -> KernelResult<()> {
     // A small selection of common emoji.
     let defaults = [
-        ("😀", "grinning face", "Smileys", &["happy", "smile", "grin"][..]),
-        ("😂", "face with tears of joy", "Smileys", &["laugh", "cry", "lol"]),
+        (
+            "😀",
+            "grinning face",
+            "Smileys",
+            &["happy", "smile", "grin"][..],
+        ),
+        (
+            "😂",
+            "face with tears of joy",
+            "Smileys",
+            &["laugh", "cry", "lol"],
+        ),
         ("❤️", "red heart", "Symbols", &["love", "heart"]),
         ("👍", "thumbs up", "People", &["like", "ok", "yes"]),
         ("👎", "thumbs down", "People", &["dislike", "no"]),
@@ -471,44 +493,56 @@ pub fn init_defaults() -> KernelResult<()> {
     }
 
     // Direct input (no IME, just keyboard).
-    state.methods.insert(String::from("direct"), InputMethod {
-        id: String::from("direct"),
-        name: String::from("Direct Input"),
-        language: String::from("en"),
-        indicator: String::from("EN"),
-        uses_composition: false,
-        builtin: true,
-    });
+    state.methods.insert(
+        String::from("direct"),
+        InputMethod {
+            id: String::from("direct"),
+            name: String::from("Direct Input"),
+            language: String::from("en"),
+            indicator: String::from("EN"),
+            uses_composition: false,
+            builtin: true,
+        },
+    );
 
     // Pinyin (Chinese).
-    state.methods.insert(String::from("pinyin"), InputMethod {
-        id: String::from("pinyin"),
-        name: String::from("Pinyin"),
-        language: String::from("zh-CN"),
-        indicator: String::from("拼"),
-        uses_composition: true,
-        builtin: true,
-    });
+    state.methods.insert(
+        String::from("pinyin"),
+        InputMethod {
+            id: String::from("pinyin"),
+            name: String::from("Pinyin"),
+            language: String::from("zh-CN"),
+            indicator: String::from("拼"),
+            uses_composition: true,
+            builtin: true,
+        },
+    );
 
     // Japanese Romaji.
-    state.methods.insert(String::from("romaji"), InputMethod {
-        id: String::from("romaji"),
-        name: String::from("Romaji"),
-        language: String::from("ja"),
-        indicator: String::from("あ"),
-        uses_composition: true,
-        builtin: true,
-    });
+    state.methods.insert(
+        String::from("romaji"),
+        InputMethod {
+            id: String::from("romaji"),
+            name: String::from("Romaji"),
+            language: String::from("ja"),
+            indicator: String::from("あ"),
+            uses_composition: true,
+            builtin: true,
+        },
+    );
 
     // Korean Hangul.
-    state.methods.insert(String::from("hangul"), InputMethod {
-        id: String::from("hangul"),
-        name: String::from("Hangul"),
-        language: String::from("ko"),
-        indicator: String::from("한"),
-        uses_composition: true,
-        builtin: true,
-    });
+    state.methods.insert(
+        String::from("hangul"),
+        InputMethod {
+            id: String::from("hangul"),
+            name: String::from("Hangul"),
+            language: String::from("ko"),
+            indicator: String::from("한"),
+            uses_composition: true,
+            builtin: true,
+        },
+    );
 
     state.active = String::from("direct");
     drop(state);

@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -323,17 +323,15 @@ pub fn init_defaults() {
 pub fn active_profile() -> KernelResult<PowerProfile> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    find_profile(state, &state.active_profile.clone())
-        .ok_or(KernelError::NotFound)
+    find_profile(state, &state.active_profile.clone()).ok_or(KernelError::NotFound)
 }
 
 /// Get the active profile name.
 pub fn active_profile_name() -> String {
     let guard = STATE.lock();
-    guard.as_ref().map_or_else(
-        || String::from("Unknown"),
-        |s| s.active_profile.clone(),
-    )
+    guard
+        .as_ref()
+        .map_or_else(|| String::from("Unknown"), |s| s.active_profile.clone())
 }
 
 fn find_profile(state: &PowerProfileState, name: &str) -> Option<PowerProfile> {
@@ -341,7 +339,9 @@ fn find_profile(state: &PowerProfileState, name: &str) -> Option<PowerProfile> {
         "Balanced" => Some(state.balanced.clone()),
         "Performance" => Some(state.performance.clone()),
         "Power Saver" => Some(state.power_saver.clone()),
-        _ => state.custom_profiles.iter()
+        _ => state
+            .custom_profiles
+            .iter()
             .find(|p| p.name == name)
             .cloned(),
     }
@@ -490,16 +490,19 @@ pub fn set_suspend_after(seconds: u32) -> KernelResult<()> {
     })
 }
 
-fn find_profile_mut<'a>(state: &'a mut PowerProfileState, name: &str) -> KernelResult<&'a mut PowerProfile> {
+fn find_profile_mut<'a>(
+    state: &'a mut PowerProfileState,
+    name: &str,
+) -> KernelResult<&'a mut PowerProfile> {
     match name {
         "Balanced" => Ok(&mut state.balanced),
         "Performance" => Ok(&mut state.performance),
         "Power Saver" => Ok(&mut state.power_saver),
-        _ => {
-            state.custom_profiles.iter_mut()
-                .find(|p| p.name == name)
-                .ok_or(KernelError::NotFound)
-        }
+        _ => state
+            .custom_profiles
+            .iter_mut()
+            .find(|p| p.name == name)
+            .ok_or(KernelError::NotFound),
     }
 }
 
@@ -560,7 +563,11 @@ pub fn check_auto_switch() -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// Update battery status.
-pub fn update_battery(state_val: BatteryState, charge_pct: u8, minutes_remaining: u32) -> KernelResult<()> {
+pub fn update_battery(
+    state_val: BatteryState,
+    charge_pct: u8,
+    minutes_remaining: u32,
+) -> KernelResult<()> {
     with_state(|s| {
         s.battery.state = state_val;
         s.battery.charge_pct = charge_pct;
@@ -596,8 +603,7 @@ pub fn battery_info() -> BatteryInfo {
 pub fn should_disable_animations() -> bool {
     let guard = STATE.lock();
     guard.as_ref().is_some_and(|s| {
-        find_profile(s, &s.active_profile.clone())
-            .is_some_and(|p| p.disable_animations)
+        find_profile(s, &s.active_profile.clone()).is_some_and(|p| p.disable_animations)
     })
 }
 
@@ -605,8 +611,7 @@ pub fn should_disable_animations() -> bool {
 pub fn should_reduce_background() -> bool {
     let guard = STATE.lock();
     guard.as_ref().is_some_and(|s| {
-        find_profile(s, &s.active_profile.clone())
-            .is_some_and(|p| p.reduce_background)
+        find_profile(s, &s.active_profile.clone()).is_some_and(|p| p.reduce_background)
     })
 }
 

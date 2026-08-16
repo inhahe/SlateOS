@@ -35,9 +35,9 @@
 
 #![allow(dead_code)]
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
@@ -375,8 +375,13 @@ pub fn create(
         });
     }
 
-    let label = format!("{} {} item{} to {}",
-        kind.label(), items.len(), if items.len() == 1 { "" } else { "s" }, dest);
+    let label = format!(
+        "{} {} item{} to {}",
+        kind.label(),
+        items.len(),
+        if items.len() == 1 { "" } else { "s" },
+        dest
+    );
 
     let op = FileOperation {
         id,
@@ -410,7 +415,9 @@ pub fn execute(op_id: u64) -> KernelResult<Progress> {
     // Mark as running.
     {
         let mut ops = OPERATIONS.lock();
-        let op = ops.iter_mut().find(|o| o.id == op_id)
+        let op = ops
+            .iter_mut()
+            .find(|o| o.id == op_id)
             .ok_or(KernelError::NotFound)?;
         if op.state != OpState::Queued && op.state != OpState::Paused {
             return Err(KernelError::InvalidArgument);
@@ -423,7 +430,9 @@ pub fn execute(op_id: u64) -> KernelResult<Progress> {
         let (item_idx, item_source, item_dest, kind, policy, is_dir);
         {
             let ops = OPERATIONS.lock();
-            let op = ops.iter().find(|o| o.id == op_id)
+            let op = ops
+                .iter()
+                .find(|o| o.id == op_id)
                 .ok_or(KernelError::NotFound)?;
 
             if op.state == OpState::Cancelled {
@@ -431,7 +440,10 @@ pub fn execute(op_id: u64) -> KernelResult<Progress> {
             }
 
             // Find next pending item.
-            let next = op.items.iter().enumerate()
+            let next = op
+                .items
+                .iter()
+                .enumerate()
                 .find(|(_, it)| it.status == ItemStatus::Pending);
 
             match next {
@@ -448,9 +460,7 @@ pub fn execute(op_id: u64) -> KernelResult<Progress> {
         }
 
         // Process the item (without holding the lock).
-        let result = process_item(
-            kind, &item_source, &item_dest, is_dir, policy, op_id,
-        );
+        let result = process_item(kind, &item_source, &item_dest, is_dir, policy, op_id);
 
         // Update item status.
         {
@@ -466,8 +476,7 @@ pub fn execute(op_id: u64) -> KernelResult<Progress> {
                             } else {
                                 ItemStatus::Done
                             };
-                            op.transferred_bytes = op.transferred_bytes
-                                .saturating_add(item.size);
+                            op.transferred_bytes = op.transferred_bytes.saturating_add(item.size);
                         }
                         Err(ProcessError::Skipped) => {
                             item.status = ItemStatus::Skipped;
@@ -489,7 +498,9 @@ pub fn execute(op_id: u64) -> KernelResult<Progress> {
     let progress;
     {
         let mut ops = OPERATIONS.lock();
-        let op = ops.iter_mut().find(|o| o.id == op_id)
+        let op = ops
+            .iter_mut()
+            .find(|o| o.id == op_id)
             .ok_or(KernelError::NotFound)?;
 
         if op.state == OpState::Running {
@@ -583,7 +594,11 @@ fn move_item(
         if let Some(op) = ops.iter_mut().find(|o| o.id == op_id) {
             // Remove the copy undo entry and replace with move.
             if let Some(last) = op.undo_log.last_mut() {
-                last.action = if is_dir { UndoAction::DirCreated } else { UndoAction::FileMoved };
+                last.action = if is_dir {
+                    UndoAction::DirCreated
+                } else {
+                    UndoAction::FileMoved
+                };
             }
         }
     } else {
@@ -591,7 +606,11 @@ fn move_item(
         if let Err(e) = crate::fs::vfs::Vfs::remove(source) {
             // Move partially failed — file was copied but source not deleted.
             // Log but don't fail the whole item.
-            crate::serial_println!("[fileops] warning: could not delete source {}: {:?}", source, e);
+            crate::serial_println!(
+                "[fileops] warning: could not delete source {}: {:?}",
+                source,
+                e
+            );
         }
         // Update undo log to reflect move rather than copy.
         let mut ops = OPERATIONS.lock();
@@ -606,11 +625,7 @@ fn move_item(
 }
 
 /// Delete a single file or directory.
-fn delete_item(
-    source: &str,
-    _is_dir: bool,
-    op_id: u64,
-) -> Result<String, ProcessError> {
+fn delete_item(source: &str, _is_dir: bool, op_id: u64) -> Result<String, ProcessError> {
     // Try delete via VFS.
     crate::fs::vfs::Vfs::remove(source)
         .map_err(|e| ProcessError::Failed(format!("delete: {:?}", e)))?;
@@ -621,10 +636,7 @@ fn delete_item(
 }
 
 /// Resolve a destination conflict according to policy.
-fn resolve_conflict(
-    dest: &str,
-    policy: ConflictPolicy,
-) -> Result<String, ProcessError> {
+fn resolve_conflict(dest: &str, policy: ConflictPolicy) -> Result<String, ProcessError> {
     // Check if destination already exists.
     let exists = crate::fs::vfs::Vfs::metadata(dest).is_ok();
 
@@ -633,16 +645,12 @@ fn resolve_conflict(
     }
 
     match policy {
-        ConflictPolicy::AutoRename => {
-            Ok(auto_rename(dest))
-        }
+        ConflictPolicy::AutoRename => Ok(auto_rename(dest)),
         ConflictPolicy::Overwrite => {
             // Will overwrite — return same dest.
             Ok(String::from(dest))
         }
-        ConflictPolicy::Skip => {
-            Err(ProcessError::Skipped)
-        }
+        ConflictPolicy::Skip => Err(ProcessError::Skipped),
         ConflictPolicy::MergeDir => {
             // For directories, merge is OK — create if needed.
             // For files within merged dirs, use AutoRename fallback.
@@ -676,7 +684,9 @@ fn add_undo(op_id: u64, action: UndoAction, source: &str, dest: &str) {
 /// Cancel an in-progress operation.
 pub fn cancel(op_id: u64) -> KernelResult<()> {
     let mut ops = OPERATIONS.lock();
-    let op = ops.iter_mut().find(|o| o.id == op_id)
+    let op = ops
+        .iter_mut()
+        .find(|o| o.id == op_id)
         .ok_or(KernelError::NotFound)?;
 
     match op.state {
@@ -698,7 +708,9 @@ pub fn undo(op_id: u64) -> KernelResult<(usize, usize)> {
     let undo_log;
     {
         let mut ops = OPERATIONS.lock();
-        let op = ops.iter_mut().find(|o| o.id == op_id)
+        let op = ops
+            .iter_mut()
+            .find(|o| o.id == op_id)
             .ok_or(KernelError::NotFound)?;
 
         if op.state != OpState::Completed && op.state != OpState::Cancelled {
@@ -764,10 +776,14 @@ pub fn undo(op_id: u64) -> KernelResult<(usize, usize)> {
 /// Get the progress of an operation.
 pub fn progress(op_id: u64) -> KernelResult<Progress> {
     let ops = OPERATIONS.lock();
-    let op = ops.iter().find(|o| o.id == op_id)
+    let op = ops
+        .iter()
+        .find(|o| o.id == op_id)
         .ok_or(KernelError::NotFound)?;
 
-    let current = op.items.iter()
+    let current = op
+        .items
+        .iter()
         .find(|i| i.status == ItemStatus::InProgress)
         .map(|i| i.source.clone())
         .unwrap_or_default();
@@ -787,7 +803,9 @@ pub fn progress(op_id: u64) -> KernelResult<Progress> {
 /// List all operations (active and completed).
 pub fn list_ops() -> Vec<(u64, OpKind, OpState, String)> {
     let ops = OPERATIONS.lock();
-    ops.iter().map(|o| (o.id, o.kind, o.state, o.label.clone())).collect()
+    ops.iter()
+        .map(|o| (o.id, o.kind, o.state, o.label.clone()))
+        .collect()
 }
 
 /// Get full detail for an operation.
@@ -799,7 +817,9 @@ pub fn get_op(op_id: u64) -> Option<FileOperation> {
 pub fn cleanup() -> usize {
     let mut ops = OPERATIONS.lock();
     let before = ops.len();
-    ops.retain(|o| o.state == OpState::Running || o.state == OpState::Queued || o.state == OpState::Paused);
+    ops.retain(|o| {
+        o.state == OpState::Running || o.state == OpState::Queued || o.state == OpState::Paused
+    });
     before.saturating_sub(ops.len())
 }
 

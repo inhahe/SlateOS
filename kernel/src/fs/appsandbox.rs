@@ -27,10 +27,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -175,7 +175,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         sandboxes: Vec::new(),
         next_id: 1,
@@ -204,31 +206,83 @@ pub fn create_sandbox(app_name: &str, trust_level: TrustLevel) -> KernelResult<u
         let mut rules = Vec::new();
         match trust_level {
             TrustLevel::Untrusted => {
-                rules.push(PermissionRule { permission: Permission::FileRead, decision: AccessDecision::Deny, path_prefix: String::new() });
-                rules.push(PermissionRule { permission: Permission::FileWrite, decision: AccessDecision::Deny, path_prefix: String::new() });
-                rules.push(PermissionRule { permission: Permission::NetworkAccess, decision: AccessDecision::Deny, path_prefix: String::new() });
+                rules.push(PermissionRule {
+                    permission: Permission::FileRead,
+                    decision: AccessDecision::Deny,
+                    path_prefix: String::new(),
+                });
+                rules.push(PermissionRule {
+                    permission: Permission::FileWrite,
+                    decision: AccessDecision::Deny,
+                    path_prefix: String::new(),
+                });
+                rules.push(PermissionRule {
+                    permission: Permission::NetworkAccess,
+                    decision: AccessDecision::Deny,
+                    path_prefix: String::new(),
+                });
             }
             TrustLevel::LowTrust => {
-                rules.push(PermissionRule { permission: Permission::FileRead, decision: AccessDecision::Prompt, path_prefix: String::new() });
-                rules.push(PermissionRule { permission: Permission::FileWrite, decision: AccessDecision::Deny, path_prefix: String::new() });
-                rules.push(PermissionRule { permission: Permission::NetworkAccess, decision: AccessDecision::Prompt, path_prefix: String::new() });
+                rules.push(PermissionRule {
+                    permission: Permission::FileRead,
+                    decision: AccessDecision::Prompt,
+                    path_prefix: String::new(),
+                });
+                rules.push(PermissionRule {
+                    permission: Permission::FileWrite,
+                    decision: AccessDecision::Deny,
+                    path_prefix: String::new(),
+                });
+                rules.push(PermissionRule {
+                    permission: Permission::NetworkAccess,
+                    decision: AccessDecision::Prompt,
+                    path_prefix: String::new(),
+                });
             }
             TrustLevel::Standard => {
-                rules.push(PermissionRule { permission: Permission::FileRead, decision: AccessDecision::Allow, path_prefix: String::new() });
-                rules.push(PermissionRule { permission: Permission::FileWrite, decision: AccessDecision::Prompt, path_prefix: String::new() });
-                rules.push(PermissionRule { permission: Permission::NetworkAccess, decision: AccessDecision::Allow, path_prefix: String::new() });
+                rules.push(PermissionRule {
+                    permission: Permission::FileRead,
+                    decision: AccessDecision::Allow,
+                    path_prefix: String::new(),
+                });
+                rules.push(PermissionRule {
+                    permission: Permission::FileWrite,
+                    decision: AccessDecision::Prompt,
+                    path_prefix: String::new(),
+                });
+                rules.push(PermissionRule {
+                    permission: Permission::NetworkAccess,
+                    decision: AccessDecision::Allow,
+                    path_prefix: String::new(),
+                });
             }
             TrustLevel::Elevated | TrustLevel::System => {
-                rules.push(PermissionRule { permission: Permission::FileRead, decision: AccessDecision::Allow, path_prefix: String::new() });
-                rules.push(PermissionRule { permission: Permission::FileWrite, decision: AccessDecision::Allow, path_prefix: String::new() });
-                rules.push(PermissionRule { permission: Permission::NetworkAccess, decision: AccessDecision::Allow, path_prefix: String::new() });
+                rules.push(PermissionRule {
+                    permission: Permission::FileRead,
+                    decision: AccessDecision::Allow,
+                    path_prefix: String::new(),
+                });
+                rules.push(PermissionRule {
+                    permission: Permission::FileWrite,
+                    decision: AccessDecision::Allow,
+                    path_prefix: String::new(),
+                });
+                rules.push(PermissionRule {
+                    permission: Permission::NetworkAccess,
+                    decision: AccessDecision::Allow,
+                    path_prefix: String::new(),
+                });
             }
         }
 
         state.sandboxes.push(Sandbox {
-            id, app_name: String::from(app_name),
-            trust_level, rules, active: true,
-            access_attempts: 0, access_denied: 0,
+            id,
+            app_name: String::from(app_name),
+            trust_level,
+            rules,
+            active: true,
+            access_attempts: 0,
+            access_denied: 0,
             created_ns: crate::hpet::elapsed_ns(),
         });
         Ok(id)
@@ -238,14 +292,22 @@ pub fn create_sandbox(app_name: &str, trust_level: TrustLevel) -> KernelResult<u
 /// Grant a permission to a sandbox.
 pub fn grant_permission(id: u32, permission: Permission, path_prefix: &str) -> KernelResult<()> {
     with_state(|state| {
-        let sandbox = state.sandboxes.iter_mut().find(|s| s.id == id)
+        let sandbox = state
+            .sandboxes
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         // Update existing or add new rule.
-        if let Some(rule) = sandbox.rules.iter_mut().find(|r| r.permission == permission && r.path_prefix == path_prefix) {
+        if let Some(rule) = sandbox
+            .rules
+            .iter_mut()
+            .find(|r| r.permission == permission && r.path_prefix == path_prefix)
+        {
             rule.decision = AccessDecision::Allow;
         } else {
             sandbox.rules.push(PermissionRule {
-                permission, decision: AccessDecision::Allow,
+                permission,
+                decision: AccessDecision::Allow,
                 path_prefix: String::from(path_prefix),
             });
         }
@@ -256,7 +318,10 @@ pub fn grant_permission(id: u32, permission: Permission, path_prefix: &str) -> K
 /// Revoke a permission from a sandbox.
 pub fn revoke_permission(id: u32, permission: Permission) -> KernelResult<()> {
     with_state(|state| {
-        let sandbox = state.sandboxes.iter_mut().find(|s| s.id == id)
+        let sandbox = state
+            .sandboxes
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         for rule in sandbox.rules.iter_mut() {
             if rule.permission == permission {
@@ -270,7 +335,10 @@ pub fn revoke_permission(id: u32, permission: Permission) -> KernelResult<()> {
 /// Check access for a sandbox.
 pub fn check_access(id: u32, permission: Permission) -> KernelResult<AccessDecision> {
     with_state(|state| {
-        let sandbox = state.sandboxes.iter_mut().find(|s| s.id == id)
+        let sandbox = state
+            .sandboxes
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         sandbox.access_attempts += 1;
         state.total_checks += 1;
@@ -279,7 +347,9 @@ pub fn check_access(id: u32, permission: Permission) -> KernelResult<AccessDecis
             return Ok(AccessDecision::Allow);
         }
 
-        let decision = sandbox.rules.iter()
+        let decision = sandbox
+            .rules
+            .iter()
             .find(|r| r.permission == permission)
             .map(|r| r.decision)
             .unwrap_or(AccessDecision::Deny);
@@ -295,7 +365,10 @@ pub fn check_access(id: u32, permission: Permission) -> KernelResult<AccessDecis
 /// Enable/disable a sandbox.
 pub fn set_active(id: u32, active: bool) -> KernelResult<()> {
     with_state(|state| {
-        let sandbox = state.sandboxes.iter_mut().find(|s| s.id == id)
+        let sandbox = state
+            .sandboxes
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         sandbox.active = active;
         Ok(())
@@ -305,7 +378,10 @@ pub fn set_active(id: u32, active: bool) -> KernelResult<()> {
 /// Remove a sandbox.
 pub fn remove_sandbox(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.sandboxes.iter().position(|s| s.id == id)
+        let pos = state
+            .sandboxes
+            .iter()
+            .position(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         state.sandboxes.remove(pos);
         Ok(())
@@ -315,20 +391,34 @@ pub fn remove_sandbox(id: u32) -> KernelResult<()> {
 /// Get sandbox by ID.
 pub fn get_sandbox(id: u32) -> KernelResult<Sandbox> {
     with_state(|state| {
-        state.sandboxes.iter().find(|s| s.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .sandboxes
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// List all sandboxes.
 pub fn list_sandboxes() -> Vec<Sandbox> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.sandboxes.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.sandboxes.clone())
 }
 
 /// Statistics: (sandbox_count, total_created, total_checks, total_denied, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.sandboxes.len(), s.total_created, s.total_checks, s.total_denied, s.ops),
+        Some(s) => (
+            s.sandboxes.len(),
+            s.total_created,
+            s.total_checks,
+            s.total_denied,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

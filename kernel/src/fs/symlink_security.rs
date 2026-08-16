@@ -189,7 +189,9 @@ pub fn check_symlink_follow(
     // Deny: potential symlink attack.
     serial_println!(
         "[symlink_security] DENIED symlink follow: {} (owner={}, follower={})",
-        symlink_path, symlink_owner_uid, follower_uid
+        symlink_path,
+        symlink_owner_uid,
+        follower_uid
     );
     Err(KernelError::PermissionDenied)
 }
@@ -236,7 +238,10 @@ pub fn check_hardlink_create(
     // Deny: hardlink to file the user doesn't own or can't read+write.
     serial_println!(
         "[symlink_security] DENIED hardlink: {} (owner={}, linker={}, mode={:o})",
-        target_path, target_owner_uid, linker_uid, target_mode
+        target_path,
+        target_owner_uid,
+        linker_uid,
+        target_mode
     );
     Err(KernelError::PermissionDenied)
 }
@@ -245,11 +250,7 @@ pub fn check_hardlink_create(
 ///
 /// Similar to symlink protection — prevents data injection via FIFOs
 /// in world-writable directories.
-pub fn check_fifo_open(
-    fifo_path: &str,
-    fifo_owner_uid: u32,
-    opener_uid: u32,
-) -> KernelResult<()> {
+pub fn check_fifo_open(fifo_path: &str, fifo_owner_uid: u32, opener_uid: u32) -> KernelResult<()> {
     if !PROTECTED_FIFOS.load(Ordering::Relaxed) {
         return Ok(());
     }
@@ -271,7 +272,9 @@ pub fn check_fifo_open(
 
     serial_println!(
         "[symlink_security] DENIED FIFO open: {} (owner={}, opener={})",
-        fifo_path, fifo_owner_uid, opener_uid
+        fifo_path,
+        fifo_owner_uid,
+        opener_uid
     );
     Err(KernelError::PermissionDenied)
 }

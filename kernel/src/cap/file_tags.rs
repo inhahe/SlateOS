@@ -33,8 +33,8 @@
 //! Safe to acquire `GROUPS` lock *after* `FILE_TAGS` if needed
 //! (but currently we release `FILE_TAGS` before checking membership).
 
-use alloc::vec::Vec;
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::vec::Vec;
 
 use super::groups::{self, CapGroupId};
 use crate::error::{KernelError, KernelResult};
@@ -94,11 +94,7 @@ impl FileTag {
     /// [`effective_tags`] would never find it — every access to the protected
     /// path would be permitted. Comparing bytes has no such failure mode.
     fn path(&self) -> &Path {
-        Path::new(
-            self.path
-                .get(..self.path_len)
-                .unwrap_or(&[]),
-        )
+        Path::new(self.path.get(..self.path_len).unwrap_or(&[]))
     }
 }
 
@@ -153,7 +149,9 @@ pub fn tag_path(path: impl AsRef<Path>, group_id: CapGroupId) -> KernelResult<()
     }
 
     // Create new entry.
-    let slot = tags.iter().position(|e| !e.active)
+    let slot = tags
+        .iter()
+        .position(|e| !e.active)
         .ok_or(KernelError::OutOfMemory)?;
 
     let entry = tags.get_mut(slot).ok_or(KernelError::OutOfMemory)?;
@@ -317,7 +315,11 @@ pub fn list_all() -> Vec<(PathBuf, Vec<CapGroupId>)> {
         if entry.active {
             result.push((
                 entry.path().to_path_buf(),
-                entry.group_ids.get(..entry.tag_count).unwrap_or(&[]).to_vec(),
+                entry
+                    .group_ids
+                    .get(..entry.tag_count)
+                    .unwrap_or(&[])
+                    .to_vec(),
             ));
         }
     }
@@ -569,7 +571,10 @@ fn test_and_composition() -> KernelResult<()> {
     match check_access(500, 200, &[], "/top_secret") {
         Err(KernelError::PermissionDenied) => {}
         other => {
-            serial_println!("[cap/file_tags]   FAIL: other single-member allowed: {:?}", other);
+            serial_println!(
+                "[cap/file_tags]   FAIL: other single-member allowed: {:?}",
+                other
+            );
             clear_tags("/top_secret").ok();
             groups::remove(gid_a).ok();
             groups::remove(gid_b).ok();

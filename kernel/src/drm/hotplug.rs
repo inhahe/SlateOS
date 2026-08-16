@@ -50,8 +50,8 @@ use crate::sync::PreemptSpinMutex as Mutex;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 
-use super::connector::ConnectorStatus;
 use super::DrmObjectId;
+use super::connector::ConnectorStatus;
 
 // ---------------------------------------------------------------------------
 // Hotplug event
@@ -341,9 +341,7 @@ pub fn poll_all_devices() {
                 // Real hardware backends will implement detect() which
                 // reads the HPD pin or DDC presence.
                 let detected = match connector.connector_type {
-                    super::connector::ConnectorType::Virtual => {
-                        ConnectorStatus::Connected
-                    }
+                    super::connector::ConnectorType::Virtual => ConnectorStatus::Connected,
                     _ => {
                         // Future: call backend-specific detect() method.
                         // For now, report unknown for non-virtual.
@@ -423,7 +421,10 @@ pub(crate) fn self_test() -> KernelResult<()> {
     // 4. Process events — should call our notifier.
     let processed = process_pending_events();
     if processed != 1 {
-        serial_println!("[drm-hp]   FAIL: processed {} events (expected 1)", processed);
+        serial_println!(
+            "[drm-hp]   FAIL: processed {} events (expected 1)",
+            processed
+        );
         return Err(KernelError::InternalError);
     }
 

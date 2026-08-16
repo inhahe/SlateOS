@@ -137,7 +137,8 @@ fn calc_load(old: u64, exp: u64, active: u64) -> u64 {
 pub fn sample() {
     // Count runnable tasks (Ready + Running states).
     let sched = crate::sched::sched_stats();
-    let runnable = sched.total_tasks_spawned
+    let runnable = sched
+        .total_tasks_spawned
         .saturating_sub(sched.total_tasks_exited);
 
     // Update the three load averages.
@@ -191,6 +192,7 @@ pub fn sample_count() -> u64 {
 #[must_use]
 pub fn nr_running() -> u64 {
     let sched = crate::sched::sched_stats();
-    sched.total_tasks_spawned
+    sched
+        .total_tasks_spawned
         .saturating_sub(sched.total_tasks_exited)
 }

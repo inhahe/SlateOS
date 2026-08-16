@@ -156,8 +156,8 @@ pub const SCHEME_DEFAULT: ColorScheme = ColorScheme {
 /// Solarized Dark.
 pub const SCHEME_SOLARIZED_DARK: ColorScheme = ColorScheme {
     name: "solarized-dark",
-    fg: 0x0083_9496,  // base0
-    bg: 0x0000_2B36,  // base03
+    fg: 0x0083_9496, // base0
+    bg: 0x0000_2B36, // base03
     palette: [
         0x0007_3642, // 0  base02
         0x00DC_322F, // 1  red
@@ -181,8 +181,8 @@ pub const SCHEME_SOLARIZED_DARK: ColorScheme = ColorScheme {
 /// Monokai (dark, vibrant).
 pub const SCHEME_MONOKAI: ColorScheme = ColorScheme {
     name: "monokai",
-    fg: 0x00F8_F8F2,  // foreground
-    bg: 0x0027_2822,  // background
+    fg: 0x00F8_F8F2, // foreground
+    bg: 0x0027_2822, // background
     palette: [
         0x0027_2822, // 0  background
         0x00F9_2672, // 1  red (pink)
@@ -476,7 +476,9 @@ impl ScrollbackBuffer {
             self.count.checked_sub(1)?.checked_sub(rev_idx)?
         } else {
             let end = (self.start.wrapping_add(self.count)) % SCROLLBACK_MAX;
-            (end.wrapping_add(SCROLLBACK_MAX).wrapping_sub(1).wrapping_sub(rev_idx))
+            (end.wrapping_add(SCROLLBACK_MAX)
+                .wrapping_sub(1)
+                .wrapping_sub(rev_idx))
                 % SCROLLBACK_MAX
         };
         self.lines.get(abs_idx)
@@ -491,8 +493,7 @@ impl ScrollbackBuffer {
         }
         for rev_idx in 0..self.count {
             if let Some(line) = self.get_rev(rev_idx) {
-                let text: alloc::string::String =
-                    line.cells.iter().map(|c| c.ch as char).collect();
+                let text: alloc::string::String = line.cells.iter().map(|c| c.ch as char).collect();
                 let trimmed = text.trim_end();
                 if trimmed.contains(query) {
                     matches.push(rev_idx);
@@ -520,13 +521,11 @@ static SCROLLBACK: Mutex<ScrollbackBuffer> = Mutex::named(
 );
 
 /// Current scroll offset (0 = at bottom/live, >0 = viewing older lines).
-static SCROLL_OFFSET: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+static SCROLL_OFFSET: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Set to true once the kernel heap allocator is ready.
 /// Until this is true, screen_buf and scrollback cannot be allocated.
-static HEAP_AVAILABLE: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static HEAP_AVAILABLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Notify the console that the heap allocator is now available.
 ///
@@ -705,7 +704,11 @@ impl ConsoleInner {
     fn ansi_param(&self, idx: usize, default: u16) -> u16 {
         if idx < self.ansi_param_count {
             let v = self.ansi_params[idx];
-            if v == 0 && !self.ansi_has_digit { default } else { v }
+            if v == 0 && !self.ansi_has_digit {
+                default
+            } else {
+                v
+            }
         } else {
             default
         }
@@ -811,7 +814,10 @@ pub fn scrollback_count() -> usize {
 pub fn scrollback_line(rev_idx: usize) -> Option<alloc::string::String> {
     let sb = SCROLLBACK.lock_irqsave();
     sb.get_rev(rev_idx).map(|line| {
-        line.cells.iter().map(|c| c.ch as char).collect::<alloc::string::String>()
+        line.cells
+            .iter()
+            .map(|c| c.ch as char)
+            .collect::<alloc::string::String>()
     })
 }
 
@@ -823,8 +829,7 @@ pub fn scrollback_search(query: &str) -> Vec<alloc::string::String> {
     let mut results = Vec::with_capacity(indices.len());
     for idx in &indices {
         if let Some(line) = sb.get_rev(*idx) {
-            let text: alloc::string::String =
-                line.cells.iter().map(|c| c.ch as char).collect();
+            let text: alloc::string::String = line.cells.iter().map(|c| c.ch as char).collect();
             results.push(text.trim_end().into());
         }
     }
@@ -841,8 +846,7 @@ pub fn screen_text() -> Vec<alloc::string::String> {
         let start = row.wrapping_mul(cols);
         let end = start.wrapping_add(cols);
         if let Some(slice) = con.screen_buf.get(start..end) {
-            let text: alloc::string::String =
-                slice.iter().map(|c| c.ch as char).collect();
+            let text: alloc::string::String = slice.iter().map(|c| c.ch as char).collect();
             lines.push(text.trim_end().into());
         }
     }
@@ -956,7 +960,9 @@ fn putchar_normal(con: &mut ConsoleInner, c: u8) {
             }
         }
         b'\t' => {
-            let next = (con.cursor_col / TAB_STOP).saturating_add(1).saturating_mul(TAB_STOP);
+            let next = (con.cursor_col / TAB_STOP)
+                .saturating_add(1)
+                .saturating_mul(TAB_STOP);
             if next >= con.cols {
                 con.cursor_col = 0;
                 if con.cursor_row >= con.scroll_bottom
@@ -1008,7 +1014,9 @@ fn render_codepoint(con: &mut ConsoleInner, cp: u32) {
     let bg = effective_bg(con);
 
     // Record the character in the screen text buffer.
-    let buf_idx = (row as usize).wrapping_mul(con.cols as usize).wrapping_add(col as usize);
+    let buf_idx = (row as usize)
+        .wrapping_mul(con.cols as usize)
+        .wrapping_add(col as usize);
     if let Some(cell) = con.screen_buf.get_mut(buf_idx) {
         // Store ASCII byte directly; non-ASCII gets '?' placeholder for search.
         cell.ch = if cp < 0x80 { cp as u8 } else { b'?' };
@@ -1017,15 +1025,33 @@ fn render_codepoint(con: &mut ConsoleInner, cp: u32) {
     }
 
     // Draw the glyph at the current position.
-    draw_glyph_bitmap(fb, pitch, col, row, &glyph, fg, bg,
-                      con.underline, con.strikethrough);
+    draw_glyph_bitmap(
+        fb,
+        pitch,
+        col,
+        row,
+        &glyph,
+        fg,
+        bg,
+        con.underline,
+        con.strikethrough,
+    );
 
     if is_wide && col.saturating_add(1) < con.cols {
         // Wide character occupies 2 cells.  Clear the second cell so no
         // stale character fragments remain.  A more sophisticated approach
         // would stretch the glyph, but clearing is correct for now.
-        draw_glyph_bitmap(fb, pitch, col.saturating_add(1), row,
-                          &[0u8; 16], fg, bg, false, false);
+        draw_glyph_bitmap(
+            fb,
+            pitch,
+            col.saturating_add(1),
+            row,
+            &[0u8; 16],
+            fg,
+            bg,
+            false,
+            false,
+        );
     }
 
     // Advance cursor by 1 or 2 cells.
@@ -1035,9 +1061,7 @@ fn render_codepoint(con: &mut ConsoleInner, cp: u32) {
     // Handle line wrap.
     if con.cursor_col >= con.cols {
         con.cursor_col = 0;
-        if con.cursor_row >= con.scroll_bottom
-            || con.cursor_row >= con.rows.saturating_sub(1)
-        {
+        if con.cursor_row >= con.scroll_bottom || con.cursor_row >= con.rows.saturating_sub(1) {
             scroll_up_locked(con);
         } else {
             con.cursor_row = con.cursor_row.saturating_add(1);
@@ -1140,12 +1164,18 @@ fn putchar_escape(con: &mut ConsoleInner, c: u8) {
 // The CSI handler is a large match statement covering ~30 VT100 commands.
 // Splitting it further would hurt readability since each arm is 3-5 lines.
 // Cursor/scroll arithmetic is small and checked/clamped.
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation, clippy::too_many_lines)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::too_many_lines
+)]
 fn putchar_csi(con: &mut ConsoleInner, c: u8) {
     match c {
         b'0'..=b'9' => {
             // Accumulate digit into current parameter.
-            con.ansi_cur_param = con.ansi_cur_param.saturating_mul(10)
+            con.ansi_cur_param = con
+                .ansi_cur_param
+                .saturating_mul(10)
                 .saturating_add((c - b'0') as u16);
             con.ansi_has_digit = true;
         }
@@ -1280,7 +1310,9 @@ fn putchar_csi(con: &mut ConsoleInner, c: u8) {
             let bg = effective_bg(con);
             for i in 0..n {
                 let col = con.cursor_col + i;
-                if col >= con.cols { break; }
+                if col >= con.cols {
+                    break;
+                }
                 erase_cell(fb, pitch, col, con.cursor_row, bg);
             }
             con.ansi_reset();
@@ -1346,11 +1378,7 @@ fn putchar_csi(con: &mut ConsoleInner, c: u8) {
                 // CPR (Cursor Position Report) — respond with ESC [ row ; col R.
                 // In a real terminal this would be sent back via the input
                 // stream.  For now, log it to serial for debugging.
-                crate::serial_println!(
-                    "\x1b[{};{}R",
-                    con.cursor_row + 1,
-                    con.cursor_col + 1
-                );
+                crate::serial_println!("\x1b[{};{}R", con.cursor_row + 1, con.cursor_col + 1);
             }
             con.ansi_reset();
         }
@@ -1555,9 +1583,7 @@ fn color_256(con: &ConsoleInner, n: usize) -> u32 {
             let g_val = ((idx / 6) % 6) as u32;
             let r_val = (idx / 36) as u32;
             // Scale 0-5 to 0-255: 0→0, 1→95, 2→135, 3→175, 4→215, 5→255
-            let scale = |v: u32| -> u32 {
-                if v == 0 { 0 } else { 55 + v * 40 }
-            };
+            let scale = |v: u32| -> u32 { if v == 0 { 0 } else { 55 + v * 40 } };
             (scale(r_val) << 16) | (scale(g_val) << 8) | scale(b_val)
         }
         232..=255 => {
@@ -1662,7 +1688,9 @@ fn handle_erase_line(con: &mut ConsoleInner, mode: u16) {
 // Row/pixel arithmetic is small and clamped.
 #[allow(clippy::arithmetic_side_effects)]
 fn scroll_region_up(con: &mut ConsoleInner, n: u32) {
-    if !con.initialized { return; }
+    if !con.initialized {
+        return;
+    }
     let region_height = con.scroll_bottom - con.scroll_top + 1;
     let n = n.min(region_height);
     let fb = con.fb_addr;
@@ -1673,7 +1701,9 @@ fn scroll_region_up(con: &mut ConsoleInner, n: u32) {
     // Copy rows: move row (top + n) to row (top), etc.
     for dst_row in con.scroll_top..=(con.scroll_bottom.saturating_sub(n)) {
         let src_row = dst_row + n;
-        if src_row > con.scroll_bottom { break; }
+        if src_row > con.scroll_bottom {
+            break;
+        }
         copy_row(fb, pitch, cols, src_row, dst_row);
     }
 
@@ -1692,7 +1722,9 @@ fn scroll_region_up(con: &mut ConsoleInner, n: u32) {
 // Row/pixel arithmetic is small and clamped.
 #[allow(clippy::arithmetic_side_effects)]
 fn scroll_region_down(con: &mut ConsoleInner, n: u32) {
-    if !con.initialized { return; }
+    if !con.initialized {
+        return;
+    }
     let region_height = con.scroll_bottom - con.scroll_top + 1;
     let n = n.min(region_height);
     let fb = con.fb_addr;
@@ -1705,7 +1737,9 @@ fn scroll_region_down(con: &mut ConsoleInner, n: u32) {
     while dst_row >= con.scroll_top + n {
         let src_row = dst_row - n;
         copy_row(fb, pitch, cols, src_row, dst_row);
-        if dst_row == 0 { break; }
+        if dst_row == 0 {
+            break;
+        }
         dst_row -= 1;
     }
 
@@ -1749,9 +1783,13 @@ fn copy_row(fb: u64, pitch: u32, cols: u32, src_row: u32, dst_row: u32) {
 // Row arithmetic is small and clamped.
 #[allow(clippy::arithmetic_side_effects)]
 fn handle_insert_lines(con: &mut ConsoleInner, n: u32) {
-    if !con.initialized { return; }
+    if !con.initialized {
+        return;
+    }
     let cur = con.cursor_row;
-    if cur < con.scroll_top || cur > con.scroll_bottom { return; }
+    if cur < con.scroll_top || cur > con.scroll_bottom {
+        return;
+    }
 
     let n = n.min(con.scroll_bottom - cur + 1);
     let fb = con.fb_addr;
@@ -1764,7 +1802,9 @@ fn handle_insert_lines(con: &mut ConsoleInner, n: u32) {
     while dst >= cur + n {
         let src = dst - n;
         copy_row(fb, pitch, cols, src, dst);
-        if dst == 0 { break; }
+        if dst == 0 {
+            break;
+        }
         dst -= 1;
     }
 
@@ -1783,9 +1823,13 @@ fn handle_insert_lines(con: &mut ConsoleInner, n: u32) {
 // Row arithmetic is small and clamped.
 #[allow(clippy::arithmetic_side_effects)]
 fn handle_delete_lines(con: &mut ConsoleInner, n: u32) {
-    if !con.initialized { return; }
+    if !con.initialized {
+        return;
+    }
     let cur = con.cursor_row;
-    if cur < con.scroll_top || cur > con.scroll_bottom { return; }
+    if cur < con.scroll_top || cur > con.scroll_bottom {
+        return;
+    }
 
     let n = n.min(con.scroll_bottom - cur + 1);
     let fb = con.fb_addr;
@@ -1796,7 +1840,9 @@ fn handle_delete_lines(con: &mut ConsoleInner, n: u32) {
     // Shift rows up.
     for dst in cur..=(con.scroll_bottom.saturating_sub(n)) {
         let src = dst + n;
-        if src > con.scroll_bottom { break; }
+        if src > con.scroll_bottom {
+            break;
+        }
         copy_row(fb, pitch, cols, src, dst);
     }
 
@@ -1820,7 +1866,9 @@ fn handle_delete_lines(con: &mut ConsoleInner, n: u32) {
 // Column/pixel arithmetic is small and bounded.
 #[allow(clippy::arithmetic_side_effects)]
 fn handle_insert_chars(con: &mut ConsoleInner, n: u32) {
-    if !con.initialized { return; }
+    if !con.initialized {
+        return;
+    }
     let fb = con.fb_addr;
     let pitch = con.fb_pitch;
     let row = con.cursor_row;
@@ -1832,7 +1880,9 @@ fn handle_insert_chars(con: &mut ConsoleInner, n: u32) {
     while dst_col >= con.cursor_col + n {
         let src_col = dst_col - n;
         copy_cell(fb, pitch, src_col, row, dst_col, row);
-        if dst_col == 0 { break; }
+        if dst_col == 0 {
+            break;
+        }
         dst_col -= 1;
     }
 
@@ -1849,7 +1899,9 @@ fn handle_insert_chars(con: &mut ConsoleInner, n: u32) {
 // Column/pixel arithmetic is small and bounded.
 #[allow(clippy::arithmetic_side_effects)]
 fn handle_delete_chars(con: &mut ConsoleInner, n: u32) {
-    if !con.initialized { return; }
+    if !con.initialized {
+        return;
+    }
     let fb = con.fb_addr;
     let pitch = con.fb_pitch;
     let row = con.cursor_row;
@@ -1859,7 +1911,9 @@ fn handle_delete_chars(con: &mut ConsoleInner, n: u32) {
     // Shift characters left.
     for dst_col in con.cursor_col..(con.cols.saturating_sub(n)) {
         let src_col = dst_col + n;
-        if src_col >= con.cols { break; }
+        if src_col >= con.cols {
+            break;
+        }
         copy_cell(fb, pitch, src_col, row, dst_col, row);
     }
 
@@ -1969,7 +2023,11 @@ fn effective_fg(con: &ConsoleInner) -> u32 {
     if con.invisible {
         return effective_bg(con);
     }
-    let fg = if con.reverse { con.bg_color } else { con.fg_color };
+    let fg = if con.reverse {
+        con.bg_color
+    } else {
+        con.fg_color
+    };
     if con.dim {
         // Dim: halve the RGB channels.
         let r = (fg >> 16) & 0xFF;
@@ -1983,7 +2041,11 @@ fn effective_fg(con: &ConsoleInner) -> u32 {
 
 /// Compute the effective background color, accounting for reverse.
 fn effective_bg(con: &ConsoleInner) -> u32 {
-    if con.reverse { con.fg_color } else { con.bg_color }
+    if con.reverse {
+        con.fg_color
+    } else {
+        con.bg_color
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2114,8 +2176,8 @@ pub fn boot_step(status: BootStatus, description: &str) {
     // Draw status indicator with color.
     let (indicator, color) = match status {
         BootStatus::Running => (b'*', COLOR_YELLOW),
-        BootStatus::Ok      => (b'+', COLOR_GREEN),
-        BootStatus::Warn    => (b'!', COLOR_RED),
+        BootStatus::Ok => (b'+', COLOR_GREEN),
+        BootStatus::Warn => (b'!', COLOR_RED),
     };
 
     // "  [" prefix
@@ -2218,8 +2280,15 @@ fn draw_glyph_colored(fb: u64, pitch: u32, col: u32, row: u32, ch: u8, fg: u32) 
 /// optional underline (horizontal line on row 14 of 16), and optional
 /// strikethrough (horizontal line on row 8 of 16).
 fn draw_glyph_full(
-    fb: u64, pitch: u32, col: u32, row: u32, ch: u8,
-    fg: u32, bg: u32, underline: bool, strikethrough: bool,
+    fb: u64,
+    pitch: u32,
+    col: u32,
+    row: u32,
+    ch: u8,
+    fg: u32,
+    bg: u32,
+    underline: bool,
+    strikethrough: bool,
 ) {
     let glyph = font::glyph(ch);
     let px_x = col.wrapping_mul(GLYPH_WIDTH);
@@ -2259,8 +2328,15 @@ fn draw_glyph_full(
 /// instead of looking up a character code in the font table.  Used for
 /// Unicode codepoints outside the ASCII range.
 fn draw_glyph_bitmap(
-    fb: u64, pitch: u32, col: u32, row: u32, bitmap: &[u8; 16],
-    fg: u32, bg: u32, underline: bool, strikethrough: bool,
+    fb: u64,
+    pitch: u32,
+    col: u32,
+    row: u32,
+    bitmap: &[u8; 16],
+    fg: u32,
+    bg: u32,
+    underline: bool,
+    strikethrough: bool,
 ) {
     let px_x = col.wrapping_mul(GLYPH_WIDTH);
     let px_y = row.wrapping_mul(GLYPH_HEIGHT);
@@ -2324,7 +2400,12 @@ fn scroll_up_locked(con: &mut ConsoleInner) {
         }
         // Clear the last row of the text buffer.
         let last_row_start = total.saturating_sub(cols);
-        for cell in con.screen_buf.get_mut(last_row_start..total).into_iter().flatten() {
+        for cell in con
+            .screen_buf
+            .get_mut(last_row_start..total)
+            .into_iter()
+            .flatten()
+        {
             *cell = ScrollCell::EMPTY;
         }
     }
@@ -2497,16 +2578,15 @@ pub fn restore_state(snap: &ConsoleSnapshot) {
     let rows = con.rows;
     for row in 0..rows {
         for col in 0..cols {
-            let idx = (row as usize).wrapping_mul(cols as usize).wrapping_add(col as usize);
+            let idx = (row as usize)
+                .wrapping_mul(cols as usize)
+                .wrapping_add(col as usize);
             if let Some(cell) = con.screen_buf.get(idx) {
                 if cell.ch == b' ' && cell.fg == DEFAULT_FG && cell.bg == DEFAULT_BG {
                     // Empty cell — erase is faster than drawing a space glyph.
                     erase_cell(fb, pitch, col, row, cell.bg);
                 } else {
-                    draw_glyph_full(
-                        fb, pitch, col, row, cell.ch,
-                        cell.fg, cell.bg, false, false,
-                    );
+                    draw_glyph_full(fb, pitch, col, row, cell.ch, cell.fg, cell.bg, false, false);
                 }
             }
         }
@@ -2586,15 +2666,15 @@ pub fn self_test() {
     // Test 3: Relative cursor movement.
     {
         write_str_no_serial("\x1b[1;1H"); // Home
-        write_str_no_serial("\x1b[3B");    // Down 3
-        write_str_no_serial("\x1b[5C");    // Right 5
+        write_str_no_serial("\x1b[3B"); // Down 3
+        write_str_no_serial("\x1b[5C"); // Right 5
         let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 3, "CUD");
         assert_eq!(con.cursor_col, 5, "CUF");
         drop(con);
 
-        write_str_no_serial("\x1b[2A");    // Up 2
-        write_str_no_serial("\x1b[1D");    // Left 1
+        write_str_no_serial("\x1b[2A"); // Up 2
+        write_str_no_serial("\x1b[1D"); // Left 1
         let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 1, "CUU");
         assert_eq!(con.cursor_col, 4, "CUB");
@@ -2604,12 +2684,12 @@ pub fn self_test() {
     // Test 4: CHA and VPA.
     {
         write_str_no_serial("\x1b[1;1H"); // Home
-        write_str_no_serial("\x1b[15G");   // Column 15
+        write_str_no_serial("\x1b[15G"); // Column 15
         let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_col, 14, "CHA");
         drop(con);
 
-        write_str_no_serial("\x1b[8d");    // Row 8
+        write_str_no_serial("\x1b[8d"); // Row 8
         let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 7, "VPA");
         crate::serial_println!("[console]   CHA/VPA absolute positioning: OK");
@@ -2618,13 +2698,13 @@ pub fn self_test() {
     // Test 5: CNL and CPL.
     {
         write_str_no_serial("\x1b[5;10H"); // Row 5, col 10
-        write_str_no_serial("\x1b[2E");     // Next line ×2
+        write_str_no_serial("\x1b[2E"); // Next line ×2
         let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 6, "CNL row");
         assert_eq!(con.cursor_col, 0, "CNL col");
         drop(con);
 
-        write_str_no_serial("\x1b[1F");     // Previous line ×1
+        write_str_no_serial("\x1b[1F"); // Previous line ×1
         let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 5, "CPL row");
         assert_eq!(con.cursor_col, 0, "CPL col");
@@ -2662,7 +2742,11 @@ pub fn self_test() {
 
         write_str_no_serial("\x1b[94m"); // Bright blue
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(con.fg_color, ansi_color(&con, 12), "fg should be bright blue");
+        assert_eq!(
+            con.fg_color,
+            ansi_color(&con, 12),
+            "fg should be bright blue"
+        );
         drop(con);
 
         write_str_no_serial("\x1b[39m"); // Default fg
@@ -2705,19 +2789,23 @@ pub fn self_test() {
         write_str_no_serial("\x1b[r");
         let con = CONSOLE.lock_irqsave();
         assert_eq!(con.scroll_top, 0, "scroll_top reset");
-        assert_eq!(con.scroll_bottom, rows.saturating_sub(1), "scroll_bottom reset");
+        assert_eq!(
+            con.scroll_bottom,
+            rows.saturating_sub(1),
+            "scroll_bottom reset"
+        );
         crate::serial_println!("[console]   Scroll region (DECSTBM): OK");
     }
 
     // Test 10: Cursor save/restore (ESC 7 / ESC 8).
     {
         write_str_no_serial("\x1b[0m\x1b[10;20H"); // Position at (10,20)
-        write_str_no_serial("\x1b[32m");             // Green foreground
-        write_str_no_serial("\x1b7");                 // Save cursor (DECSC)
+        write_str_no_serial("\x1b[32m"); // Green foreground
+        write_str_no_serial("\x1b7"); // Save cursor (DECSC)
 
-        write_str_no_serial("\x1b[1;1H\x1b[31m");   // Move and change color
+        write_str_no_serial("\x1b[1;1H\x1b[31m"); // Move and change color
 
-        write_str_no_serial("\x1b8");                 // Restore cursor (DECRC)
+        write_str_no_serial("\x1b8"); // Restore cursor (DECRC)
         let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 9, "DECRC row");
         assert_eq!(con.cursor_col, 19, "DECRC col");
@@ -2727,10 +2815,10 @@ pub fn self_test() {
 
     // Test 11: SCP/RCP (ESC[s / ESC[u).
     {
-        write_str_no_serial("\x1b[0m\x1b[3;7H");    // Position at (3,7)
-        write_str_no_serial("\x1b[s");                // Save cursor (SCP)
-        write_str_no_serial("\x1b[15;30H");           // Move elsewhere
-        write_str_no_serial("\x1b[u");                // Restore (RCP)
+        write_str_no_serial("\x1b[0m\x1b[3;7H"); // Position at (3,7)
+        write_str_no_serial("\x1b[s"); // Save cursor (SCP)
+        write_str_no_serial("\x1b[15;30H"); // Move elsewhere
+        write_str_no_serial("\x1b[u"); // Restore (RCP)
         let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 2, "RCP row");
         assert_eq!(con.cursor_col, 6, "RCP col");
@@ -2751,7 +2839,7 @@ pub fn self_test() {
     // Test 13: Full reset (ESC c).
     {
         write_str_no_serial("\x1b[1;4;7;31m"); // Bold+underline+reverse+red
-        write_str_no_serial("\x1bc");            // RIS
+        write_str_no_serial("\x1bc"); // RIS
         let con = CONSOLE.lock_irqsave();
         assert!(!con.bold, "RIS bold");
         assert!(!con.underline, "RIS underline");

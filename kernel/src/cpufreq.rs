@@ -42,8 +42,8 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // MSR addresses
@@ -222,7 +222,11 @@ fn init_hwp() {
 
     serial_println!(
         "[cpufreq] HWP enabled: lowest={} efficient={} guaranteed={} highest={} (base ~{}MHz)",
-        perf_lowest, perf_efficient, perf_guaranteed, perf_highest, mhz
+        perf_lowest,
+        perf_efficient,
+        perf_guaranteed,
+        perf_highest,
+        mhz
     );
 }
 
@@ -248,7 +252,9 @@ fn init_eist() {
 
     serial_println!(
         "[cpufreq] EIST: current ratio={} (~{}MHz), min ratio={}",
-        current_ratio, estimated_mhz, min_ratio
+        current_ratio,
+        estimated_mhz,
+        min_ratio
     );
 }
 
@@ -303,7 +309,8 @@ pub fn ondemand_tick() {
     let Some(stats) = crate::cputime::cpu_stats(0) else {
         return;
     };
-    let total = stats.system_ns
+    let total = stats
+        .system_ns
         .saturating_add(stats.irq_ns)
         .saturating_add(stats.softirq_ns)
         .saturating_add(stats.idle_ns);
@@ -359,16 +366,18 @@ fn apply_perf_level(level: u8) {
         let max = PERF_MAX.load(Ordering::Relaxed);
         // Bits [7:0] = min, [15:8] = max, [23:16] = desired (0 = let HW decide).
         // Setting desired = level gives the CPU a hint about our preference.
-        let request = u64::from(min)
-            | (u64::from(max) << 8)
-            | (u64::from(level) << 16);
+        let request = u64::from(min) | (u64::from(max) << 8) | (u64::from(level) << 16);
         // SAFETY: HWP is enabled and the MSR is valid.
-        unsafe { wrmsr(MSR_HWP_REQUEST, request); }
+        unsafe {
+            wrmsr(MSR_HWP_REQUEST, request);
+        }
     } else if EIST_AVAILABLE.load(Ordering::Relaxed) {
         // EIST: write target ratio to IA32_PERF_CTL[15:8].
         let ctl = u64::from(level) << 8;
         // SAFETY: EIST is available and the MSR is writable.
-        unsafe { wrmsr(MSR_PERF_CTL, ctl); }
+        unsafe {
+            wrmsr(MSR_PERF_CTL, ctl);
+        }
     }
 }
 

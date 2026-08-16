@@ -240,6 +240,38 @@ every boot instead of having to be rediscovered. Closing it for the other 20 is
 open work — each needs a judgement about whether it is a real benchmark or a
 diagnostic sub-measurement that should stay print-only.
 
+**Candidate inventory for that remaining work** (static scan of `bench.rs`:
+`run()`/`run_with_cache_info()` call sites per function, minus
+`track()`/`record()`/`score()` call sites). Static name-matching is *not* the
+authority here — it over-counts, because several benchmarks are recorded under a
+different name than the function that measures them, and it cannot tell a
+benchmark from a diagnostic. The runtime coverage line is the instrument; this
+list is only a starting set to walk:
+
+| Function | line | `run()` | recorded | gap |
+|---|---|---|---|---|
+| `bench_syscall_dispatch_breakdown` | 3275 | 6 | 0 | 6 |
+| `bench_lock_primitives` | 4626 | 6 | 1 | 5 |
+| `bench_pick_next_scaling` | 3149 | 2 | 1 | 1 |
+| `bench_ipc_futex` | 3926 | 2 | 1 | 1 |
+| `bench_vfs_stat_breakdown` | 4731 | 6 | 5 | 1 |
+| `bench_net_veth_recv` | 5454 | 2 | 1 | 1 |
+
+That totals 15. The scan also reports gaps in `run_all`, `timed`, `run`,
+`print_scorecard` and `self_test`; those are **false positives** — dispatch and
+infrastructure, not measurements — and are the clearest evidence that the static
+count cannot be trusted on its own.
+
+The two clusters at the top are the ones that actually need a decision, and they
+are likely to decide *differently*. A `…_breakdown` function exists to attribute
+cost across the stages of one operation, so its six sub-measurements are
+diagnostics whose sum is already covered by the parent benchmark — recording each
+stage separately would add six regression checks on quantities that are only
+meaningful relative to each other. `bench_lock_primitives`, by contrast, measures
+six genuinely independent primitives and records one; the other five look like
+real benchmarks that were simply never wired up, and a lock primitive regressing
+silently is exactly what this instrument exists to catch.
+
 ## Byte-indexed display truncation panics on non-ASCII text (lane C)
 
 **Status: FIXED 2026-08-15** (lane C, commits `f508f76cf`, `f53562a09`,

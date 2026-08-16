@@ -54119,3 +54119,24 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## Symptom to recognise: a background task whose .output file is exactly 0 bytes
 ## long after the command should have printed something. Check for a `head`/`tail`
 ## in the command before assuming the build is merely slow.
+##
+## (c) ADDED 2026-08-16, after walking into (b) again in the same session: the
+##     invisibility is the SECOND-worst part. `boot-test.sh --bench | tail -120`
+##     also throws the verdict away -- a pipeline's exit status is the LAST
+##     command's, so `tail` exits 0 and a boot test that failed reports success.
+##     `pipefail` is not set in these one-off Bash-tool invocations, and would not
+##     help anyway if the reason for piping was to trim output.
+##
+##     This one is materially worse than (b) because it does not merely hide
+##     progress, it inverts the result, and it does so silently on the exact runs
+##     that matter -- the failing ones. It is the same shape as every bug this
+##     project keeps rediscovering: a check that cannot fire is indistinguishable
+##     from a check that passes.
+##
+##     Caught this time only because the 0-byte output file from (b) prompted a
+##     restart. Had the run been merely slow rather than silent, a red boot would
+##     have been merged as green.
+##
+##     DO INSTEAD, for anything whose exit code is the point:
+##         ./scripts/boot-test.sh --bench; echo "=== EXIT=$? ==="
+##     unpiped, backgrounded via run_in_background, and read the .output file.

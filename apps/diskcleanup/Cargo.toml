@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Disk Cleanup — find and remove temporary files, caches, and other reclaimable space"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

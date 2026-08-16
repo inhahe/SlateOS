@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Screenshot — screen capture utility with region selection"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

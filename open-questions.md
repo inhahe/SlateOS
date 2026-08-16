@@ -368,6 +368,69 @@ rule table); the gate sites are `posix/src/time.rs` (`clock_settime`,
 (`check_mlock_caps`), `posix/src/epoll.rs` (`timerfd_create`). Tracked in
 `known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`, step 3.
 
+## C-Q2 — [C] When the text on a line runs both ways, should the Right arrow key move the caret one character *later in the sentence*, or one step *to the right on the screen*? — Status: OPEN
+
+**In short:** Hebrew and Arabic are written right to left, and a line can mix
+them with English — "I said שלום to him". On such a line the order the
+characters are *stored and read* is not the order they are *drawn*, so the Right
+arrow key has two different meanings and they disagree. Today it means "the next
+character in reading order", which makes the blinking caret sometimes jump
+sideways across a word instead of stepping. The alternative is "one step to the
+right on screen", which always steps, but means the caret sometimes moves
+*backwards* through the sentence. Every operating system picks one; they do not
+all pick the same one, and neither answer is wrong.
+
+**A worked example.** The line is `I said <SHALOM> to him`, where `<SHALOM>` is
+one Hebrew word of five letters. Drawn, the Hebrew word's letters run right to
+left inside it, while the sentence around them runs left to right. Put the caret
+just before the Hebrew word and press Right five times:
+
+| | What the caret does | Where it ends up |
+|---|---|---|
+| **Logical** (today) | Steps through the Hebrew letters in the order they are read, so it jumps from the word's right-hand end leftwards, then jumps back | after the last Hebrew letter, at the word's **left** edge |
+| **Visual** | Moves right one letter-width each press, never jumping | at the word's **right** edge, having passed through the whole word |
+
+Both end "after the whole word" in some sense; they just disagree about which
+end of the word that is, and about what happens in between.
+
+**The options.**
+
+| | *What changes:* |
+|---|---|
+| **A. Keep logical** (macOS, GTK, Qt, most of Linux) | Nothing changes. On a mixed line the caret sometimes jumps a word's width sideways between two presses of the same key. |
+| **B. Switch to visual** (Windows edit controls, and what ICU's `ubidi` API is built to support) | The caret always moves one step in the direction of the arrow, and never jumps. Holding Right walks the caret smoothly across the line, but the *text position* it is at can go backwards, so typing after several presses inserts earlier in the sentence than the previous press did. |
+| **C. Both, on a setting** | A preference the user sets, defaulting to one of the above. Costs a setting nobody knows how to answer, and doubles the number of behaviours every future text widget has to be correct in. |
+
+**What is already built either way.** The hard part is done: the shaping engine
+already knows, for every character, where it is drawn and which direction it
+runs, and the caret already carries the extra bit ("which side of a direction
+boundary am I on") that either answer needs. Both options are a small amount of
+code on top of that. This is a question about which behaviour is right, not
+about which is affordable.
+
+**My recommendation: B, visual.** The reason is what the key is called. Users
+press "right arrow" while looking at the screen, and an arrow key that sometimes
+moves the caret left is surprising in a way that no amount of correctness
+argument fixes. The logical convention's advantage — that the caret's text
+position advances monotonically — is invisible; the visual convention's
+advantage is the thing the user is looking at. Home/End and word-motion would
+stay logical under either answer, since those name positions in the sentence
+rather than directions on the screen.
+
+**If this is never answered:** nothing breaks and nothing gets worse. Option A
+is the current behaviour and it is self-consistent; the cost is a small,
+permanent oddity on mixed-direction lines, which is rare in English text and
+constant in Hebrew or Arabic text. It gets harder to change later only in the
+sense that more text widgets will have been written against whichever answer is
+in force.
+
+**Where it bites:** `gui/font/src/shape.rs` (`ShapedRun::x_of`, `offset_at`,
+and the per-glyph bidi levels a visual walk would use), `gui/toolkit/src/text.rs`
+(`TextCursor`), and the arrow-key handling in `guitk::widget::TextInput`,
+`guitk::modal::InputDialog` and `apps/editor`. Tracked in `known-issues.md` →
+`TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`.
+
+
 ---
 
 # Resolved

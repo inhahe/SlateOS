@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Sound Mixer — per-app volume control"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

@@ -1715,10 +1715,16 @@ pub const SYS_PROCESS_SET_EXEC_FDS: u64 = 1061;
 ///   - `== 0`: any child in the caller's process group.
 ///   - `< -1`: any child in process group `-arg0`.
 ///
-/// `arg1`: options — `WNOHANG` (1), `WUNTRACED` (2), `WCONTINUED` (8).
-/// Any other bit is `InvalidArgument`.
+/// `arg1`: options — `WNOHANG` (1), `WUNTRACED` (2), `WCONTINUED` (8),
+/// plus the two native-only bits described below. Any other bit is
+/// `InvalidArgument`: an unknown bit means a caller compiled against a newer
+/// kernel, and silently ignoring it would hand it the old semantics under a
+/// name that promises different ones.
 ///
 /// `arg2`: user `*mut i32` receiving the `wstatus` word (0 = don't write).
+///
+/// `arg3`/`arg4`: optional `*mut WaitInfo` and its size in bytes (0 = don't
+/// want it).
 ///
 /// Returns the PID whose state changed, `0` when `WNOHANG` was given and
 /// nothing was ready, or a negative error (`NoChildProcess` = ECHILD).
@@ -1740,8 +1746,42 @@ pub const SYS_PROCESS_SET_EXEC_FDS: u64 = 1061;
 ///
 /// `SYS_PROCESS_WAIT`/`SYS_PROCESS_TRY_WAIT` remain for callers that only
 /// need the exit code; all three resolve the pid selector through the same
-/// `wait_pgid_filter`, so they cannot disagree about which children a
-/// non-positive selector names.
+/// [`crate::syscall::wait::WaitTarget::from_posix_selector`], so they cannot
+/// disagree about which children a non-positive selector names — nor can they
+/// disagree with the Linux ABI's `wait4`/`waitid`, which resolve through it
+/// too.
+///
+/// ## Option bits beyond POSIX
+///
+/// Two bits exist here that `wait4` does not have, placed where Linux leaves
+/// this word free rather than reusing a Linux value for a different meaning
+/// (two ABIs disagreeing about one integer is the most expensive kind of
+/// divergence to debug):
+///
+/// * `WPGID` (`0x0001_0000`) — read `arg0` as a bare, unsigned process-group
+///   id. `waitpid`'s signed selector spells "group g" as `-g`, which cannot
+///   spell group **1** because `-1` already means "any child" — and group 1
+///   is the session leader's group, exactly the one an init or a shell most
+///   wants to wait on. Linux solves the same problem by adding a type field
+///   (`waitid(P_PGID)`), not by overloading the integer.
+/// * `WNOWAIT` (`0x0100_0000`) — report the state change without consuming
+///   it, so a later wait sees it again (Linux `waitid`'s `WNOWAIT`).
+///
+/// ## The `WaitInfo` out-parameter (`arg3`/`arg4`)
+///
+/// Optional; carries the child's real UID and its CPU-time, fault and
+/// context-switch counters — which is to say the facts that **do not survive
+/// the reap**. Once the PCB is destroyed there is nobody left to ask, so a
+/// wait that does not produce them cannot be followed by a query that does.
+///
+/// It follows the extensible-struct convention (Linux `clone3`,
+/// `sched_setattr`): the caller passes its buffer size in `arg4`, the kernel
+/// writes `min(caller, kernel)` bytes and zero-fills any tail it does not
+/// know about. An older caller on a newer kernel gets the prefix it
+/// understands and never a write past its buffer; a newer caller on this
+/// kernel gets zeros for fields this kernel cannot fill, which is the right
+/// answer for a counter. That is what lets the structure grow later without
+/// a second syscall number. See `handlers::WAIT_INFO_SIZE` for the layout.
 pub const SYS_PROCESS_WAIT_STATUS: u64 = 1063;
 
 /// Retrieve initial argv/envp for the current process.

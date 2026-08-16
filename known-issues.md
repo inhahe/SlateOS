@@ -252,6 +252,11 @@ acted on; it wants a `requests/c-b-…` once there is a concrete proposal.
 
 ## Almost no `apps/` crate opts into the workspace lints (lane C)
 
+**Status: PARTIALLY FIXED 2026-08-16** (lane C) — the opt-in has landed
+tree-wide; the warning backlog it exposed is what remains open. See
+"What the measurement actually found" at the end of this entry; the original
+report follows first.
+
 **Status: OPEN 2026-08-15** (lane C). Noticed while checking whether
 `clippy::arithmetic_side_effects` applied to a fix in `apps/kanban`. It does
 not — because `apps/kanban/Cargo.toml` has no `[lints] workspace = true`.
@@ -272,6 +277,137 @@ crate by crate, fixing each crate's fallout as it goes, rather than as one
 tree-wide commit that has to be reverted the moment anything is red. Worth
 doing: a lint that is configured but not applied is worse than no lint, because
 the workspace config reads as though the guarantee is in force.
+
+### What the measurement actually found (2026-08-16)
+
+The paragraph above guessed that `clippy::all = deny` would break crates, and
+prescribed a crate-by-crate rollout on that basis. **The guess was wrong, and
+it was wrong in the direction that mattered.** Rather than assume, the opt-in
+was added to all 124 crates at once *as a measurement* and the whole tree run:
+
+```
+CARGO_TARGET_DIR=target-hl cargo clippy --keep-going --message-format=short \
+    -p <all 141 apps packages> --target x86_64-pc-windows-gnu
+```
+
+Result: **5174 findings, 0 errors, in 120 of the 141 packages.** Nothing goes
+red. Two independent reasons:
+
+- Almost every finding is one of the four `warn`-level correctness lints
+  `CLAUDE.md` asks for, not a `clippy::all` lint. The explicit
+  `arithmetic_side_effects = "warn"` / `indexing_slicing = "warn"` in the
+  workspace config *overrides* the group's `deny`, so those never error.
+- `grep -rn 'D warnings|deny(warnings)|Dwarnings' scripts/ .cargo/ Cargo.toml`
+  is empty. No build, script, or CI path in this tree turns warnings into
+  errors, so a warning backlog cannot break anyone.
+
+So the opt-in landed as **one tree-wide commit** after all. The crate-by-crate
+advice was mitigating a risk that does not exist, at the cost of 124 commits
+and of leaving the lints unenforced for however long that took.
+
+What remains open is the backlog itself:
+
+| Finding | Count |
+|---|---:|
+| `arithmetic_side_effects` ("arithmetic … unexpected side-effects") | 3161 |
+| `indexing_slicing` — "indexing may panic" | 1796 |
+| `indexing_slicing` — "slicing may panic" | 123 |
+| `expect_used` on an `Option` | 8 |
+| assorted `pedantic`/style (Debug formatting, manual `String::new`, …) | 86 |
+
+Worst crates: `editor` 500, `markdowneditor` 348, `explorer` 264, `paint` 234,
+`backup` 198, `imageviewer` 193, `indexer` 149, `connect4` 123, `rssreader`
+117, `spreadsheet` 106. Twenty-one packages are already clean, and
+`contacts`, `simon`, `diskcleanup`, `pomodoro` and `radio` have exactly one
+finding each.
+
+The 1919 `indexing_slicing` findings are the ones worth attacking first: that
+is precisely the lint class that would have caught the eighteen byte/character
+sites recorded above at the moment they were written. `arithmetic_side_effects`
+is the larger pile but the lower yield — most of its 3161 hits are loop
+counters and layout arithmetic on values that cannot overflow, and rewriting
+those to `checked_*` buys correctness theatre rather than correctness. Take
+`indexing_slicing` to zero first; then judge `arithmetic_side_effects` on
+whether a per-crate `allow` with a justification beats 3161 mechanical edits.
+
+### Sweep progress: `editor` 500 → 80, `indexing_slicing` 0 (2026-08-16)
+
+The worst crate is done. `apps/editor` went from ~200 `indexing_slicing`
+findings to **0** (total warnings 500 → 80, all of them
+`arithmetic_side_effects`); tests 108 → 119, all passing. Commits `a0dcac89a`
+(`highlight.rs`) and `64998fde2` (`main.rs`, `syntree.rs`).
+
+**The sweep was not cosmetic — it found four reachable bugs**, listed
+separately below. That is the answer to "is this lint class worth the effort":
+one crate's worth of it turned up four defects that no existing test caught,
+in code that had been reviewed and shipped. The remaining worst crates are
+`markdowneditor` 348, `explorer` 264, `paint` 234, `backup` 198,
+`imageviewer` 193, `indexer` 149.
+
+Three patterns did most of the work and should be reused:
+
+- **`i < len && bytes[i]` states the bound twice**, and the two drift. Replace
+  with an `Option`-returning accessor (`at`, `starts_with_at`,
+  `scan_to_delimiter`) so the bound is stated once, in one place.
+- **A `Vec` plus an index is an invariant expressed as a convention.**
+  `documents: Vec<Document>` + `active_tab: usize` became a `Tabs` type whose
+  first document is a plain field, so "there is always a document open" is
+  what the type says rather than what five call sites assumed.
+- **A stale index handed back across a rebuild is the real hazard**, not the
+  in-bounds access. `SyntaxTree::node`, `Document::line` and
+  `Document::replace_in_line` all now return `Option`/`bool` rather than
+  trusting an index a caller has held since before the last edit.
+
+Test modules carry `#![allow(clippy::indexing_slicing, clippy::unwrap_used,
+clippy::panic)]` — a test that indexes out of range should fail loudly and
+point at the line that did it.
+
+## Four reachable panics/corruptions in `apps/editor`, found by the lint sweep (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). All four were found by working through
+`clippy::indexing_slicing` in `apps/editor` and checking each site for a *real*
+panic rather than silencing it. None was caught by any existing test; each now
+has one.
+
+**1. JS regex literal emitted a token past the end of the line.** In
+`highlight.rs`, the regex-literal scanner stepped `i += 2` over a backslash
+escape without checking that the second byte existed, so a line ending in
+`/\` produced a token ending at `len + 1`. The renderer slices the line by
+token range, so this panicked the editor — taking every unsaved buffer in
+every other tab with it — on a keystroke. Proved reachable by reverting the
+fix and watching the highlighter sweep test fail with `JavaScript: token 0..3
+out of bounds for "/\" (len 2)`. Fixed by routing the scan through
+`scan_to_delimiter`, which clamps. Covered by the sweep test, now 12 languages
+× 5 prefixes × 17 line-endings × 7 entry states = 7140 cases.
+
+**2. Find reported overlapping matches.** `FindState::find_all` resumed the
+search one byte into the match it had just recorded, so `"aaaa"` reported
+three occurrences of `"aa"`. Two consequences: the match count shown to the
+user was wrong, and `replace_all` then rewrote overlapping ranges one after
+another, shredding the line. The one-byte step also landed *inside* a
+multi-byte character, where the old `search_line[start..]` panicked outright.
+Fixed by resuming past the match end.
+
+**3. Find computed offsets against a string that is not the one being
+edited.** The case-insensitive path searched a `to_lowercase()` copy of the
+line and used the offsets it found to index the *real* line. `to_lowercase`
+is not length-preserving — Turkish `İ` (U+0130) folds to two characters,
+three bytes, from two — so past the first such character every offset is
+wrong. The editor selected, or replaced, the wrong bytes; a span past the end
+of the line reached `String::replace_range`, which panics. Fixed with
+`folded_match_end`, which folds *incrementally* while walking the real line,
+so every offset it returns is an offset into the line the user is looking at,
+and returns the match's real end (which can differ in length from the needle,
+for the same reason).
+
+**4. Replace trusted ranges recorded against a different document.**
+Find/replace records `(line, start, end)` against whichever document was
+searched, and nothing stopped a caller handing a different document to
+`replace_all`, or editing the buffer between the search and the replace.
+`String::replace_range` panics on an out-of-range span *and* on one that
+splits a character. Fixed by making `Document::replace_in_line` validate the
+line index, the ordering, the end bound and both char boundaries, returning
+`false` rather than panicking.
 
 ## `apps/editor`'s syntax highlighter is complete, tested, and not connected (lane C)
 
@@ -481,7 +617,26 @@ artifacts, enumerate the set from the thing they have in common — here "links
 `libc.a`" — not from the directory that happened to hold them when the rule was
 written (`services/ctest-*`).
 
-### TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT. `waitid` cannot express process group 1, cannot honour `WNOWAIT`, and reports `si_uid` as 0 — all three because `SYS_PROCESS_WAIT_STATUS` is `waitpid`-shaped — LOGGED 2026-08-16 by lane B
+### TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT. `waitid` cannot express process group 1, cannot honour `WNOWAIT`, and reports `si_uid` as 0 — all three because `SYS_PROCESS_WAIT_STATUS` is `waitpid`-shaped — LOGGED 2026-08-16 by lane B — ✅ KERNEL SIDE FIXED 2026-08-16 by lane A; libc side still open
+
+**Status: the kernel half is done** (2026-08-16, lane A). All three gaps — and
+the `si_utime`/`si_stime`/`rusage` fourth one below, whose premise turned out to
+be false — are now expressible through the syscall. The entry stays open because
+**libc has not been changed to use any of it yet**: `waitid` still returns
+`ENOSYS` for the group-1 case, still ignores `WNOWAIT`, and still reports
+`si_uid` as 0, because it is still passing the old three arguments. What to
+change on the libc side is spelled out in
+`requests/a-b-wait-syscall-grew-wpgid-wnowait-and-a-waitinfo-struct.md`; the
+kernel rationale is `design-decisions.md` §206. Close this entry when
+`posix/src/process.rs` consumes the new ABI.
+
+**Correction to item 4 below ("there is no per-process CPU accounting").** That
+was already false when this entry was written. `pcb`'s `acct_*`/`child_*`
+counters and `thread::process_cpu_ticks`/`process_fault_counts`/
+`process_ctxsw_counts` were live, and `sys_getrusage` already encoded all 144
+bytes from them; `wait4`'s `clear_user_rusage` was a **false zero** — the data
+existed and the call threw it away. `wait4` now writes a real `rusage` and
+`waitid` fills `si_utime`/`si_stime` in USER_HZ ticks.
 
 **In short:** `waitid()` is the modern replacement for `waitpid()`, and it exists
 because `waitpid()`'s arguments cannot express some perfectly reasonable waits.
@@ -518,22 +673,31 @@ caller that asked for a group wait and got an arbitrary child has no way to
 detect the substitution and has lost the status of a child it was not managing.
 Refusing is recoverable; guessing is not.
 
-**Proper fix — all three are kernel-side**, and filed as
-`requests/b-a-waitid-needs-an-explicit-idtype-wait.md`:
+**Proper fix — all three were kernel-side, and all three landed** on
+2026-08-16 (lane A), exactly as this entry proposed:
 
-1. An option bit (e.g. `WPGID = 1 << 16`) that makes `arg0` an unsigned pgid,
-   bypassing `wait_pgid_filter`'s inference. Currently rejected by the mask, so
+1. ✅ **`WPGID = 1 << 16`** on `SYS_PROCESS_WAIT_STATUS` makes `arg0` an
+   unsigned pgid, so group 1 is nameable. Previously rejected by the mask, so
    no existing caller is affected.
-2. A `WNOWAIT` bit that finds the eligible child and encodes its `wstatus` but
-   skips the reap. `poll_any_child_event` already separates "find" from
-   "consume" for stop/continue; this applies the same split to exits.
-3. Return the child's uid — the PCB already carries it (`pcb.rs:88`). Widening
-   the `arg2` out-parameter from a bare `i32 wstatus` to a small struct is
-   probably cleaner than a second return register, and leaves room for the CPU
-   times if accounting ever lands.
+2. ✅ **`WNOWAIT = 1 << 24`** peeks: the zombie is left in place and the
+   job-control report is left unconsumed, so an identical second wait sees the
+   same event again.
+3. ✅ **The child's uid** rides out in a new `WaitInfo` out-parameter (`arg3`
+   pointer, `arg4` size, 72 bytes), which — as this entry predicted — also
+   carries the CPU times and four other counters. It is written under the
+   `clone3`/`sched_setattr` convention (`min(caller, kernel)` bytes, zero-filled
+   tail), so it can grow again without a new syscall number.
 
-Until then the divergences are documented on `waitid`'s doc comment, which is
-where someone debugging a `WNOWAIT` that reaped will actually look.
+One thing nobody asked for came out of the same work: **`sys_waitid` had no
+signal handling at all** — no pending-signal check, no `ERESTARTSYS`, no
+signalfd registration — so a process blocked in it could not be interrupted.
+`wait4` next door had all three. Unifying the three wait syscalls onto
+`kernel/src/syscall/wait.rs` fixed it, and it is the clearest evidence for why
+one primitive beats three copies.
+
+Until libc catches up, the divergences remain documented on `waitid`'s doc
+comment, which is where someone debugging a `WNOWAIT` that reaped will actually
+look — and that comment now needs a line saying the kernel *can* do it.
 
 **What *is* covered, so this entry is not mistaken for "waitid is untested."**
 Everything `waitid` can do is exercised on target by
@@ -22363,6 +22527,59 @@ descriptors underneath it. Left as tech debt: changing it to leak instead
 would trade a rare wrong-packet for a permanent queue drain on a flaky device,
 and neither is right without the reset path.
 
+## TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER
+
+**Status: OPEN 2026-08-16** (lane C). Blocked on an operator decision, filed as
+`open-questions.md` -> **C-Q2**. Do not "fix" this without an answer there: the
+two candidate behaviours are both correct, and shipping one silently makes the
+question harder to ask.
+
+**What.** Left/Right arrow keys move the caret by one position in *logical*
+order -- the order the characters are stored and read -- in every text widget in
+the tree. On a line that mixes left-to-right and right-to-left text ("I said
+<HEBREW WORD> to him"), logical order is not screen order, so pressing Right can
+move the caret visibly *leftwards*, and pressing it repeatedly makes the caret
+jump back and forth across the width of the right-to-left word rather than
+stepping across it.
+
+This is not a bug in the sense that it produces a wrong result -- the caret is
+always at a real, correct text position, and typing there inserts where the user
+would expect *in the sentence*. It is a bug in the sense that the key is named
+after a direction on the screen and does not always move in it. Windows edit
+controls move visually; macOS, GTK and Qt move logically. Both ship.
+
+**Where.** The arrow-key handlers, each of which does `cursor -= 1` /
+`cursor += 1` over a byte or character index with no reference to direction:
+
+* `gui/toolkit/src/widget.rs` -- `TextInput`
+* `gui/toolkit/src/modal.rs` -- `InputDialog`
+* `apps/editor/src/main.rs` -- `move_left` / `move_right`
+
+**Reproduce.** Type or paste a line containing a Hebrew or Arabic word between
+two English words into any of the three. Put the caret immediately before the
+right-to-left word and press Right once: the caret jumps to the *far side* of
+that word rather than moving one letter-width right, then walks back across it
+on subsequent presses.
+
+**What the proper fix looks like, if C-Q2 answers "visual".** The prerequisite
+is already built and this is the whole reason it was built:
+`TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL` (fixed 2026-08-16) gave
+`gui/toolkit/src/text.rs` a `TextCursor { byte, affinity }`, and
+`gui/font/src/shape.rs` a `ShapedRun` that knows each glyph's screen position
+and bidi direction. A visual step is then: ask the run for the glyph the cursor
+currently sits beside, take its neighbour in *draw* order (`draw_order()`), and
+set the cursor to that neighbour's leading or trailing edge depending on whether
+that glyph runs left-to-right or right-to-left -- which is exactly the pairing
+`offset_at` already computes (`in_left = upstream(next)` for an RTL cluster,
+the reverse for LTR). The affinity bit is what makes the two ends of a direction
+boundary distinguishable, so no extra state is needed.
+
+Two things must stay logical under either answer, and would be wrong to convert
+along with the arrows: Home/End and word-motion (Ctrl+arrow). Those name
+positions in the sentence, not directions on the screen.
+
+If C-Q2 answers "logical", this entry closes with no code change and a comment
+at each of the three sites recording that the behaviour is deliberate.
 ## B-BOOT-TEST-HANGS-INTERMITTENTLY-WITH-A-QEMU-GLIB-HANDLE-ERROR, AND LOOKS EXACTLY LIKE A KERNEL REGRESSION (lane B, 2026-08-16)
 
 **Status: OPEN — host-level, cause not identified. Recorded so the next lane

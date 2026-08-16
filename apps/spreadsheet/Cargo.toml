@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Spreadsheet — full-featured spreadsheet application"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

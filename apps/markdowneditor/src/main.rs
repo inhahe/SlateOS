@@ -32,6 +32,7 @@ use guitk::color::Color;
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textfind::{self, Case};
 
 use diffcore::{
     ConflictChoice, DiskChange, FileSync, MergeOutcome, MergeReview, ThreeWayMerge,
@@ -694,17 +695,17 @@ impl Document {
     /// Insert a character at the cursor position.
     pub fn insert_char(&mut self, ch: char) {
         let line = self.cursor_line;
-        let col = self.cursor_col;
-        if line < self.lines.len() {
-            let clamped_col = clamp_col(&self.lines[line], col);
-            self.lines[line].insert(clamped_col, ch);
-            self.cursor_col = clamped_col + ch.len_utf8();
-            self.push_undo(EditAction::Insert {
-                line,
-                col: clamped_col,
-                text: ch.to_string(),
-            });
-        }
+        let Some(text) = self.lines.get_mut(line) else {
+            return;
+        };
+        let col = clamp_col(text, self.cursor_col);
+        text.insert(col, ch);
+        self.cursor_col = col.saturating_add(ch.len_utf8());
+        self.push_undo(EditAction::Insert {
+            line,
+            col,
+            text: ch.to_string(),
+        });
     }
 
     /// Insert a string at the cursor position (may contain newlines).
@@ -712,8 +713,6 @@ impl Document {
         if text.is_empty() {
             return;
         }
-        let start_line = self.cursor_line;
-        let start_col = self.cursor_col;
         let mut actions = Vec::new();
 
         for ch in text.chars() {
@@ -721,64 +720,66 @@ impl Document {
                 self.insert_newline_internal(&mut actions);
             } else {
                 let line = self.cursor_line;
-                let col = self.cursor_col;
-                if line < self.lines.len() {
-                    let clamped_col = clamp_col(&self.lines[line], col);
-                    self.lines[line].insert(clamped_col, ch);
-                    self.cursor_col = clamped_col + ch.len_utf8();
-                    actions.push(EditAction::Insert {
-                        line,
-                        col: clamped_col,
-                        text: ch.to_string(),
-                    });
-                }
+                let Some(line_text) = self.lines.get_mut(line) else {
+                    continue;
+                };
+                let col = clamp_col(line_text, self.cursor_col);
+                line_text.insert(col, ch);
+                self.cursor_col = col.saturating_add(ch.len_utf8());
+                actions.push(EditAction::Insert {
+                    line,
+                    col,
+                    text: ch.to_string(),
+                });
             }
         }
 
-        if actions.len() == 1 {
-            let action = actions.into_iter().next().unwrap_or(EditAction::Batch {
-                actions: Vec::new(),
-            });
-            self.push_undo(action);
-        } else if actions.len() > 1 {
-            self.push_undo(EditAction::Batch { actions });
+        // One action undoes on its own; several must undo together, or a
+        // pasted paragraph would take one Ctrl+Z per character.
+        match actions.len() {
+            0 => {}
+            1 => {
+                if let Some(action) = actions.into_iter().next() {
+                    self.push_undo(action);
+                }
+            }
+            _ => self.push_undo(EditAction::Batch { actions }),
         }
-        // The push_undo calls in the else branches are redundant with internal
-        // tracking, but we need to record the overall operation.
-        let _ = (start_line, start_col); // used for batch grouping context
+    }
+
+    /// Split the current line at the cursor, recording the action.
+    ///
+    /// The split point is taken from the line's own text rather than trusted
+    /// from `cursor_col`, which can name a byte inside a character after an
+    /// edit that shortened the line.
+    fn split_line_at_cursor(&mut self) -> Option<EditAction> {
+        let text = self.lines.get_mut(self.cursor_line)?;
+        let col = clamp_col(text, self.cursor_col);
+        let remainder = text.get(col..).unwrap_or("").to_string();
+        text.truncate(col);
+        self.cursor_line = self.cursor_line.saturating_add(1);
+        self.cursor_col = 0;
+        // `insert` at `len` is a push; the index cannot exceed it, because the
+        // line it came from is in the vector.
+        self.lines
+            .insert(self.cursor_line.min(self.lines.len()), remainder.clone());
+        Some(EditAction::InsertLine {
+            line: self.cursor_line,
+            text: remainder,
+        })
     }
 
     /// Insert a newline at the cursor, splitting the current line.
     fn insert_newline_internal(&mut self, actions: &mut Vec<EditAction>) {
-        let line = self.cursor_line;
-        if line < self.lines.len() {
-            let col = clamp_col(&self.lines[line], self.cursor_col);
-            let remainder = self.lines[line][col..].to_string();
-            self.lines[line].truncate(col);
-            self.cursor_line += 1;
-            self.cursor_col = 0;
-            self.lines.insert(self.cursor_line, remainder.clone());
-            actions.push(EditAction::InsertLine {
-                line: self.cursor_line,
-                text: remainder,
-            });
+        if let Some(action) = self.split_line_at_cursor() {
+            actions.push(action);
         }
     }
 
     /// Insert a newline at the cursor position (public, single-action undo).
     pub fn insert_newline(&mut self) {
-        let line = self.cursor_line;
-        if line < self.lines.len() {
-            let col = clamp_col(&self.lines[line], self.cursor_col);
-            let remainder = self.lines[line][col..].to_string();
-            self.lines[line].truncate(col);
-            self.cursor_line += 1;
-            self.cursor_col = 0;
-            self.lines.insert(self.cursor_line, remainder.clone());
-            self.push_undo(EditAction::InsertLine {
-                line: self.cursor_line,
-                text: remainder,
-            });
+        if let Some(action) = self.split_line_at_cursor() {
+            self.push_undo(action);
         }
     }
 
@@ -787,30 +788,41 @@ impl Document {
         let line = self.cursor_line;
         let col = self.cursor_col;
 
-        if col > 0 && line < self.lines.len() {
-            let clamped_col = clamp_col(&self.lines[line], col);
-            if clamped_col > 0 {
-                // Find the previous character boundary.
-                let prev_boundary = self.lines[line][..clamped_col]
-                    .char_indices()
-                    .next_back()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                let deleted = self.lines[line][prev_boundary..clamped_col].to_string();
-                self.lines[line].replace_range(prev_boundary..clamped_col, "");
-                self.cursor_col = prev_boundary;
-                self.push_undo(EditAction::Delete {
-                    line,
-                    col: prev_boundary,
-                    text: deleted,
-                });
-            }
-        } else if col == 0 && line > 0 {
+        if col > 0 {
+            let Some(text) = self.lines.get_mut(line) else {
+                return;
+            };
+            let clamped_col = clamp_col(text, col);
+            // Find the previous character boundary. `..clamped_col` is in
+            // range and on a boundary because `clamp_col` guarantees both.
+            let Some(prev) = text
+                .get(..clamped_col)
+                .and_then(|head| head.char_indices().next_back())
+            else {
+                return;
+            };
+            let (prev_boundary, _) = prev;
+            let deleted = text
+                .get(prev_boundary..clamped_col)
+                .unwrap_or("")
+                .to_string();
+            text.replace_range(prev_boundary..clamped_col, "");
+            self.cursor_col = prev_boundary;
+            self.push_undo(EditAction::Delete {
+                line,
+                col: prev_boundary,
+                text: deleted,
+            });
+        } else if let Some(prev_line) = line.checked_sub(1)
+            && line < self.lines.len()
+        {
             // Merge with previous line.
             let current_text = self.lines.remove(line);
-            self.cursor_line = line - 1;
-            self.cursor_col = self.lines[self.cursor_line].len();
-            self.lines[self.cursor_line].push_str(&current_text);
+            self.cursor_line = prev_line;
+            if let Some(target) = self.lines.get_mut(prev_line) {
+                self.cursor_col = target.len();
+                target.push_str(&current_text);
+            }
             self.push_undo(EditAction::DeleteLine {
                 line,
                 text: current_text,
@@ -823,30 +835,39 @@ impl Document {
         let line = self.cursor_line;
         let col = self.cursor_col;
 
-        if line < self.lines.len() {
-            let current_len = self.lines[line].len();
-            let clamped_col = clamp_col(&self.lines[line], col);
+        let Some(text) = self.lines.get_mut(line) else {
+            return;
+        };
+        let current_len = text.len();
+        let clamped_col = clamp_col(text, col);
 
-            if clamped_col < current_len {
-                // Delete the character at cursor.
-                let next_boundary = self.lines[line][clamped_col..]
-                    .char_indices()
-                    .nth(1)
-                    .map(|(i, _)| clamped_col + i)
-                    .unwrap_or(current_len);
-                let deleted = self.lines[line][clamped_col..next_boundary].to_string();
-                self.lines[line].replace_range(clamped_col..next_boundary, "");
-                self.push_undo(EditAction::Delete {
-                    line,
-                    col: clamped_col,
-                    text: deleted,
-                });
-            } else if line + 1 < self.lines.len() {
-                // Merge with next line.
-                let next_text = self.lines.remove(line + 1);
-                self.lines[line].push_str(&next_text);
+        if clamped_col < current_len {
+            // Delete the character at the cursor. `nth(1)` is the boundary
+            // *after* it; running out means the cursor is on the last one.
+            let next_boundary = text
+                .get(clamped_col..)
+                .and_then(|tail| tail.char_indices().nth(1))
+                .map_or(current_len, |(i, _)| clamped_col.saturating_add(i));
+            let deleted = text
+                .get(clamped_col..next_boundary)
+                .unwrap_or("")
+                .to_string();
+            text.replace_range(clamped_col..next_boundary, "");
+            self.push_undo(EditAction::Delete {
+                line,
+                col: clamped_col,
+                text: deleted,
+            });
+        } else {
+            // Merge with the next line, if there is one.
+            let next = line.saturating_add(1);
+            if next < self.lines.len() {
+                let next_text = self.lines.remove(next);
+                if let Some(target) = self.lines.get_mut(line) {
+                    target.push_str(&next_text);
+                }
                 self.push_undo(EditAction::DeleteLine {
-                    line: line + 1,
+                    line: next,
                     text: next_text,
                 });
             }
@@ -871,34 +892,58 @@ impl Document {
         }
     }
 
+    /// Remove `text.len()` bytes from line `line` starting at `col`, and put
+    /// the cursor where they were.
+    ///
+    /// Undoing an insert and redoing a delete are the same operation, so they
+    /// share it — as do the two below. An undo stack outlives the text it
+    /// describes (a reload, or a merge from disk, replaces every line while
+    /// leaving the stack alone), so each of these validates rather than
+    /// trusting the recorded position.
+    fn erase_at(&mut self, line: usize, col: usize, len: usize) {
+        let Some(text) = self.lines.get_mut(line) else {
+            return;
+        };
+        let start = clamp_col(text, col);
+        let end = clamp_col(text, start.saturating_add(len));
+        text.replace_range(start..end, "");
+        self.cursor_line = line;
+        self.cursor_col = start;
+    }
+
+    /// Put `insert` back into line `line` at `col`, and put the cursor after it.
+    fn restore_at(&mut self, line: usize, col: usize, insert: &str) {
+        let Some(text) = self.lines.get_mut(line) else {
+            return;
+        };
+        let col = clamp_col(text, col);
+        text.insert_str(col, insert);
+        self.cursor_line = line;
+        self.cursor_col = col.saturating_add(insert.len());
+    }
+
+    /// Join line `line` back onto the one above it, undoing a line split.
+    fn join_onto_previous(&mut self, line: usize) {
+        let Some(prev) = line.checked_sub(1) else {
+            return;
+        };
+        if line >= self.lines.len() {
+            return;
+        }
+        let removed = self.lines.remove(line);
+        self.cursor_line = prev;
+        if let Some(target) = self.lines.get_mut(prev) {
+            self.cursor_col = target.len();
+            target.push_str(&removed);
+        }
+    }
+
     /// Apply an undo action (reverse the edit).
     fn apply_undo(&mut self, action: &EditAction) {
         match action {
-            EditAction::Insert { line, col, text } => {
-                if *line < self.lines.len() {
-                    let start = clamp_col(&self.lines[*line], *col);
-                    let end = clamp_col(&self.lines[*line], start.saturating_add(text.len()));
-                    self.lines[*line].replace_range(start..end, "");
-                    self.cursor_line = *line;
-                    self.cursor_col = start;
-                }
-            }
-            EditAction::Delete { line, col, text } => {
-                if *line < self.lines.len() {
-                    let clamped_col = clamp_col(&self.lines[*line], *col);
-                    self.lines[*line].insert_str(clamped_col, text);
-                    self.cursor_line = *line;
-                    self.cursor_col = clamped_col.saturating_add(text.len());
-                }
-            }
-            EditAction::InsertLine { line, text: _ } => {
-                if *line < self.lines.len() && *line > 0 {
-                    let removed_text = self.lines.remove(*line);
-                    self.cursor_line = line - 1;
-                    self.lines[self.cursor_line].push_str(&removed_text);
-                    self.cursor_col = self.lines[self.cursor_line].len() - removed_text.len();
-                }
-            }
+            EditAction::Insert { line, col, text } => self.erase_at(*line, *col, text.len()),
+            EditAction::Delete { line, col, text } => self.restore_at(*line, *col, text),
+            EditAction::InsertLine { line, text: _ } => self.join_onto_previous(*line),
             EditAction::DeleteLine { line, text } => {
                 if *line <= self.lines.len() {
                     self.lines.insert(*line, text.clone());
@@ -918,34 +963,11 @@ impl Document {
     /// Apply a redo action (re-apply the edit).
     fn apply_redo(&mut self, action: &EditAction) {
         match action {
-            EditAction::Insert { line, col, text } => {
-                if *line < self.lines.len() {
-                    let clamped_col = clamp_col(&self.lines[*line], *col);
-                    self.lines[*line].insert_str(clamped_col, text);
-                    self.cursor_line = *line;
-                    self.cursor_col = clamped_col.saturating_add(text.len());
-                }
-            }
-            EditAction::Delete { line, col, text } => {
-                if *line < self.lines.len() {
-                    let start = clamp_col(&self.lines[*line], *col);
-                    let end = clamp_col(&self.lines[*line], start.saturating_add(text.len()));
-                    self.lines[*line].replace_range(start..end, "");
-                    self.cursor_line = *line;
-                    self.cursor_col = start;
-                }
-            }
+            EditAction::Insert { line, col, text } => self.restore_at(*line, *col, text),
+            EditAction::Delete { line, col, text } => self.erase_at(*line, *col, text.len()),
             EditAction::InsertLine { line, text } => {
                 if *line <= self.lines.len() {
-                    if *line > 0 {
-                        let prev = *line - 1;
-                        let split_col = self.lines[prev].len();
-                        self.lines.insert(*line, text.clone());
-                        // Truncate previous line at split point if needed.
-                        let _ = split_col;
-                    } else {
-                        self.lines.insert(*line, text.clone());
-                    }
+                    self.lines.insert(*line, text.clone());
                     self.cursor_line = *line;
                     self.cursor_col = 0;
                 }
@@ -965,19 +987,32 @@ impl Document {
         }
     }
 
+    /// The text of line `n`, or `""` if the document has no such line.
+    ///
+    /// The cursor, the selection anchor, the scroll position and every entry
+    /// on the undo stack hold line numbers, and all of them outlive the lines
+    /// they refer to: a reload from disk, a three-way merge or an undo replaces
+    /// the whole buffer. Reading a line that is no longer there is a
+    /// misdrawn frame; indexing one is the loss of every unsaved document in
+    /// the editor.
+    fn line_text(&self, n: usize) -> &str {
+        self.lines.get(n).map_or("", String::as_str)
+    }
+
     /// Move cursor up one line.
     pub fn move_cursor_up(&mut self) {
-        if self.cursor_line > 0 {
-            self.cursor_line -= 1;
-            self.cursor_col = clamp_col(&self.lines[self.cursor_line], self.cursor_col);
+        if let Some(prev) = self.cursor_line.checked_sub(1) {
+            self.cursor_line = prev;
+            self.cursor_col = clamp_col(self.line_text(prev), self.cursor_col);
         }
     }
 
     /// Move cursor down one line.
     pub fn move_cursor_down(&mut self) {
-        if self.cursor_line + 1 < self.lines.len() {
-            self.cursor_line += 1;
-            self.cursor_col = clamp_col(&self.lines[self.cursor_line], self.cursor_col);
+        let next = self.cursor_line.saturating_add(1);
+        if next < self.lines.len() {
+            self.cursor_line = next;
+            self.cursor_col = clamp_col(self.line_text(next), self.cursor_col);
         }
     }
 
@@ -985,35 +1020,32 @@ impl Document {
     pub fn move_cursor_left(&mut self) {
         if self.cursor_col > 0 {
             // Move to previous character boundary.
-            if self.cursor_line < self.lines.len() {
-                let line = &self.lines[self.cursor_line];
-                let clamped = clamp_col(line, self.cursor_col);
-                self.cursor_col = line[..clamped]
-                    .char_indices()
-                    .next_back()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-            }
-        } else if self.cursor_line > 0 {
-            self.cursor_line -= 1;
-            self.cursor_col = self.lines[self.cursor_line].len();
+            let line = self.line_text(self.cursor_line);
+            let clamped = clamp_col(line, self.cursor_col);
+            self.cursor_col = line
+                .get(..clamped)
+                .and_then(|head| head.char_indices().next_back())
+                .map_or(0, |(i, _)| i);
+        } else if let Some(prev) = self.cursor_line.checked_sub(1) {
+            self.cursor_line = prev;
+            self.cursor_col = self.line_text(prev).len();
         }
     }
 
     /// Move cursor right one character.
     pub fn move_cursor_right(&mut self) {
-        if self.cursor_line < self.lines.len() {
-            let line_len = self.lines[self.cursor_line].len();
-            if self.cursor_col < line_len {
-                let line = &self.lines[self.cursor_line];
-                let clamped = clamp_col(line, self.cursor_col);
-                self.cursor_col = line[clamped..]
-                    .char_indices()
-                    .nth(1)
-                    .map(|(i, _)| clamped + i)
-                    .unwrap_or(line_len);
-            } else if self.cursor_line + 1 < self.lines.len() {
-                self.cursor_line += 1;
+        let line = self.line_text(self.cursor_line);
+        let line_len = line.len();
+        if self.cursor_col < line_len {
+            let clamped = clamp_col(line, self.cursor_col);
+            self.cursor_col = line
+                .get(clamped..)
+                .and_then(|tail| tail.char_indices().nth(1))
+                .map_or(line_len, |(i, _)| clamped.saturating_add(i));
+        } else {
+            let next = self.cursor_line.saturating_add(1);
+            if next < self.lines.len() {
+                self.cursor_line = next;
                 self.cursor_col = 0;
             }
         }
@@ -1026,9 +1058,7 @@ impl Document {
 
     /// Move cursor to the end of the current line.
     pub fn move_cursor_end(&mut self) {
-        if self.cursor_line < self.lines.len() {
-            self.cursor_col = self.lines[self.cursor_line].len();
-        }
+        self.cursor_col = self.line_text(self.cursor_line).len();
     }
 
     /// Move cursor to a specific line (0-based), clamping to valid range.
@@ -1049,40 +1079,42 @@ impl Document {
             ((self.cursor_line, self.cursor_col), anchor)
         };
 
+        // The deleted text goes on the undo stack, so it is read from the
+        // buffer as it stands — and only in the branch that actually deletes
+        // it, or an undo would restore text that was never removed.
         let mut deleted = String::new();
         if start.0 == end.0 {
             // Selection within a single line.
-            if start.0 < self.lines.len() {
-                let s = clamp_col(&self.lines[start.0], start.1);
-                let e = clamp_col(&self.lines[start.0], end.1).max(s);
-                deleted = self.lines[start.0][s..e].to_string();
-                self.lines[start.0].replace_range(s..e, "");
+            if let Some(text) = self.lines.get_mut(start.0) {
+                let s = clamp_col(text, start.1);
+                let e = clamp_col(text, end.1).max(s);
+                deleted = text.get(s..e).unwrap_or("").to_string();
+                text.replace_range(s..e, "");
             }
-        } else {
-            // Multi-line selection.
-            if end.0 < self.lines.len() {
-                let end_col = clamp_col(&self.lines[end.0], end.1);
-                let remaining = self.lines[end.0][end_col..].to_string();
+        } else if end.0 < self.lines.len() {
+            deleted = self.text_between(start, end);
+            // Multi-line selection: keep the tail of the last line, drop the
+            // lines in between, and graft the tail onto the head of the first.
+            let remaining = self
+                .lines
+                .get(end.0)
+                .map(|text| {
+                    let end_col = clamp_col(text, end.1);
+                    text.get(end_col..).unwrap_or("").to_string()
+                })
+                .unwrap_or_default();
+            let start_col = clamp_col(self.line_text(start.0), start.1);
 
-                // Collect deleted text.
-                let start_col = clamp_col(&self.lines[start.0], start.1);
-                deleted.push_str(&self.lines[start.0][start_col..]);
-                for i in (start.0 + 1)..end.0 {
-                    deleted.push('\n');
-                    deleted.push_str(&self.lines[i]);
+            let after_start = start.0.saturating_add(1);
+            let remove_count = end.0.saturating_sub(start.0);
+            for _ in 0..remove_count {
+                if after_start < self.lines.len() {
+                    self.lines.remove(after_start);
                 }
-                deleted.push('\n');
-                deleted.push_str(&self.lines[end.0][..end_col]);
-
-                // Remove lines between start and end.
-                let remove_count = end.0 - start.0;
-                for _ in 0..remove_count {
-                    if start.0 + 1 < self.lines.len() {
-                        self.lines.remove(start.0 + 1);
-                    }
-                }
-                self.lines[start.0].truncate(start_col);
-                self.lines[start.0].push_str(&remaining);
+            }
+            if let Some(text) = self.lines.get_mut(start.0) {
+                text.truncate(start_col);
+                text.push_str(&remaining);
             }
         }
 
@@ -1104,6 +1136,37 @@ impl Document {
         Some(deleted)
     }
 
+    /// The text between two `(line, col)` positions, `start` first.
+    ///
+    /// Positions that name lines the document no longer has contribute
+    /// nothing, and a column inside a character is moved to the boundary
+    /// before it by `clamp_col` — so a selection recorded before an edit
+    /// yields a shorter string rather than a panic.
+    fn text_between(&self, start: (usize, usize), end: (usize, usize)) -> String {
+        if start.0 == end.0 {
+            let line = self.line_text(start.0);
+            let s = clamp_col(line, start.1);
+            let e = clamp_col(line, end.1).max(s);
+            return line.get(s..e).unwrap_or("").to_string();
+        }
+
+        let mut result = String::new();
+        if start.0 < self.lines.len() {
+            let first = self.line_text(start.0);
+            result.push_str(first.get(clamp_col(first, start.1)..).unwrap_or(""));
+        }
+        for i in start.0.saturating_add(1)..end.0 {
+            result.push('\n');
+            result.push_str(self.line_text(i));
+        }
+        if end.0 < self.lines.len() {
+            result.push('\n');
+            let last = self.line_text(end.0);
+            result.push_str(last.get(..clamp_col(last, end.1)).unwrap_or(""));
+        }
+        result
+    }
+
     /// Get the selected text, if any.
     pub fn selected_text(&self) -> Option<String> {
         let anchor = self.selection_anchor?;
@@ -1113,31 +1176,7 @@ impl Document {
             ((self.cursor_line, self.cursor_col), anchor)
         };
 
-        let mut result = String::new();
-        if start.0 == end.0 {
-            if start.0 < self.lines.len() {
-                let s = clamp_col(&self.lines[start.0], start.1);
-                let e = clamp_col(&self.lines[start.0], end.1).max(s);
-                result.push_str(&self.lines[start.0][s..e]);
-            }
-        } else {
-            if start.0 < self.lines.len() {
-                let s = clamp_col(&self.lines[start.0], start.1);
-                result.push_str(&self.lines[start.0][s..]);
-            }
-            for i in (start.0 + 1)..end.0 {
-                result.push('\n');
-                if i < self.lines.len() {
-                    result.push_str(&self.lines[i]);
-                }
-            }
-            if end.0 < self.lines.len() {
-                result.push('\n');
-                let e = clamp_col(&self.lines[end.0], end.1);
-                result.push_str(&self.lines[end.0][..e]);
-            }
-        }
-
+        let result = self.text_between(start, end);
         if result.is_empty() {
             None
         } else {
@@ -1272,9 +1311,11 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
     let mut blocks = Vec::new();
     let mut idx = 0;
 
-    while idx < lines.len() {
-        let line = lines[idx];
-
+    // Every loop below advances `idx` through `lines`, and each used to state
+    // its bound twice — once in `idx < lines.len()` and again in `lines[idx]`.
+    // Reading through `get` states it once, so a future edit cannot move one
+    // and leave the other behind.
+    while let Some(&line) = lines.get(idx) {
         // Blank line — skip.
         if line.trim().is_empty() {
             idx += 1;
@@ -1308,12 +1349,10 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
                 .trim()
                 .to_string();
             let mut code_lines = Vec::new();
+            let closing_fence: String = core::iter::repeat_n(fence_char, 3).collect();
             idx += 1;
-            while idx < lines.len() {
-                let cl = lines[idx];
-                if cl
-                    .trim_start()
-                    .starts_with(&format!("{}{}{}", fence_char, fence_char, fence_char))
+            while let Some(&cl) = lines.get(idx) {
+                if cl.trim_start().starts_with(&closing_fence)
                     && cl.trim().chars().all(|c| c == fence_char)
                 {
                     idx += 1;
@@ -1332,8 +1371,11 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
         // Blockquote: > prefix.
         if line.trim_start().starts_with('>') {
             let mut quote_lines = Vec::new();
-            while idx < lines.len() && lines[idx].trim_start().starts_with('>') {
-                let ql = lines[idx].trim_start();
+            while let Some(ql) = lines
+                .get(idx)
+                .map(|l| l.trim_start())
+                .filter(|l| l.starts_with('>'))
+            {
                 let stripped = ql
                     .strip_prefix("> ")
                     .or_else(|| ql.strip_prefix('>'))
@@ -1348,13 +1390,18 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
         }
 
         // Table: line contains | and the next line is a separator row.
-        if line.contains('|') && idx + 1 < lines.len() && is_table_separator(lines[idx + 1]) {
+        if let Some(&separator) = lines.get(idx + 1).filter(|_| line.contains('|'))
+            && is_table_separator(separator)
+        {
             let headers = parse_table_row(line);
-            let alignments = parse_table_alignments(lines[idx + 1]);
+            let alignments = parse_table_alignments(separator);
             idx += 2;
             let mut rows = Vec::new();
-            while idx < lines.len() && lines[idx].contains('|') && !lines[idx].trim().is_empty() {
-                rows.push(parse_table_row(lines[idx]));
+            while let Some(&row) = lines
+                .get(idx)
+                .filter(|l| l.contains('|') && !l.trim().is_empty())
+            {
+                rows.push(parse_table_row(row));
                 idx += 1;
             }
             blocks.push(MdBlock::Table {
@@ -1368,8 +1415,8 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
         // Unordered list: starts with -, *, +.
         if is_unordered_list_start(line) {
             let mut items = Vec::new();
-            while idx < lines.len() && is_unordered_list_start(lines[idx]) {
-                items.push(parse_list_item(lines[idx], false));
+            while let Some(&item) = lines.get(idx).filter(|l| is_unordered_list_start(l)) {
+                items.push(parse_list_item(item, false));
                 idx += 1;
             }
             blocks.push(MdBlock::UnorderedList { items });
@@ -1380,8 +1427,8 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
         if is_ordered_list_start(line) {
             let start_num = parse_ordered_list_number(line).unwrap_or(1);
             let mut items = Vec::new();
-            while idx < lines.len() && is_ordered_list_start(lines[idx]) {
-                items.push(parse_list_item(lines[idx], true));
+            while let Some(&item) = lines.get(idx).filter(|l| is_ordered_list_start(l)) {
+                items.push(parse_list_item(item, true));
                 idx += 1;
             }
             blocks.push(MdBlock::OrderedList {
@@ -1393,8 +1440,11 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
 
         // Paragraph: everything else until a blank line or block-level element.
         let mut para_lines = Vec::new();
-        while idx < lines.len() && !lines[idx].trim().is_empty() && !is_block_start(lines[idx]) {
-            para_lines.push(lines[idx]);
+        while let Some(&para) = lines
+            .get(idx)
+            .filter(|l| !l.trim().is_empty() && !is_block_start(l))
+        {
+            para_lines.push(para);
             idx += 1;
         }
         if !para_lines.is_empty() {
@@ -1584,184 +1634,166 @@ fn parse_table_row(line: &str) -> Vec<Vec<MdInline>> {
         .collect()
 }
 
+/// The characters of `chars[start..end]`, or `""` if that is not a range.
+///
+/// Every span in `parse_inlines` runs from a marker the scanner found to a
+/// marker one of the `find_*` helpers found, so in a correct scanner the range
+/// is always valid — which is exactly why an incorrect one used to be a panic
+/// rather than a wrong rendering. An empty string is what an unmatched marker
+/// should produce.
+fn span(chars: &[char], start: usize, end: usize) -> String {
+    chars.get(start..end).unwrap_or(&[]).iter().collect()
+}
+
+/// Emit the plain text accumulated so far, if any, and clear it.
+///
+/// A construct that begins here ends the run of plain text before it, whether
+/// or not the construct turns out to be closed — which is why this is called
+/// before the closing marker is looked for, not after.
+fn flush_text(text: &mut String, out: &mut Vec<MdInline>) {
+    if !text.is_empty() {
+        out.push(MdInline::Text(std::mem::take(text)));
+    }
+}
+
 /// Parse inline markdown elements from a text string.
 pub fn parse_inlines(input: &str) -> Vec<MdInline> {
+    let chars: Vec<char> = input.chars().collect();
     let mut result = Vec::new();
-    let mut chars: Vec<char> = input.chars().collect();
     let mut pos = 0;
     let mut current_text = String::new();
 
-    while pos < chars.len() {
+    // Each construct reads the character at `pos` and usually the one after
+    // it, and `pos + 1` is past the end on the last character of the input —
+    // the ordinary case, not an exceptional one. Reading both through `get`
+    // states the bound once, in the loop header, instead of once per branch.
+    while let Some(&ch) = chars.get(pos) {
+        let next = chars.get(pos.saturating_add(1)).copied();
+
         // Strikethrough: ~~text~~
-        if pos + 1 < chars.len() && chars[pos] == '~' && chars[pos + 1] == '~' {
-            if !current_text.is_empty() {
-                result.push(MdInline::Text(current_text.clone()));
-                current_text.clear();
-            }
-            let start = pos + 2;
+        if ch == '~' && next == Some('~') {
+            flush_text(&mut current_text, &mut result);
+            let start = pos.saturating_add(2);
             if let Some(end) = find_closing_marker(&chars, start, &['~', '~']) {
-                let inner: String = chars[start..end].iter().collect();
-                let inner_inlines = parse_inlines(&inner);
-                result.push(MdInline::Strikethrough(inner_inlines));
-                pos = end + 2;
+                result.push(MdInline::Strikethrough(parse_inlines(&span(
+                    &chars, start, end,
+                ))));
+                pos = end.saturating_add(2);
                 continue;
             }
         }
 
         // Bold: **text** or __text__
-        if pos + 1 < chars.len()
-            && ((chars[pos] == '*' && chars[pos + 1] == '*')
-                || (chars[pos] == '_' && chars[pos + 1] == '_'))
-        {
-            let marker = chars[pos];
-            if !current_text.is_empty() {
-                result.push(MdInline::Text(current_text.clone()));
-                current_text.clear();
-            }
-            let start = pos + 2;
-            if let Some(end) = find_closing_marker(&chars, start, &[marker, marker]) {
-                let inner: String = chars[start..end].iter().collect();
-                let inner_inlines = parse_inlines(&inner);
-                result.push(MdInline::Bold(inner_inlines));
-                pos = end + 2;
+        if (ch == '*' || ch == '_') && next == Some(ch) {
+            flush_text(&mut current_text, &mut result);
+            let start = pos.saturating_add(2);
+            if let Some(end) = find_closing_marker(&chars, start, &[ch, ch]) {
+                result.push(MdInline::Bold(parse_inlines(&span(&chars, start, end))));
+                pos = end.saturating_add(2);
                 continue;
             }
         }
 
         // Italic: *text* or _text_
-        if (chars[pos] == '*' || chars[pos] == '_')
-            && (pos + 1 < chars.len() && chars[pos + 1] != chars[pos])
-        {
-            let marker = chars[pos];
-            if !current_text.is_empty() {
-                result.push(MdInline::Text(current_text.clone()));
-                current_text.clear();
-            }
-            let start = pos + 1;
-            if let Some(end) = find_single_closing(&chars, start, marker) {
-                let inner: String = chars[start..end].iter().collect();
-                let inner_inlines = parse_inlines(&inner);
-                result.push(MdInline::Italic(inner_inlines));
-                pos = end + 1;
+        if (ch == '*' || ch == '_') && next.is_some_and(|n| n != ch) {
+            flush_text(&mut current_text, &mut result);
+            let start = pos.saturating_add(1);
+            if let Some(end) = find_single_closing(&chars, start, ch) {
+                result.push(MdInline::Italic(parse_inlines(&span(&chars, start, end))));
+                pos = end.saturating_add(1);
                 continue;
             }
         }
 
         // Inline code: `code`
-        if chars[pos] == '`' {
-            if !current_text.is_empty() {
-                result.push(MdInline::Text(current_text.clone()));
-                current_text.clear();
-            }
-            let start = pos + 1;
+        if ch == '`' {
+            flush_text(&mut current_text, &mut result);
+            let start = pos.saturating_add(1);
             if let Some(end) = find_single_closing(&chars, start, '`') {
-                let code: String = chars[start..end].iter().collect();
-                result.push(MdInline::InlineCode(code));
-                pos = end + 1;
+                result.push(MdInline::InlineCode(span(&chars, start, end)));
+                pos = end.saturating_add(1);
                 continue;
             }
         }
 
         // Image: ![alt](url)
-        if chars[pos] == '!' && pos + 1 < chars.len() && chars[pos + 1] == '[' {
-            if !current_text.is_empty() {
-                result.push(MdInline::Text(current_text.clone()));
-                current_text.clear();
-            }
-            let alt_start = pos + 2;
+        if ch == '!' && next == Some('[') {
+            flush_text(&mut current_text, &mut result);
+            let alt_start = pos.saturating_add(2);
             if let Some(alt_end) = find_single_closing(&chars, alt_start, ']')
-                && alt_end + 1 < chars.len()
-                && chars[alt_end + 1] == '('
+                && chars.get(alt_end.saturating_add(1)) == Some(&'(')
             {
-                let url_start = alt_end + 2;
+                let url_start = alt_end.saturating_add(2);
                 if let Some(url_end) = find_single_closing(&chars, url_start, ')') {
-                    let alt: String = chars[alt_start..alt_end].iter().collect();
-                    let url: String = chars[url_start..url_end].iter().collect();
-                    result.push(MdInline::Image { alt, url });
-                    pos = url_end + 1;
+                    result.push(MdInline::Image {
+                        alt: span(&chars, alt_start, alt_end),
+                        url: span(&chars, url_start, url_end),
+                    });
+                    pos = url_end.saturating_add(1);
                     continue;
                 }
             }
         }
 
         // Link: [text](url)
-        if chars[pos] == '[' {
-            if !current_text.is_empty() {
-                result.push(MdInline::Text(current_text.clone()));
-                current_text.clear();
-            }
-            let text_start = pos + 1;
+        if ch == '[' {
+            flush_text(&mut current_text, &mut result);
+            let text_start = pos.saturating_add(1);
             if let Some(text_end) = find_single_closing(&chars, text_start, ']')
-                && text_end + 1 < chars.len()
-                && chars[text_end + 1] == '('
+                && chars.get(text_end.saturating_add(1)) == Some(&'(')
             {
-                let url_start = text_end + 2;
+                let url_start = text_end.saturating_add(2);
                 if let Some(url_end) = find_single_closing(&chars, url_start, ')') {
-                    let link_text: String = chars[text_start..text_end].iter().collect();
-                    let url: String = chars[url_start..url_end].iter().collect();
-                    let text_inlines = parse_inlines(&link_text);
                     result.push(MdInline::Link {
-                        text: text_inlines,
-                        url,
+                        text: parse_inlines(&span(&chars, text_start, text_end)),
+                        url: span(&chars, url_start, url_end),
                     });
-                    pos = url_end + 1;
+                    pos = url_end.saturating_add(1);
                     continue;
                 }
             }
         }
 
-        // Line break: two trailing spaces.
-        if chars[pos] == ' ' && pos + 1 < chars.len() && chars[pos + 1] == ' ' {
-            // Check if this is at end of content or before more spaces.
-            let mut space_end = pos;
-            while space_end < chars.len() && chars[space_end] == ' ' {
-                space_end += 1;
-            }
+        // Line break: two or more spaces at the very end of the text.
+        if ch == ' ' && next == Some(' ') {
+            let space_end = chars
+                .iter()
+                .skip(pos)
+                .position(|&c| c != ' ')
+                .map_or(chars.len(), |off| pos.saturating_add(off));
             if space_end == chars.len() {
-                if !current_text.is_empty() {
-                    result.push(MdInline::Text(current_text.clone()));
-                    current_text.clear();
-                }
+                flush_text(&mut current_text, &mut result);
                 result.push(MdInline::LineBreak);
                 pos = space_end;
                 continue;
             }
         }
 
-        current_text.push(chars[pos]);
-        pos += 1;
+        current_text.push(ch);
+        pos = pos.saturating_add(1);
     }
 
-    if !current_text.is_empty() {
-        result.push(MdInline::Text(current_text));
-    }
-
-    let _ = &mut chars; // suppress unused-mut if needed
+    flush_text(&mut current_text, &mut result);
     result
 }
 
 /// Find the position of a two-character closing marker (like ** or ~~).
 fn find_closing_marker(chars: &[char], start: usize, marker: &[char; 2]) -> Option<usize> {
-    let mut i = start;
-    while i + 1 < chars.len() {
-        if chars[i] == marker[0] && chars[i + 1] == marker[1] {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
+    let [first, second] = *marker;
+    chars
+        .get(start..)?
+        .windows(2)
+        .position(|w| matches!(w, [a, b] if *a == first && *b == second))
+        .map(|p| start.saturating_add(p))
 }
 
 /// Find the position of a single-character closing marker.
 fn find_single_closing(chars: &[char], start: usize, marker: char) -> Option<usize> {
-    let mut i = start;
-    while i < chars.len() {
-        if chars[i] == marker {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
+    chars
+        .get(start..)?
+        .iter()
+        .position(|&c| c == marker)
+        .map(|p| start.saturating_add(p))
 }
 
 // ============================================================================
@@ -1840,31 +1872,21 @@ impl FindReplaceState {
     }
 
     /// Find all occurrences of the query in the given document lines.
+    ///
+    /// The ranges recorded are byte ranges *in the lines themselves*, so they
+    /// can be handed straight to `replace_range` or to the highlighter. This
+    /// used to search a `to_lowercase()` copy of each line and use the offsets
+    /// it found on the real line, which is only sound when lowercasing
+    /// preserves length — it does not. See `textfind`'s documentation.
     pub fn find_all(&mut self, lines: &[String]) {
         self.matches.clear();
         self.current_match = 0;
-        if self.query.is_empty() {
-            return;
-        }
-
+        let case = Case::sensitive(self.case_sensitive);
         for (line_idx, line) in lines.iter().enumerate() {
-            let search_line;
-            let search_query;
-            if self.case_sensitive {
-                search_line = line.clone();
-                search_query = self.query.clone();
-            } else {
-                search_line = line.to_lowercase();
-                search_query = self.query.to_lowercase();
-            }
-
-            let mut start = 0;
-            while let Some(found) = search_line[start..].find(&search_query) {
-                let abs_start = start + found;
-                let abs_end = abs_start + self.query.len();
-                self.matches.push((line_idx, abs_start, abs_end));
-                start = abs_end;
-            }
+            self.matches.extend(
+                textfind::matches(line, &self.query, case)
+                    .map(|(start, end)| (line_idx, start, end)),
+            );
         }
     }
 
@@ -1878,43 +1900,40 @@ impl FindReplaceState {
     /// Move to the previous match.
     pub fn prev_match(&mut self) {
         if !self.matches.is_empty() {
-            if self.current_match == 0 {
-                self.current_match = self.matches.len() - 1;
-            } else {
-                self.current_match -= 1;
-            }
+            self.current_match = match self.current_match.checked_sub(1) {
+                Some(prev) => prev,
+                None => self.matches.len().saturating_sub(1),
+            };
         }
     }
 
-    /// Replace the current match.
+    /// Replace the current match. Returns whether anything was replaced.
     pub fn replace_current(&mut self, lines: &mut [String]) -> bool {
-        if self.matches.is_empty() {
+        let Some(&(line_idx, start, end)) = self.current_match_info_ref() else {
+            return false;
+        };
+        if !replace_in_line(lines, line_idx, start, end, &self.replacement) {
             return false;
         }
-        let idx = self.current_match.min(self.matches.len() - 1);
-        let (line_idx, start, end) = self.matches[idx];
-        if line_idx < lines.len() && end <= lines[line_idx].len() {
-            lines[line_idx].replace_range(start..end, &self.replacement);
-            // Refresh matches after replacement.
-            self.find_all(lines);
-            return true;
-        }
-        false
+        // Refresh matches after replacement.
+        self.find_all(lines);
+        true
     }
 
-    /// Replace all matches.
+    /// Replace all matches. Returns how many were replaced.
     pub fn replace_all(&mut self, lines: &mut [String]) -> usize {
-        if self.matches.is_empty() || self.query.is_empty() {
+        if self.query.is_empty() {
             return 0;
         }
-        let mut count = 0;
-        // Replace from end to start to preserve indices.
-        let mut matches_rev = self.matches.clone();
-        matches_rev.reverse();
-        for (line_idx, start, end) in matches_rev {
-            if line_idx < lines.len() && end <= lines[line_idx].len() {
-                lines[line_idx].replace_range(start..end, &self.replacement);
-                count += 1;
+        let mut count = 0_usize;
+        // Replace from end to start, so that a replacement of a different
+        // length than the text it replaces does not move the matches that have
+        // not been applied yet. This is only sound because `find_all` reports
+        // non-overlapping matches — with overlapping ones, a later replacement
+        // would rewrite text an earlier one had already changed.
+        for &(line_idx, start, end) in self.matches.iter().rev() {
+            if replace_in_line(lines, line_idx, start, end, &self.replacement) {
+                count = count.saturating_add(1);
             }
         }
         self.find_all(lines);
@@ -1923,17 +1942,45 @@ impl FindReplaceState {
 
     /// Get the current match info, if any.
     pub fn current_match_info(&self) -> Option<(usize, usize, usize)> {
-        if self.matches.is_empty() {
-            return None;
-        }
-        let idx = self.current_match.min(self.matches.len() - 1);
-        Some(self.matches[idx])
+        self.current_match_info_ref().copied()
+    }
+
+    /// The current match, clamped into range.
+    ///
+    /// `current_match` is an index into `matches`, and `matches` is rebuilt
+    /// whenever the query or the document changes — so an index held across
+    /// either is stale. Clamping keeps a stale index pointing at *a* match
+    /// rather than off the end.
+    fn current_match_info_ref(&self) -> Option<&(usize, usize, usize)> {
+        self.matches
+            .get(self.current_match)
+            .or_else(|| self.matches.last())
     }
 
     /// Return the total number of matches.
     pub fn match_count(&self) -> usize {
         self.matches.len()
     }
+}
+
+/// Replace bytes `start..end` of `lines[n]` with `text`. Returns whether
+/// anything was replaced.
+///
+/// Every argument here can be stale: the match list is recorded against
+/// whatever the document held when the search ran, and the user can edit it,
+/// or switch documents, before pressing Replace. `String::replace_range` panics
+/// on an out-of-range span *and* on one that splits a character, so all four
+/// conditions are checked rather than the two the previous version checked.
+fn replace_in_line(lines: &mut [String], n: usize, start: usize, end: usize, text: &str) -> bool {
+    let Some(line) = lines.get_mut(n) else {
+        return false;
+    };
+    if start > end || end > line.len() || !line.is_char_boundary(start) || !line.is_char_boundary(end)
+    {
+        return false;
+    }
+    line.replace_range(start..end, text);
+    true
 }
 
 // ============================================================================

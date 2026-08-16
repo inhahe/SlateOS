@@ -22492,14 +22492,20 @@ keeps this entry open.**
   a real `capset()` drop still binds and a later refresh cannot undo it.
 - **Step 3 — the gates are still advisory, and that is what is left.** The 63
   libc gate sites still read the stored words through `has_capability()`, which
-  on the target still starts permissive. Flipping them is a one-line change
-  (point `has_capability` at `reported_caps_effective`), but it breaks every
-  fixture spawned `capabilities: &[]` — `services/ctest-jobctl`,
-  `self_test_cctty`, `self_test_cpgroup` — so it lands together with giving
-  those fixtures real capabilities, with QEMU free. `refresh()`'s
-  fail-soft-on-error behaviour also has to become fail-closed at that point:
-  while the gates are advisory, "we could not ask" and "you may" are the same
-  thing; once they are binding, they stop being.
+  on the target still starts permissive. Pointing `has_capability` at
+  `reported_caps_effective` is one line, but **that line is not the work**: a
+  dozen of the gates are written as capability-*only* where Linux's rule is
+  "capability **or** something else", so making them truthful would deny
+  operations the kernel itself permits — a regression, not a tightening. That
+  survey is its own entry,
+  TD-POSIX-CAP-GATES-OMIT-LINUX-S-NON-CAPABILITY-ALTERNATIVE, and it lands
+  first. Step 3 then still needs the fixtures spawned `capabilities: &[]` —
+  `services/ctest-jobctl`, `self_test_cctty`, `self_test_cpgroup` — given real
+  capabilities (they are spawned from `kernel/src/proc/spawn.rs`, lane A's
+  tree), and QEMU free. `refresh()`'s fail-soft-on-error behaviour also has to
+  become fail-closed at that point: while the gates are advisory, "we could not
+  ask" and "you may" are the same thing; once they are binding, they stop
+  being.
 
 **What.** `posix/src/sys_capability.rs` keeps the three Linux capability sets
 (effective/permitted/inheritable) in its own store and initialises them from
@@ -22601,6 +22607,116 @@ the permissive behaviour: `services/ctest-jobctl` (documented in its own doc
 comment), and `self_test_cctty` / `self_test_cpgroup`, which spawn with
 `capabilities: &[]`. All three need real capability grants in the same change,
 and that is boot-test-visible.
+
+---
+
+### TD-POSIX-CAP-GATES-OMIT-LINUX-S-NON-CAPABILITY-ALTERNATIVE. A dozen libc capability gates test only the capability, where Linux's rule is "capability **or** something else" — so making them truthful would deny what the kernel permits — 🔶 **OPEN, blocks §312 step 3** — 2026-08-16
+
+**In short.** Several of our libc functions ask "do you hold capability X?" and
+refuse if not. Real Linux asks a two-sided question — "do you hold X, *or* is
+this your own process / your own file / within your own limit?" — and permits
+either way. Right now nobody notices, because on the target every process
+believes it holds every capability, so the gates always pass. The moment §312
+step 3 makes them answer honestly, they will start refusing ordinary
+operations that the kernel itself is perfectly happy to allow. **This is
+therefore a prerequisite for step 3, not a follow-up to it.**
+
+**Why it is invisible today.** `has_capability()` reads libc's own stored
+words, which on the target start out with every bit set
+(TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S). A gate written as `if !has_capability(X)
+{ EPERM }` is thus a no-op, and a missing "or same-owner" branch has no
+observable consequence. Step 3 flips all 63 gates from no-ops to real tests on
+the same day — so every one of these divergences becomes user-visible
+simultaneously, and the ones already documented in-place become bugs at exactly
+the same moment as the ones that are not.
+
+**Class A — the alternative exists in our model and is simply not tested.**
+These are the actionable ones: the information needed to write the missing
+branch is available to libc today.
+
+| Site | Function | Linux's actual predicate | What we test |
+|---|---|---|---|
+| `posix/src/signal.rs:1014` | `kill`, process-group form | same real/effective uid as target **or** `CAP_KILL` | `CAP_KILL` only |
+| `posix/src/signal.rs:1037` | `kill`, `KillTarget::Other` | same uid **or** `CAP_KILL` | `CAP_KILL` only |
+| `posix/src/signal.rs:1715` | `sigqueue` | same uid **or** `CAP_KILL` | `CAP_KILL` only |
+| `posix/src/file.rs:2920` | `chown` | owner may chgrp to a group they belong to; only chown-to-another-user needs `CAP_CHOWN` | `CAP_CHOWN` only |
+| `posix/src/file.rs:2960` | `fchown` | ditto | `CAP_CHOWN` only |
+| `posix/src/file.rs:3000` | `lchown` | ditto | `CAP_CHOWN` only |
+| `posix/src/sched.rs:419` | `sched_setaffinity` | `check_same_owner(p)` **or** `CAP_SYS_NICE` | `pid > 0` **and** `CAP_SYS_NICE` |
+
+`sched.rs:419` is the sharpest of these because it *looks* like it handles the
+alternative and does not: it uses `pid > 0` as a proxy for "not same owner",
+but `pid > 0` includes `pid == getpid()`. Under a truthful gate a process could
+not set its **own** affinity by explicit pid — only by passing `0`. The comment
+above it names `check_same_owner` correctly, so the intent was right and the
+proxy is the bug.
+
+The `kill` row is the one with the widest blast radius, and it is already
+written down as load-bearing elsewhere:
+`services/ctest-jobctl/main.c`'s "Authority." paragraph explains that the
+fixture's parent→child `kill(child, SIGCONT)` "needs no capability grant from
+the kernel spawn: the kernel authorises a signal when the caller **is the
+target's parent**, and our libc's own `CAP_KILL` gate reads the process
+capability words, which start out as 'every capability held'." Under a truthful
+gate the kernel would still permit that send and libc would refuse it — so
+parent→child signalling breaks for every process that was not handed `CAP_KILL`.
+
+**Class B — the alternative is a concept our model does not have yet.** These
+are already documented in place, which is the right call; they are listed so
+step 3 does not rediscover them as surprises. Each needs a decision (implement
+the missing concept, or accept the divergence deliberately) rather than a code
+fix.
+
+| Site | Function | Missing alternative |
+|---|---|---|
+| `posix/src/sched.rs:155` | `sched_setscheduler` → RT/DEADLINE | `RLIMIT_RTPRIO` — no per-task rlimit model |
+| `posix/src/resource.rs:592` | `nice`, `inc < 0` | `RLIMIT_NICE`; its own comment says the test "collapses to a pure cap probe" |
+| `posix/src/resource.rs:648` | `setpriority`, raising priority | `RLIMIT_NICE`, same |
+| `posix/src/unistd.rs:3039` | `ptrace` attach | same-thread-group bypass — we do not track thread groups |
+| `posix/src/process.rs:3197` | `process_vm_readv` | `ptrace_may_access`: same-uid **and** dumpable |
+| `posix/src/process.rs:3239` | `process_vm_writev` | ditto |
+| `posix/src/process.rs:3348` | `kcmp` | ditto, twice (once per target pid) |
+
+**Class C — verified correct, for the record**, so a future survey does not
+re-walk them: `posix/src/mman.rs:331` (`check_mlock_caps` — `CAP_IPC_LOCK`
+**or** within `RLIMIT_MEMLOCK`, the pattern the Class A sites should copy),
+`posix/src/unistd.rs:605`/`611` (`target == cur || has_capability(...)`),
+`posix/src/sys_fsuid.rs:140`/`166` (`matches_cred || ...`),
+`posix/src/stat.rs:376`/`430` (`CAP_MKNOD` fires only for `S_IFCHR`/`S_IFBLK`,
+which is exactly Linux's `vfs_mknod` placement), `posix/src/socket.rs:1312`
+(raw sockets) and `:1699` (`CAP_NET_BIND_SERVICE` for low ports) — both
+capability-only in Linux too, `posix/src/time.rs:391`/`668` and
+`posix/src/sys_timex.rs:398` (`CAP_SYS_TIME`), `posix/src/epoll.rs:1372`
+(`CAP_WAKE_ALARM`), `posix/src/file.rs:5161` (`CAP_DAC_READ_SEARCH` for
+`open_by_handle_at`), `posix/src/sys_io.rs:109`/`191` (`CAP_SYS_RAWIO`),
+`posix/src/linux_module.rs` (`CAP_SYS_MODULE`).
+
+**Proper fix.** For Class A, give each gate the shape
+`if !permitted_by_ownership(...) && !has_capability(X) { EPERM }`, with the
+ownership predicate written once per family rather than inlined per call site —
+`kill`/`sigqueue` share one, the three `chown` variants share one. The uid
+comparison has the credentials it needs already (`posix/src/unistd.rs` keeps
+the real/effective ids); the *target's* uid is the part we do not have for
+cross-process cases, and for those the honest predicate is "the kernel will
+decide" — i.e. do not pre-empt with `EPERM` at all, make the call and report
+what comes back. That is also the shape that survives step 3 unchanged, since
+it stops libc from second-guessing an authority it does not hold.
+
+For Class B, each row is a separate decision; none should be silently widened
+into a Class A-style fix, because inventing an ownership test we cannot
+actually evaluate would be worse than the current honest over-restriction.
+
+**Do not fix this by weakening the gates.** Deleting the capability test, or
+making `has_capability` return `true` while advisory, both "work" and both
+destroy the property §312 was built for. There are also ~9 existing tests
+(`process.rs:8079`, `:11455`, `:11849`, `:12295`, `:12679`,
+`unistd.rs:5287`, `:9153`, `mman.rs:3162`, `sys_quota.rs:998`) that explicitly
+drop a bit and assert `!has_capability(...)`, so an unconditionally-true gate
+fails the suite immediately — which is the correct outcome and worth knowing
+before trying it.
+
+**Found** 2026-08-16 by lane B while scoping §312 step 3, immediately after
+step 2 landed.
 
 ---
 

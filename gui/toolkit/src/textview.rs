@@ -11,6 +11,7 @@ use crate::color::Color;
 use crate::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
 use crate::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
+use textfind::Case;
 
 // ---------------------------------------------------------------------------
 // Catppuccin Mocha palette (dark theme)
@@ -847,28 +848,19 @@ impl SimpleTextView {
             return;
         }
 
-        let query = if self.search.case_sensitive {
-            self.search.query.clone()
-        } else {
-            self.search.query.to_lowercase()
-        };
-
+        // The offsets recorded here are used to highlight and to replace, so
+        // they must be offsets into the line itself. Searching a
+        // `to_lowercase()` copy — which this did — gives offsets into a
+        // different string, because lowercasing is not length-preserving;
+        // `textfind` folds while walking the real line instead. See that
+        // crate's documentation for the three bugs the old shape carried.
+        let case = Case::sensitive(self.search.case_sensitive);
         for (line_idx, _) in self.lines.iter().enumerate() {
             let text = self.line_text(line_idx);
-            let haystack = if self.search.case_sensitive {
-                text.clone()
-            } else {
-                text.to_lowercase()
-            };
-
-            let mut start = 0;
-            while let Some(pos) = haystack[start..].find(&query) {
-                let abs_pos = start + pos;
-                self.search
-                    .matches
-                    .push((line_idx, abs_pos, abs_pos + query.len()));
-                start = abs_pos + 1; // Allow overlapping matches
-            }
+            self.search.matches.extend(
+                textfind::matches(&text, &self.search.query, case)
+                    .map(|(start, end)| (line_idx, start, end)),
+            );
         }
     }
 
@@ -2118,28 +2110,22 @@ impl RichTextView {
             return;
         }
 
-        let query = if self.search.case_sensitive {
-            self.search.query.clone()
-        } else {
-            self.search.query.to_lowercase()
-        };
-
-        for (line_idx, wl) in self.wrapped_lines.iter().enumerate() {
-            let text: String = wl.spans.iter().map(|s| s.text.as_str()).collect();
-            let haystack = if self.search.case_sensitive {
-                text.clone()
-            } else {
-                text.to_lowercase()
-            };
-            let mut start = 0;
-            while let Some(pos) = haystack[start..].find(&query) {
-                let abs_pos = start + pos;
-                self.search
-                    .matches
-                    .push((line_idx, abs_pos, abs_pos + query.len()));
-                start = abs_pos + 1;
-            }
-        }
+        // Same correction as `TextView::refresh_search` above: the ranges are
+        // consumed as offsets into the wrapped line's own text.
+        let case = Case::sensitive(self.search.case_sensitive);
+        let query = self.search.query.clone();
+        let found: Vec<(usize, usize, usize)> = self
+            .wrapped_lines
+            .iter()
+            .enumerate()
+            .flat_map(|(line_idx, wl)| {
+                let text: String = wl.spans.iter().map(|s| s.text.as_str()).collect();
+                textfind::matches(&text, &query, case)
+                    .map(|(start, end)| (line_idx, start, end))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        self.search.matches = found;
     }
 
     fn scroll_to_match(&mut self, match_idx: usize) {
@@ -2470,7 +2456,13 @@ impl RichTextView {
                         SEARCH_MATCH_COLOR
                     };
                     for (bx, bw) in self.selection_boxes_of_cols(wl, ms, me) {
-                        tree.fill_rect(gutter_w + wl.indent + bx, render_y, bw, wl.line_height, color);
+                        tree.fill_rect(
+                            gutter_w + wl.indent + bx,
+                            render_y,
+                            bw,
+                            wl.line_height,
+                            color,
+                        );
                     }
                 }
             }
@@ -2882,6 +2874,68 @@ mod tests {
         assert_eq!(view.search.current_match, None);
     }
 
+    #[test]
+    fn a_match_range_is_an_offset_into_the_line_the_user_can_see() {
+        // `İ` (U+0130) is two bytes but three once lowercased, so the old
+        // implementation — which searched a `to_lowercase()` copy of the line
+        // and used the offsets it found on the line itself — reported this
+        // match one byte too far along. Every consumer of the range then
+        // highlighted or replaced the wrong text, and `replace_range` on a
+        // range past the end of a line panics outright.
+        let mut view = simple_view(400.0, 160.0);
+        view.set_text("İabc");
+
+        view.find("ABC", false);
+        assert_eq!(view.match_count(), 1);
+        let &(line, start, end) = view.search.matches.first().expect("one match");
+        assert_eq!((line, start, end), (0, 2, 5));
+        assert_eq!(view.line_text(0).get(start..end), Some("abc"));
+    }
+
+    #[test]
+    fn matches_do_not_overlap_each_other() {
+        // The old loop resumed one byte into the match it had just recorded,
+        // under a comment claiming overlapping matches were wanted. They are
+        // not: the count shown to the user is wrong, and a replace-all that
+        // rewrites overlapping ranges destroys the line.
+        let mut view = simple_view(400.0, 160.0);
+        view.set_text("aaaa");
+
+        view.find("aa", true);
+        assert_eq!(view.match_count(), 2);
+        assert_eq!(view.search.matches, [(0, 0, 2), (0, 2, 4)]);
+    }
+
+    #[test]
+    fn a_search_over_multi_byte_text_does_not_panic() {
+        // The one-byte resume also stepped into the middle of a character,
+        // where slicing the line panics.
+        let mut view = simple_view(400.0, 160.0);
+        view.set_text("日本日本語");
+
+        view.find("日本", true);
+        assert_eq!(view.search.matches, [(0, 0, 6), (0, 6, 12)]);
+    }
+
+    #[test]
+    fn the_rich_view_search_agrees_with_the_simple_one() {
+        // Both views had their own copy of the search, and so their own copy
+        // of the same three bugs. They now share one implementation; this is
+        // the test that fails if one of them grows a private copy again.
+        let mut view = RichTextView::new(400.0, 160.0);
+        view.set_blocks(vec![RichBlock::Paragraph {
+            spans: vec![RichSpan::plain("İabc aaaa")],
+            spacing_above: 0.0,
+            spacing_below: 0.0,
+        }]);
+
+        view.find("ABC", false);
+        assert_eq!(view.search.matches, [(0, 2, 5)]);
+
+        view.find("aa", true);
+        assert_eq!(view.search.matches, [(0, 6, 8), (0, 8, 10)]);
+    }
+
     // --- Word-wrap tests ---
 
     #[test]
@@ -3037,13 +3091,13 @@ mod tests {
         let all = view.selection_boxes_of_cols(&wl, 0, 10);
         assert_eq!(all.len(), 1, "{all:?}");
         // …and it covers the whole line, both spans included.
-        let total: f32 = wl
-            .spans
-            .iter()
-            .map(|s| view.span_width(s, None))
-            .sum();
+        let total: f32 = wl.spans.iter().map(|s| view.span_width(s, None)).sum();
         assert!((all[0].0).abs() < 0.001, "starts at {}", all[0].0);
-        assert!((all[0].1 - total).abs() < 0.01, "width {} vs line {total}", all[0].1);
+        assert!(
+            (all[0].1 - total).abs() < 0.01,
+            "width {} vs line {total}",
+            all[0].1
+        );
 
         // Splitting the range in two tiles the same ground: the box for the
         // second half begins exactly where the box for the first half ends.

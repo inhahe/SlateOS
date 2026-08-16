@@ -5,6 +5,10 @@ edition = "2024"
 description = "SlateOS File Explorer — graphical file manager with tree view"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+textfind = { path = "../../textfind" }
+# The thumbnailer reads BMP, PNG, GIF and JPEG headers at offsets the file
+# itself supplies. `byteread` is those reads stating their own bound.
+byteread = { path = "../../byteread" }
 
 [lints]
 workspace = true

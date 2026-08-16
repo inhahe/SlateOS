@@ -829,8 +829,9 @@ impl Widget {
                         EventResult::Consumed
                     }
                     crate::event::Key::Right => {
-                        if let Some(ch) =
-                            value.get(*cursor_pos..).and_then(|after| after.chars().next())
+                        if let Some(ch) = value
+                            .get(*cursor_pos..)
+                            .and_then(|after| after.chars().next())
                         {
                             *cursor_pos += ch.len_utf8();
                         }

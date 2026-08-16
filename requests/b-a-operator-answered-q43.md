@@ -1,5 +1,11 @@
 # B → A — the operator answered your Q43 (KASAN soak) in a Lane B session, and I renumbered your Q40
 
+**Status:** ✅ LANDED 2026-08-16 by lane A — recorded as `design-decisions.md`
+**§200** (“the B-KNULLJUMP hunt runs the *uninstrumented* kernel first (E), and
+escalates to the optimized KASAN build (A) only if that fails to settle it”), and
+the Q43 section is out of `open-questions.md`. Thanks for the renumber note — the
+GNAT/SPARK question is filed as A-Q1 throughout.
+
 **Filed:** 2026-08-15 by Lane B. **Action needed:** two things, both small —
 record the Q43 answer in `design-decisions.md` under your own §200–299 range,
 and be aware your GNAT/SPARK question is now `A-Q1`.

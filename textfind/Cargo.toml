@@ -1,0 +1,17 @@
+[package]
+name = "textfind"
+version = "0.1.0"
+edition = "2024"
+description = "Substring search whose offsets are offsets into the string you searched, case-insensitive or not."
+
+[lib]
+path = "src/lib.rs"
+
+# Intentionally dependency-free, and `no_std` with no `alloc` either: the whole
+# point of this crate is to answer "where is it?" without building a second
+# copy of the text to answer it in. Mirrors `textfmt`, `yamldoc` and `tzrules`
+# in being reachable by the headless components as well as the GUI ones.
+[dependencies]
+
+[lints]
+workspace = true

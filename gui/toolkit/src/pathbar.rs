@@ -864,7 +864,12 @@ impl PathBar {
         // prefix's width, and which of the two candidate positions is right
         // depends on the affinity the cursor is carrying.
         let cursor_x = text_x
-            + crate::text::caret_x(&self.edit_text, self.cursor, FONT_SIZE, FontWeightHint::Regular);
+            + crate::text::caret_x(
+                &self.edit_text,
+                self.cursor,
+                FONT_SIZE,
+                FontWeightHint::Regular,
+            );
         cmds.push(RenderCommand::FillRect {
             x: cursor_x,
             y: text_y - 2.0,

@@ -1815,7 +1815,11 @@ fn test_dispatch_wait_status_wpgid_and_wnowait() -> KernelResult<()> {
     // is a *different* answer from the EINVAL above, so this distinguishes
     // "understood" from "rejected").
     const NO_GROUP: u64 = 8_765_431;
-    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(NO_GROUP, WNOHANG | WPGID | WNOWAIT)).value
+    if dispatch(
+        SYS_PROCESS_WAIT_STATUS,
+        &mk(NO_GROUP, WNOHANG | WPGID | WNOWAIT),
+    )
+    .value
         != i64::from(KernelError::NoChildProcess.code())
     {
         return fail("WPGID|WNOWAIT should be accepted option bits", &[]);
@@ -1952,7 +1956,13 @@ fn test_dispatch_wait_status_wpgid_and_wnowait() -> KernelResult<()> {
     let _ = pcb::record_jc_stopped(s, SIGTSTP);
     // (i) Peeked twice, still pending both times.
     for pass in 0..2 {
-        if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(s, WNOHANG | WUNTRACED | WNOWAIT)).value != s_i {
+        if dispatch(
+            SYS_PROCESS_WAIT_STATUS,
+            &mk(s, WNOHANG | WUNTRACED | WNOWAIT),
+        )
+        .value
+            != s_i
+        {
             return fail(
                 if pass == 0 {
                     "WNOWAIT should report a pending stop"
@@ -1998,7 +2008,7 @@ fn test_dispatch_wait_status_wpgid_and_wnowait() -> KernelResult<()> {
 fn test_dispatch_wait_info_layout() -> KernelResult<()> {
     use crate::proc::pcb::ExitInfo;
     use crate::proc::thread::ProcessUsage;
-    use crate::syscall::handlers::{wait_info_image, WAIT_INFO_SIZE};
+    use crate::syscall::handlers::{WAIT_INFO_SIZE, wait_info_image};
     use crate::syscall::wait::{ChildEvent, FoundEvent};
 
     fn fail(msg: &str) -> KernelResult<()> {

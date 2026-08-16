@@ -61,7 +61,30 @@ done
 
 # --- build the staging tree --------------------------------------------------
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
+
+# Every "[rootfs] staged ..." line below describes a copy into $STAGE — a
+# temporary directory — and the image is not written until the very end.  So a
+# log that names your new artifact does *not* mean the image contains it, and
+# an abort partway through leaves the previous rootfs.ext4 in place.  That is a
+# quiet failure with a loud consequence: the next boot test attaches the OLD
+# image, the new rung self-skips on its missing prerequisite, and the run still
+# reports PASS with only a "COVERAGE INCOMPLETE" note to show for it.
+#
+# So say it on the way out, on *every* failure path rather than at each `exit 1`
+# — there are five today and the next one added would not have remembered.
+IMAGE_WRITTEN=0
+_on_exit() {
+    local rc=$?
+    rm -rf "$STAGE"
+    if [ "$rc" -ne 0 ] && [ "$IMAGE_WRITTEN" -eq 0 ]; then
+        echo "[rootfs] *** rootfs.ext4 was NOT written — the existing image is UNCHANGED. ***"
+        echo "[rootfs]     Any 'staged ...' line above went to a temp dir, not to the image."
+        echo "[rootfs]     '[rootfs] DONE.' is the only line that means the image was rebuilt."
+        echo "[rootfs]     A boot test run now uses the OLD image and can still report PASS."
+    fi
+    exit "$rc"
+}
+trap _on_exit EXIT
 
 mkdir -p "$STAGE/lib64" "$STAGE$LIBC_DIR" "$STAGE/bin"
 
@@ -1270,6 +1293,7 @@ mke2fs -q -F -t ext4 -b 4096 \
     -d "$STAGE" \
     "$OUT_IMG" "$IMG_SIZE"
 
+IMAGE_WRITTEN=1
 echo "[rootfs] created $OUT_IMG"
 echo "[rootfs] feature set:"
 dumpe2fs -h "$OUT_IMG" 2>/dev/null | grep -E 'Filesystem features|Block size|Inode count|Free blocks' | sed 's/^/  /'
@@ -1303,9 +1327,10 @@ if [ -n "$STAMP_PY" ]; then
         exit 1
     }
 else
-    echo "[rootfs] ERROR: no python3/python — cannot write the image manifest."
-    echo "[rootfs]        scripts/boot-test.sh rejects an image without one, because"
-    echo "[rootfs]        an unverifiable image is how a stale fixture last got a PASS."
+    echo "[rootfs] ERROR: no python3/python - cannot write the image manifest."
+    echo "[rootfs]        'ctest-fixtures.py image-check' rejects an image without"
+    echo "[rootfs]        one, because an unverifiable image is how a stale fixture"
+    echo "[rootfs]        last got a PASS."
     exit 1
 fi
 echo "[rootfs] DONE."

@@ -20,6 +20,7 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+use guitk::canvas::Canvas;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -255,235 +256,13 @@ impl Default for BrushSettings {
 // Pixel buffer — per-layer raster data
 // ============================================================================
 
-/// A 2D RGBA pixel buffer.
-#[derive(Clone, Debug)]
-pub struct PixelBuffer {
-    /// Width in pixels.
-    pub width: u32,
-    /// Height in pixels.
-    pub height: u32,
-    /// Row-major RGBA pixel data. Length = width * height * 4.
-    pub data: Vec<u8>,
-}
-
-impl PixelBuffer {
-    /// Creates a new pixel buffer filled with a solid color.
-    pub fn new(width: u32, height: u32, fill: Color) -> Self {
-        let pixel_count = (width as usize).saturating_mul(height as usize);
-        let mut data = Vec::with_capacity(pixel_count.saturating_mul(4));
-        for _ in 0..pixel_count {
-            data.push(fill.r);
-            data.push(fill.g);
-            data.push(fill.b);
-            data.push(fill.a);
-        }
-        Self { width, height, data }
-    }
-
-    /// Creates a transparent pixel buffer.
-    pub fn transparent(width: u32, height: u32) -> Self {
-        Self::new(width, height, Color::TRANSPARENT)
-    }
-
-    /// Returns the byte offset for a given (x, y) coordinate.
-    fn offset(&self, x: u32, y: u32) -> Option<usize> {
-        if x < self.width && y < self.height {
-            Some(((y as usize) * (self.width as usize) + (x as usize)) * 4)
-        } else {
-            None
-        }
-    }
-
-    /// Gets the color at (x, y), or None if out of bounds.
-    pub fn get_pixel(&self, x: u32, y: u32) -> Option<Color> {
-        let off = self.offset(x, y)?;
-        Some(Color::rgba(
-            self.data[off],
-            self.data[off + 1],
-            self.data[off + 2],
-            self.data[off + 3],
-        ))
-    }
-
-    /// Sets the pixel at (x, y). No-op if out of bounds.
-    pub fn set_pixel(&mut self, x: u32, y: u32, color: Color) {
-        if let Some(off) = self.offset(x, y) {
-            self.data[off] = color.r;
-            self.data[off + 1] = color.g;
-            self.data[off + 2] = color.b;
-            self.data[off + 3] = color.a;
-        }
-    }
-
-    /// Alpha-blends a color onto the existing pixel at (x, y).
-    pub fn blend_pixel(&mut self, x: u32, y: u32, color: Color) {
-        if let Some(existing) = self.get_pixel(x, y) {
-            let blended = color.over(existing);
-            self.set_pixel(x, y, blended);
-        }
-    }
-
-    /// Fills the entire buffer with a solid color.
-    pub fn fill(&mut self, color: Color) {
-        let len = self.data.len();
-        let mut i = 0;
-        while i < len {
-            self.data[i] = color.r;
-            self.data[i + 1] = color.g;
-            self.data[i + 2] = color.b;
-            self.data[i + 3] = color.a;
-            i += 4;
-        }
-    }
-
-    /// Copies a rectangular region from this buffer.
-    pub fn copy_region(&self, x: u32, y: u32, w: u32, h: u32) -> PixelBuffer {
-        let mut result = PixelBuffer::transparent(w, h);
-        for dy in 0..h {
-            for dx in 0..w {
-                if let Some(c) = self.get_pixel(x.saturating_add(dx), y.saturating_add(dy)) {
-                    result.set_pixel(dx, dy, c);
-                }
-            }
-        }
-        result
-    }
-
-    /// Pastes another buffer onto this one at the given offset (with alpha blending).
-    pub fn paste(&mut self, src: &PixelBuffer, dest_x: i32, dest_y: i32) {
-        for sy in 0..src.height {
-            for sx in 0..src.width {
-                let dx = dest_x.saturating_add(sx as i32);
-                let dy = dest_y.saturating_add(sy as i32);
-                if dx >= 0 && dy >= 0
-                    && let Some(c) = src.get_pixel(sx, sy) {
-                        self.blend_pixel(dx as u32, dy as u32, c);
-                    }
-            }
-        }
-    }
-
-    /// Pastes another buffer onto this one, overwriting (no blending).
-    pub fn paste_overwrite(&mut self, src: &PixelBuffer, dest_x: i32, dest_y: i32) {
-        for sy in 0..src.height {
-            for sx in 0..src.width {
-                let dx = dest_x.saturating_add(sx as i32);
-                let dy = dest_y.saturating_add(sy as i32);
-                if dx >= 0 && dy >= 0
-                    && let Some(c) = src.get_pixel(sx, sy) {
-                        self.set_pixel(dx as u32, dy as u32, c);
-                    }
-            }
-        }
-    }
-
-    /// Flips the buffer horizontally (left-right mirror).
-    pub fn flip_horizontal(&mut self) {
-        for y in 0..self.height {
-            for x in 0..self.width / 2 {
-                let other_x = self.width - 1 - x;
-                let left = self.get_pixel(x, y);
-                let right = self.get_pixel(other_x, y);
-                if let (Some(l), Some(r)) = (left, right) {
-                    self.set_pixel(x, y, r);
-                    self.set_pixel(other_x, y, l);
-                }
-            }
-        }
-    }
-
-    /// Flips the buffer vertically (top-bottom mirror).
-    pub fn flip_vertical(&mut self) {
-        for y in 0..self.height / 2 {
-            let other_y = self.height - 1 - y;
-            for x in 0..self.width {
-                let top = self.get_pixel(x, y);
-                let bottom = self.get_pixel(x, other_y);
-                if let (Some(t), Some(b)) = (top, bottom) {
-                    self.set_pixel(x, y, b);
-                    self.set_pixel(x, other_y, t);
-                }
-            }
-        }
-    }
-
-    /// Rotates the buffer 90 degrees clockwise. Returns a new buffer.
-    pub fn rotate_90_cw(&self) -> PixelBuffer {
-        let new_w = self.height;
-        let new_h = self.width;
-        let mut result = PixelBuffer::transparent(new_w, new_h);
-        for y in 0..self.height {
-            for x in 0..self.width {
-                if let Some(c) = self.get_pixel(x, y) {
-                    let nx = self.height - 1 - y;
-                    let ny = x;
-                    result.set_pixel(nx, ny, c);
-                }
-            }
-        }
-        result
-    }
-
-    /// Rotates the buffer 90 degrees counter-clockwise. Returns a new buffer.
-    pub fn rotate_90_ccw(&self) -> PixelBuffer {
-        let new_w = self.height;
-        let new_h = self.width;
-        let mut result = PixelBuffer::transparent(new_w, new_h);
-        for y in 0..self.height {
-            for x in 0..self.width {
-                if let Some(c) = self.get_pixel(x, y) {
-                    let nx = y;
-                    let ny = self.width - 1 - x;
-                    result.set_pixel(nx, ny, c);
-                }
-            }
-        }
-        result
-    }
-
-    /// Rotates the buffer 180 degrees. Returns a new buffer.
-    pub fn rotate_180(&self) -> PixelBuffer {
-        let mut result = PixelBuffer::transparent(self.width, self.height);
-        for y in 0..self.height {
-            for x in 0..self.width {
-                if let Some(c) = self.get_pixel(x, y) {
-                    let nx = self.width - 1 - x;
-                    let ny = self.height - 1 - y;
-                    result.set_pixel(nx, ny, c);
-                }
-            }
-        }
-        result
-    }
-
-    /// Resizes using nearest-neighbor interpolation. Returns a new buffer.
-    pub fn resize_nearest(&self, new_width: u32, new_height: u32) -> PixelBuffer {
-        if new_width == 0 || new_height == 0 {
-            return PixelBuffer::transparent(new_width, new_height);
-        }
-        let mut result = PixelBuffer::transparent(new_width, new_height);
-        for ny in 0..new_height {
-            for nx in 0..new_width {
-                let sx = ((nx as f64 * self.width as f64) / new_width as f64) as u32;
-                let sy = ((ny as f64 * self.height as f64) / new_height as f64) as u32;
-                let sx = sx.min(self.width.saturating_sub(1));
-                let sy = sy.min(self.height.saturating_sub(1));
-                if let Some(c) = self.get_pixel(sx, sy) {
-                    result.set_pixel(nx, ny, c);
-                }
-            }
-        }
-        result
-    }
-}
-
 // ============================================================================
 // Drawing primitives on pixel buffers
 // ============================================================================
 
 /// Draws a line using Bresenham's algorithm.
 pub fn draw_line(
-    buf: &mut PixelBuffer,
+    buf: &mut Canvas,
     x0: i32,
     y0: i32,
     x1: i32,
@@ -505,7 +284,7 @@ pub fn draw_line(
         // Draw a filled circle at each point for thick lines
         if thickness <= 1 {
             if cx >= 0 && cy >= 0 {
-                buf.blend_pixel(cx as u32, cy as u32, color);
+                buf.blend(cx as u32, cy as u32, color);
             }
         } else {
             draw_filled_circle_at(buf, cx, cy, half, color);
@@ -527,7 +306,7 @@ pub fn draw_line(
 }
 
 /// Draws a filled circle centered at (cx, cy) with given radius.
-fn draw_filled_circle_at(buf: &mut PixelBuffer, cx: i32, cy: i32, radius: i32, color: Color) {
+fn draw_filled_circle_at(buf: &mut Canvas, cx: i32, cy: i32, radius: i32, color: Color) {
     let r2 = radius * radius;
     for dy in -radius..=radius {
         for dx in -radius..=radius {
@@ -535,7 +314,7 @@ fn draw_filled_circle_at(buf: &mut PixelBuffer, cx: i32, cy: i32, radius: i32, c
                 let px = cx + dx;
                 let py = cy + dy;
                 if px >= 0 && py >= 0 {
-                    buf.blend_pixel(px as u32, py as u32, color);
+                    buf.blend(px as u32, py as u32, color);
                 }
             }
         }
@@ -544,7 +323,7 @@ fn draw_filled_circle_at(buf: &mut PixelBuffer, cx: i32, cy: i32, radius: i32, c
 
 /// Draws an outlined rectangle on the pixel buffer.
 pub fn draw_rect_outline(
-    buf: &mut PixelBuffer,
+    buf: &mut Canvas,
     x: i32,
     y: i32,
     w: i32,
@@ -561,13 +340,13 @@ pub fn draw_rect_outline(
 }
 
 /// Draws a filled rectangle on the pixel buffer.
-pub fn draw_rect_filled(buf: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, color: Color) {
+pub fn draw_rect_filled(buf: &mut Canvas, x: i32, y: i32, w: i32, h: i32, color: Color) {
     for dy in 0..h {
         for dx in 0..w {
             let px = x + dx;
             let py = y + dy;
             if px >= 0 && py >= 0 {
-                buf.blend_pixel(px as u32, py as u32, color);
+                buf.blend(px as u32, py as u32, color);
             }
         }
     }
@@ -575,7 +354,7 @@ pub fn draw_rect_filled(buf: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, c
 
 /// Draws an outlined ellipse using the midpoint algorithm.
 pub fn draw_ellipse_outline(
-    buf: &mut PixelBuffer,
+    buf: &mut Canvas,
     cx: i32,
     cy: i32,
     rx: i32,
@@ -628,7 +407,7 @@ pub fn draw_ellipse_outline(
 
 /// Plots the four symmetrical points of an ellipse.
 fn plot_ellipse_points(
-    buf: &mut PixelBuffer,
+    buf: &mut Canvas,
     cx: i32,
     cy: i32,
     x: i32,
@@ -646,7 +425,7 @@ fn plot_ellipse_points(
     for (px, py) in points {
         if thickness <= 1 {
             if px >= 0 && py >= 0 {
-                buf.blend_pixel(px as u32, py as u32, color);
+                buf.blend(px as u32, py as u32, color);
             }
         } else {
             draw_filled_circle_at(buf, px, py, half, color);
@@ -655,14 +434,7 @@ fn plot_ellipse_points(
 }
 
 /// Draws a filled ellipse using horizontal scan lines.
-pub fn draw_ellipse_filled(
-    buf: &mut PixelBuffer,
-    cx: i32,
-    cy: i32,
-    rx: i32,
-    ry: i32,
-    color: Color,
-) {
+pub fn draw_ellipse_filled(buf: &mut Canvas, cx: i32, cy: i32, rx: i32, ry: i32, color: Color) {
     if rx <= 0 || ry <= 0 {
         return;
     }
@@ -674,7 +446,7 @@ pub fn draw_ellipse_filled(
         let x_end = (cx as f64 + x_extent).floor() as i32;
         for px in x_start..=x_end {
             if px >= 0 && (cy + dy) >= 0 {
-                buf.blend_pixel(px as u32, (cy + dy) as u32, color);
+                buf.blend(px as u32, (cy + dy) as u32, color);
             }
         }
     }
@@ -686,7 +458,7 @@ pub fn draw_ellipse_filled(
 // shift the call-site verbosity without adding clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_rounded_rect_outline(
-    buf: &mut PixelBuffer,
+    buf: &mut Canvas,
     x: i32,
     y: i32,
     w: i32,
@@ -714,7 +486,7 @@ pub fn draw_rounded_rect_outline(
 
 /// Draws a filled rounded rectangle on the pixel buffer.
 pub fn draw_rounded_rect_filled(
-    buf: &mut PixelBuffer,
+    buf: &mut Canvas,
     x: i32,
     y: i32,
     w: i32,
@@ -742,7 +514,7 @@ pub fn draw_rounded_rect_filled(
 // geometry signature, struct-bundling would only shift verbosity).
 #[allow(clippy::too_many_arguments)]
 fn draw_corner_arc(
-    buf: &mut PixelBuffer,
+    buf: &mut Canvas,
     cx: i32,
     cy: i32,
     rx: i32,
@@ -757,7 +529,10 @@ fn draw_corner_arc(
         0 => (0.0_f64, std::f64::consts::FRAC_PI_2),
         1 => (std::f64::consts::FRAC_PI_2, std::f64::consts::PI),
         2 => (std::f64::consts::PI, 3.0 * std::f64::consts::FRAC_PI_2),
-        _ => (3.0 * std::f64::consts::FRAC_PI_2, 2.0 * std::f64::consts::PI),
+        _ => (
+            3.0 * std::f64::consts::FRAC_PI_2,
+            2.0 * std::f64::consts::PI,
+        ),
     };
 
     for i in 0..=steps {
@@ -766,7 +541,7 @@ fn draw_corner_arc(
         let py = cy - (ry as f64 * t.sin()) as i32;
         if thickness <= 1 {
             if px >= 0 && py >= 0 {
-                buf.blend_pixel(px as u32, py as u32, color);
+                buf.blend(px as u32, py as u32, color);
             }
         } else {
             draw_filled_circle_at(buf, px, py, half, color);
@@ -775,14 +550,7 @@ fn draw_corner_arc(
 }
 
 /// Fills a quarter circle. Quadrant: 0=bottom-right, 1=top-right, 2=top-left, 3=bottom-left.
-fn fill_quarter_circle(
-    buf: &mut PixelBuffer,
-    cx: i32,
-    cy: i32,
-    r: i32,
-    quadrant: u8,
-    color: Color,
-) {
+fn fill_quarter_circle(buf: &mut Canvas, cx: i32, cy: i32, r: i32, quadrant: u8, color: Color) {
     let r2 = r * r;
     for dy in 0..=r {
         for dx in 0..=r {
@@ -794,7 +562,7 @@ fn fill_quarter_circle(
                     _ => (cx + dx, cy - dy),
                 };
                 if px >= 0 && py >= 0 {
-                    buf.blend_pixel(px as u32, py as u32, color);
+                    buf.blend(px as u32, py as u32, color);
                 }
             }
         }
@@ -802,8 +570,8 @@ fn fill_quarter_circle(
 }
 
 /// Flood fill starting at (start_x, start_y).
-pub fn flood_fill(buf: &mut PixelBuffer, start_x: u32, start_y: u32, fill_color: Color) {
-    let target_color = match buf.get_pixel(start_x, start_y) {
+pub fn flood_fill(buf: &mut Canvas, start_x: u32, start_y: u32, fill_color: Color) {
+    let target_color = match buf.get(start_x, start_y) {
         Some(c) => c,
         None => return,
     };
@@ -817,22 +585,22 @@ pub fn flood_fill(buf: &mut PixelBuffer, start_x: u32, start_y: u32, fill_color:
     stack.push((start_x, start_y));
 
     while let Some((px, py)) = stack.pop() {
-        if let Some(current) = buf.get_pixel(px, py) {
+        if let Some(current) = buf.get(px, py) {
             if current != target_color {
                 continue;
             }
-            buf.set_pixel(px, py, fill_color);
+            buf.set(px, py, fill_color);
 
             if px > 0 {
                 stack.push((px - 1, py));
             }
-            if px + 1 < buf.width {
+            if px + 1 < buf.width() {
                 stack.push((px + 1, py));
             }
             if py > 0 {
                 stack.push((px, py - 1));
             }
-            if py + 1 < buf.height {
+            if py + 1 < buf.height() {
                 stack.push((px, py + 1));
             }
         }
@@ -841,7 +609,7 @@ pub fn flood_fill(buf: &mut PixelBuffer, start_x: u32, start_y: u32, fill_color:
 
 /// Spray paint effect: randomly scatter dots within a radius.
 pub fn spray_paint(
-    buf: &mut PixelBuffer,
+    buf: &mut Canvas,
     cx: i32,
     cy: i32,
     radius: i32,
@@ -865,7 +633,7 @@ pub fn spray_paint(
         let px = cx + (dist * angle.cos()) as i32;
         let py = cy + (dist * angle.sin()) as i32;
         if px >= 0 && py >= 0 {
-            buf.blend_pixel(px as u32, py as u32, color);
+            buf.blend(px as u32, py as u32, color);
         }
     }
 }
@@ -880,7 +648,7 @@ pub struct Layer {
     /// Display name.
     pub name: String,
     /// Pixel data for this layer.
-    pub pixels: PixelBuffer,
+    pub pixels: Canvas,
     /// Whether this layer is visible.
     pub visible: bool,
     /// Layer opacity (0.0 - 1.0).
@@ -892,7 +660,7 @@ impl Layer {
     pub fn new(name: String, width: u32, height: u32) -> Self {
         Self {
             name,
-            pixels: PixelBuffer::transparent(width, height),
+            pixels: Canvas::transparent(width, height),
             visible: true,
             opacity: 1.0,
         }
@@ -902,7 +670,7 @@ impl Layer {
     pub fn with_background(name: String, width: u32, height: u32, color: Color) -> Self {
         Self {
             name,
-            pixels: PixelBuffer::new(width, height, color),
+            pixels: Canvas::filled(width, height, color),
             visible: true,
             opacity: 1.0,
         }
@@ -935,7 +703,7 @@ pub struct Selection {
     /// Height of selection.
     pub height: u32,
     /// Pixel data that has been cut/copied (if any).
-    pub content: Option<PixelBuffer>,
+    pub content: Option<Canvas>,
 }
 
 impl Selection {
@@ -1089,22 +857,29 @@ impl PolygonBuilder {
     }
 
     /// Draws the polygon outline onto a pixel buffer.
-    pub fn draw_outline(&self, buf: &mut PixelBuffer, color: Color, thickness: u32) {
+    pub fn draw_outline(&self, buf: &mut Canvas, color: Color, thickness: u32) {
         let pts = &self.points;
         if pts.len() < 2 {
             return;
         }
-        for i in 0..pts.len() - 1 {
-            draw_line(buf, pts[i].0, pts[i].1, pts[i + 1].0, pts[i + 1].1, color, thickness);
+        // `windows(2)` states "each vertex and the one after it" once, where the
+        // index form stated it four times per edge and relied on `len() - 1`
+        // being in range — which is only true because of the early return above.
+        for edge in pts.windows(2) {
+            if let [(x0, y0), (x1, y1)] = *edge {
+                draw_line(buf, x0, y0, x1, y1, color, thickness);
+            }
         }
-        if self.closed && pts.len() >= 3 {
-            let last = pts.len() - 1;
-            draw_line(buf, pts[last].0, pts[last].1, pts[0].0, pts[0].1, color, thickness);
+        if self.closed
+            && pts.len() >= 3
+            && let (Some(&(lx, ly)), Some(&(fx, fy))) = (pts.last(), pts.first())
+        {
+            draw_line(buf, lx, ly, fx, fy, color, thickness);
         }
     }
 
     /// Draws the polygon filled (using scan line algorithm) onto a pixel buffer.
-    pub fn draw_filled(&self, buf: &mut PixelBuffer, color: Color) {
+    pub fn draw_filled(&self, buf: &mut Canvas, color: Color) {
         let pts = &self.points;
         if pts.len() < 3 {
             return;
@@ -1116,12 +891,11 @@ impl PolygonBuilder {
 
         for y in min_y..=max_y {
             let mut intersections = Vec::new();
-            let n = pts.len();
-            for i in 0..n {
-                let j = (i + 1) % n;
-                let (y0, y1) = (pts[i].1, pts[j].1);
-                let (x0, x1) = (pts[i].0, pts[j].0);
-
+            // Each vertex paired with its successor, wrapping the last back to
+            // the first — which is what the `(i + 1) % n` index arithmetic said,
+            // except that this form cannot be given an `n` that disagrees with
+            // the slice it indexes.
+            for (&(x0, y0), &(x1, y1)) in pts.iter().zip(pts.iter().cycle().skip(1)) {
                 if (y0 <= y && y1 > y) || (y1 <= y && y0 > y) {
                     let dy = y1 - y0;
                     if dy != 0 {
@@ -1132,18 +906,20 @@ impl PolygonBuilder {
                 }
             }
 
-            intersections.sort();
+            intersections.sort_unstable();
 
-            let mut idx = 0;
-            while idx + 1 < intersections.len() {
-                let x_start = intersections[idx];
-                let x_end = intersections[idx + 1];
-                for x in x_start..=x_end {
-                    if x >= 0 && y >= 0 {
-                        buf.blend_pixel(x as u32, y as u32, color);
+            // Scan-line fill takes the crossings in pairs: inside the polygon
+            // between the first and second, outside until the third. A trailing
+            // odd crossing is not a span and `chunks_exact` drops it, which is
+            // what the old `idx + 1 < len` guard did by hand.
+            for span in intersections.chunks_exact(2) {
+                if let &[x_start, x_end] = span {
+                    for x in x_start..=x_end {
+                        if x >= 0 && y >= 0 {
+                            buf.blend(x as u32, y as u32, color);
+                        }
                     }
                 }
-                idx += 2;
             }
         }
     }
@@ -1232,9 +1008,9 @@ pub fn default_palette() -> Vec<Color> {
 // ============================================================================
 
 /// Encodes a pixel buffer as a 32-bit BMP file.
-pub fn encode_bmp(buf: &PixelBuffer) -> Vec<u8> {
-    let w = buf.width;
-    let h = buf.height;
+pub fn encode_bmp(buf: &Canvas) -> Vec<u8> {
+    let w = buf.width();
+    let h = buf.height();
     let row_size = w as usize * 4;
     let pixel_data_size = row_size * h as usize;
     let file_size = 54 + pixel_data_size;
@@ -1265,7 +1041,7 @@ pub fn encode_bmp(buf: &PixelBuffer) -> Vec<u8> {
     // Pixel data (bottom-up, BGRA)
     for y in (0..h).rev() {
         for x in 0..w {
-            if let Some(c) = buf.get_pixel(x, y) {
+            if let Some(c) = buf.get(x, y) {
                 out.push(c.b);
                 out.push(c.g);
                 out.push(c.r);
@@ -1278,45 +1054,59 @@ pub fn encode_bmp(buf: &PixelBuffer) -> Vec<u8> {
 }
 
 /// Decodes a 32-bit BMP file into a pixel buffer. Returns None on invalid data.
-pub fn decode_bmp(data: &[u8]) -> Option<PixelBuffer> {
-    if data.len() < 54 {
-        return None;
-    }
-    if data[0] != b'B' || data[1] != b'M' {
+///
+/// Every field here sits at a fixed offset in the first 54 bytes, and the old
+/// code established that with one `data.len() < 54` check and then restated it
+/// at each of the twenty-two byte indexes that followed. `byteread` states the
+/// bound where the read happens, which is the only place it can be wrong.
+pub fn decode_bmp(data: &[u8]) -> Option<Canvas> {
+    if !byteread::starts_with(data, b"BM") {
         return None;
     }
 
-    let pixel_offset = u32::from_le_bytes([data[10], data[11], data[12], data[13]]) as usize;
-    let width = i32::from_le_bytes([data[18], data[19], data[20], data[21]]);
-    let height = i32::from_le_bytes([data[22], data[23], data[24], data[25]]);
-    let bpp = u16::from_le_bytes([data[28], data[29]]);
+    let pixel_offset = byteread::u32_le_at(data, 10)? as usize;
+    let width = byteread::i32_le_at(data, 18)?;
+    let height = byteread::i32_le_at(data, 22)?;
+    let bpp = byteread::u16_le_at(data, 28)?;
 
     if width <= 0 || bpp != 32 {
         return None;
     }
 
-    let w = width as u32;
+    let w = width.unsigned_abs();
     let bottom_up = height > 0;
     let h = height.unsigned_abs();
 
-    let row_bytes = w as usize * 4;
-    let needed = pixel_offset + row_bytes * h as usize;
+    // Width, height and the pixel-data offset are read straight out of the
+    // file, so a crafted BMP picks all three, and `offset + w * 4 * h` is the
+    // bound that every read below depends on. That product does not in fact
+    // wrap on this target — three 32-bit fields cannot exceed a 64-bit `usize`
+    // — but that is an accident of `usize` being twice the width of the fields,
+    // not something the expression says, and it stops being true the moment
+    // this is built for a 32-bit target, where a wrapped `needed` is *small*
+    // and sails through the length check that exists to reject it. Checked
+    // arithmetic states the requirement instead of relying on the coincidence.
+    let row_bytes = (w as usize).checked_mul(4)?;
+    let needed = row_bytes
+        .checked_mul(h as usize)?
+        .checked_add(pixel_offset)?;
     if data.len() < needed {
         return None;
     }
 
-    let mut buf = PixelBuffer::transparent(w, h);
+    let mut buf = Canvas::transparent(w, h);
 
     for row in 0..h {
-        let src_row = if bottom_up { h - 1 - row } else { row };
-        let row_start = pixel_offset + src_row as usize * row_bytes;
+        let src_row = if bottom_up {
+            h.saturating_sub(1).saturating_sub(row)
+        } else {
+            row
+        };
+        let row_start = pixel_offset.checked_add((src_row as usize).checked_mul(row_bytes)?)?;
         for col in 0..w {
-            let off = row_start + col as usize * 4;
-            let b = data[off];
-            let g_val = data[off + 1];
-            let r = data[off + 2];
-            let a = data[off + 3];
-            buf.set_pixel(col, row, Color::rgba(r, g_val, b, a));
+            let off = row_start.checked_add((col as usize).checked_mul(4)?)?;
+            let [b, g_val, r, a] = byteread::array_at::<4>(data, off)?;
+            buf.set(col, row, Color::rgba(r, g_val, b, a));
         }
     }
 
@@ -1475,21 +1265,21 @@ impl ColorPicker {
         self.green = color.g;
         self.blue = color.b;
         self.alpha = color.a;
-        self.hex_input = TextInput::with_text(
-            &format!("{:02X}{:02X}{:02X}", color.r, color.g, color.b),
-        );
+        self.hex_input =
+            TextInput::with_text(&format!("{:02X}{:02X}{:02X}", color.r, color.g, color.b));
     }
 
     /// Tries to parse the hex input and update the color sliders.
     pub fn apply_hex_input(&mut self) -> bool {
         let text = self.hex_input.text.trim().trim_start_matches('#');
         if text.len() == 6
-            && let Ok(val) = u32::from_str_radix(text, 16) {
-                self.red = ((val >> 16) & 0xFF) as u8;
-                self.green = ((val >> 8) & 0xFF) as u8;
-                self.blue = (val & 0xFF) as u8;
-                return true;
-            }
+            && let Ok(val) = u32::from_str_radix(text, 16)
+        {
+            self.red = ((val >> 16) & 0xFF) as u8;
+            self.green = ((val >> 8) & 0xFF) as u8;
+            self.blue = (val & 0xFF) as u8;
+            return true;
+        }
         false
     }
 
@@ -1563,7 +1353,7 @@ impl Default for GridSettings {
 #[derive(Clone, Debug, Default)]
 pub struct Clipboard {
     /// Copied pixel data, if any.
-    pub content: Option<PixelBuffer>,
+    pub content: Option<Canvas>,
 }
 
 impl Clipboard {
@@ -1573,12 +1363,12 @@ impl Clipboard {
     }
 
     /// Stores pixel data.
-    pub fn store(&mut self, buf: PixelBuffer) {
+    pub fn store(&mut self, buf: Canvas) {
         self.content = Some(buf);
     }
 
     /// Returns a reference to the stored content.
-    pub fn get(&self) -> Option<&PixelBuffer> {
+    pub fn get(&self) -> Option<&Canvas> {
         self.content.as_ref()
     }
 
@@ -1887,19 +1677,25 @@ impl PaintApp {
     pub fn add_layer(&mut self) {
         let idx = self.layers.len();
         let name = format!("Layer {}", idx + 1);
-        self.layers.push(Layer::new(name, self.canvas_width, self.canvas_height));
+        self.layers
+            .push(Layer::new(name, self.canvas_width, self.canvas_height));
         self.active_layer = self.layers.len() - 1;
     }
 
     /// Deletes the active layer. Cannot delete the last layer.
     pub fn delete_layer(&mut self) -> bool {
-        if self.layers.len() <= 1 {
+        // `Vec::remove` panics on an out-of-range index. `active_layer` is a
+        // public field and nothing in the type enforces that it indexes
+        // `layers` — the invariant is a convention spread across ten
+        // assignment sites, and a caller that sets it directly (or restores a
+        // `HistorySnapshot` it built itself, which is equally public) reaches
+        // this line with a stale index and takes the whole editor down. The
+        // bound is checked here rather than inherited.
+        if self.layers.len() <= 1 || self.active_layer >= self.layers.len() {
             return false;
         }
         self.layers.remove(self.active_layer);
-        if self.active_layer >= self.layers.len() {
-            self.active_layer = self.layers.len() - 1;
-        }
+        self.active_layer = self.active_layer.min(self.layers.len().saturating_sub(1));
         true
     }
 
@@ -1927,23 +1723,37 @@ impl PaintApp {
 
     /// Merges the active layer down onto the layer below it.
     pub fn merge_layer_down(&mut self) -> bool {
-        if self.active_layer == 0 || self.layers.len() <= 1 {
+        // `Vec::remove` panics on an out-of-range index, and `active_layer` is a
+        // plain field that every edit to the layer list has to remember to fix,
+        // so both ends are checked here rather than assumed. Splitting the
+        // slice lets the blend borrow the layer above and the one below at the
+        // same time, which in turn lets the removal happen *after* the work
+        // instead of before it — so a lookup that fails cannot leave the
+        // document with a layer deleted and never merged into anything.
+        let Some(below) = self.active_layer.checked_sub(1) else {
             return false;
-        }
-        let upper = self.layers.remove(self.active_layer);
-        self.active_layer -= 1;
-        let lower = &mut self.layers[self.active_layer];
+        };
+        let Some((beneath, from_active)) = self.layers.split_at_mut_checked(self.active_layer)
+        else {
+            return false;
+        };
+        let (Some(lower), Some(upper)) = (beneath.get_mut(below), from_active.first()) else {
+            return false;
+        };
 
         // Blend upper onto lower
-        for y in 0..upper.pixels.height {
-            for x in 0..upper.pixels.width {
-                if let Some(mut c) = upper.pixels.get_pixel(x, y) {
+        for y in 0..upper.pixels.height() {
+            for x in 0..upper.pixels.width() {
+                if let Some(mut c) = upper.pixels.get(x, y) {
                     // Apply layer opacity
                     c = Color::rgba(c.r, c.g, c.b, (c.a as f32 * upper.opacity) as u8);
-                    lower.pixels.blend_pixel(x, y, c);
+                    lower.pixels.blend(x, y, c);
                 }
             }
         }
+
+        self.layers.remove(self.active_layer);
+        self.active_layer = below;
         true
     }
 
@@ -1962,8 +1772,8 @@ impl PaintApp {
     // ========================================================================
 
     /// Flattens all visible layers into a single pixel buffer.
-    pub fn flatten(&self) -> PixelBuffer {
-        let mut result = PixelBuffer::new(self.canvas_width, self.canvas_height, self.canvas_bg);
+    pub fn flatten(&self) -> Canvas {
+        let mut result = Canvas::filled(self.canvas_width, self.canvas_height, self.canvas_bg);
 
         for layer in &self.layers {
             if !layer.visible {
@@ -1971,10 +1781,10 @@ impl PaintApp {
             }
             for y in 0..self.canvas_height {
                 for x in 0..self.canvas_width {
-                    if let Some(mut c) = layer.pixels.get_pixel(x, y) {
+                    if let Some(mut c) = layer.pixels.get(x, y) {
                         c = Color::rgba(c.r, c.g, c.b, (c.a as f32 * layer.opacity) as u8);
                         if c.a > 0 {
-                            result.blend_pixel(x, y, c);
+                            result.blend(x, y, c);
                         }
                     }
                 }
@@ -2098,7 +1908,7 @@ impl PaintApp {
                         let px = sx + dx as i32;
                         let py = sy + dy as i32;
                         if px >= 0 && py >= 0 {
-                            layer.pixels.set_pixel(px as u32, py as u32, Color::TRANSPARENT);
+                            layer.pixels.set(px as u32, py as u32, Color::TRANSPARENT);
                         }
                     }
                 }
@@ -2113,8 +1923,8 @@ impl PaintApp {
             let sel = Selection {
                 x: 0,
                 y: 0,
-                width: content.width,
-                height: content.height,
+                width: content.width(),
+                height: content.height(),
                 content: Some(content),
             };
             self.selection = Some(sel);
@@ -2125,17 +1935,21 @@ impl PaintApp {
     pub fn apply_selection(&mut self) {
         if let Some(sel) = self.selection.take()
             && let Some(content) = &sel.content
-                && let Some(layer) = self.layers.get_mut(self.active_layer) {
-                    layer.pixels.paste(content, sel.x, sel.y);
-                }
+            && let Some(layer) = self.layers.get_mut(self.active_layer)
+        {
+            layer.pixels.blend_from(content, sel.x, sel.y);
+        }
     }
 
     /// Crops the canvas to the current selection.
     pub fn crop_to_selection(&mut self) {
         let (sx, sy, sw, sh) = match &self.selection {
-            Some(sel) if sel.has_area() => {
-                (sel.x.max(0) as u32, sel.y.max(0) as u32, sel.width, sel.height)
-            }
+            Some(sel) if sel.has_area() => (
+                sel.x.max(0) as u32,
+                sel.y.max(0) as u32,
+                sel.width,
+                sel.height,
+            ),
             _ => return,
         };
 
@@ -2223,12 +2037,12 @@ impl PaintApp {
         let buf = decode_bmp(&data).ok_or_else(|| "Invalid BMP format".to_string())?;
 
         self.push_history("load BMP");
-        self.canvas_width = buf.width;
-        self.canvas_height = buf.height;
+        self.canvas_width = buf.width();
+        self.canvas_height = buf.height();
 
         // Replace all layers with a single background layer
         self.layers.clear();
-        let mut layer = Layer::new("Background".to_string(), buf.width, buf.height);
+        let mut layer = Layer::new("Background".to_string(), buf.width(), buf.height());
         layer.pixels = buf;
         self.layers.push(layer);
         self.active_layer = 0;
@@ -2252,7 +2066,7 @@ impl PaintApp {
                 let size = self.brush.size;
                 if let Some(layer) = self.layers.get_mut(self.active_layer) {
                     if size <= 1 {
-                        layer.pixels.blend_pixel(canvas_x as u32, canvas_y as u32, color);
+                        layer.pixels.blend(canvas_x as u32, canvas_y as u32, color);
                     } else {
                         draw_filled_circle_at(
                             &mut layer.pixels,
@@ -2270,7 +2084,7 @@ impl PaintApp {
                 let size = self.brush.size;
                 if let Some(layer) = self.layers.get_mut(self.active_layer) {
                     if size <= 1 {
-                        layer.pixels.set_pixel(canvas_x as u32, canvas_y as u32, color);
+                        layer.pixels.set(canvas_x as u32, canvas_y as u32, color);
                     } else {
                         let half = (size / 2) as i32;
                         let r2 = half * half;
@@ -2280,7 +2094,7 @@ impl PaintApp {
                                     let px = canvas_x + dx;
                                     let py = canvas_y + dy;
                                     if px >= 0 && py >= 0 {
-                                        layer.pixels.set_pixel(px as u32, py as u32, color);
+                                        layer.pixels.set(px as u32, py as u32, color);
                                     }
                                 }
                             }
@@ -2291,15 +2105,17 @@ impl PaintApp {
             Tool::Fill => {
                 self.push_history("flood fill");
                 let color = self.drawing_color();
-                if canvas_x >= 0 && canvas_y >= 0
-                    && let Some(layer) = self.layers.get_mut(self.active_layer) {
-                        flood_fill(&mut layer.pixels, canvas_x as u32, canvas_y as u32, color);
-                    }
+                if canvas_x >= 0
+                    && canvas_y >= 0
+                    && let Some(layer) = self.layers.get_mut(self.active_layer)
+                {
+                    flood_fill(&mut layer.pixels, canvas_x as u32, canvas_y as u32, color);
+                }
             }
             Tool::Eyedropper => {
                 if canvas_x >= 0 && canvas_y >= 0 {
                     let flat = self.flatten();
-                    if let Some(c) = flat.get_pixel(canvas_x as u32, canvas_y as u32) {
+                    if let Some(c) = flat.get(canvas_x as u32, canvas_y as u32) {
                         self.fg_color = c;
                         self.add_recent_color(c);
                     }
@@ -2336,10 +2152,11 @@ impl PaintApp {
             Tool::Select => {
                 // Check if clicking inside an existing selection
                 if let Some(sel) = &self.selection
-                    && sel.contains(canvas_x, canvas_y) {
-                        self.moving_selection = true;
-                        return;
-                    }
+                    && sel.contains(canvas_x, canvas_y)
+                {
+                    self.moving_selection = true;
+                    return;
+                }
                 // Start a new selection
                 self.apply_selection();
                 self.selection = None;
@@ -2362,7 +2179,15 @@ impl PaintApp {
                 let color = self.drawing_color();
                 let size = self.brush.size;
                 if let Some(layer) = self.layers.get_mut(self.active_layer) {
-                    draw_line(&mut layer.pixels, prev_x, prev_y, canvas_x, canvas_y, color, size);
+                    draw_line(
+                        &mut layer.pixels,
+                        prev_x,
+                        prev_y,
+                        canvas_x,
+                        canvas_y,
+                        color,
+                        size,
+                    );
                 }
             }
             Tool::Eraser => {
@@ -2370,7 +2195,15 @@ impl PaintApp {
                 let size = self.brush.size;
                 if let Some(layer) = self.layers.get_mut(self.active_layer) {
                     // For eraser, use overwrite not blend
-                    draw_line(&mut layer.pixels, prev_x, prev_y, canvas_x, canvas_y, color, size);
+                    draw_line(
+                        &mut layer.pixels,
+                        prev_x,
+                        prev_y,
+                        canvas_x,
+                        canvas_y,
+                        color,
+                        size,
+                    );
                 }
             }
             Tool::SprayCan => {
@@ -2844,7 +2677,11 @@ impl PaintApp {
             let btn_h = 32.0;
 
             let is_active = tool == self.current_tool;
-            let bg = if is_active { MOCHA_BLUE } else { MOCHA_SURFACE0 };
+            let bg = if is_active {
+                MOCHA_BLUE
+            } else {
+                MOCHA_SURFACE0
+            };
             let fg = if is_active { MOCHA_CRUST } else { MOCHA_TEXT };
 
             cmds.push(RenderCommand::FillRect {
@@ -3088,11 +2925,11 @@ impl PaintApp {
         let pixel_w = z.max(1.0);
         let pixel_h = z.max(1.0);
 
-        for py in 0..layer.pixels.height {
+        for py in 0..layer.pixels.height() {
             let mut run_start: Option<(u32, Color)> = None;
 
-            for px in 0..layer.pixels.width {
-                let raw_color = match layer.pixels.get_pixel(px, py) {
+            for px in 0..layer.pixels.width() {
+                let raw_color = match layer.pixels.get(px, py) {
                     Some(c) => c,
                     None => continue,
                 };
@@ -3142,7 +2979,7 @@ impl PaintApp {
 
             // Flush last run
             if let Some((start, run_color)) = run_start {
-                let run_len = layer.pixels.width - start;
+                let run_len = layer.pixels.width() - start;
                 cmds.push(RenderCommand::FillRect {
                     x: base_x + start as f32 * z,
                     y: base_y + py as f32 * z,
@@ -3245,14 +3082,10 @@ impl PaintApp {
 
         match self.current_tool {
             Tool::Line => {
-                let (sx, sy) = self.canvas_to_window(
-                    self.drag.start_x as f32,
-                    self.drag.start_y as f32,
-                );
-                let (ex, ey) = self.canvas_to_window(
-                    self.drag.current_x as f32,
-                    self.drag.current_y as f32,
-                );
+                let (sx, sy) =
+                    self.canvas_to_window(self.drag.start_x as f32, self.drag.start_y as f32);
+                let (ex, ey) =
+                    self.canvas_to_window(self.drag.current_x as f32, self.drag.current_y as f32);
                 cmds.push(RenderCommand::Line {
                     x1: sx,
                     y1: sy,
@@ -3326,8 +3159,8 @@ impl PaintApp {
         let pts = &self.polygon_builder.points;
         let color = Color::rgba(self.fg_color.r, self.fg_color.g, self.fg_color.b, 180);
 
-        for i in 0..pts.len() {
-            let (wx, wy) = self.canvas_to_window(pts[i].0 as f32, pts[i].1 as f32);
+        for (i, &(vx, vy)) in pts.iter().enumerate() {
+            let (wx, wy) = self.canvas_to_window(vx as f32, vy as f32);
 
             // Draw vertex dot
             cmds.push(RenderCommand::FillRect {
@@ -3339,10 +3172,11 @@ impl PaintApp {
                 corner_radii: CornerRadii::all(3.0),
             });
 
-            // Draw edge to next vertex
-            if i + 1 < pts.len() {
-                let (wx2, wy2) =
-                    self.canvas_to_window(pts[i + 1].0 as f32, pts[i + 1].1 as f32);
+            // Draw edge to next vertex. `get(i + 1)` returns `None` at the last
+            // vertex, which is the same "there is no next one" the `i + 1 <
+            // len()` guard expressed — with the bound stated at the read.
+            if let Some(&(nx, ny)) = pts.get(i.wrapping_add(1)) {
+                let (wx2, wy2) = self.canvas_to_window(nx as f32, ny as f32);
                 cmds.push(RenderCommand::Line {
                     x1: wx,
                     y1: wy,
@@ -3777,28 +3611,26 @@ impl PaintApp {
         // Sliders
         let slider_x = dlg_x + 12.0;
         let slider_w = dlg_w - 24.0;
-        let slider_labels = ["R", "G", "B", "A"];
-        let slider_values = [
-            self.color_picker.red,
-            self.color_picker.green,
-            self.color_picker.blue,
-            self.color_picker.alpha,
-        ];
-        let slider_colors = [
-            Color::rgb(255, 80, 80),
-            Color::rgb(80, 200, 80),
-            Color::rgb(80, 120, 255),
-            Color::rgb(200, 200, 200),
+        // One array of rows rather than three arrays read at a common index:
+        // three arrays plus a hard-coded `0..4` is four places that have to
+        // agree about how many sliders there are, and nothing checks that they
+        // do. A row carries its own label, value and colour, so adding a
+        // channel is one line and cannot half-happen.
+        let sliders = [
+            ("R", self.color_picker.red, Color::rgb(255, 80, 80)),
+            ("G", self.color_picker.green, Color::rgb(80, 200, 80)),
+            ("B", self.color_picker.blue, Color::rgb(80, 120, 255)),
+            ("A", self.color_picker.alpha, Color::rgb(200, 200, 200)),
         ];
 
-        for i in 0..4 {
+        for (i, &(label, value, bar_color)) in sliders.iter().enumerate() {
             let sy = preview_y + 52.0 + i as f32 * 40.0;
 
             // Label
             cmds.push(RenderCommand::Text {
                 x: slider_x,
                 y: sy,
-                text: format!("{}: {}", slider_labels[i], slider_values[i]),
+                text: format!("{label}: {value}"),
                 font_size: 12.0,
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Regular,
@@ -3818,13 +3650,13 @@ impl PaintApp {
             });
 
             // Slider fill
-            let fill_ratio = slider_values[i] as f32 / 255.0;
+            let fill_ratio = f32::from(value) / 255.0;
             cmds.push(RenderCommand::FillRect {
                 x: slider_x,
                 y: track_y,
                 width: slider_w * fill_ratio,
                 height: 8.0,
-                color: slider_colors[i],
+                color: bar_color,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -3884,9 +3716,8 @@ impl PaintApp {
 
         // OK / Cancel buttons
         let btn_y = hex_y + 28.0;
-        let btn_labels_inner = ["OK", "Cancel"];
-        let btn_colors = [MOCHA_GREEN, MOCHA_RED];
-        for (i, &label) in btn_labels_inner.iter().enumerate() {
+        let buttons = [("OK", MOCHA_GREEN), ("Cancel", MOCHA_RED)];
+        for (i, &(label, label_color)) in buttons.iter().enumerate() {
             let bx = slider_x + i as f32 * 80.0;
             cmds.push(RenderCommand::FillRect {
                 x: bx,
@@ -3901,7 +3732,7 @@ impl PaintApp {
                 y: btn_y + 5.0,
                 text: label.to_string(),
                 font_size: 12.0,
-                color: btn_colors[i],
+                color: label_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -4117,11 +3948,7 @@ impl PaintApp {
                                 let px = sx + dx as i32;
                                 let py = sy + dy as i32;
                                 if px >= 0 && py >= 0 {
-                                    layer.pixels.set_pixel(
-                                        px as u32,
-                                        py as u32,
-                                        Color::TRANSPARENT,
-                                    );
+                                    layer.pixels.set(px as u32, py as u32, Color::TRANSPARENT);
                                 }
                             }
                         }
@@ -4238,155 +4065,167 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    // `float_cmp` likewise: a test asserting an exact geometry result wants
+    // exact equality, and an epsilon there would hide the regression it exists
+    // to catch.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp
+    )]
 
     use super::*;
 
-    // ---- PixelBuffer tests ----
+    // ---- Canvas tests ----
 
     #[test]
     fn test_pixel_buffer_new() {
-        let buf = PixelBuffer::new(10, 10, Color::RED);
-        assert_eq!(buf.width, 10);
-        assert_eq!(buf.height, 10);
-        assert_eq!(buf.data.len(), 400);
-        assert_eq!(buf.get_pixel(0, 0).unwrap(), Color::RED);
+        let buf = Canvas::filled(10, 10, Color::RED);
+        assert_eq!(buf.width(), 10);
+        assert_eq!(buf.height(), 10);
+        assert_eq!(buf.pixels().len(), 100);
+        assert_eq!(buf.get(0, 0).unwrap(), Color::RED);
     }
 
     #[test]
     fn test_pixel_buffer_transparent() {
-        let buf = PixelBuffer::transparent(5, 5);
-        assert_eq!(buf.get_pixel(0, 0).unwrap(), Color::TRANSPARENT);
+        let buf = Canvas::transparent(5, 5);
+        assert_eq!(buf.get(0, 0).unwrap(), Color::TRANSPARENT);
     }
 
     #[test]
     fn test_pixel_buffer_set_get() {
-        let mut buf = PixelBuffer::transparent(3, 3);
-        buf.set_pixel(1, 1, Color::BLUE);
-        assert_eq!(buf.get_pixel(1, 1).unwrap(), Color::BLUE);
-        assert_eq!(buf.get_pixel(0, 0).unwrap(), Color::TRANSPARENT);
+        let mut buf = Canvas::transparent(3, 3);
+        buf.set(1, 1, Color::BLUE);
+        assert_eq!(buf.get(1, 1).unwrap(), Color::BLUE);
+        assert_eq!(buf.get(0, 0).unwrap(), Color::TRANSPARENT);
     }
 
     #[test]
     fn test_pixel_buffer_out_of_bounds() {
-        let buf = PixelBuffer::new(2, 2, Color::WHITE);
-        assert!(buf.get_pixel(2, 0).is_none());
-        assert!(buf.get_pixel(0, 2).is_none());
-        assert!(buf.get_pixel(100, 100).is_none());
+        let buf = Canvas::filled(2, 2, Color::WHITE);
+        assert!(buf.get(2, 0).is_none());
+        assert!(buf.get(0, 2).is_none());
+        assert!(buf.get(100, 100).is_none());
     }
 
     #[test]
     fn test_pixel_buffer_fill() {
-        let mut buf = PixelBuffer::new(4, 4, Color::WHITE);
+        let mut buf = Canvas::filled(4, 4, Color::WHITE);
         buf.fill(Color::BLACK);
-        assert_eq!(buf.get_pixel(0, 0).unwrap(), Color::BLACK);
-        assert_eq!(buf.get_pixel(3, 3).unwrap(), Color::BLACK);
+        assert_eq!(buf.get(0, 0).unwrap(), Color::BLACK);
+        assert_eq!(buf.get(3, 3).unwrap(), Color::BLACK);
     }
 
     #[test]
     fn test_pixel_buffer_copy_region() {
-        let mut buf = PixelBuffer::new(10, 10, Color::WHITE);
-        buf.set_pixel(2, 2, Color::RED);
+        let mut buf = Canvas::filled(10, 10, Color::WHITE);
+        buf.set(2, 2, Color::RED);
         let region = buf.copy_region(1, 1, 4, 4);
-        assert_eq!(region.width, 4);
-        assert_eq!(region.height, 4);
-        assert_eq!(region.get_pixel(1, 1).unwrap(), Color::RED);
+        assert_eq!(region.width(), 4);
+        assert_eq!(region.height(), 4);
+        assert_eq!(region.get(1, 1).unwrap(), Color::RED);
     }
 
     #[test]
     fn test_pixel_buffer_paste() {
-        let mut dest = PixelBuffer::transparent(10, 10);
-        let src = PixelBuffer::new(3, 3, Color::GREEN);
-        dest.paste(&src, 2, 2);
-        assert_eq!(dest.get_pixel(2, 2).unwrap(), Color::GREEN);
-        assert_eq!(dest.get_pixel(4, 4).unwrap(), Color::GREEN);
-        assert_eq!(dest.get_pixel(5, 5).unwrap(), Color::TRANSPARENT);
+        let mut dest = Canvas::transparent(10, 10);
+        let src = Canvas::filled(3, 3, Color::GREEN);
+        dest.blend_from(&src, 2, 2);
+        assert_eq!(dest.get(2, 2).unwrap(), Color::GREEN);
+        assert_eq!(dest.get(4, 4).unwrap(), Color::GREEN);
+        assert_eq!(dest.get(5, 5).unwrap(), Color::TRANSPARENT);
     }
 
     #[test]
     fn test_pixel_buffer_paste_overwrite() {
-        let mut dest = PixelBuffer::new(10, 10, Color::RED);
-        let src = PixelBuffer::new(3, 3, Color::BLUE);
-        dest.paste_overwrite(&src, 0, 0);
-        assert_eq!(dest.get_pixel(0, 0).unwrap(), Color::BLUE);
-        assert_eq!(dest.get_pixel(3, 3).unwrap(), Color::RED);
+        let mut dest = Canvas::filled(10, 10, Color::RED);
+        let src = Canvas::filled(3, 3, Color::BLUE);
+        dest.draw_from(&src, 0, 0);
+        assert_eq!(dest.get(0, 0).unwrap(), Color::BLUE);
+        assert_eq!(dest.get(3, 3).unwrap(), Color::RED);
     }
 
     #[test]
     fn test_pixel_buffer_flip_horizontal() {
-        let mut buf = PixelBuffer::transparent(4, 1);
-        buf.set_pixel(0, 0, Color::RED);
-        buf.set_pixel(3, 0, Color::BLUE);
+        let mut buf = Canvas::transparent(4, 1);
+        buf.set(0, 0, Color::RED);
+        buf.set(3, 0, Color::BLUE);
         buf.flip_horizontal();
-        assert_eq!(buf.get_pixel(0, 0).unwrap(), Color::BLUE);
-        assert_eq!(buf.get_pixel(3, 0).unwrap(), Color::RED);
+        assert_eq!(buf.get(0, 0).unwrap(), Color::BLUE);
+        assert_eq!(buf.get(3, 0).unwrap(), Color::RED);
     }
 
     #[test]
     fn test_pixel_buffer_flip_vertical() {
-        let mut buf = PixelBuffer::transparent(1, 4);
-        buf.set_pixel(0, 0, Color::RED);
-        buf.set_pixel(0, 3, Color::BLUE);
+        let mut buf = Canvas::transparent(1, 4);
+        buf.set(0, 0, Color::RED);
+        buf.set(0, 3, Color::BLUE);
         buf.flip_vertical();
-        assert_eq!(buf.get_pixel(0, 0).unwrap(), Color::BLUE);
-        assert_eq!(buf.get_pixel(0, 3).unwrap(), Color::RED);
+        assert_eq!(buf.get(0, 0).unwrap(), Color::BLUE);
+        assert_eq!(buf.get(0, 3).unwrap(), Color::RED);
     }
 
     #[test]
     fn test_pixel_buffer_rotate_90_cw() {
-        let mut buf = PixelBuffer::transparent(3, 2);
-        buf.set_pixel(0, 0, Color::RED);
+        let mut buf = Canvas::transparent(3, 2);
+        buf.set(0, 0, Color::RED);
         let rotated = buf.rotate_90_cw();
-        assert_eq!(rotated.width, 2);
-        assert_eq!(rotated.height, 3);
-        assert_eq!(rotated.get_pixel(1, 0).unwrap(), Color::RED);
+        assert_eq!(rotated.width(), 2);
+        assert_eq!(rotated.height(), 3);
+        assert_eq!(rotated.get(1, 0).unwrap(), Color::RED);
     }
 
     #[test]
     fn test_pixel_buffer_rotate_90_ccw() {
-        let mut buf = PixelBuffer::transparent(3, 2);
-        buf.set_pixel(2, 0, Color::BLUE);
+        let mut buf = Canvas::transparent(3, 2);
+        buf.set(2, 0, Color::BLUE);
         let rotated = buf.rotate_90_ccw();
-        assert_eq!(rotated.width, 2);
-        assert_eq!(rotated.height, 3);
+        assert_eq!(rotated.width(), 2);
+        assert_eq!(rotated.height(), 3);
         // 90° CCW sends the top-right corner (2,0) of the 3x2 source to the
         // top-left corner (0,0) of the 2x3 result.
-        assert_eq!(rotated.get_pixel(0, 0).unwrap(), Color::BLUE);
+        assert_eq!(rotated.get(0, 0).unwrap(), Color::BLUE);
     }
 
     #[test]
     fn test_pixel_buffer_rotate_180() {
-        let mut buf = PixelBuffer::transparent(3, 3);
-        buf.set_pixel(0, 0, Color::RED);
+        let mut buf = Canvas::transparent(3, 3);
+        buf.set(0, 0, Color::RED);
         let rotated = buf.rotate_180();
-        assert_eq!(rotated.get_pixel(2, 2).unwrap(), Color::RED);
-        assert_eq!(rotated.get_pixel(0, 0).unwrap(), Color::TRANSPARENT);
+        assert_eq!(rotated.get(2, 2).unwrap(), Color::RED);
+        assert_eq!(rotated.get(0, 0).unwrap(), Color::TRANSPARENT);
     }
 
     #[test]
     fn test_pixel_buffer_resize_nearest() {
-        let buf = PixelBuffer::new(4, 4, Color::RED);
+        let buf = Canvas::filled(4, 4, Color::RED);
         let resized = buf.resize_nearest(8, 8);
-        assert_eq!(resized.width, 8);
-        assert_eq!(resized.height, 8);
-        assert_eq!(resized.get_pixel(0, 0).unwrap(), Color::RED);
-        assert_eq!(resized.get_pixel(7, 7).unwrap(), Color::RED);
+        assert_eq!(resized.width(), 8);
+        assert_eq!(resized.height(), 8);
+        assert_eq!(resized.get(0, 0).unwrap(), Color::RED);
+        assert_eq!(resized.get(7, 7).unwrap(), Color::RED);
     }
 
     #[test]
     fn test_pixel_buffer_resize_zero() {
-        let buf = PixelBuffer::new(4, 4, Color::RED);
+        let buf = Canvas::filled(4, 4, Color::RED);
         let resized = buf.resize_nearest(0, 0);
-        assert_eq!(resized.width, 0);
-        assert_eq!(resized.height, 0);
+        assert_eq!(resized.width(), 0);
+        assert_eq!(resized.height(), 0);
     }
 
     #[test]
     fn test_pixel_buffer_blend() {
-        let mut buf = PixelBuffer::new(2, 2, Color::WHITE);
+        let mut buf = Canvas::filled(2, 2, Color::WHITE);
         let semi = Color::rgba(255, 0, 0, 128);
-        buf.blend_pixel(0, 0, semi);
-        let result = buf.get_pixel(0, 0).unwrap();
+        buf.blend(0, 0, semi);
+        let result = buf.get(0, 0).unwrap();
         // After blending red with 50% alpha over white, should be pinkish
         assert!(result.r > 128);
         assert!(result.g < 200);
@@ -4396,151 +4235,151 @@ mod tests {
 
     #[test]
     fn test_draw_line_horizontal() {
-        let mut buf = PixelBuffer::transparent(10, 1);
+        let mut buf = Canvas::transparent(10, 1);
         draw_line(&mut buf, 0, 0, 9, 0, Color::RED, 1);
         for x in 0..10 {
-            assert_eq!(buf.get_pixel(x, 0).unwrap(), Color::RED);
+            assert_eq!(buf.get(x, 0).unwrap(), Color::RED);
         }
     }
 
     #[test]
     fn test_draw_line_vertical() {
-        let mut buf = PixelBuffer::transparent(1, 10);
+        let mut buf = Canvas::transparent(1, 10);
         draw_line(&mut buf, 0, 0, 0, 9, Color::BLUE, 1);
         for y in 0..10 {
-            assert_eq!(buf.get_pixel(0, y).unwrap(), Color::BLUE);
+            assert_eq!(buf.get(0, y).unwrap(), Color::BLUE);
         }
     }
 
     #[test]
     fn test_draw_line_diagonal() {
-        let mut buf = PixelBuffer::transparent(10, 10);
+        let mut buf = Canvas::transparent(10, 10);
         draw_line(&mut buf, 0, 0, 9, 9, Color::GREEN, 1);
-        assert_eq!(buf.get_pixel(0, 0).unwrap(), Color::GREEN);
-        assert_eq!(buf.get_pixel(9, 9).unwrap(), Color::GREEN);
-        assert_eq!(buf.get_pixel(5, 5).unwrap(), Color::GREEN);
+        assert_eq!(buf.get(0, 0).unwrap(), Color::GREEN);
+        assert_eq!(buf.get(9, 9).unwrap(), Color::GREEN);
+        assert_eq!(buf.get(5, 5).unwrap(), Color::GREEN);
     }
 
     #[test]
     fn test_draw_line_thick() {
-        let mut buf = PixelBuffer::transparent(20, 20);
+        let mut buf = Canvas::transparent(20, 20);
         draw_line(&mut buf, 5, 10, 15, 10, Color::RED, 4);
         // Center pixel should be set
-        assert_eq!(buf.get_pixel(10, 10).unwrap(), Color::RED);
+        assert_eq!(buf.get(10, 10).unwrap(), Color::RED);
         // Pixels above/below should be set too (thickness 4 => radius 2)
-        assert_eq!(buf.get_pixel(10, 9).unwrap(), Color::RED);
+        assert_eq!(buf.get(10, 9).unwrap(), Color::RED);
     }
 
     #[test]
     fn test_draw_rect_outline() {
-        let mut buf = PixelBuffer::transparent(10, 10);
+        let mut buf = Canvas::transparent(10, 10);
         draw_rect_outline(&mut buf, 1, 1, 8, 8, Color::RED, 1);
         // Top edge
-        assert_eq!(buf.get_pixel(1, 1).unwrap(), Color::RED);
-        assert_eq!(buf.get_pixel(8, 1).unwrap(), Color::RED);
+        assert_eq!(buf.get(1, 1).unwrap(), Color::RED);
+        assert_eq!(buf.get(8, 1).unwrap(), Color::RED);
         // Center should be transparent
-        assert_eq!(buf.get_pixel(5, 5).unwrap(), Color::TRANSPARENT);
+        assert_eq!(buf.get(5, 5).unwrap(), Color::TRANSPARENT);
     }
 
     #[test]
     fn test_draw_rect_filled() {
-        let mut buf = PixelBuffer::transparent(10, 10);
+        let mut buf = Canvas::transparent(10, 10);
         draw_rect_filled(&mut buf, 2, 2, 4, 4, Color::BLUE);
-        assert_eq!(buf.get_pixel(2, 2).unwrap(), Color::BLUE);
-        assert_eq!(buf.get_pixel(5, 5).unwrap(), Color::BLUE);
-        assert_eq!(buf.get_pixel(6, 6).unwrap(), Color::TRANSPARENT);
+        assert_eq!(buf.get(2, 2).unwrap(), Color::BLUE);
+        assert_eq!(buf.get(5, 5).unwrap(), Color::BLUE);
+        assert_eq!(buf.get(6, 6).unwrap(), Color::TRANSPARENT);
     }
 
     #[test]
     fn test_draw_ellipse_filled() {
-        let mut buf = PixelBuffer::transparent(20, 20);
+        let mut buf = Canvas::transparent(20, 20);
         draw_ellipse_filled(&mut buf, 10, 10, 5, 5, Color::RED);
         // Center should be filled
-        assert_eq!(buf.get_pixel(10, 10).unwrap(), Color::RED);
+        assert_eq!(buf.get(10, 10).unwrap(), Color::RED);
         // Far corner should not
-        assert_eq!(buf.get_pixel(0, 0).unwrap(), Color::TRANSPARENT);
+        assert_eq!(buf.get(0, 0).unwrap(), Color::TRANSPARENT);
     }
 
     #[test]
     fn test_draw_ellipse_outline() {
-        let mut buf = PixelBuffer::transparent(30, 30);
+        let mut buf = Canvas::transparent(30, 30);
         draw_ellipse_outline(&mut buf, 15, 15, 10, 8, Color::GREEN, 1);
         // Center should not be filled for outline
-        assert_eq!(buf.get_pixel(15, 15).unwrap(), Color::TRANSPARENT);
+        assert_eq!(buf.get(15, 15).unwrap(), Color::TRANSPARENT);
         // Top of ellipse should be colored
-        assert_eq!(buf.get_pixel(15, 7).unwrap(), Color::GREEN);
+        assert_eq!(buf.get(15, 7).unwrap(), Color::GREEN);
     }
 
     #[test]
     fn test_draw_ellipse_zero_radius() {
-        let mut buf = PixelBuffer::transparent(10, 10);
+        let mut buf = Canvas::transparent(10, 10);
         draw_ellipse_filled(&mut buf, 5, 5, 0, 0, Color::RED);
         // Should not crash and center should remain transparent
-        assert_eq!(buf.get_pixel(5, 5).unwrap(), Color::TRANSPARENT);
+        assert_eq!(buf.get(5, 5).unwrap(), Color::TRANSPARENT);
     }
 
     #[test]
     fn test_draw_rounded_rect_outline() {
-        let mut buf = PixelBuffer::transparent(30, 30);
+        let mut buf = Canvas::transparent(30, 30);
         draw_rounded_rect_outline(&mut buf, 2, 2, 26, 26, 4, Color::RED, 1);
         // Should have pixels on the border
-        assert_ne!(buf.get_pixel(15, 2).unwrap(), Color::TRANSPARENT);
+        assert_ne!(buf.get(15, 2).unwrap(), Color::TRANSPARENT);
     }
 
     #[test]
     fn test_draw_rounded_rect_filled() {
-        let mut buf = PixelBuffer::transparent(30, 30);
+        let mut buf = Canvas::transparent(30, 30);
         draw_rounded_rect_filled(&mut buf, 2, 2, 26, 26, 4, Color::BLUE);
         // Center should be filled
-        assert_eq!(buf.get_pixel(15, 15).unwrap(), Color::BLUE);
+        assert_eq!(buf.get(15, 15).unwrap(), Color::BLUE);
     }
 
     #[test]
     fn test_flood_fill_basic() {
-        let mut buf = PixelBuffer::new(5, 5, Color::WHITE);
+        let mut buf = Canvas::filled(5, 5, Color::WHITE);
         flood_fill(&mut buf, 0, 0, Color::RED);
         // All pixels should be red now
         for y in 0..5 {
             for x in 0..5 {
-                assert_eq!(buf.get_pixel(x, y).unwrap(), Color::RED);
+                assert_eq!(buf.get(x, y).unwrap(), Color::RED);
             }
         }
     }
 
     #[test]
     fn test_flood_fill_bounded() {
-        let mut buf = PixelBuffer::new(5, 5, Color::WHITE);
+        let mut buf = Canvas::filled(5, 5, Color::WHITE);
         // Draw a border
         for i in 0..5 {
-            buf.set_pixel(2, i, Color::BLACK);
+            buf.set(2, i, Color::BLACK);
         }
         flood_fill(&mut buf, 0, 0, Color::RED);
         // Left side should be red
-        assert_eq!(buf.get_pixel(0, 0).unwrap(), Color::RED);
-        assert_eq!(buf.get_pixel(1, 2).unwrap(), Color::RED);
+        assert_eq!(buf.get(0, 0).unwrap(), Color::RED);
+        assert_eq!(buf.get(1, 2).unwrap(), Color::RED);
         // Right side should still be white
-        assert_eq!(buf.get_pixel(3, 0).unwrap(), Color::WHITE);
+        assert_eq!(buf.get(3, 0).unwrap(), Color::WHITE);
         // Border should still be black
-        assert_eq!(buf.get_pixel(2, 0).unwrap(), Color::BLACK);
+        assert_eq!(buf.get(2, 0).unwrap(), Color::BLACK);
     }
 
     #[test]
     fn test_flood_fill_same_color() {
-        let mut buf = PixelBuffer::new(3, 3, Color::RED);
+        let mut buf = Canvas::filled(3, 3, Color::RED);
         flood_fill(&mut buf, 1, 1, Color::RED);
         // Should not change anything (target = fill color)
-        assert_eq!(buf.get_pixel(1, 1).unwrap(), Color::RED);
+        assert_eq!(buf.get(1, 1).unwrap(), Color::RED);
     }
 
     #[test]
     fn test_spray_paint() {
-        let mut buf = PixelBuffer::transparent(20, 20);
+        let mut buf = Canvas::transparent(20, 20);
         spray_paint(&mut buf, 10, 10, 5, Color::RED, 50, 42);
         // At least some pixels should be colored
         let mut colored = 0;
         for y in 0..20 {
             for x in 0..20 {
-                if buf.get_pixel(x, y).unwrap() != Color::TRANSPARENT {
+                if buf.get(x, y).unwrap() != Color::TRANSPARENT {
                     colored += 1;
                 }
             }
@@ -4552,22 +4391,22 @@ mod tests {
 
     #[test]
     fn test_bmp_encode_decode_roundtrip() {
-        let mut buf = PixelBuffer::new(4, 4, Color::WHITE);
-        buf.set_pixel(0, 0, Color::RED);
-        buf.set_pixel(3, 3, Color::BLUE);
+        let mut buf = Canvas::filled(4, 4, Color::WHITE);
+        buf.set(0, 0, Color::RED);
+        buf.set(3, 3, Color::BLUE);
 
         let encoded = encode_bmp(&buf);
         let decoded = decode_bmp(&encoded).unwrap();
 
-        assert_eq!(decoded.width, 4);
-        assert_eq!(decoded.height, 4);
-        assert_eq!(decoded.get_pixel(0, 0).unwrap(), Color::rgba(220, 50, 50, 255));
-        assert_eq!(decoded.get_pixel(3, 3).unwrap(), Color::rgba(50, 100, 220, 255));
+        assert_eq!(decoded.width(), 4);
+        assert_eq!(decoded.height(), 4);
+        assert_eq!(decoded.get(0, 0).unwrap(), Color::rgba(220, 50, 50, 255));
+        assert_eq!(decoded.get(3, 3).unwrap(), Color::rgba(50, 100, 220, 255));
     }
 
     #[test]
     fn test_bmp_header() {
-        let buf = PixelBuffer::new(2, 2, Color::BLACK);
+        let buf = Canvas::filled(2, 2, Color::BLACK);
         let encoded = encode_bmp(&buf);
         assert_eq!(encoded[0], b'B');
         assert_eq!(encoded[1], b'M');
@@ -4599,13 +4438,13 @@ mod tests {
         assert_eq!(layer.name, "Test");
         assert!(layer.visible);
         assert_eq!(layer.opacity, 1.0);
-        assert_eq!(layer.pixels.width, 100);
+        assert_eq!(layer.pixels.width(), 100);
     }
 
     #[test]
     fn test_layer_with_background() {
         let layer = Layer::with_background("BG".to_string(), 5, 5, Color::RED);
-        assert_eq!(layer.pixels.get_pixel(0, 0).unwrap(), Color::RED);
+        assert_eq!(layer.pixels.get(0, 0).unwrap(), Color::RED);
     }
 
     #[test]
@@ -4810,10 +4649,10 @@ mod tests {
         pb.add_point(10, 20);
         pb.close();
 
-        let mut buf = PixelBuffer::transparent(25, 25);
+        let mut buf = Canvas::transparent(25, 25);
         pb.draw_outline(&mut buf, Color::RED, 1);
         // Top edge should have pixels
-        assert_eq!(buf.get_pixel(10, 0).unwrap(), Color::RED);
+        assert_eq!(buf.get(10, 0).unwrap(), Color::RED);
     }
 
     #[test]
@@ -4825,10 +4664,10 @@ mod tests {
         pb.add_point(0, 20);
         pb.close();
 
-        let mut buf = PixelBuffer::transparent(25, 25);
+        let mut buf = Canvas::transparent(25, 25);
         pb.draw_filled(&mut buf, Color::BLUE);
         // Center should be filled
-        assert_eq!(buf.get_pixel(10, 10).unwrap(), Color::BLUE);
+        assert_eq!(buf.get(10, 10).unwrap(), Color::BLUE);
     }
 
     #[test]
@@ -4845,7 +4684,7 @@ mod tests {
     fn test_polygon_builder_too_few_points_outline() {
         let mut pb = PolygonBuilder::new();
         pb.add_point(0, 0);
-        let mut buf = PixelBuffer::transparent(10, 10);
+        let mut buf = Canvas::transparent(10, 10);
         pb.draw_outline(&mut buf, Color::RED, 1);
         // Should not crash, no pixels drawn
     }
@@ -4855,7 +4694,7 @@ mod tests {
         let mut pb = PolygonBuilder::new();
         pb.add_point(0, 0);
         pb.add_point(5, 5);
-        let mut buf = PixelBuffer::transparent(10, 10);
+        let mut buf = Canvas::transparent(10, 10);
         pb.draw_filled(&mut buf, Color::RED);
         // Should not crash (fewer than 3 points)
     }
@@ -5028,16 +4867,16 @@ mod tests {
     #[test]
     fn test_clipboard_store_and_get() {
         let mut cb = Clipboard::new();
-        cb.store(PixelBuffer::new(5, 5, Color::RED));
+        cb.store(Canvas::filled(5, 5, Color::RED));
         assert!(cb.has_content());
         let content = cb.get().unwrap();
-        assert_eq!(content.width, 5);
+        assert_eq!(content.width(), 5);
     }
 
     #[test]
     fn test_clipboard_clear() {
         let mut cb = Clipboard::new();
-        cb.store(PixelBuffer::new(3, 3, Color::BLACK));
+        cb.store(Canvas::filled(3, 3, Color::BLACK));
         cb.clear();
         assert!(!cb.has_content());
     }
@@ -5218,11 +5057,11 @@ mod tests {
     fn test_paint_app_merge_layer_down() {
         let mut app = PaintApp::new(100.0, 100.0);
         app.add_layer();
-        app.layers[1].pixels.set_pixel(5, 5, Color::RED);
+        app.layers[1].pixels.set(5, 5, Color::RED);
         assert!(app.merge_layer_down());
         assert_eq!(app.layers.len(), 1);
         // Merged pixel should be present
-        assert_eq!(app.layers[0].pixels.get_pixel(5, 5).unwrap(), Color::RED);
+        assert_eq!(app.layers[0].pixels.get(5, 5).unwrap(), Color::RED);
     }
 
     #[test]
@@ -5231,23 +5070,66 @@ mod tests {
         assert!(!app.merge_layer_down()); // Can't merge bottom layer
     }
 
+    // `layers` and `active_layer` are both public fields, and nothing in
+    // `PaintApp` ties them together — the invariant "the index is in range" is
+    // a convention maintained by ten separate assignments. Both operations
+    // below reached `Vec::remove` / `Vec` indexing with whatever the field
+    // happened to say, so a caller that set it directly, or restored a
+    // `HistorySnapshot` of its own construction (equally public), took the
+    // editor down. Declining is the right answer; panicking is not.
+
+    #[test]
+    fn deleting_a_layer_with_a_stale_active_index_declines_rather_than_panicking() {
+        let mut app = PaintApp::new(100.0, 100.0);
+        app.add_layer();
+        assert_eq!(app.layers.len(), 2);
+        app.active_layer = 7;
+        assert!(!app.delete_layer());
+        assert_eq!(app.layers.len(), 2, "nothing should have been removed");
+    }
+
+    #[test]
+    fn merging_down_with_a_stale_active_index_declines_rather_than_panicking() {
+        let mut app = PaintApp::new(100.0, 100.0);
+        app.add_layer();
+        app.active_layer = 7;
+        assert!(!app.merge_layer_down());
+        assert_eq!(app.layers.len(), 2, "nothing should have been merged away");
+    }
+
+    #[test]
+    fn merging_down_leaves_the_document_whole_when_it_declines() {
+        // The old order removed the upper layer and *then* looked up the lower
+        // one. Any failure after the removal would have lost a layer without
+        // merging it into anything; doing the blend first makes that
+        // impossible rather than merely unlikely.
+        let mut app = PaintApp::new(20.0, 20.0);
+        app.add_layer();
+        app.layers[1].pixels.set(3, 3, Color::RED);
+        app.active_layer = 1;
+        assert!(app.merge_layer_down());
+        assert_eq!(app.layers.len(), 1);
+        assert_eq!(app.active_layer, 0);
+        assert_eq!(app.layers[0].pixels.get(3, 3).unwrap(), Color::RED);
+    }
+
     #[test]
     fn test_paint_app_flatten() {
         let mut app = PaintApp::new(100.0, 100.0);
-        app.layers[0].pixels.set_pixel(0, 0, Color::RED);
+        app.layers[0].pixels.set(0, 0, Color::RED);
         let flat = app.flatten();
-        assert_eq!(flat.get_pixel(0, 0).unwrap(), Color::RED);
+        assert_eq!(flat.get(0, 0).unwrap(), Color::RED);
     }
 
     #[test]
     fn test_paint_app_flatten_invisible_layer() {
         let mut app = PaintApp::new(100.0, 100.0);
         app.add_layer();
-        app.layers[1].pixels.set_pixel(0, 0, Color::RED);
+        app.layers[1].pixels.set(0, 0, Color::RED);
         app.layers[1].visible = false;
         let flat = app.flatten();
         // Should see the background, not the invisible layer's red pixel
-        assert_ne!(flat.get_pixel(0, 0).unwrap(), Color::RED);
+        assert_ne!(flat.get(0, 0).unwrap(), Color::RED);
     }
 
     #[test]
@@ -5325,9 +5207,9 @@ mod tests {
     fn test_paint_app_undo_redo() {
         let mut app = PaintApp::new(100.0, 100.0);
         app.push_history("initial");
-        app.layers[0].pixels.set_pixel(0, 0, Color::RED);
+        app.layers[0].pixels.set(0, 0, Color::RED);
         assert!(app.undo());
-        assert_eq!(app.layers[0].pixels.get_pixel(0, 0).unwrap(), Color::WHITE);
+        assert_eq!(app.layers[0].pixels.get(0, 0).unwrap(), Color::WHITE);
         assert!(app.redo());
     }
 
@@ -5440,25 +5322,19 @@ mod tests {
     #[test]
     fn test_paint_app_flip_horizontal() {
         let mut app = PaintApp::new(100.0, 100.0);
-        app.layers[0].pixels.set_pixel(0, 0, Color::RED);
+        app.layers[0].pixels.set(0, 0, Color::RED);
         app.flip_horizontal();
         let w = app.canvas_width;
-        assert_eq!(
-            app.layers[0].pixels.get_pixel(w - 1, 0).unwrap(),
-            Color::RED
-        );
+        assert_eq!(app.layers[0].pixels.get(w - 1, 0).unwrap(), Color::RED);
     }
 
     #[test]
     fn test_paint_app_flip_vertical() {
         let mut app = PaintApp::new(100.0, 100.0);
-        app.layers[0].pixels.set_pixel(0, 0, Color::BLUE);
+        app.layers[0].pixels.set(0, 0, Color::BLUE);
         app.flip_vertical();
         let h = app.canvas_height;
-        assert_eq!(
-            app.layers[0].pixels.get_pixel(0, h - 1).unwrap(),
-            Color::BLUE
-        );
+        assert_eq!(app.layers[0].pixels.get(0, h - 1).unwrap(), Color::BLUE);
     }
 
     #[test]
@@ -5467,8 +5343,8 @@ mod tests {
         app.resize_canvas(400, 300);
         assert_eq!(app.canvas_width, 400);
         assert_eq!(app.canvas_height, 300);
-        assert_eq!(app.layers[0].pixels.width, 400);
-        assert_eq!(app.layers[0].pixels.height, 300);
+        assert_eq!(app.layers[0].pixels.width(), 400);
+        assert_eq!(app.layers[0].pixels.height(), 300);
     }
 
     #[test]
@@ -5493,16 +5369,13 @@ mod tests {
         app.current_tool = Tool::Fill;
         app.fg_color = Color::RED;
         app.on_canvas_press(5, 5);
-        assert_eq!(
-            app.layers[0].pixels.get_pixel(5, 5).unwrap(),
-            Color::RED,
-        );
+        assert_eq!(app.layers[0].pixels.get(5, 5).unwrap(), Color::RED,);
     }
 
     #[test]
     fn test_paint_app_on_canvas_press_eyedropper() {
         let mut app = PaintApp::new(100.0, 100.0);
-        app.layers[0].pixels.set_pixel(10, 10, Color::rgb(100, 200, 50));
+        app.layers[0].pixels.set(10, 10, Color::rgb(100, 200, 50));
         app.current_tool = Tool::Eyedropper;
         app.on_canvas_press(10, 10);
         assert_eq!(app.fg_color, Color::rgb(100, 200, 50));
@@ -5607,7 +5480,7 @@ mod tests {
     #[test]
     fn test_copy_paste_selection() {
         let mut app = PaintApp::new(100.0, 100.0);
-        app.layers[0].pixels.set_pixel(5, 5, Color::RED);
+        app.layers[0].pixels.set(5, 5, Color::RED);
         app.selection = Some(Selection::new(5, 5, 2, 2));
         app.copy_selection();
         assert!(app.clipboard.has_content());
@@ -5616,21 +5489,18 @@ mod tests {
     #[test]
     fn test_cut_selection() {
         let mut app = PaintApp::new(100.0, 100.0);
-        app.layers[0].pixels.set_pixel(5, 5, Color::RED);
+        app.layers[0].pixels.set(5, 5, Color::RED);
         app.selection = Some(Selection::new(5, 5, 2, 2));
         app.push_history("cut");
         app.cut_selection();
         assert!(app.clipboard.has_content());
-        assert_eq!(
-            app.layers[0].pixels.get_pixel(5, 5).unwrap(),
-            Color::TRANSPARENT
-        );
+        assert_eq!(app.layers[0].pixels.get(5, 5).unwrap(), Color::TRANSPARENT);
     }
 
     #[test]
     fn test_paste_creates_selection() {
         let mut app = PaintApp::new(100.0, 100.0);
-        app.clipboard.store(PixelBuffer::new(10, 10, Color::BLUE));
+        app.clipboard.store(Canvas::filled(10, 10, Color::BLUE));
         app.paste();
         assert!(app.selection.is_some());
         let sel = app.selection.as_ref().unwrap();
@@ -5723,28 +5593,22 @@ mod tests {
     #[test]
     fn test_paint_app_rotate_90_cw() {
         let mut app = PaintApp::new(100.0, 100.0);
-        app.layers[0].pixels.set_pixel(0, 0, Color::RED);
+        app.layers[0].pixels.set(0, 0, Color::RED);
         app.rotate_90_cw();
         // After 90 CW rotation of an 800x600 buffer:
         // (0,0) -> (height-1, 0) in the new buffer
-        let new_w = app.layers[0].pixels.width;
-        assert_eq!(
-            app.layers[0].pixels.get_pixel(new_w - 1, 0).unwrap(),
-            Color::RED
-        );
+        let new_w = app.layers[0].pixels.width();
+        assert_eq!(app.layers[0].pixels.get(new_w - 1, 0).unwrap(), Color::RED);
     }
 
     #[test]
     fn test_paint_app_rotate_180() {
         let mut app = PaintApp::new(100.0, 100.0);
-        app.layers[0].pixels.set_pixel(0, 0, Color::BLUE);
+        app.layers[0].pixels.set(0, 0, Color::BLUE);
         app.rotate_180();
-        let w = app.layers[0].pixels.width;
-        let h = app.layers[0].pixels.height;
-        assert_eq!(
-            app.layers[0].pixels.get_pixel(w - 1, h - 1).unwrap(),
-            Color::BLUE
-        );
+        let w = app.layers[0].pixels.width();
+        let h = app.layers[0].pixels.height();
+        assert_eq!(app.layers[0].pixels.get(w - 1, h - 1).unwrap(), Color::BLUE);
     }
 
     // ---- Drawing color tests ----
@@ -5775,10 +5639,7 @@ mod tests {
         app.on_canvas_press(5, 5);
         app.on_canvas_release(50, 5);
         // Line should be drawn from (5,5) to (50,5)
-        assert_eq!(
-            app.layers[0].pixels.get_pixel(25, 5).unwrap(),
-            Color::BLACK
-        );
+        assert_eq!(app.layers[0].pixels.get(25, 5).unwrap(), Color::BLACK);
     }
 
     #[test]
@@ -5789,10 +5650,7 @@ mod tests {
         app.on_canvas_press(10, 10);
         app.on_canvas_release(30, 30);
         // Center of rectangle should be filled
-        assert_eq!(
-            app.layers[0].pixels.get_pixel(20, 20).unwrap(),
-            Color::BLACK
-        );
+        assert_eq!(app.layers[0].pixels.get(20, 20).unwrap(), Color::BLACK);
     }
 
     #[test]
@@ -5803,9 +5661,6 @@ mod tests {
         app.on_canvas_press(10, 10);
         app.on_canvas_release(50, 40);
         // Center should be filled
-        assert_ne!(
-            app.layers[0].pixels.get_pixel(30, 25).unwrap(),
-            Color::WHITE,
-        );
+        assert_ne!(app.layers[0].pixels.get(30, 25).unwrap(), Color::WHITE,);
     }
 }

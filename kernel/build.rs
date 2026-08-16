@@ -51,7 +51,13 @@ use std::process::Command;
 /// would produce an object that links fine and misbehaves under interrupt.
 /// Kept identical to `kernel/ada/virtqueue.gpr`, which is what gnatprove reads
 /// — if these two disagree, we prove one thing and ship another.
-const ADA_FLAGS: &[&str] = &["-mno-red-zone", "-mcmodel=kernel", "-O2", "-gnatwa", "-gnatw.X"];
+const ADA_FLAGS: &[&str] = &[
+    "-mno-red-zone",
+    "-mcmodel=kernel",
+    "-O2",
+    "-gnatwa",
+    "-gnatw.X",
+];
 
 /// Ada unit names to compile. GNAT requires the object file to be named after
 /// the unit, so this doubles as the object basename.
@@ -195,7 +201,8 @@ fn ada_stamp(ada: &Path) -> String {
 }
 
 fn verify_against_toolchain(gcc: &Path, ada: &Path, prebuilt: &Path) {
-    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|_| ".".into())).join("adaverify");
+    let out =
+        PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|_| ".".into())).join("adaverify");
     if std::fs::create_dir_all(&out).is_err() {
         return;
     }
@@ -218,12 +225,17 @@ fn verify_against_toolchain(gcc: &Path, ada: &Path, prebuilt: &Path) {
             // that the committed object can satisfy. Warn loudly instead: the
             // stamp already guarantees the object matches the sources.
             _ => {
-                println!("cargo:warning=Ada toolchain found but failed to compile {unit}; using the committed object. The stamp check still passed.");
+                println!(
+                    "cargo:warning=Ada toolchain found but failed to compile {unit}; using the committed object. The stamp check still passed."
+                );
                 continue;
             }
         }
 
-        let (a, b) = (std::fs::read(&produced), std::fs::read(prebuilt.join(format!("{unit}.o"))));
+        let (a, b) = (
+            std::fs::read(&produced),
+            std::fs::read(prebuilt.join(format!("{unit}.o"))),
+        );
         if let (Ok(a), Ok(b)) = (a, b) {
             assert!(
                 a == b,
@@ -245,7 +257,11 @@ fn find_ada_gcc() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let exe = if cfg!(windows) { "x86_64-elf-gcc.exe" } else { "x86_64-elf-gcc" };
+    let exe = if cfg!(windows) {
+        "x86_64-elf-gcc.exe"
+    } else {
+        "x86_64-elf-gcc"
+    };
 
     // PATH.
     if let Ok(path) = std::env::var("PATH") {
@@ -260,9 +276,15 @@ fn find_ada_gcc() -> Option<PathBuf> {
     // Alire's toolchain cache, whose directory name carries a version and a
     // hash we deliberately do not hardcode -- glob for the crate prefix so a
     // toolchain upgrade does not silently stop being found.
-    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).ok()?;
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()?;
     let cache = Path::new(&home).join("AppData/Local/alire/cache/toolchains");
-    let cache = if cache.is_dir() { cache } else { Path::new(&home).join(".local/share/alire/toolchains") };
+    let cache = if cache.is_dir() {
+        cache
+    } else {
+        Path::new(&home).join(".local/share/alire/toolchains")
+    };
     let entries = std::fs::read_dir(cache).ok()?;
     for e in entries.flatten() {
         let name = e.file_name();

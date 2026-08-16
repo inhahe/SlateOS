@@ -5,6 +5,11 @@ edition = "2024"
 description = "SlateOS Image Viewer — photo and image viewing with zoom and slideshow"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# Every field this viewer reads out of a BMP, PNG, MP4, Matroska or AVI file
+# comes from a byte offset that the file itself supplied. `byteread` is how
+# those reads state their own bound, instead of resting on a length check
+# written twenty lines earlier -- see `byteread/src/lib.rs`.
+byteread = { path = "../../byteread" }
 
 [lints]
 workspace = true

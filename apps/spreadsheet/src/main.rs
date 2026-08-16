@@ -22,6 +22,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textfind;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -1709,20 +1710,13 @@ impl FindReplace {
         if self.search_text.is_empty() {
             return;
         }
-        let search = if self.case_sensitive {
-            self.search_text.clone()
-        } else {
-            self.search_text.to_lowercase()
-        };
-
+        // Folding both sides into fresh `String`s allocated twice per cell and
+        // got the answer wrong for any character whose folded form is a
+        // different length; `textfind` compares the folded forms as it walks,
+        // allocating neither.
+        let case = textfind::Case::sensitive(self.case_sensitive);
         for (&addr, cell) in &sheet.cells {
-            let text = cell.display_text();
-            let compare = if self.case_sensitive {
-                text.clone()
-            } else {
-                text.to_lowercase()
-            };
-            if compare.contains(&search) {
+            if textfind::contains(&cell.display_text(), &self.search_text, case) {
                 self.results.push(addr);
             }
         }
@@ -1812,19 +1806,27 @@ impl FindReplace {
 }
 
 /// Case-insensitive string replacement.
+///
+/// The offsets come from `textfind`, so they are offsets into `text` itself.
+/// This used to search `text.to_lowercase()` and then slice `text` with the
+/// copy's offsets, which is wrong three ways:
+///
+/// * folding is not length-preserving (`İ` U+0130 is two bytes and folds to
+///   three), so `&text[start..abs_pos]` could slice inside a character and
+///   panic;
+/// * it advanced by the *unfolded* needle's byte length inside the folded
+///   copy, which lands mid-character for a needle that grows when folded;
+/// * an empty needle matched at every position without advancing `start`, so
+///   the loop appended `replacement` forever.
 fn case_insensitive_replace(text: &str, search: &str, replacement: &str) -> String {
-    let lower_text = text.to_lowercase();
-    let lower_search = search.to_lowercase();
     let mut result = String::new();
-    let mut start = 0;
-
-    while let Some(pos) = lower_text[start..].find(&lower_search) {
-        let abs_pos = start + pos;
-        result.push_str(&text[start..abs_pos]);
+    let mut at = 0;
+    for (start, end) in textfind::matches(text, search, textfind::Case::Insensitive) {
+        result.push_str(text.get(at..start).unwrap_or(""));
         result.push_str(replacement);
-        start = abs_pos + search.len();
+        at = end;
     }
-    result.push_str(&text[start..]);
+    result.push_str(text.get(at..).unwrap_or(""));
     result
 }
 
@@ -5274,6 +5276,40 @@ mod tests {
             case_insensitive_replace("Hello World", "hello", "hi"),
             "hi World"
         );
+    }
+
+    /// Replacement slices the cell text, not a lowercased copy of it.
+    ///
+    /// Turkish `İ` (U+0130) is two bytes and folds to three, so the offsets
+    /// from the folded copy pointed one byte past where they should — inside
+    /// the following character in the real text, which panics in `&text[..]`.
+    #[test]
+    fn a_replacement_slices_the_text_it_was_given() {
+        assert_eq!(
+            case_insensitive_replace("\u{130}abc\u{130}", "ABC", "-"),
+            "\u{130}-\u{130}"
+        );
+    }
+
+    /// A needle that grows when folded is matched and skipped whole, rather
+    /// than resumed inside.
+    #[test]
+    fn a_needle_that_grows_when_folded_is_skipped_whole() {
+        assert_eq!(case_insensitive_replace("x\u{130}y", "i\u{307}", "I"), "xIy");
+    }
+
+    /// Replacements do not overlap: `aa` occurs twice in `aaaa`.
+    #[test]
+    fn replacements_do_not_overlap() {
+        assert_eq!(case_insensitive_replace("aaaa", "aa", "b"), "bb");
+    }
+
+    /// An empty needle replaces nothing. It used to match at every position
+    /// without advancing, so the loop appended the replacement until the
+    /// process ran out of memory.
+    #[test]
+    fn an_empty_needle_replaces_nothing() {
+        assert_eq!(case_insensitive_replace("abc", "", "X"), "abc");
     }
 
     // -- Selection tests --

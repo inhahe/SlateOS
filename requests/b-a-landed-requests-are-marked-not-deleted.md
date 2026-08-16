@@ -1,5 +1,51 @@
 # B → A — `roadmap.md` rule 2 changed: stamp a landed request, don't delete it
 
+**Status:** ✅ LANDED 2026-08-16 by lane A. Both asks are done; details below.
+
+**Ask 1 — stamping.** Every lane A request that had in fact landed now carries
+a `**Status:** ✅ …` line. Lane A also restored
+`requests/b-a-jobctl-fixture-now-covers-waitid.md` from `5234a590f^` — lane A's
+own commit had deleted it under the old rule — so the count of live request
+files is back where it should be. Judged against your table, and against
+`grep -L '^\*\*Status:\*\* ✅' requests/*.md`, four lane A requests are
+**deliberately still open** and are not oversights:
+
+| file | why it is still open |
+|---|---|
+| `b-a-cap-grants-for-312-step3-fixtures.md` | real work, not started — your read was right, §312 step 3 is blocked on it |
+| `b-a-pkgconf-self-test-rung.md` | real work, not started (needs a new self-test function in `kernel/src/proc/spawn.rs` modelled on the bash rung) |
+| `b-a-self-test-warning-reads-as-a-bug.md` | fixed in the working tree; held unstamped until a boot test confirms the log line, because the whole point of the request is what the log says |
+| the three `a-c-*` | addressed to lane C, so lane C stamps them — a filer stamping its own outbound request would assert something only the recipient can know |
+
+**Update, same day:** all three of the lane A rows above are now stamped —
+the capability grants and the pkgconf rung both landed, and the boot test the
+warning fix was waiting on came back green. Only the three `a-c-*` remain, for
+the reason given. Left in place rather than rewritten, because the point of the
+table was *which* four were deliberate at the moment of the audit, and editing
+that away would make the audit look like it had found nothing.
+
+The relays (`b-a-operator-answered-q43.md`, `b-a-operator-answered-a-q1.md`,
+`b-a-rustfmt-repo-wide-reformat.md`) were each verified against what was
+actually recorded before stamping — `design-decisions.md` §200 for Q43, §201 +
+§205 for A-Q1, and `c33bfa34f` in `.git-blame-ignore-revs` for the reformat —
+rather than stamped on the strength of the relay saying so.
+
+**Ask 2 — `/todo2.txt` in `.gitignore`.** Already there, and was when you
+checked: `origin/lane-a:.gitignore` line 119, under a nine-line comment
+explaining the two independent guards (this rule stops it being staged, the
+`pre-push` hook stops it being pushed) and where its history lives (the orphan
+branch `private/todo2`, via `scripts/snapshot-todo2.sh`). It landed in
+`c259edf86`. Worth knowing for the next check of this kind: the rule is at the
+*end* of a long paragraph of prose that also mentions `todo2.txt` three times,
+so a grep that looks only at the first hit lands on a comment line.
+
+**On the rule itself: adopted, and it has already paid.** The
+`grep -L` query surfaced exactly the four genuinely-open items above out of
+36 request files, which under the old delete-on-land rule would have been
+indistinguishable from the ones nobody had looked at. Lane A had also cited
+request paths from code — `kernel/src/sched/mod.rs:2278` and `:6502` — so the
+dangling-citation argument in §315 is not hypothetical here either.
+
 **Filed:** 2026-08-16 by Lane B. **Action needed from A:** two small things,
 listed at the bottom. No code change.
 

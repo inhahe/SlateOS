@@ -3853,9 +3853,7 @@ pub const WAIT_INFO_SIZE: usize = 72;
 /// address space to write into. The layout is an ABI promise; a test that
 /// could only reach it through `copy_to_user` could not check it at all
 /// from a bare kernel task.
-pub(crate) fn wait_info_image(
-    found: &crate::syscall::wait::FoundEvent,
-) -> [u8; WAIT_INFO_SIZE] {
+pub(crate) fn wait_info_image(found: &crate::syscall::wait::FoundEvent) -> [u8; WAIT_INFO_SIZE] {
     /// One tick is 10 ms at `USER_HZ == 100`; see `sys_getrusage`, which is
     /// the other consumer of these same counters and must not disagree.
     const US_PER_TICK: u64 = 10_000;
@@ -3979,10 +3977,7 @@ pub fn sys_process_wait_status(args: &SyscallArgs) -> SyscallResult {
     // caller garbage — see `wait_opt::WINFO` for why no amount of validation
     // substitutes for asking.
     let (info_ptr, info_size) = if options & wait_opt::WINFO != 0 {
-        (
-            args.arg3,
-            usize::try_from(args.arg4).unwrap_or(usize::MAX),
-        )
+        (args.arg3, usize::try_from(args.arg4).unwrap_or(usize::MAX))
     } else {
         (0, 0)
     };
@@ -4105,7 +4100,8 @@ pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
                 write_reaped_pid(out_ptr, found.pid);
             }
             match found.event {
-                wait::ChildEvent::Exited(info) => {
+                wait::ChildEvent::Exited(info) =>
+                {
                     #[allow(clippy::cast_possible_wrap)]
                     SyscallResult::ok(info.exit_code as i64)
                 }
@@ -4114,9 +4110,7 @@ pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
                 // `unreachable!()` because a panic here would be a kernel
                 // panic reachable from an unprivileged syscall if that
                 // invariant ever broke.
-                wait::ChildEvent::JobControl(_) => {
-                    SyscallResult::err(KernelError::InvalidArgument)
-                }
+                wait::ChildEvent::JobControl(_) => SyscallResult::err(KernelError::InvalidArgument),
             }
         }
         // `nohang: false`, so the primitive cannot report a miss.
@@ -4161,15 +4155,14 @@ pub fn sys_process_try_wait(args: &SyscallArgs) -> SyscallResult {
                 write_reaped_pid(out_ptr, found.pid);
             }
             match found.event {
-                wait::ChildEvent::Exited(info) => {
+                wait::ChildEvent::Exited(info) =>
+                {
                     #[allow(clippy::cast_possible_wrap)]
                     SyscallResult::ok(info.exit_code as i64)
                 }
                 // Unreachable — no job-control class was requested; see
                 // `sys_process_wait` for why this is handled, not panicked on.
-                wait::ChildEvent::JobControl(_) => {
-                    SyscallResult::err(KernelError::InvalidArgument)
-                }
+                wait::ChildEvent::JobControl(_) => SyscallResult::err(KernelError::InvalidArgument),
             }
         }
         Ok(None) => SyscallResult::err(KernelError::WouldBlock),

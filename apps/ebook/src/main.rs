@@ -28,6 +28,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::textfind;
 #[allow(unused_imports)]
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
@@ -495,26 +496,27 @@ pub struct SearchMatch {
 }
 
 /// Find all case-insensitive occurrences of `needle` in `haystack`.
+///
+/// The offsets are offsets into `haystack` — the book text the reader draws
+/// and slices — not into a lowercased copy of it. This used to search
+/// `haystack.to_lowercase()` and report the copy's offsets, which is wrong
+/// three ways at once, all of them reachable in a real book:
+///
+/// * folding is not length-preserving (`İ` U+0130 is two bytes and folds to
+///   three), so every offset after such a character was shifted, and the
+///   `&book.text[page_start..m.byte_offset]` in the highlighter would then
+///   slice inside a character and panic;
+/// * `byte_len` was the *needle's* length, so a match on a character that
+///   changes length when folded was underlined at the wrong width;
+/// * the scan resumed one byte past the *start* of each match, so `aa` in
+///   `aaaa` was reported three times, overlapping.
 pub fn find_all_matches(haystack: &str, needle: &str) -> Vec<SearchMatch> {
-    if needle.is_empty() {
-        return Vec::new();
-    }
-
-    let lower_haystack = haystack.to_lowercase();
-    let lower_needle = needle.to_lowercase();
-    let mut matches = Vec::new();
-    let mut start = 0usize;
-
-    while let Some(pos) = lower_haystack[start..].find(&lower_needle) {
-        let absolute = start.saturating_add(pos);
-        matches.push(SearchMatch {
-            byte_offset: absolute,
-            byte_len: lower_needle.len(),
-        });
-        start = absolute.saturating_add(1);
-    }
-
-    matches
+    textfind::matches(haystack, needle, textfind::Case::Insensitive)
+        .map(|(start, end)| SearchMatch {
+            byte_offset: start,
+            byte_len: end.saturating_sub(start),
+        })
+        .collect()
 }
 
 /// Determine which page a byte offset falls on.
@@ -2552,6 +2554,44 @@ mod tests {
     fn test_find_all_matches_no_match() {
         let matches = find_all_matches("some text", "xyz");
         assert!(matches.is_empty());
+    }
+
+    /// A match offset is an offset into the book, not into a lowercased copy
+    /// of it. Turkish `I` with a dot above (U+0130) is two bytes and folds to
+    /// three, so the old search reported byte 3 for a match that really
+    /// begins at byte 2 — and the highlighter then sliced `book.text` at a
+    /// byte inside a character, which panics.
+    #[test]
+    fn a_match_offset_is_an_offset_into_the_book() {
+        let text = "\u{130}abc";
+        let matches = find_all_matches(text, "ABC");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].byte_offset, 2);
+        assert_eq!(matches[0].byte_len, 3);
+        // Which is to say: the reported range slices the real text.
+        assert_eq!(&text[2..5], "abc");
+    }
+
+    /// A match is as long as the text it matched, not as long as the needle.
+    #[test]
+    fn a_match_length_is_the_length_of_what_matched() {
+        let text = "x\u{130}y";
+        let matches = find_all_matches(text, "i\u{307}");
+        assert_eq!(matches.len(), 1);
+        assert_eq!((matches[0].byte_offset, matches[0].byte_len), (1, 2));
+    }
+
+    /// Matches do not overlap: `aa` occurs twice in `aaaa`, not three times.
+    #[test]
+    fn matches_do_not_overlap() {
+        let matches = find_all_matches("aaaa", "aa");
+        assert_eq!(
+            matches
+                .iter()
+                .map(|m| (m.byte_offset, m.byte_len))
+                .collect::<Vec<_>>(),
+            [(0, 2), (2, 2)]
+        );
     }
 
     #[test]

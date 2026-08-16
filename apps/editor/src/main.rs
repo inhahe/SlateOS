@@ -19,6 +19,7 @@ mod syntree;
 
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderTree};
+use guitk::tabs::Tabs;
 use guitk::text;
 use highlight::{DEFAULT_THEME, HighlightState, StyledToken, Token};
 use syntree::{Pos, SyntaxTree};
@@ -1113,135 +1114,12 @@ impl FindState {
 // Editor state (multi-tab)
 // ============================================================================
 
-/// The open documents, and which one is in front.
-///
-/// The editor is never in a state with no document open — closing the last
-/// tab opens a fresh empty one — and every screen the editor draws needs
-/// *the* active document, not an optional one. Expressing that as a plain
-/// `Vec` plus an index made the invariant a convention: five call sites
-/// indexed straight into the vector, `close_tab` called `Vec::remove` with
-/// an index nothing had re-checked, and two places computed `len() - 1` on
-/// a vector that the type system was happy to let be empty. Any one of
-/// those panics the whole editor, losing every unsaved buffer, not just the
-/// one whose index went stale.
-///
-/// Splitting the first document out of the vector makes "at least one
-/// document" a fact the compiler knows, which is what lets [`Tabs::active`]
-/// hand back a `&Document` with no unwrap and no panic. The index is
-/// private for the same reason: it can only be moved through
-/// [`Tabs::set_active`], which clamps.
-pub struct Tabs {
-    /// The first tab. Always present — that is the whole point of storing
-    /// it outside `rest`.
-    head: Document,
-    /// Tabs 1..n. `rest[i]` is tab `i + 1`.
-    rest: Vec<Document>,
-    /// Index of the tab in front, in the combined numbering. Kept in range
-    /// by every method that can disturb it; `active`/`active_mut` fall back
-    /// to the first tab rather than panicking if it ever is not.
-    active: usize,
-}
+// The open documents, and which one is in front, live in
+// `guitk::tabs::Tabs` — a `Vec<Document>` plus an `active: usize` left "at
+// least one is open" and "the index names one" as conventions every call
+// site had to keep, and both editors had broken them. The generic type is
+// in the toolkit because the markdown editor needs exactly the same thing.
 
-impl Tabs {
-    /// A single empty untitled document.
-    pub fn new() -> Self {
-        Self {
-            head: Document::new(),
-            rest: Vec::new(),
-            active: 0,
-        }
-    }
-
-    /// Number of open tabs. Never zero — which is why this is `count` and
-    /// not `len`: a `len` invites an `is_empty` whose answer is always
-    /// `false`, and a reader who has to check that is a reader the type was
-    /// supposed to reassure.
-    pub fn count(&self) -> usize {
-        self.rest.len().saturating_add(1)
-    }
-
-    /// Index of the tab in front.
-    pub fn active_index(&self) -> usize {
-        self.active
-    }
-
-    /// Bring tab `i` to the front, clamping to the last tab.
-    pub fn set_active(&mut self, i: usize) {
-        self.active = i.min(self.count().saturating_sub(1));
-    }
-
-    pub fn get(&self, i: usize) -> Option<&Document> {
-        match i.checked_sub(1) {
-            None => Some(&self.head),
-            Some(j) => self.rest.get(j),
-        }
-    }
-
-    pub fn get_mut(&mut self, i: usize) -> Option<&mut Document> {
-        match i.checked_sub(1) {
-            None => Some(&mut self.head),
-            Some(j) => self.rest.get_mut(j),
-        }
-    }
-
-    /// The tab in front.
-    pub fn active(&self) -> &Document {
-        self.get(self.active).unwrap_or(&self.head)
-    }
-
-    /// The tab in front, mutably.
-    pub fn active_mut(&mut self) -> &mut Document {
-        match self.active.checked_sub(1) {
-            None => &mut self.head,
-            // Borrowck sees `rest` and `head` as disjoint fields, so the
-            // fallback is allowed even though `get_mut` borrowed `rest`.
-            Some(j) => match self.rest.get_mut(j) {
-                Some(doc) => doc,
-                None => &mut self.head,
-            },
-        }
-    }
-
-    /// Every open tab, in tab order.
-    pub fn iter(&self) -> impl Iterator<Item = &Document> {
-        std::iter::once(&self.head).chain(self.rest.iter())
-    }
-
-    /// Append a tab and bring it to the front. Returns its index.
-    pub fn open(&mut self, doc: Document) -> usize {
-        self.rest.push(doc);
-        self.active = self.count().saturating_sub(1);
-        self.active
-    }
-
-    /// Close the tab in front. Closing the only tab replaces it with a fresh
-    /// empty one rather than leaving nothing open.
-    pub fn close_active(&mut self) {
-        match self.active.checked_sub(1) {
-            // Closing tab 0: the next tab is promoted to `head`, or — if
-            // there is no next tab — `head` becomes a new empty document.
-            None => {
-                self.head = if self.rest.is_empty() {
-                    Document::new()
-                } else {
-                    self.rest.remove(0)
-                };
-            }
-            Some(j) => {
-                if j < self.rest.len() {
-                    self.rest.remove(j);
-                }
-            }
-        }
-        self.active = self.active.min(self.count().saturating_sub(1));
-    }
-}
-
-impl Default for Tabs {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Byte offset just past a case-folded match of `needle` starting exactly at
 /// byte offset `at` in `haystack`, or `None` if there is no match there.
@@ -1281,7 +1159,7 @@ fn folded_match_end(haystack: &str, at: usize, needle: &str) -> Option<usize> {
 /// Complete editor application state.
 pub struct EditorState {
     /// Open documents (tabs), and which is in front.
-    pub tabs: Tabs,
+    pub tabs: Tabs<Document>,
     /// Find & replace state.
     pub find: FindState,
     /// Whether find panel is visible.
@@ -3023,7 +2901,7 @@ mod tab_tests {
         d
     }
 
-    fn names(tabs: &Tabs) -> Vec<String> {
+    fn names(tabs: &Tabs<Document>) -> Vec<String> {
         tabs.iter().map(|d| d.name.clone()).collect()
     }
 
@@ -3032,7 +2910,7 @@ mod tab_tests {
         // The editor draws *the* active document on every frame; there is no
         // "no document" screen. Closing the last tab therefore has to leave a
         // fresh empty one rather than an empty list.
-        let mut tabs = Tabs::new();
+        let mut tabs: Tabs<Document> = Tabs::new();
         assert_eq!(tabs.count(), 1);
         tabs.close_active();
         assert_eq!(tabs.count(), 1);
@@ -3044,7 +2922,7 @@ mod tab_tests {
     fn closing_the_first_tab_promotes_the_next_one() {
         // The first tab is stored apart from the rest, so closing it is the
         // one case that has to move a document rather than remove one.
-        let mut tabs = Tabs::new();
+        let mut tabs: Tabs<Document> = Tabs::new();
         tabs.open(named("b"));
         tabs.open(named("c"));
         tabs.set_active(0);
@@ -3055,7 +2933,7 @@ mod tab_tests {
 
     #[test]
     fn closing_the_last_tab_moves_the_selection_back_one() {
-        let mut tabs = Tabs::new();
+        let mut tabs: Tabs<Document> = Tabs::new();
         tabs.open(named("b"));
         tabs.open(named("c"));
         assert_eq!(tabs.active().name, "c");
@@ -3066,7 +2944,7 @@ mod tab_tests {
 
     #[test]
     fn closing_a_middle_tab_leaves_the_others_in_order() {
-        let mut tabs = Tabs::new();
+        let mut tabs: Tabs<Document> = Tabs::new();
         tabs.open(named("b"));
         tabs.open(named("c"));
         tabs.set_active(1);
@@ -3080,7 +2958,7 @@ mod tab_tests {
         // The index used to be a public field, so any stale value reached
         // `documents[active_tab]` and took the editor — and every unsaved
         // buffer in it — down. It can now only move through `set_active`.
-        let mut tabs = Tabs::new();
+        let mut tabs: Tabs<Document> = Tabs::new();
         tabs.open(named("b"));
         tabs.set_active(99);
         assert_eq!(tabs.active_index(), 1);

@@ -1,5 +1,26 @@
 # B → A — a passing self-test prints `WARNING: exit hook table full`, and it reads as a resource-exhaustion bug
 
+**Status:** ✅ LANDED 2026-08-16 by lane A, and **confirmed by boot test**
+rather than by reading the diff — the whole point of the request being what
+the log actually says. The serial log now reads:
+
+```
+[sched] Registered exit hook at slot 7 (addr 0xffffffff810198f0)
+[sched]   (expected) exit hook table full (8 slots) — provoked by a self-test
+[sched] Unregistered exit hook at slot 0
+```
+
+The word `WARNING` is gone from that line, and a `grep -c WARNING` over the
+whole boot now returns 3, all of them pre-existing and unrelated (one `[fat]`
+unclean-unmount notice, two `[lockdep]` self-test lines).
+
+A second, unasked-for fix rode along: the provoking test leaked a hook slot on
+its failure path. `test_exit_hooks` now `unregister_exit_hook(extra)` there
+too, which is why the log above shows all eight slots (0–7) being released
+rather than seven. That bug was invisible while the line said `WARNING`,
+because the noise it made was indistinguishable from the noise the test made
+on purpose — which is a fair summary of why your request was worth filing.
+
 **Filed:** 2026-08-16 by Lane B. **Action needed from A:** one clarifying word
 on one log line in `kernel/src/sched/mod.rs`. Two minutes of work; filed
 because it cost Lane B a full investigative pass today.

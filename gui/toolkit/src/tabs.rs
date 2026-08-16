@@ -539,6 +539,190 @@ impl TabView {
     }
 }
 
+// ============================================================================
+// Tabs<T> — the model behind a tab bar
+// ============================================================================
+
+/// The open items, and which one is in front — with "at least one is open"
+/// enforced by the type rather than by convention.
+///
+/// [`TabView`] above draws a tab bar; this is what a document-oriented
+/// application keeps *behind* one. Both editors reached for the obvious
+/// shape — a `Vec<Document>` plus an `active: usize` — and both then had to
+/// maintain, by hand and at every call site, the two facts the shape does
+/// not encode: that the vector is never empty, and that the index is in
+/// range. Between them that convention produced eight bare index
+/// expressions, three `len() - 1` subtractions on a vector nothing proved
+/// non-empty, and a `Vec::remove` with an index no one had re-checked. Every
+/// one of those panics the whole application, losing every unsaved buffer
+/// rather than just the one whose index went stale.
+///
+/// Splitting the first item out of the vector makes "at least one" a fact
+/// the compiler knows, which is what lets [`Tabs::active`] return a `&T`
+/// with no `unwrap` and no panic. The index is private for the same reason:
+/// it moves only through methods that clamp it.
+///
+/// ```
+/// use guitk::tabs::Tabs;
+///
+/// let mut tabs: Tabs<String> = Tabs::with("first".to_string());
+/// assert_eq!(tabs.count(), 1);
+///
+/// tabs.open("second".to_string());
+/// assert_eq!(tabs.active_index(), 1);
+/// assert_eq!(tabs.active(), "second");
+///
+/// // An out-of-range index cannot make the active item vanish.
+/// tabs.set_active(99);
+/// assert_eq!(tabs.active_index(), 1);
+///
+/// // Closing the last one leaves a fresh item, never an empty set.
+/// tabs.close(1);
+/// tabs.close(0);
+/// assert_eq!(tabs.count(), 1);
+/// assert_eq!(tabs.active(), "");
+/// ```
+#[derive(Clone, Debug)]
+pub struct Tabs<T> {
+    /// The first item. Always present — that is the whole point of storing
+    /// it outside `rest`.
+    head: T,
+    /// Items `1..n`. `rest[i]` is item `i + 1`.
+    rest: Vec<T>,
+    /// Index of the item in front, in the combined numbering. Kept in range
+    /// by every method that can disturb it; [`Tabs::active`] falls back to
+    /// the first item rather than panicking if it somehow is not.
+    active: usize,
+}
+
+impl<T> Tabs<T> {
+    /// A set holding exactly `first`.
+    pub fn with(first: T) -> Self {
+        Self {
+            head: first,
+            rest: Vec::new(),
+            active: 0,
+        }
+    }
+
+    /// Number of open items. Never zero — which is why this is `count` and
+    /// not `len`: a `len` invites an `is_empty` whose answer is always
+    /// `false`, and a reader who has to check that is a reader the type was
+    /// supposed to reassure.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.rest.len().saturating_add(1)
+    }
+
+    /// Index of the item in front.
+    #[must_use]
+    pub fn active_index(&self) -> usize {
+        self.active
+    }
+
+    /// Bring item `i` to the front, clamping to the last item.
+    pub fn set_active(&mut self, i: usize) {
+        self.active = i.min(self.count().saturating_sub(1));
+    }
+
+    /// The item at `i`, or `None` if there is no such item.
+    #[must_use]
+    pub fn get(&self, i: usize) -> Option<&T> {
+        match i.checked_sub(1) {
+            None => Some(&self.head),
+            Some(j) => self.rest.get(j),
+        }
+    }
+
+    /// The item at `i`, mutably.
+    pub fn get_mut(&mut self, i: usize) -> Option<&mut T> {
+        match i.checked_sub(1) {
+            None => Some(&mut self.head),
+            Some(j) => self.rest.get_mut(j),
+        }
+    }
+
+    /// The item in front.
+    #[must_use]
+    pub fn active(&self) -> &T {
+        self.get(self.active).unwrap_or(&self.head)
+    }
+
+    /// The item in front, mutably.
+    pub fn active_mut(&mut self) -> &mut T {
+        match self.active.checked_sub(1) {
+            None => &mut self.head,
+            // Borrowck sees `rest` and `head` as disjoint fields, so the
+            // fallback is allowed even though the arm borrowed `rest`.
+            Some(j) => match self.rest.get_mut(j) {
+                Some(item) => item,
+                None => &mut self.head,
+            },
+        }
+    }
+
+    /// Every open item, in tab order.
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        core::iter::once(&self.head).chain(self.rest.iter())
+    }
+
+    /// Every open item, in tab order, mutably.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        core::iter::once(&mut self.head).chain(self.rest.iter_mut())
+    }
+
+    /// Append an item and bring it to the front. Returns its index.
+    pub fn open(&mut self, item: T) -> usize {
+        self.rest.push(item);
+        self.active = self.count().saturating_sub(1);
+        self.active
+    }
+}
+
+impl<T: Default> Tabs<T> {
+    /// A set holding one default-constructed item.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with(T::default())
+    }
+
+    /// Close item `i`. Closing the only item replaces it with a fresh
+    /// default one rather than leaving nothing open; an index that names no
+    /// item does nothing at all.
+    pub fn close(&mut self, i: usize) {
+        if i >= self.count() {
+            return;
+        }
+        if self.rest.is_empty() {
+            self.head = T::default();
+            self.active = 0;
+            return;
+        }
+        match i.checked_sub(1) {
+            // Closing item 0 promotes the next one into `head`.
+            None => self.head = self.rest.remove(0),
+            Some(j) => {
+                self.rest.remove(j);
+            }
+        }
+        if self.active > i {
+            self.active = self.active.saturating_sub(1);
+        }
+        self.active = self.active.min(self.count().saturating_sub(1));
+    }
+
+    /// Close the item in front.
+    pub fn close_active(&mut self) {
+        self.close(self.active);
+    }
+}
+
+impl<T: Default> Default for Tabs<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,5 +863,101 @@ mod tests {
         // Content should start at y=0 with bottom tabs
         assert!(content_y.abs() < f32::EPSILON);
         assert!((content_height - (300.0 - TAB_BAR_HEIGHT)).abs() < f32::EPSILON);
+    }
+
+    // --- Tabs<T> ---
+
+    fn abc() -> Tabs<String> {
+        let mut t = Tabs::with("a".to_string());
+        t.open("b".to_string());
+        t.open("c".to_string());
+        t
+    }
+
+    #[test]
+    fn a_tab_set_is_never_empty() {
+        let mut t: Tabs<String> = Tabs::new();
+        assert_eq!(t.count(), 1);
+        // Closing the only tab is the case that used to leave a `Vec` the
+        // next `documents[active]` would index into.
+        t.close(0);
+        assert_eq!(t.count(), 1);
+        t.close_active();
+        assert_eq!(t.count(), 1);
+        assert_eq!(t.active(), "");
+    }
+
+    #[test]
+    fn opening_brings_the_new_tab_to_the_front() {
+        let t = abc();
+        assert_eq!(t.count(), 3);
+        assert_eq!(t.active_index(), 2);
+        assert_eq!(t.active(), "c");
+    }
+
+    #[test]
+    fn indices_address_the_tabs_in_order() {
+        let t = abc();
+        assert_eq!(t.get(0).map(String::as_str), Some("a"));
+        assert_eq!(t.get(1).map(String::as_str), Some("b"));
+        assert_eq!(t.get(2).map(String::as_str), Some("c"));
+        assert_eq!(t.get(3), None);
+        assert_eq!(
+            t.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_index_is_clamped_rather_than_trusted() {
+        let mut t = abc();
+        t.set_active(99);
+        assert_eq!(t.active_index(), 2);
+        assert_eq!(t.active(), "c");
+        // And an out-of-range close is a no-op, not a `Vec::remove` panic.
+        t.close(99);
+        assert_eq!(t.count(), 3);
+    }
+
+    #[test]
+    fn closing_the_first_tab_promotes_the_next_one() {
+        let mut t = abc();
+        t.set_active(0);
+        t.close(0);
+        assert_eq!(t.iter().map(String::as_str).collect::<Vec<_>>(), ["b", "c"]);
+        assert_eq!(t.active(), "b");
+    }
+
+    #[test]
+    fn closing_a_tab_before_the_active_one_keeps_the_same_tab_in_front() {
+        let mut t = abc();
+        assert_eq!(t.active(), "c");
+        t.close(1);
+        assert_eq!(t.active(), "c");
+        assert_eq!(t.active_index(), 1);
+    }
+
+    #[test]
+    fn closing_the_last_tab_moves_the_front_back_one() {
+        let mut t = abc();
+        t.close_active();
+        assert_eq!(t.active_index(), 1);
+        assert_eq!(t.active(), "b");
+    }
+
+    #[test]
+    fn mutation_reaches_the_tab_it_names() {
+        let mut t = abc();
+        if let Some(b) = t.get_mut(1) {
+            b.push('!');
+        }
+        t.active_mut().push('?');
+        for s in t.iter_mut() {
+            s.insert(0, '<');
+        }
+        assert_eq!(
+            t.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["<a", "<b!", "<c?"]
+        );
     }
 }

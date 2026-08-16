@@ -34,6 +34,7 @@ use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 // ============================================================================
@@ -194,7 +195,11 @@ pub struct ColumnDef {
 // ============================================================================
 
 /// A typed cell value that knows how to format itself for display.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `PartialEq`, `Eq`, `PartialOrd` and `Ord` are all written in terms of one
+/// hand-written [`Ord::cmp`], so the four cannot disagree. See that impl for
+/// why they are not derived.
+#[derive(Clone, Debug)]
 pub enum ColumnValue {
     /// Plain text.
     Text(String),
@@ -226,36 +231,83 @@ impl ColumnValue {
         }
     }
 
-    /// Return a sort key so different value types can be compared.
-    /// Higher-priority types sort first; within a type the natural
-    /// order is used. Empty always sorts last.
-    pub fn sort_key(&self) -> (u8, i128) {
+    /// Rank of the value's *kind*, the primary sort key when two cells in one
+    /// column hold different kinds — which happens whenever a provider has a
+    /// value for one file and not another. `Empty` always sorts last so blank
+    /// cells collect at the bottom rather than the top.
+    fn kind_rank(&self) -> u8 {
         match self {
-            Self::Empty => (255, 0),
-            Self::Text(s) => {
-                // Use the first 8 bytes of the lowercase string as a rough
-                // numeric key. Full text comparison is handled separately.
-                let bytes = s.to_lowercase();
-                let mut key: i128 = 0;
-                for (i, b) in bytes.bytes().take(16).enumerate() {
-                    key |= i128::from(b) << (120 - i * 8);
-                }
-                (0, key)
+            Self::Text(_) => 0,
+            Self::Number(_) => 1,
+            Self::Size(_) => 2,
+            Self::DateTime(_) => 3,
+            Self::Duration(_) => 4,
+            Self::Percentage(_) => 5,
+            Self::Empty => 255,
+        }
+    }
+}
+
+// `PartialEq` is written in terms of `cmp` rather than derived, and `cmp` is
+// written by hand rather than derived, for reasons that are worth stating
+// because the obvious shortcuts were both taken here before and both wrong.
+//
+// **Why not a packed integer key.** The original `sort_key` returned
+// `(u8, i128)` and packed a text value into the i128 as its first sixteen
+// lowercased bytes. That has two defects. The first is a truncation: two names
+// sharing a sixteen-byte prefix compared `Equal` while `PartialEq` called them
+// different, so `Ord`'s contract — `cmp` is `Equal` exactly when `==` — was
+// violated, and `sort_by` is permitted to do anything at all with a comparator
+// like that. The second is a sign flip: the leading byte was shifted into bit
+// 127, the i128 sign bit, so any name whose first byte is >= 0x80 — that is,
+// *every* name that does not begin with an ASCII character — produced a
+// negative key and sorted before every ASCII name. A folder of accented or
+// CJK filenames sorted as one block ahead of the rest, for no reason a user
+// could see. Comparing the strings directly has neither problem and is
+// cheaper: it stops at the first differing character instead of walking
+// sixteen bytes and allocating a lowercased copy of the whole name.
+//
+// **Why not derive `Eq`.** `Percentage` holds an `f32`, and a derived
+// `PartialEq` makes NaN unequal to itself, which `Eq` forbids. Rather than
+// give up the total order, `cmp` uses `f32::total_cmp` and `eq` defers to it:
+// a NaN percentage then equals itself and sorts after every real one. A NaN
+// is a nonsense value in a percentage column either way, but this way it has
+// a defined place instead of making the whole sort's behaviour arbitrary.
+impl Ord for ColumnValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            // Case-insensitive, because that is what every file manager does
+            // and what the old key intended with its `to_lowercase`. The
+            // tie-break on the raw strings is what keeps `cmp` and `eq`
+            // consistent: without it `README` and `readme` would compare
+            // `Equal` while `==` called them different.
+            (Self::Text(a), Self::Text(b)) => {
+                textfind::compare(a, b, textfind::Case::Insensitive).then_with(|| a.cmp(b))
             }
-            Self::Number(n) => (1, *n as i128),
-            Self::Size(n) => (2, *n as i128),
-            Self::DateTime(n) => (3, *n as i128),
-            Self::Duration(n) => (4, *n as i128),
-            Self::Percentage(f) => (5, (*f * 10_000.0) as i128),
+            (Self::Number(a), Self::Number(b)) => a.cmp(b),
+            (Self::Size(a), Self::Size(b)) => a.cmp(b),
+            (Self::DateTime(a), Self::DateTime(b)) => a.cmp(b),
+            (Self::Duration(a), Self::Duration(b)) => a.cmp(b),
+            (Self::Percentage(a), Self::Percentage(b)) => a.total_cmp(b),
+            (Self::Empty, Self::Empty) => Ordering::Equal,
+            _ => self.kind_rank().cmp(&other.kind_rank()),
         }
     }
 }
 
 impl PartialOrd for ColumnValue {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.sort_key().cmp(&other.sort_key()))
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
+
+impl PartialEq for ColumnValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for ColumnValue {}
 
 // ============================================================================
 // Column provider trait
@@ -1515,6 +1567,24 @@ fn format_percentage(frac: f32) -> String {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    //
+    // `float_cmp` is allowed for the same reason plus one of its own: the
+    // widths under test are passed through `resolve` either unchanged or
+    // clamped to one of the bounds, so the assertions compare a float to the
+    // very bit pattern it was built from. An epsilon there would weaken the
+    // test — it would start passing if `resolve` returned a *nearly* right
+    // width, which is exactly the bug it is meant to catch.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     // ------------------------------------------------------------------
@@ -1669,6 +1739,119 @@ mod tests {
         assert_eq!(ColumnValue::Duration(222).display(), "3:42");
         assert_eq!(ColumnValue::Percentage(0.85).display(), "85%");
         assert_eq!(ColumnValue::Empty.display(), "");
+    }
+
+    // ------------------------------------------------------------------
+    // ColumnValue ordering
+    //
+    // Each of the first three tests fails against the packed-`i128`
+    // `sort_key` this ordering replaced; see the comment above `impl Ord`.
+    // ------------------------------------------------------------------
+
+    fn text(s: &str) -> ColumnValue {
+        ColumnValue::Text(s.to_string())
+    }
+
+    #[test]
+    fn a_non_ascii_name_does_not_sort_ahead_of_every_ascii_one() {
+        // The old key shifted the leading byte into the i128 sign bit, so any
+        // name starting >= 0x80 — every non-ASCII name — went negative and
+        // sorted ahead of every ASCII name, including ones that begin with
+        // `a`. A folder of accented or CJK names became a block at the top,
+        // ordered by nothing the user could see.
+        //
+        // What this asserts is only that the block is gone: ordering is by
+        // Unicode scalar value after case folding, so `éclair` lands after
+        // `zulu` rather than before `alpha`. That is not where a French
+        // speaker expects it — proper placement needs the Unicode Collation
+        // Algorithm's tables, which this tree does not have. Tracked in
+        // `known-issues.md` as `TD-EXPLORER-SORT-IS-CODEPOINT-NOT-COLLATION`.
+        assert_eq!(text("\u{e9}clair").cmp(&text("alpha")), Ordering::Greater);
+        assert_eq!(text("\u{65e5}").cmp(&text("zulu")), Ordering::Greater);
+
+        let mut names = vec![text("zulu"), text("\u{e9}clair"), text("alpha")];
+        names.sort();
+        let order: Vec<String> = names.iter().map(ColumnValue::display).collect();
+        assert_eq!(order, ["alpha", "zulu", "\u{e9}clair"]);
+    }
+
+    #[test]
+    fn names_are_distinguished_past_the_sixteenth_byte() {
+        // The old key packed sixteen bytes and stopped. These two differ at
+        // byte 20, so it called them Equal while `==` called them different —
+        // an `Ord` contract violation, which lets `sort_by` do anything.
+        let a = text("aaaaaaaaaaaaaaaaaaaa1");
+        let b = text("aaaaaaaaaaaaaaaaaaaa2");
+        assert_ne!(a, b);
+        assert_eq!(a.cmp(&b), Ordering::Less);
+    }
+
+    #[test]
+    fn ordering_and_equality_agree_over_a_mixed_sample() {
+        // `Ord`'s contract: `a.cmp(b) == Equal` exactly when `a == b`.
+        let sample = [
+            text(""),
+            text("a"),
+            text("A"),
+            text("readme"),
+            text("README"),
+            text("\u{130}"),
+            text("i\u{307}"),
+            ColumnValue::Number(-1),
+            ColumnValue::Number(0),
+            ColumnValue::Size(0),
+            ColumnValue::DateTime(0),
+            ColumnValue::Duration(0),
+            ColumnValue::Percentage(0.5),
+            ColumnValue::Percentage(f32::NAN),
+            ColumnValue::Empty,
+        ];
+        for x in &sample {
+            for y in &sample {
+                assert_eq!(
+                    x.cmp(y) == Ordering::Equal,
+                    x == y,
+                    "cmp/eq disagree: {x:?} vs {y:?}"
+                );
+                assert_eq!(x.cmp(y), y.cmp(x).reverse(), "antisymmetry: {x:?} {y:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn case_only_differences_sort_together_but_stay_distinct() {
+        // Case-insensitive is the primary order, so `README` lands next to
+        // `readme` rather than ahead of every lowercase name — but the two are
+        // still different values, so the tie-break must order them.
+        let mut names = vec![text("readme"), text("apple"), text("README"), text("Zebra")];
+        names.sort();
+        let order: Vec<String> = names.iter().map(ColumnValue::display).collect();
+        assert_eq!(order, ["apple", "README", "readme", "Zebra"]);
+    }
+
+    #[test]
+    fn a_nan_percentage_has_a_defined_place_rather_than_an_arbitrary_one() {
+        // Derived `PartialEq` on f32 makes NaN unequal to itself, which `Eq`
+        // forbids and which makes a sort's behaviour undefined. `total_cmp`
+        // puts NaN after every real percentage and equal to itself.
+        let nan = ColumnValue::Percentage(f32::NAN);
+        assert_eq!(nan, nan.clone());
+        assert_eq!(nan.cmp(&ColumnValue::Percentage(1.0)), Ordering::Greater);
+    }
+
+    #[test]
+    fn empty_cells_collect_at_the_bottom() {
+        let mut vals = vec![
+            ColumnValue::Empty,
+            ColumnValue::Size(3),
+            text("name"),
+            ColumnValue::Empty,
+        ];
+        vals.sort();
+        assert_eq!(vals[0], text("name"));
+        assert_eq!(vals[1], ColumnValue::Size(3));
+        assert_eq!(vals[2], ColumnValue::Empty);
+        assert_eq!(vals[3], ColumnValue::Empty);
     }
 
     // ------------------------------------------------------------------

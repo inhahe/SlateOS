@@ -9695,6 +9695,563 @@ called from `kernel/src/main.rs` with the other IDT self-tests. The measured
 flag set and the three false-negative traps found while verifying it are in
 `deferred-questions.md` → D-Q2's 2026-08-16 amendment.
 
+## §205 — The Ada toolchain is the **`x86_64-elf` cross-GNAT** on a **ZFP runtime**; the object is committed and stamped, so no other lane needs a 1 GB install
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous) — these are the two sub-decisions §201
+explicitly left to Lane A, plus a factual correction to §201 that emerged in
+carrying them out.
+
+**In short:** §201 approved installing Ada and its prover but deliberately left
+two follow-on choices open: *which* Ada compiler to install, and *which*
+cut-down runtime library to build against. Both are now settled by having
+actually done it. The compiler is the one that produces code for bare metal
+rather than for Windows; the runtime is the smallest one there is, which for
+our purposes turns out to be a single 200-line file we now keep in the tree.
+A third thing came out of the work: §201 says GPL "is not a problem here"
+because we only *run* the toolchain — but we ended up copying one file out of
+it into our own source tree, so that reasoning does not actually cover us. A
+different licence provision does. This entry records what that is.
+
+---
+
+### 1. Which GNAT: `gnat_x86_64_elf`, not `gnat_native`
+
+**What changes:** the compiler emits ELF objects that link into the kernel,
+instead of Windows PE-COFF objects that cannot.
+
+Alire publishes both under confusingly similar names, and they are not
+interchangeable:
+
+| Crate | Host | Emits | Usable for the kernel? |
+|---|---|---|---|
+| `gnat_native` | Windows | PE-COFF (mingw) | **No** |
+| `gnat_x86_64_elf` | Windows | ELF, bare-metal `x86_64-elf` | **Yes** |
+
+Both *run* on Windows; the difference is what they produce. `gnat_native` is a
+mingw compiler whose output is a Windows object file, and `rust-lld` linking an
+ELF kernel cannot consume it.
+
+**This overturns a conclusion recorded in an earlier session.** That session
+probed `gnat_native`, found PE-COFF, and concluded that Ada in the kernel
+required building the whole toolchain under WSL. That conclusion was sound
+reasoning applied to the wrong crate — the cross-compiler was on the same
+Alire index the whole time. Installed path:
+
+```
+~/AppData/Local/alire/cache/toolchains/gnat_x86_64_elf_15.3.1_880685c3/bin/x86_64-elf-gcc.exe
+```
+
+`gnatprove` (FSF 16.1.0, `~/.alire/bin/`) is host-side and target-agnostic, so
+it needs no cross build — but see the trap in §3 below, because "target-agnostic"
+is precisely the problem.
+
+*Consequence:* the WSL Alire install made on the PE-COFF premise
+(`~/opt/alire`, `~/.local/bin/alr`) is now dead weight and can be removed.
+
+### 2. The restricted runtime: **ZFP**, vendored as one file
+
+**What changes:** instead of configuring and building a runtime library, we
+carry a single `system.ads` in the tree and pass `--RTS=kernel/ada/rts`.
+
+§201 framed this as "configuration work with real content." Measured, it was
+not, and the reason is worth recording because it makes the choice obvious
+rather than a judgement call:
+
+| | ZFP (Zero FootPrint) | Light |
+|---|---|---|
+| Exceptions | none | propagation, needs unwinder |
+| Tasking | none | none |
+| Files needed here | **`system.ads` only** | `system.ads` + `adalib` (built) |
+| Undefined symbols left | **one** | several |
+
+For a package that does arithmetic on array indices and dereferences nothing,
+ZFP costs a single file and leaves exactly one undefined symbol,
+`__gnat_last_chance_handler`, which `kernel/src/ada.rs` exports and routes to
+the kernel panic path. Light would buy exception propagation that this
+component has no use for — SPARK *proves* the exceptions cannot be raised, so a
+runtime able to propagate them is machinery for an impossible case.
+
+The vendored `system.ads` needed exactly one edit from the stock copy:
+`Duration_32_Bits` set for the target. Everything else is verbatim.
+
+Choosing ZFP is reversible: moving to light later means building `adalib` and
+changing one `--RTS=` path, with no source change in the Ada.
+
+### 3. **Correction to §201's licence reasoning** — the Runtime Library Exception is what applies
+
+§201 point 3 states: *"GPL is not a problem here. The toolchain is a tool we
+run, not something we link; it does not reach our output."*
+
+**That is true of the compiler and false of what we actually shipped.**
+Vendoring `system.ads` copies a GPL-3 file *out of* the toolchain and *into*
+SlateOS, and the compiled kernel contains code derived from it. The
+"we only run it" argument does not reach this case at all.
+
+What does reach it is the **GCC Runtime Library Exception**, which GCC's
+runtime files (`system.ads` among them) carry precisely so that compiling
+against them does not impose GPL on the result. It is the same provision that
+lets proprietary programs be compiled with GCC and link `libgcc`. So the
+outcome §201 asserts is correct — but for a different reason, and the
+distinction matters the next time someone reasons from §201's stated rationale
+to a case the Runtime Library Exception does *not* cover (e.g. vendoring a file
+from a GPL project that has no such exception).
+
+**§201 is left unedited** — it is Operator-attributed and the shared documents
+are append-only. This entry is the correction of record; a reader arriving at
+§201 point 3 should be brought here.
+
+### 4. The consequence that shaped the build: prebuilt object + stamp
+
+The cross-GNAT is a ~1 GB install, and the boot test builds the **whole
+workspace** — so requiring the toolchain would block Lanes B and C over a
+component neither touches. Requiring it is not acceptable; skipping
+verification is not acceptable either. The resolution:
+
+- `kernel/ada/prebuilt/virtqueue_descriptors.o` is **committed**, and
+  `kernel/build.rs` links it rather than compiling Ada.
+- `kernel/ada/prebuilt/stamp.txt` holds a SHA-256 over the compiler flags and
+  every source input. **`build.rs` recomputes it on every build, everywhere**,
+  and refuses to build on mismatch. This needs no toolchain, and it is the
+  half that catches the dangerous case: a source edited without regenerating.
+- Where a toolchain *is* present, `build.rs` additionally recompiles and
+  **byte-compares** — catching a tampered or hand-edited object, which the
+  stamp alone would not. GNAT's output was verified deterministic here (same
+  digest across runs and working directories), which is what makes the
+  comparison meaningful rather than flaky.
+- `kernel/ada/regen-prebuilt.py` is the **only** supported way to move the
+  stamp forward, and it **re-runs `gnatprove` and refuses to write if any check
+  is unproved**. Regenerating the object is exactly the moment the proof stops
+  applying, so a fresh-but-unproved object is worse than a stale one: the stamp
+  would then assert a freshness the proof does not back.
+
+The stamp is computed by both Python and Rust. That duplication is deliberate
+and safe **because it is self-policing, not merely documented**: one side
+writes the digest and the other checks it, so any divergence fails *every*
+build on the next run, on every machine, with the mismatch printed. The
+alternative — a build-time dependency to share one implementation — would add a
+crate to the kernel build to remove a risk that already announces itself.
+
+**Where it lives.** `kernel/ada/` (sources, `virtqueue.gpr`, `x86_64-elf.atp`,
+`rts/adainclude/system.ads`, `regen-prebuilt.py`, `prebuilt/`);
+`kernel/build.rs` (`ada_stamp`, `verify_against_toolchain`, `find_ada_gcc`);
+`kernel/src/ada.rs` (FFI wrappers and the panic bridge). Current state:
+**105/105 verification conditions discharged, zero unproved, zero warnings.**
+
+---
+## §206 — One wait primitive under three ABIs, a target *enum* instead of an overloaded selector, and an extensible out-parameter for the facts that do not survive the reap
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous) — in response to lane B's request
+`requests/b-a-waitid-needs-an-explicit-idtype-wait.md`, which asked for three
+specific capabilities; the shape chosen to deliver them is mine.
+
+**In short:** three different syscalls let a program wait for its child process
+to finish — one for programs built for our own system, and two more for
+programs ported from Linux. All three were separately written copies of the
+same logic, and they had drifted apart: one of them could not be interrupted by
+a Ctrl-C at all, none of them could say "wait for the processes in group 1",
+and none could tell you the child's user ID or how much CPU it used, because by
+the time they answered, the child's records had already been deleted. This
+change merges the three copies into one and adds the missing facts to the
+answer. The choices worth recording are: one shared body rather than three;
+naming *what kind* of thing you are waiting on with a separate field instead of
+squeezing it into the sign of a number; and returning the extra facts in a
+caller-sized structure that can grow later without needing a new syscall.
+
+### The decision
+
+1. **One primitive.** `kernel/src/syscall/wait.rs` owns child selection, the
+   reap, and the blocking loop. `wait4`, `waitid` and the native
+   `SYS_PROCESS_WAIT_STATUS` are marshalling layers over it: `wait4` and the
+   native syscall encode a POSIX `wstatus` word, `waitid` encodes a
+   `siginfo_t`, and none of them decides *which* child.
+2. **`WaitTarget { Any, Pid, Pgid }`** replaces the overloaded signed selector
+   inside the kernel. The `waitpid`-shaped callers convert at the boundary with
+   `WaitTarget::from_posix_selector`; callers that can say what they mean
+   (`waitid`'s `P_PGID`, the native `WPGID` bit) construct `Pgid` directly.
+3. **Native option bits `WPGID` (1<<16) and `WNOWAIT` (1<<24)**, both
+   previously rejected by the options mask, so no existing caller changes.
+4. **A `WaitInfo` out-parameter** (`arg3` pointer, `arg4` size, 72 bytes today)
+   carrying pid, uid, wstatus and six usage counters, written under the
+   `clone3`/`sched_setattr` convention: the kernel writes `min(caller, kernel)`
+   bytes and zero-fills any tail it does not know about.
+
+### Why one primitive, and what the two extra copies had already cost
+
+The three entry points read the *same* records — process groups, zombie exit
+info, job-control reports. If they disagree about which child a selector names,
+which transition is reported first, or whether a report was consumed, then a
+program on our libc and a ported glibc program waiting on the same child
+observe different histories. That is not hypothetical: `sys_waitid` had **no
+signal handling whatsoever** — no pending-signal check, no `ERESTARTSYS`, no
+signalfd registration, just `block_current()` — while `wait4` a few hundred
+lines away had all three. A process blocked in `waitid` could not be
+interrupted. Nobody decided that; it is what two copies of one primitive decay
+into.
+
+*Against:* a shared body is a shared blast radius — a bug in `scan_once` is now
+a bug in three ABIs at once, and the three callers can no longer be tuned
+independently. *For:* they were never *supposed* to differ, and the one place
+they did differ was a defect. A shared bug that shows up in three tests is
+strictly easier to find than three subtly different behaviours that each look
+locally reasonable.
+
+### Why a target enum rather than "just add a flag"
+
+`waitpid`'s single `pid_t` overloads four meanings onto one integer (`>0` a
+pid, `0` my group, `-1` any child, `<-1` group `-pid`), which cannot name
+process group 1: that would need `-1`, already spoken for. This is lane B's
+item 1, and it is a real user-visible hole — an init or a shell most wants to
+wait on exactly that group.
+
+Linux does not patch the encoding; it never overloads internally, resolving
+`sys_waitid`'s arguments to a `(type, struct pid *)` pair before calling
+`do_wait`. `WaitTarget` is that pair. The alternative — keep the signed
+selector everywhere and special-case group 1 with a sentinel — was rejected
+because a sentinel is exactly how the hole was made in the first place, and the
+next un-nameable value would need another one.
+
+*Cost:* every caller now converts, and `from_posix_selector` is one more place
+a mistake can live. *Benefit:* the conversion is total — there is no encoding a
+caller can pass that means two things at once — and the ABI-specific gate that
+rejects `INT_MIN` stays at the syscall boundary where it belongs, rather than
+becoming a property of waiting itself.
+
+### A second bug the consolidation surfaced: registration was answering a question it could not see
+
+The any-child/group branch of the blocking wait registered the waiter *before*
+scanning, and returned the registration error as the answer:
+
+```rust
+// "Registering first ... also reports ECHILD when the caller has no children at all."
+if let Err(e) = pcb::set_wait_any_task(parent_pid, task_id) { return Err(e); }
+```
+
+That comment's second clause was false. `set_wait_any_task` looks up **the
+caller** and fails with `NoSuchProcess` when the caller has no PCB — it never
+examines children at all. So a registration failure was standing in for ECHILD,
+and every any-child and every group wait from a caller without a process record
+returned ECHILD without scanning.
+
+It survived because the two pre-existing tests both miss that branch: the
+group-filter test goes through `SYS_PROCESS_TRY_WAIT`, which calls `scan_once`
+directly, and the job-control test names a pid, taking the branch that scans
+*before* registering. That asymmetry between the two branches was itself the
+tell, and is only visible once both live in one function.
+
+The fix separates the two questions: registration failure is recorded rather
+than returned, `scan_once` answers ECHILD from `!has_child` as it already
+could, and only a caller that would actually have to **park** is defeated by
+having no wake slot — parking without one is a permanent hang, so that case
+returns `NoSuchProcess`, which `wait_err_to_echild` folds to ECHILD at the
+boundary. That guard is load-bearing rather than defensive: `linux.rs`'s wait4
+register-truncation test deliberately passes an `options` word that truncates
+to `0` — no `WNOHANG` — on a wait-any, and is the one caller in the tree that
+reaches the park point with no PCB.
+
+### Why an extensible struct rather than a second return register
+
+Lane B's items 3 and 4 (`si_uid`, CPU times) share the property that decides
+the shape: **they do not survive the reap.** Once the PCB is destroyed there is
+no one left to ask, so a follow-up query syscall is not merely inelegant, it is
+impossible. The facts must ride out on the wait itself.
+
+Two ways to do that were considered:
+
+- **A second return register** (`syscall3_2ret` already exists on the libc
+  side). Cheap, and enough for `si_uid` alone. Rejected because it is enough
+  for *exactly* `si_uid`: the six usage counters do not fit, and lane B
+  explicitly noted that leaving room for CPU time now saves a second ABI change
+  later. A one-off register would have made that second change mandatory.
+- **A caller-sized struct.** Chosen. An older caller on a newer kernel passes a
+  smaller size and gets the prefix it understands, never a write past its
+  buffer; a newer caller on this kernel passes a larger size and gets zeros in
+  the fields this kernel cannot fill — which is the *correct* answer for every
+  counter here, since an unknown count reads as none rather than as garbage.
+  Size 0 (or a null pointer) means "don't want it", so the cost to callers that
+  never use it is two zero registers.
+
+*Against the struct:* it is a userspace layout the kernel writes field by
+field, which is the larger trust boundary §112 cited when it deferred a
+`siginfo_t`-shaped syscall. *Why that objection does not bite here:* §112's
+concern was a 128-byte layout with a union whose interpretation depends on
+`si_code`. This is a flat array of `u64`s — no union, no pointers, nothing
+variable-length — written through the same `copy_to_user` as every other
+out-parameter, and validated **before** the wait blocks as well as inside the
+write, because a caller that passed a bad pointer should learn so now, not
+after sleeping for an arbitrarily long wait and reaping a child it then cannot
+be told about.
+
+### The out-parameter must be opt-in — an extension bit, not just a size
+
+**In short:** you cannot start reading a syscall argument register that the
+callers who already exist never write. The first version of this change did,
+and it turned `waitpid` into a wild pointer.
+
+`SYS_PROCESS_WAIT_STATUS` shipped taking three arguments. Every caller it has
+therefore reaches it through a three-argument wrapper — `posix`'s `syscall3`
+emits `in("rdi")`, `in("rsi")`, `in("rdx")` and nothing else, so `r10` and `r8`
+arrive holding whatever the caller last left in them. Reading them as
+`(ptr, size)` meant the kernel validated a pointer userspace never supplied,
+and on the success path would have written 72 bytes through it. `ctest-pgroup`,
+`ctest-jobctl` and `ctest-ctty` all failed inside one boot; the EFAULT they saw
+was the lucky outcome, not the characteristic one.
+
+So `arg3`/`arg4` are read only under a new option bit, `WINFO = 0x0002_0000`.
+
+*The tempting wrong answer* is that the size field already covers this —
+`arg4 == 0` means "don't want it", so surely an old caller is safe. It is not:
+garbage is zero with probability 2⁻⁶⁴. **The size convention protects against a
+struct that grew, not against a register that was never written**, and those
+are different failures with different remedies. The option word is the only
+argument every existing caller demonstrably sets, so an option bit is the only
+place an "I am new enough to have filled in `r10`" signal can live.
+
+*Against the bit:* it spends option space on something the size field
+superficially seems to cover, and a caller must now set two things
+(bit + pointer) instead of one. *For it:* the alternative is unsound, and the
+generalisation is worth stating plainly for the next syscall that grows —
+**`number.rs` already carried this exact warning about `SYS_PROCESS_WAIT`'s
+callers leaving garbage in the argument registers, and this change failed to
+apply it to the syscall doing the growing.** Any syscall gaining an argument
+beyond the arity it shipped with needs an in-band opt-in, not just a
+self-describing payload.
+
+### The one unit that is deliberately inconsistent
+
+`WaitInfo` carries CPU time in **microseconds**; `waitid`'s `si_utime` /
+`si_stime` carry it in **USER_HZ ticks**. That looks like an oversight and is
+not. `siginfo_t`'s fields are `clock_t` and Linux fills them via
+`nsec_to_clock_t`, so any conversion applied there would make ported binaries
+wrong — no conversion is right, and any conversion would be wrong. `WaitInfo`
+has no such constraint, so it uses the unit that does not require the caller to
+know `USER_HZ`; a caller that guessed wrong would be off by a factor of ten
+with nothing to notice it by. The tick-to-microsecond factor lives in exactly
+one place (`US_PER_TICK` in `wait_info_image`), next to a note pointing at
+`sys_getrusage` — the other consumer of the same counters, which must not
+disagree.
+
+### A premise in the request that was already false
+
+Lane B's item 4 states "There is no per-process CPU accounting, so libc zeroes
+all of it." That was true when `wait4`'s `clear_user_rusage` was written and is
+not true now: `pcb`'s `acct_*` / `child_*` counters and
+`thread::process_cpu_ticks` / `process_fault_counts` / `process_ctxsw_counts`
+have existed for a while, and `sys_getrusage` already encodes all 144 bytes
+from them. `clear_user_rusage` was a **false zero** — the data was there and
+the call threw it away. `wait4` now reports it, so item 4 is closed rather than
+deferred.
+
+### How to reverse
+
+`wait.rs` is additive: the three callers could be given back private copies by
+inlining `scan_once` / `wait_for_child_event`, at the cost of reintroducing
+exactly the drift described above. The two option bits and the out-parameter
+are pure extensions — removing them returns the syscall to its previous
+behaviour for every existing caller, since all three inputs were previously
+rejected or ignored.
+
+### Where it lives
+
+- `kernel/src/syscall/wait.rs` — the whole primitive.
+- `kernel/src/syscall/handlers.rs` — `wait_opt`, `WAIT_INFO_SIZE`,
+  `wait_info_image`, `write_wait_info`, `sys_process_wait_status`,
+  `sys_process_wait`, `sys_process_try_wait`.
+- `kernel/src/syscall/linux.rs` — `sys_wait4`, `write_user_rusage`,
+  `sys_waitid`, `waitid_scan`, `waitid_siginfo`.
+- `kernel/src/proc/thread.rs` — `ProcessUsage`, `process_usage_both`.
+- Tests: `dispatch.rs` — `test_dispatch_wait_status_wpgid_and_wnowait`,
+  `test_dispatch_wait_info_layout`, `test_dispatch_wait_process_group_filter`;
+  `linux.rs` — `test_waitid_scan`.
+
+---
+
+## §207 — `CAP_SETUID`/`CAP_SETGID` project from a **dedicated `Rights::SET_CREDENTIALS` bit**, not from a reuse of `METADATA`
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous) — Lane B asked for a preimage in
+`requests/b-a-cap-grants-for-312-step3-fixtures.md` and proposed
+`(Process, METADATA)`; Lane A chose a new bit instead. Reversible: the bit is
+one line in `kernel/src/cap/rights.rs` and one predicate in `posix`.
+
+**In short:** Our POSIX layer decides whether a program may call `setuid()` —
+"become a different user" — by looking at what kernel permissions the program
+was given. Nobody had written down *which* kernel permission means "may become
+another user", so the answer was "none", and under a change Lane B is
+preparing that would have made `setuid()` impossible for every program on the
+system. Lane B suggested reusing an existing general-purpose permission called
+METADATA ("may modify this process's attributes"). We instead added a new,
+single-purpose permission that means only this. The cost is one bit out of 52
+spare; the benefit is that nobody can hand out "may become root" by accident
+while trying to grant something harmless.
+
+## The problem
+
+`posix::sys_capability::kernel_view::project` maps kernel capabilities onto
+Linux's `CAP_*` words. §312 step 3 flips `has_capability` from the all-caps
+default to that projection, at which point **any `CAP_*` with no rule in
+`project()` reads false forever**. `CAP_SETUID`/`CAP_SETGID` had no rule, so
+step 3 would have made `setuid()`/`setgid()` unreachable process-wide — not
+merely for the `fastpy-setuid` fixture that surfaced it. Lane B's framing was
+exactly right: the bit cannot be left unprojected.
+
+## The options
+
+| | preimage | cost | failure mode |
+|---|---|---|---|
+| **A** | `(Process, METADATA)` — Lane B's proposal | zero: no new `ResourceType`, no new `Rights` bit | a *future* benign grant of `METADATA` on a Process silently confers root-capability |
+| **B** (chosen) | `(Process, SET_CREDENTIALS)` — a new bit, `1 << 18` | ~4 lines in `kernel/src/cap/rights.rs`, one line in `posix`'s mirrored `rights` module, one predicate | none known; costs one of 52 free bits |
+
+**A is safe today and was checked, not assumed.** `(Process, METADATA)`
+appears in no other projection rule, and neither of the two sites that grant a
+Process capability automatically — `proc/spawn.rs` step 5b and `proc/fork.rs`
+step 8, both granting `READ|WRITE|DELETE|WAIT|SIGNAL|DUPLICATE` to the parent
+— includes `METADATA`. So A would not have escalated anything that exists.
+
+## Why B anyway
+
+**The hazard is forward-looking, and it is the kind nothing catches.**
+`Rights::METADATA` is documented as "Modify metadata (permissions, attributes,
+etc.)" — it is the *generic* bit. It is precisely what the next person wanting
+"may rename this process", "may set this process's nice value" or "may retag
+this process" will reach for, and they will be right to, because that is what
+the bit says it is for. The moment they do, every holder of that grant becomes
+`CAP_SETUID`-capable.
+
+What makes that specifically dangerous rather than merely untidy is that
+**the grant site and the projection live in different crates owned by
+different lanes**. A lane-A engineer adding `METADATA` to a Process grant reads
+`kernel/src/cap/rights.rs`, which would say nothing about uid; the rule that
+turns it into root-capability is in `posix`, which is Lane B's file. There is
+no diff in which both halves are visible. That is the same class of failure as
+`B-A-MERGE-RESURRECTED-THREE-ARCHIVED-ENTRIES` — an invariant that spans two
+files with nothing standing over the pair.
+
+**The asymmetry decides it.** Choosing B when A would have sufficed costs one
+bit out of 52 free — after 46 days of development, 12 are in use, so bits are
+not a scarce resource and treating them as one is a false economy. Choosing A
+when B was needed costs a **silent** privilege escalation, discoverable only
+by someone who happens to read both crates at once.
+
+**There is direct precedent in this very file.** `Rights::DEBUG` (`1 << 17`)
+exists rather than being spelled `READ | WRITE` on a Process, for exactly this
+reason: "may read another process's memory unilaterally" is a *distinct
+authority*, not an intensity of "may read". "May become another user" stands
+in the same relation to "may modify an attribute". The rule the two cases
+share, and the one worth stating generally:
+
+> A `Rights` bit names an **authority**, not an object shape. When an
+> operation's danger does not follow from the generic verb that would
+> otherwise cover it, it gets its own bit.
+
+## What was rejected
+
+- **Projecting from `uid == 0`.** That is ambient authority in a capability
+  costume — the thing §312 exists to remove — and it is circular besides: the
+  question is whether you may *change* your uid.
+- **Leaving it unprojected and special-casing the fixture.** It is not the
+  fixture that is broken; `setuid()` would be unreachable for everything.
+
+## Where it lives
+
+- `kernel/src/cap/rights.rs` — `Rights::SET_CREDENTIALS`, and its entry in the
+  `Display` flag table (`setcred`).
+- `kernel/src/proc/spawn.rs` — `self_test_fastpy_slateos_setuid`'s `caps`
+  array. Its sibling `self_test_fastpy_slateos_nice` gained
+  `(Thread, IO_REALTIME)` in the same change, which needed no new bit — Lane
+  B's read there was right and is adopted unchanged.
+- `posix/src/sys_capability.rs` — Lane B's file; the mirrored `rights` module
+  and the `project()` predicate are requested in
+  `requests/a-b-set-credentials-right.md`.
+
+**Until Lane B lands the `posix` half, nothing changes observably**: the
+projection is advisory, `has_capability` still answers from the all-caps
+default, and the kernel's own invariant for `SYS_PROCESS_SET_CREDENTIALS` is
+unchanged (a process may set its own credentials; policy is userspace's). The
+grant is in place *first* so that step 3 is a one-line flip rather than a flip
+plus a hunt for the fixtures it broke.
+
+---
+
+## §208 — Merge-induced artifact staleness is checked against *history*, by a script lane A owns and every lane runs
+
+**Date:** 2026-08-16. **Decided by:** Claude (autonomous).
+
+**In short:** some compiled programs are checked into git next to a small file
+recording which library they were built from. That record can be perfectly
+honest and still wrong, if the library changed on a *different branch* and the
+two were merged afterwards. Nothing we had could see that, because every check
+we had looks at the files in front of it, and the fault is not in any one set of
+files — it is in the merge. The decision is to check the **commit history**
+instead, in a script that runs after every merge, and to have lane A own that
+script even though the artifacts it guards belong to lane B.
+
+### What happened, in one graph
+
+```
+                 c23cc33c0  merge origin/main into lane-b   11:11
+                    /   \
+   lane-b 12:22  5531f816c   2069cbd8e  lane-c: rebuild + re-stamp   13:09
+   +13 libc symbols     \   /           (built against 11:11's libc.a)
+                      b807390ff  main   ← both, and they disagree
+```
+
+Neither commit is an ancestor of the other. **Both were correct where they were
+made** — lane C's fixtures did match lane C's `libc.a`, and lane B had no
+rebuilt fixtures to invalidate. On `main` the pair is wrong by seventeen public
+symbols. This is a defect class, not an incident: any tracked artifact whose
+recorded inputs are owned by one lane and derived from another lane's source
+has this shape, and the three-lane arrangement manufactures it.
+
+### The alternatives
+
+| | Where it looks | Why it was not chosen |
+|---|---|---|
+| **mtime** (already present) | working tree | A checkout stamps every file with one time. `create-ext4-rootfs.sh:1213` disqualifies it in its own comment. |
+| **content stamp** (already present) | working tree | Asks "does the ELF match the libc it was built against?" — answer yes. Correct question, wrong question for this. |
+| **build libc.a and diff** | working tree | Definitive, and needs a toolchain. The stamp check's entire design goal (`create-ext4-rootfs.sh:1219`) is to need none. |
+| **record `posix/`'s tree hash in the stamp** | the artifact | Makes the stamp answer the right question *directly* — the best answer. Rejected only as lane A's call to make: it edits `services/**` and couples it to a path outside. Left open for lane B. |
+| **history check** ← chosen | the commit graph | No toolchain, ~40 ms, identical answer in a fresh clone. Exactly sensitive to the merge case because it is the only one that can see a merge. |
+
+### The two calls inside it that have a real downside
+
+1. **The root `Cargo.toml` warns rather than fails.** Its `[profile.release]`
+   genuinely can change `libc.a`, so a strict reading says it is a source. But
+   in practice it far more often just gains an unrelated lane's workspace member
+   — `byteread` did the same day — and **a check that cries wolf gets flagged
+   into silence**, which costs more than the hole. So an opt-level change passes
+   as a warning. This is a known, documented gap, and it is written into the
+   script's docstring so a future reader does not "fix" it by promoting the tier
+   and then watch the whole check get disabled. The rejected alternative was
+   parsing the manifest to see *which* table moved: more precise, and fragile in
+   a way that fails silently, which is the failure direction that matters.
+
+2. **Lane A wrote a check about lane B's artifacts.** The ownership map says
+   `services/**` and `posix/**` are lane B's, and the repair *is* lane B's — the
+   nine ELFs are theirs to rebuild. But the check is read-only, writes nothing
+   into either tree, and lives in `scripts/` on the `ki_dupes.py` precedent —
+   lane A's own, same shape, written for a merge-only defect in a file all three
+   lanes share (known-issues.md →
+   `B-A-MERGE-RESURRECTED-THREE-ARCHIVED-ENTRIES`). The
+   argument that settled it: **leaving detection as a request would have left
+   the one check that can see this class waiting on the lane that structurally
+   cannot see it.** Filing a request for a detector you can write yourself, for
+   a defect the recipient's tree does not exhibit, is asking someone to act on
+   evidence they do not have.
+
+### What this commits us to
+
+Running `python scripts/stamp-ancestry.py` after every merge, next to
+`python scripts/ki_dupes.py`. Two post-merge checks is one habit, not two; if a
+third arrives, they should be folded into one `scripts/after-merge.py` rather
+than accumulating as a list nobody remembers. The family table is data, so a new
+artifact family costs four lines — and the reason it is a table at all is
+`services/.gitignore`: a rule replicated per directory is a rule the next
+directory opts out of by not having it.
+
+---
+
 ## §300 — A NULL pointer is `EFAULT` only where the kernel would see it; glibc's own pre-checks keep their `EINVAL`
 
 **Date:** 2026-08-13
@@ -11315,6 +11872,343 @@ documented prerequisite. When a recipe "works on my machine", check first
 whether the machine is carrying an unrecorded input — and prefer a pinned,
 verified, automatic fetch to a documented manual one, because the second kind
 fails silently and the first kind cannot.
+
+## §317 — A libc function with no backend is *composed over the missing primitive*, not stubbed
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** CPython needs three functions — `openpty`, `forkpty`, `login_tty`
+— that create a *pseudo-terminal* (a fake keyboard-and-screen pair that lets
+one program drive another as if a human were typing at it; this is how `ssh`,
+`script`, `expect` and every terminal window work). SlateOS does not have
+pseudo-terminals yet. The choice was whether to write these three as
+placeholders that pretend to succeed, or to write them properly *now* — as real
+code on top of the primitive that is missing, so they fail honestly today and
+start working by themselves the day the primitive arrives. We wrote them
+properly.
+
+**The two options.**
+
+| | Stub | Compose over the missing primitive |
+|---|---|---|
+| *What changes:* | `os.openpty()` returns a plausible-looking pair of numbers that are not a terminal | `os.openpty()` fails with `ENOSYS` ("this system call is not implemented"), which is true |
+| When the pty layer lands | someone must remember to come back and rewrite all three | they work, with no edit |
+| Error a caller sees | invented by the stub | the real one, from `posix_openpt` |
+| Cost today | ~10 lines | ~490 lines, five tests |
+
+**Why compose.** The whole point of the CPython spike was to replace a claim
+with a measurement. A stub would have restored the claim: the symbol table
+would say `openpty` exists, the linker would be satisfied, and the first
+program to actually open a terminal would get silent nonsense instead of a
+diagnosable failure. `ENOSYS` from `posix_openpt`, propagated verbatim, is a
+*better* outcome than a fake success — it names the missing piece and points at
+the file that will supply it.
+
+The composition is not speculative. `openpty` is the standard
+`posix_openpt` → `grantpt` → `unlockpt` → `ptsname_r` → `open(slave)` dance;
+all five already exist as entry points, four of them functional, and only
+`posix_openpt` returns `ENOSYS`. `login_tty` is fully functional *today* —
+`setsid` + `TIOCSCTTY` + three `dup2`s — and `forkpty` carries musl's
+`O_CLOEXEC` synchronisation pipe so a `login_tty` failure inside the child is
+reported to the parent rather than yielding a child whose stdio silently is not
+the pty. A test pins the property that matters: `openpty` reports
+`posix_openpt`'s errno rather than one of its own, so the day `posix_openpt`
+stops returning `ENOSYS` the test still passes and the function starts working.
+
+**Against.** Composing costs ~50× the lines of a stub for zero present-day
+capability, and it front-loads work whose requirements could still change — if
+the eventual pty layer does not expose a `/dev/ptmx`-shaped interface, some of
+this glue is rewritten anyway. That risk is small and bounded (the glue is thin
+and the interface is 40 years old and specified), and it is the *right* kind of
+risk to take: the failure mode is wasted effort, whereas the stub's failure
+mode is a program that misbehaves for reasons nothing in the system explains.
+
+**Generalisation.** This is now the rule for the `posix` crate: when a symbol
+is required but its backend is not built, implement it against the backend's
+real entry point and let the honest error propagate. Do not stub, and do not
+`unimplemented!()`. Where the honest behaviour is a *degradation* rather than a
+failure — as with `pthread_kill` on a peer thread, which currently delivers
+process-directed because the kernel has no per-task pending set — document the
+degradation at the call site *and* in `todo.txt` with the kernel change that
+would remove it.
+
+**Where it lives.** `posix/src/pty.rs` (new in `5531f816c`).
+
+---
+
+## §318 — `syscall()` is a translation table, not a trap door
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** Unix has a function called `syscall()` that lets a program ask the
+kernel for something directly, by number, bypassing the C library. CPython uses
+it for a handful of things its libc might be too old to expose. The problem is
+that the numbers are *Linux's* numbers, and SlateOS's own numbers are unrelated
+— they happen to overlap, so forwarding one to the other would not error out,
+it would call the wrong thing. Our `syscall()` therefore translates a small,
+fixed set of Linux numbers into calls on functions in this crate, and refuses
+everything else.
+
+**The collision is not hypothetical.** SlateOS's `SYS_EXIT` is **1**, which is
+Linux's `write`. A naive `syscall(n, …) → SYSCALL n` forwarder handed
+`SYS_WRITE` (Linux 1) would have exited the process. A test now pins this:
+`test_linux_numbers_are_linux_numbers` asserts both that our `SYS_EXIT` differs
+from `crate::syscall::SYS_EXIT` and that `crate::syscall::SYS_EXIT` equals
+Linux's `SYS_WRITE`, so the overlap cannot silently drift back.
+
+**Three options were on the table.**
+
+| | *What changes:* |
+|---|---|
+| Forward to the kernel | wrong function called, silently — rejected outright |
+| Translate every Linux number | a second, parallel libc, maintained forever |
+| Translate the numbers real callers issue; `ENOSYS` for the rest | `syscall(SYS_gettid)` works; `syscall(SYS_write, …)` fails cleanly |
+
+We took the third. The table covers what CPython actually issues —
+`sched_yield`, `getpid`, `getppid`, `gettid`, `get{,e}{u,g}id`,
+`gettimeofday`, `getrandom`, `pidfd_open`, `pidfd_send_signal` — every one of
+which is a thin query with an existing crate function behind it.
+
+**Why the libc-bypass numbers are *deliberately* absent.** `read`, `write`,
+`close`, `fork`, `execve` and `exit` are not missing by oversight; wrapping
+them would be actively wrong. A caller reaching those through `syscall()` is
+bypassing libc *on purpose* — to avoid our fd table, our `pthread_atfork`
+handlers, our CWD resolution — and quietly routing it back through the very
+layer it is evading would produce behaviour that matches neither what the
+caller asked for nor what Linux does. `ENOSYS` is the honest answer, and
+`test_bypass_syscalls_are_not_silently_wrapped` pins it.
+
+**Against.** A program that legitimately needs a number we have not tabulated
+gets `ENOSYS` and must be diagnosed, where a full forwarder would "just work"
+— except that it would not; it would call the wrong function. The real cost is
+that the table needs extending as new programs land, which is a small, visible,
+test-covered edit rather than a hidden hazard.
+
+**One implementation note worth keeping.** The seven arguments are typed
+`isize`, **not** `core::ffi::c_long`. `c_long` is 32 bits on the LLP64 host the
+tests run on and 64 bits on `x86_64-slateos` — declaring the signature with it
+produces a *different function* in the tested build than in the shipped one,
+truncating every pointer argument. The first compile caught it, and the type
+alias carries the explanation so it cannot recur silently. Seven fixed
+arguments rather than a variadic is ABI-identical on x86-64 SysV and avoids a
+feature gate the crate does not enable.
+
+**Where it lives.** `posix/src/sys_syscall.rs`, rewritten in `5531f816c`; the
+old header claimed its `SYS_*` constants "map Linux syscall names to our native
+syscall numbers" (they are verbatim Linux numbers) and globbed in
+`crate::syscall::*`, which is what forced the `SYS_EXIT_LINUX` alias. Both are
+gone; nothing consumed either.
+
+## §319 — libc's four wait entry points funnel through one call, and the extensible struct's size is deliberately not exposed to C
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous) — the kernel ABI was lane A's call (§206);
+these are the libc-side shape questions it left open.
+
+**In short:** a program that starts a child process can wait for it to finish
+four different ways, all meaning roughly the same thing. Until now each of the
+four was written out separately in our C library, and they had drifted: one of
+them refused a perfectly legal request outright, one silently destroyed the
+information it was asked only to look at, and two of them reported the child's
+CPU time as zero when the kernel knew the real number. This change routes all
+four through a single piece of code and has them read the kernel's new answer
+structure. The three choices worth recording are: one shared body rather than
+four; naming *what kind* of thing is being waited on with a small enum instead
+of overloading the sign of a number; and **not** giving C programs a way to
+name the answer structure's size, even though that is exactly what one test
+needs.
+
+### The context
+
+Lane A's §206 gave `SYS_PROCESS_WAIT_STATUS` three new option bits (`WPGID`,
+`WINFO`, `WNOWAIT`) and a `WaitInfo` out-parameter carrying the facts that do
+not survive the reap — the child's uid, its CPU time, and four other counters.
+`requests/a-b-wait-syscall-grew-wpgid-wnowait-and-a-waitinfo-struct.md` asked
+lane B to consume it. Nothing in libc broke by not consuming it; every choice
+below is about the shape of the consumption, not whether to do it.
+
+### The decisions
+
+**1. One `wait_common`, not four call sites.**
+
+`waitpid`, `wait3`, `wait4` and `waitid` all reach the kernel through one
+private function. `wait3` is now literally `wait4(-1, …)`, and `wait4` is
+`waitpid` plus an out-parameter.
+
+*For:* the four differ only in how they *encode* an answer — a packed `wstatus`
+word, a `siginfo_t`, a `struct rusage` — never in which child they select or
+whether a report is consumed. Those were the parts that drifted. It is the same
+argument §206 makes one level down, and it is why `waitid` inherited the
+group-1 `ENOSYS` and the ignored `WNOWAIT` in the first place: it was a
+separate copy that nobody updated when `waitpid` grew.
+
+*Against:* a funnel makes each caller pay for the union of the others'
+concerns — `waitpid`'s hot path now goes through a `match` on a two-armed enum.
+Accepted: the match compiles to a branch on a register, next to a syscall that
+costs three orders of magnitude more, and the alternative is the drift that
+produced this request.
+
+**2. `WaitTarget { Selector, Pgid }` at the libc boundary, mirroring the
+kernel's `WaitTarget { Any, Pid, Pgid }`.**
+
+*For:* the whole of request item 1 is that `waitpid`'s single signed integer
+cannot express "group 1" — it spends `-1` on "any child". A libc that kept
+passing a signed integer around internally and only converted at the syscall
+would have the same hole one layer up. Making the two interpretations separate
+*types* is what stops a half-conversion, which is the specific failure mode
+lane A warns about: with `WPGID` set, `-g` is not group `g`, it is a huge
+unsigned pgid that matches nothing and silently returns `ECHILD`.
+
+*Against:* two enums, one per side of the syscall, describing the same idea. A
+single shared definition would be less to keep in step. Rejected because libc
+and the kernel are separately compiled and separately versioned — a shared type
+would be a shared *header*, which is precisely the coupling the numbered ABI
+exists to avoid.
+
+Note the deliberate asymmetry: libc's enum has two arms where the kernel's has
+three. `Any` is not a libc concept — `waitpid(-1, …)` and `waitid(P_ALL, …)`
+both mean it, and both are already spelled as a selector. Adding a third arm
+would create two encodings of the same wait inside libc, which is the disease.
+
+**3. The `WaitInfo` size is not reachable from C.**
+
+The extensible-struct convention only means anything if a caller can pass a
+size other than the current one. libc, by construction, always passes its own
+`sizeof` — so libc cannot test the convention, and there is a real temptation
+to export a size-taking entry point (`slate_wait_info(…, size)`) so that a
+fixture can.
+
+*Rejected.* A libc export whose only correct caller is a test is a permanent
+hole: every other caller can then hand the kernel an arbitrary length, and the
+kernel's validation is all that stands between a typo and a write past the end
+of a buffer. The convention's real beneficiary is *an older libc on a newer
+kernel*, which does not need an entry point — it needs the kernel to honour a
+size it already passes.
+
+So the test reaches the syscall raw, from C, in
+`services/ctest-jobctl/main.c` (checks 150-187): a hand-written five-argument
+`syscall`, a locally-declared 72-byte struct, and a 128-byte buffer poisoned
+with `0x5A` before each call. Check 157 asserts that `arg4 = 128` comes back
+with bytes 72..128 **zeroed**; check 169 asserts that `arg4 = 24` leaves bytes
+24..128 **exactly as poisoned**. Both are properties of `copy_to_user`, which no
+kernel self-test can reach — a bare kernel task has no user address space, so
+`dispatch.rs::test_dispatch_wait_info_layout` can only check the pure encoder.
+
+The struct is re-declared in the fixture rather than shared with the kernel's
+definition, and that is the point: a struct generated from the same source as
+the kernel's would agree with it by construction even if both were wrong. The
+fixture is asserting what bytes arrive, not what the kernel meant to send.
+
+**4. The unit split is honoured in exactly one function.**
+
+`WaitInfo` is in microseconds; `siginfo_t`'s `si_utime`/`si_stime` are in
+USER_HZ ticks, because the field is `clock_t` and a ported binary reading it
+expects what Linux's `nsec_to_clock_t` would have put there. libc converts in
+`us_to_clock_t` and nowhere else.
+
+*For:* a caller that guessed the wrong unit is off by exactly 10× — large
+enough to be wrong, small enough to look plausible in a log, and invisible in
+review. One conversion site is one place to be wrong.
+
+*Against:* it means `wait4`'s `rusage` (microseconds, via `us_to_timeval`) and
+`waitid`'s `siginfo` (ticks) report the same child's CPU time at different
+resolutions, and a program that used both would see them disagree below 10 ms.
+Accepted: that disagreement is Linux's, and matching it is the entire reason
+the ABI has two units.
+
+**5. `wait4` writes `rusage` on a `WNOHANG` miss but not on an error.**
+
+*For:* both match Linux's `sys_wait4`. On a miss there was no child, so zero
+usage is the truth and leaving the caller's previous contents would read as a
+second child's numbers. On an error there is nothing to describe.
+
+The old code did neither — it zero-filled unconditionally, before it even knew
+whether a child existed, via the kernel's `clear_user_rusage`. That was a
+**false zero**: `pcb`'s counters existed the whole time and the call was
+discarding them. Two host tests asserted the zeroing and had to be inverted;
+they now assert the Linux contract instead.
+
+**Where it lives.** `posix/src/process.rs` — `WaitInfo`, `WaitTarget`,
+`wait_common`, `waitid_target`, `waitid_kernel_options`, `siginfo_for_wait`,
+`rusage_from_wait_info`, `us_to_clock_t`, `us_to_timeval`; `posix/src/resource.rs`
+(`Rusage` gains `Default`, so a partial fill has an honest base);
+`services/ctest-jobctl/main.c` checks 150-187.
+
+**Tests.** Host: 18 new tests over the pure helpers — the `WaitInfo` byte layout
+(every offset, both zero pads, size 72, align 8), the `(idtype, id)` →
+`WaitTarget` mapping including group 1 and the never-negate rule, the option
+translation, and the `rusage`/`siginfo` encoders. Target: `ctest-jobctl`
+150-187, which is the only layer that can see a `copy_to_user`.
+
+## §320 — The rootfs image is verified by a manifest it writes about itself, because its own timestamp records when it was last *booted*
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** The boot test runs our ring-3 C test programs from inside a disk
+image, not from the source tree. Nothing checked that the image was as new as
+the programs in it, so today a boot test passed while running the *previous*
+version of a test — the exact one I had just added 38 checks to. The fix is
+that the image-building script now writes a small file listing a fingerprint of
+every program it packed, and a checker compares that list against the tree. The
+alternative — just comparing file dates — cannot work here, for a reason
+specific to this file.
+
+### The decision
+
+`scripts/create-ext4-rootfs.sh` ends by writing `rootfs.ext4.manifest`: the
+sha256 of every locally built ELF it staged (`services/ctest-*/*.elf`,
+`services/fastpy-*/*.elf`, `build/spike/*.elf` — 74 files today).
+`scripts/ctest-fixtures.py image-check` compares it against the working tree
+and fails, naming each ELF that moved. Writing the manifest is **fatal** if it
+cannot happen, because an image nothing can verify is precisely the state that
+produced the false green.
+
+### Why not mtimes, when three neighbouring gates use them
+
+`create-ext4-rootfs.sh` already compares ELF mtimes against `libc.a` and
+against each fixture's sources, and those are the right question there. For the
+*image* they are not merely weak — they are inverted:
+
+- **QEMU writes to `rootfs.ext4` on every boot.** The image is mounted
+  read-write and the kernel touches it, so its mtime is when it was last *run*.
+  An image packed on Tuesday and booted this morning is, by mtime, newer than
+  fixtures rebuilt an hour ago. The comparison does not merely fail to catch
+  the drift; it actively reports the stale image as the fresher artifact.
+- A fresh clone flattens every mtime, which is the argument already recorded in
+  `ctest-fixtures.py`'s docstring for why the *fixture* stamp is a content hash.
+  It applies here too, but it is the weaker of the two reasons: the image is
+  gitignored, so a fresh clone has no image at all.
+
+### The alternative considered: hash the image itself
+
+Recording the sha256 of `rootfs.ext4` and re-checking it would prove the image
+had not been *tampered with*, which is not the question — and it would fail
+after every boot, for the same reason mtimes do: QEMU writes to it. Hashing the
+*inputs* rather than the output is what survives the artifact being mutated by
+the very act of testing it.
+
+### The cost, accepted
+
+The manifest is a gitignored file that can be deleted independently of the
+image it describes. `image-check` treats "image present, manifest absent" as a
+failure rather than a skip — the image predates the check, so what is in it
+genuinely cannot be established, and "cannot verify" must not read as "fine"
+(the `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT` rule). The remedy is one command,
+and it is printed. "No image at all" *is* a pass, with a printed line, because
+that is a legitimate configuration in which the Path-Z rungs self-skip.
+
+**Files.** `scripts/ctest-fixtures.py` (`cmd_image_stamp`, `cmd_image_check`,
+`STAGED_GLOBS`); `scripts/create-ext4-rootfs.sh` (the call, at the end, after
+`debugfs` reports the contents); `.gitignore` (`*.ext4.manifest`).
+
+**Not yet wired.** `scripts/boot-test.sh` is lane A's file, so the
+`image-check` call that makes any of this fire is
+`requests/b-a-boot-test-boots-a-rootfs-image-that-may-predate-the-fixtures-in-it.md`.
+Until it lands the checker is inert, and this entry describes a guard that
+exists rather than one that runs.
 
 ## §400 — Every GUI process finds its own UI font, lazily, from a compiled-in fallback list
 
@@ -15402,719 +16296,5 @@ later if a profile ever asks for it, and would not change the interface.
 **Where it lives.** `apps/editor/src/main.rs` — `EditAction`,
 `Document::record_edit`/`snapshot`/`splice_lines`/`undo`/`redo`/`clamp_cursor`,
 and the `undo_tests` module.
-
----
-
-## §205 — The Ada toolchain is the **`x86_64-elf` cross-GNAT** on a **ZFP runtime**; the object is committed and stamped, so no other lane needs a 1 GB install
-
-**Date:** 2026-08-16
-**Decided by:** Claude (autonomous) — these are the two sub-decisions §201
-explicitly left to Lane A, plus a factual correction to §201 that emerged in
-carrying them out.
-
-**In short:** §201 approved installing Ada and its prover but deliberately left
-two follow-on choices open: *which* Ada compiler to install, and *which*
-cut-down runtime library to build against. Both are now settled by having
-actually done it. The compiler is the one that produces code for bare metal
-rather than for Windows; the runtime is the smallest one there is, which for
-our purposes turns out to be a single 200-line file we now keep in the tree.
-A third thing came out of the work: §201 says GPL "is not a problem here"
-because we only *run* the toolchain — but we ended up copying one file out of
-it into our own source tree, so that reasoning does not actually cover us. A
-different licence provision does. This entry records what that is.
-
----
-
-### 1. Which GNAT: `gnat_x86_64_elf`, not `gnat_native`
-
-**What changes:** the compiler emits ELF objects that link into the kernel,
-instead of Windows PE-COFF objects that cannot.
-
-Alire publishes both under confusingly similar names, and they are not
-interchangeable:
-
-| Crate | Host | Emits | Usable for the kernel? |
-|---|---|---|---|
-| `gnat_native` | Windows | PE-COFF (mingw) | **No** |
-| `gnat_x86_64_elf` | Windows | ELF, bare-metal `x86_64-elf` | **Yes** |
-
-Both *run* on Windows; the difference is what they produce. `gnat_native` is a
-mingw compiler whose output is a Windows object file, and `rust-lld` linking an
-ELF kernel cannot consume it.
-
-**This overturns a conclusion recorded in an earlier session.** That session
-probed `gnat_native`, found PE-COFF, and concluded that Ada in the kernel
-required building the whole toolchain under WSL. That conclusion was sound
-reasoning applied to the wrong crate — the cross-compiler was on the same
-Alire index the whole time. Installed path:
-
-```
-~/AppData/Local/alire/cache/toolchains/gnat_x86_64_elf_15.3.1_880685c3/bin/x86_64-elf-gcc.exe
-```
-
-`gnatprove` (FSF 16.1.0, `~/.alire/bin/`) is host-side and target-agnostic, so
-it needs no cross build — but see the trap in §3 below, because "target-agnostic"
-is precisely the problem.
-
-*Consequence:* the WSL Alire install made on the PE-COFF premise
-(`~/opt/alire`, `~/.local/bin/alr`) is now dead weight and can be removed.
-
-### 2. The restricted runtime: **ZFP**, vendored as one file
-
-**What changes:** instead of configuring and building a runtime library, we
-carry a single `system.ads` in the tree and pass `--RTS=kernel/ada/rts`.
-
-§201 framed this as "configuration work with real content." Measured, it was
-not, and the reason is worth recording because it makes the choice obvious
-rather than a judgement call:
-
-| | ZFP (Zero FootPrint) | Light |
-|---|---|---|
-| Exceptions | none | propagation, needs unwinder |
-| Tasking | none | none |
-| Files needed here | **`system.ads` only** | `system.ads` + `adalib` (built) |
-| Undefined symbols left | **one** | several |
-
-For a package that does arithmetic on array indices and dereferences nothing,
-ZFP costs a single file and leaves exactly one undefined symbol,
-`__gnat_last_chance_handler`, which `kernel/src/ada.rs` exports and routes to
-the kernel panic path. Light would buy exception propagation that this
-component has no use for — SPARK *proves* the exceptions cannot be raised, so a
-runtime able to propagate them is machinery for an impossible case.
-
-The vendored `system.ads` needed exactly one edit from the stock copy:
-`Duration_32_Bits` set for the target. Everything else is verbatim.
-
-Choosing ZFP is reversible: moving to light later means building `adalib` and
-changing one `--RTS=` path, with no source change in the Ada.
-
-### 3. **Correction to §201's licence reasoning** — the Runtime Library Exception is what applies
-
-§201 point 3 states: *"GPL is not a problem here. The toolchain is a tool we
-run, not something we link; it does not reach our output."*
-
-**That is true of the compiler and false of what we actually shipped.**
-Vendoring `system.ads` copies a GPL-3 file *out of* the toolchain and *into*
-SlateOS, and the compiled kernel contains code derived from it. The
-"we only run it" argument does not reach this case at all.
-
-What does reach it is the **GCC Runtime Library Exception**, which GCC's
-runtime files (`system.ads` among them) carry precisely so that compiling
-against them does not impose GPL on the result. It is the same provision that
-lets proprietary programs be compiled with GCC and link `libgcc`. So the
-outcome §201 asserts is correct — but for a different reason, and the
-distinction matters the next time someone reasons from §201's stated rationale
-to a case the Runtime Library Exception does *not* cover (e.g. vendoring a file
-from a GPL project that has no such exception).
-
-**§201 is left unedited** — it is Operator-attributed and the shared documents
-are append-only. This entry is the correction of record; a reader arriving at
-§201 point 3 should be brought here.
-
-### 4. The consequence that shaped the build: prebuilt object + stamp
-
-The cross-GNAT is a ~1 GB install, and the boot test builds the **whole
-workspace** — so requiring the toolchain would block Lanes B and C over a
-component neither touches. Requiring it is not acceptable; skipping
-verification is not acceptable either. The resolution:
-
-- `kernel/ada/prebuilt/virtqueue_descriptors.o` is **committed**, and
-  `kernel/build.rs` links it rather than compiling Ada.
-- `kernel/ada/prebuilt/stamp.txt` holds a SHA-256 over the compiler flags and
-  every source input. **`build.rs` recomputes it on every build, everywhere**,
-  and refuses to build on mismatch. This needs no toolchain, and it is the
-  half that catches the dangerous case: a source edited without regenerating.
-- Where a toolchain *is* present, `build.rs` additionally recompiles and
-  **byte-compares** — catching a tampered or hand-edited object, which the
-  stamp alone would not. GNAT's output was verified deterministic here (same
-  digest across runs and working directories), which is what makes the
-  comparison meaningful rather than flaky.
-- `kernel/ada/regen-prebuilt.py` is the **only** supported way to move the
-  stamp forward, and it **re-runs `gnatprove` and refuses to write if any check
-  is unproved**. Regenerating the object is exactly the moment the proof stops
-  applying, so a fresh-but-unproved object is worse than a stale one: the stamp
-  would then assert a freshness the proof does not back.
-
-The stamp is computed by both Python and Rust. That duplication is deliberate
-and safe **because it is self-policing, not merely documented**: one side
-writes the digest and the other checks it, so any divergence fails *every*
-build on the next run, on every machine, with the mismatch printed. The
-alternative — a build-time dependency to share one implementation — would add a
-crate to the kernel build to remove a risk that already announces itself.
-
-**Where it lives.** `kernel/ada/` (sources, `virtqueue.gpr`, `x86_64-elf.atp`,
-`rts/adainclude/system.ads`, `regen-prebuilt.py`, `prebuilt/`);
-`kernel/build.rs` (`ada_stamp`, `verify_against_toolchain`, `find_ada_gcc`);
-`kernel/src/ada.rs` (FFI wrappers and the panic bridge). Current state:
-**105/105 verification conditions discharged, zero unproved, zero warnings.**
-
----
-
-## §317 — A libc function with no backend is *composed over the missing primitive*, not stubbed
-
-**Date:** 2026-08-16
-**Decided by:** Claude (autonomous)
-
-**In short:** CPython needs three functions — `openpty`, `forkpty`, `login_tty`
-— that create a *pseudo-terminal* (a fake keyboard-and-screen pair that lets
-one program drive another as if a human were typing at it; this is how `ssh`,
-`script`, `expect` and every terminal window work). SlateOS does not have
-pseudo-terminals yet. The choice was whether to write these three as
-placeholders that pretend to succeed, or to write them properly *now* — as real
-code on top of the primitive that is missing, so they fail honestly today and
-start working by themselves the day the primitive arrives. We wrote them
-properly.
-
-**The two options.**
-
-| | Stub | Compose over the missing primitive |
-|---|---|---|
-| *What changes:* | `os.openpty()` returns a plausible-looking pair of numbers that are not a terminal | `os.openpty()` fails with `ENOSYS` ("this system call is not implemented"), which is true |
-| When the pty layer lands | someone must remember to come back and rewrite all three | they work, with no edit |
-| Error a caller sees | invented by the stub | the real one, from `posix_openpt` |
-| Cost today | ~10 lines | ~490 lines, five tests |
-
-**Why compose.** The whole point of the CPython spike was to replace a claim
-with a measurement. A stub would have restored the claim: the symbol table
-would say `openpty` exists, the linker would be satisfied, and the first
-program to actually open a terminal would get silent nonsense instead of a
-diagnosable failure. `ENOSYS` from `posix_openpt`, propagated verbatim, is a
-*better* outcome than a fake success — it names the missing piece and points at
-the file that will supply it.
-
-The composition is not speculative. `openpty` is the standard
-`posix_openpt` → `grantpt` → `unlockpt` → `ptsname_r` → `open(slave)` dance;
-all five already exist as entry points, four of them functional, and only
-`posix_openpt` returns `ENOSYS`. `login_tty` is fully functional *today* —
-`setsid` + `TIOCSCTTY` + three `dup2`s — and `forkpty` carries musl's
-`O_CLOEXEC` synchronisation pipe so a `login_tty` failure inside the child is
-reported to the parent rather than yielding a child whose stdio silently is not
-the pty. A test pins the property that matters: `openpty` reports
-`posix_openpt`'s errno rather than one of its own, so the day `posix_openpt`
-stops returning `ENOSYS` the test still passes and the function starts working.
-
-**Against.** Composing costs ~50× the lines of a stub for zero present-day
-capability, and it front-loads work whose requirements could still change — if
-the eventual pty layer does not expose a `/dev/ptmx`-shaped interface, some of
-this glue is rewritten anyway. That risk is small and bounded (the glue is thin
-and the interface is 40 years old and specified), and it is the *right* kind of
-risk to take: the failure mode is wasted effort, whereas the stub's failure
-mode is a program that misbehaves for reasons nothing in the system explains.
-
-**Generalisation.** This is now the rule for the `posix` crate: when a symbol
-is required but its backend is not built, implement it against the backend's
-real entry point and let the honest error propagate. Do not stub, and do not
-`unimplemented!()`. Where the honest behaviour is a *degradation* rather than a
-failure — as with `pthread_kill` on a peer thread, which currently delivers
-process-directed because the kernel has no per-task pending set — document the
-degradation at the call site *and* in `todo.txt` with the kernel change that
-would remove it.
-
-**Where it lives.** `posix/src/pty.rs` (new in `5531f816c`).
-
----
-
-## §318 — `syscall()` is a translation table, not a trap door
-
-**Date:** 2026-08-16
-**Decided by:** Claude (autonomous)
-
-**In short:** Unix has a function called `syscall()` that lets a program ask the
-kernel for something directly, by number, bypassing the C library. CPython uses
-it for a handful of things its libc might be too old to expose. The problem is
-that the numbers are *Linux's* numbers, and SlateOS's own numbers are unrelated
-— they happen to overlap, so forwarding one to the other would not error out,
-it would call the wrong thing. Our `syscall()` therefore translates a small,
-fixed set of Linux numbers into calls on functions in this crate, and refuses
-everything else.
-
-**The collision is not hypothetical.** SlateOS's `SYS_EXIT` is **1**, which is
-Linux's `write`. A naive `syscall(n, …) → SYSCALL n` forwarder handed
-`SYS_WRITE` (Linux 1) would have exited the process. A test now pins this:
-`test_linux_numbers_are_linux_numbers` asserts both that our `SYS_EXIT` differs
-from `crate::syscall::SYS_EXIT` and that `crate::syscall::SYS_EXIT` equals
-Linux's `SYS_WRITE`, so the overlap cannot silently drift back.
-
-**Three options were on the table.**
-
-| | *What changes:* |
-|---|---|
-| Forward to the kernel | wrong function called, silently — rejected outright |
-| Translate every Linux number | a second, parallel libc, maintained forever |
-| Translate the numbers real callers issue; `ENOSYS` for the rest | `syscall(SYS_gettid)` works; `syscall(SYS_write, …)` fails cleanly |
-
-We took the third. The table covers what CPython actually issues —
-`sched_yield`, `getpid`, `getppid`, `gettid`, `get{,e}{u,g}id`,
-`gettimeofday`, `getrandom`, `pidfd_open`, `pidfd_send_signal` — every one of
-which is a thin query with an existing crate function behind it.
-
-**Why the libc-bypass numbers are *deliberately* absent.** `read`, `write`,
-`close`, `fork`, `execve` and `exit` are not missing by oversight; wrapping
-them would be actively wrong. A caller reaching those through `syscall()` is
-bypassing libc *on purpose* — to avoid our fd table, our `pthread_atfork`
-handlers, our CWD resolution — and quietly routing it back through the very
-layer it is evading would produce behaviour that matches neither what the
-caller asked for nor what Linux does. `ENOSYS` is the honest answer, and
-`test_bypass_syscalls_are_not_silently_wrapped` pins it.
-
-**Against.** A program that legitimately needs a number we have not tabulated
-gets `ENOSYS` and must be diagnosed, where a full forwarder would "just work"
-— except that it would not; it would call the wrong function. The real cost is
-that the table needs extending as new programs land, which is a small, visible,
-test-covered edit rather than a hidden hazard.
-
-**One implementation note worth keeping.** The seven arguments are typed
-`isize`, **not** `core::ffi::c_long`. `c_long` is 32 bits on the LLP64 host the
-tests run on and 64 bits on `x86_64-slateos` — declaring the signature with it
-produces a *different function* in the tested build than in the shipped one,
-truncating every pointer argument. The first compile caught it, and the type
-alias carries the explanation so it cannot recur silently. Seven fixed
-arguments rather than a variadic is ABI-identical on x86-64 SysV and avoids a
-feature gate the crate does not enable.
-
-**Where it lives.** `posix/src/sys_syscall.rs`, rewritten in `5531f816c`; the
-old header claimed its `SYS_*` constants "map Linux syscall names to our native
-syscall numbers" (they are verbatim Linux numbers) and globbed in
-`crate::syscall::*`, which is what forced the `SYS_EXIT_LINUX` alias. Both are
-gone; nothing consumed either.
-
-## §319 — libc's four wait entry points funnel through one call, and the extensible struct's size is deliberately not exposed to C
-
-**Date:** 2026-08-16
-**Decided by:** Claude (autonomous) — the kernel ABI was lane A's call (§206);
-these are the libc-side shape questions it left open.
-
-**In short:** a program that starts a child process can wait for it to finish
-four different ways, all meaning roughly the same thing. Until now each of the
-four was written out separately in our C library, and they had drifted: one of
-them refused a perfectly legal request outright, one silently destroyed the
-information it was asked only to look at, and two of them reported the child's
-CPU time as zero when the kernel knew the real number. This change routes all
-four through a single piece of code and has them read the kernel's new answer
-structure. The three choices worth recording are: one shared body rather than
-four; naming *what kind* of thing is being waited on with a small enum instead
-of overloading the sign of a number; and **not** giving C programs a way to
-name the answer structure's size, even though that is exactly what one test
-needs.
-
-### The context
-
-Lane A's §206 gave `SYS_PROCESS_WAIT_STATUS` three new option bits (`WPGID`,
-`WINFO`, `WNOWAIT`) and a `WaitInfo` out-parameter carrying the facts that do
-not survive the reap — the child's uid, its CPU time, and four other counters.
-`requests/a-b-wait-syscall-grew-wpgid-wnowait-and-a-waitinfo-struct.md` asked
-lane B to consume it. Nothing in libc broke by not consuming it; every choice
-below is about the shape of the consumption, not whether to do it.
-
-### The decisions
-
-**1. One `wait_common`, not four call sites.**
-
-`waitpid`, `wait3`, `wait4` and `waitid` all reach the kernel through one
-private function. `wait3` is now literally `wait4(-1, …)`, and `wait4` is
-`waitpid` plus an out-parameter.
-
-*For:* the four differ only in how they *encode* an answer — a packed `wstatus`
-word, a `siginfo_t`, a `struct rusage` — never in which child they select or
-whether a report is consumed. Those were the parts that drifted. It is the same
-argument §206 makes one level down, and it is why `waitid` inherited the
-group-1 `ENOSYS` and the ignored `WNOWAIT` in the first place: it was a
-separate copy that nobody updated when `waitpid` grew.
-
-*Against:* a funnel makes each caller pay for the union of the others'
-concerns — `waitpid`'s hot path now goes through a `match` on a two-armed enum.
-Accepted: the match compiles to a branch on a register, next to a syscall that
-costs three orders of magnitude more, and the alternative is the drift that
-produced this request.
-
-**2. `WaitTarget { Selector, Pgid }` at the libc boundary, mirroring the
-kernel's `WaitTarget { Any, Pid, Pgid }`.**
-
-*For:* the whole of request item 1 is that `waitpid`'s single signed integer
-cannot express "group 1" — it spends `-1` on "any child". A libc that kept
-passing a signed integer around internally and only converted at the syscall
-would have the same hole one layer up. Making the two interpretations separate
-*types* is what stops a half-conversion, which is the specific failure mode
-lane A warns about: with `WPGID` set, `-g` is not group `g`, it is a huge
-unsigned pgid that matches nothing and silently returns `ECHILD`.
-
-*Against:* two enums, one per side of the syscall, describing the same idea. A
-single shared definition would be less to keep in step. Rejected because libc
-and the kernel are separately compiled and separately versioned — a shared type
-would be a shared *header*, which is precisely the coupling the numbered ABI
-exists to avoid.
-
-Note the deliberate asymmetry: libc's enum has two arms where the kernel's has
-three. `Any` is not a libc concept — `waitpid(-1, …)` and `waitid(P_ALL, …)`
-both mean it, and both are already spelled as a selector. Adding a third arm
-would create two encodings of the same wait inside libc, which is the disease.
-
-**3. The `WaitInfo` size is not reachable from C.**
-
-The extensible-struct convention only means anything if a caller can pass a
-size other than the current one. libc, by construction, always passes its own
-`sizeof` — so libc cannot test the convention, and there is a real temptation
-to export a size-taking entry point (`slate_wait_info(…, size)`) so that a
-fixture can.
-
-*Rejected.* A libc export whose only correct caller is a test is a permanent
-hole: every other caller can then hand the kernel an arbitrary length, and the
-kernel's validation is all that stands between a typo and a write past the end
-of a buffer. The convention's real beneficiary is *an older libc on a newer
-kernel*, which does not need an entry point — it needs the kernel to honour a
-size it already passes.
-
-So the test reaches the syscall raw, from C, in
-`services/ctest-jobctl/main.c` (checks 150-187): a hand-written five-argument
-`syscall`, a locally-declared 72-byte struct, and a 128-byte buffer poisoned
-with `0x5A` before each call. Check 157 asserts that `arg4 = 128` comes back
-with bytes 72..128 **zeroed**; check 169 asserts that `arg4 = 24` leaves bytes
-24..128 **exactly as poisoned**. Both are properties of `copy_to_user`, which no
-kernel self-test can reach — a bare kernel task has no user address space, so
-`dispatch.rs::test_dispatch_wait_info_layout` can only check the pure encoder.
-
-The struct is re-declared in the fixture rather than shared with the kernel's
-definition, and that is the point: a struct generated from the same source as
-the kernel's would agree with it by construction even if both were wrong. The
-fixture is asserting what bytes arrive, not what the kernel meant to send.
-
-**4. The unit split is honoured in exactly one function.**
-
-`WaitInfo` is in microseconds; `siginfo_t`'s `si_utime`/`si_stime` are in
-USER_HZ ticks, because the field is `clock_t` and a ported binary reading it
-expects what Linux's `nsec_to_clock_t` would have put there. libc converts in
-`us_to_clock_t` and nowhere else.
-
-*For:* a caller that guessed the wrong unit is off by exactly 10× — large
-enough to be wrong, small enough to look plausible in a log, and invisible in
-review. One conversion site is one place to be wrong.
-
-*Against:* it means `wait4`'s `rusage` (microseconds, via `us_to_timeval`) and
-`waitid`'s `siginfo` (ticks) report the same child's CPU time at different
-resolutions, and a program that used both would see them disagree below 10 ms.
-Accepted: that disagreement is Linux's, and matching it is the entire reason
-the ABI has two units.
-
-**5. `wait4` writes `rusage` on a `WNOHANG` miss but not on an error.**
-
-*For:* both match Linux's `sys_wait4`. On a miss there was no child, so zero
-usage is the truth and leaving the caller's previous contents would read as a
-second child's numbers. On an error there is nothing to describe.
-
-The old code did neither — it zero-filled unconditionally, before it even knew
-whether a child existed, via the kernel's `clear_user_rusage`. That was a
-**false zero**: `pcb`'s counters existed the whole time and the call was
-discarding them. Two host tests asserted the zeroing and had to be inverted;
-they now assert the Linux contract instead.
-
-**Where it lives.** `posix/src/process.rs` — `WaitInfo`, `WaitTarget`,
-`wait_common`, `waitid_target`, `waitid_kernel_options`, `siginfo_for_wait`,
-`rusage_from_wait_info`, `us_to_clock_t`, `us_to_timeval`; `posix/src/resource.rs`
-(`Rusage` gains `Default`, so a partial fill has an honest base);
-`services/ctest-jobctl/main.c` checks 150-187.
-
-**Tests.** Host: 18 new tests over the pure helpers — the `WaitInfo` byte layout
-(every offset, both zero pads, size 72, align 8), the `(idtype, id)` →
-`WaitTarget` mapping including group 1 and the never-negate rule, the option
-translation, and the `rusage`/`siginfo` encoders. Target: `ctest-jobctl`
-150-187, which is the only layer that can see a `copy_to_user`.
-
----
-
-## §320 — The rootfs image is verified by a manifest it writes about itself, because its own timestamp records when it was last *booted*
-
-**Date:** 2026-08-16
-**Decided by:** Claude (autonomous)
-
-**In short:** The boot test runs our ring-3 C test programs from inside a disk
-image, not from the source tree. Nothing checked that the image was as new as
-the programs in it, so today a boot test passed while running the *previous*
-version of a test — the exact one I had just added 38 checks to. The fix is
-that the image-building script now writes a small file listing a fingerprint of
-every program it packed, and a checker compares that list against the tree. The
-alternative — just comparing file dates — cannot work here, for a reason
-specific to this file.
-
-### The decision
-
-`scripts/create-ext4-rootfs.sh` ends by writing `rootfs.ext4.manifest`: the
-sha256 of every locally built ELF it staged (`services/ctest-*/*.elf`,
-`services/fastpy-*/*.elf`, `build/spike/*.elf` — 74 files today).
-`scripts/ctest-fixtures.py image-check` compares it against the working tree
-and fails, naming each ELF that moved. Writing the manifest is **fatal** if it
-cannot happen, because an image nothing can verify is precisely the state that
-produced the false green.
-
-### Why not mtimes, when three neighbouring gates use them
-
-`create-ext4-rootfs.sh` already compares ELF mtimes against `libc.a` and
-against each fixture's sources, and those are the right question there. For the
-*image* they are not merely weak — they are inverted:
-
-- **QEMU writes to `rootfs.ext4` on every boot.** The image is mounted
-  read-write and the kernel touches it, so its mtime is when it was last *run*.
-  An image packed on Tuesday and booted this morning is, by mtime, newer than
-  fixtures rebuilt an hour ago. The comparison does not merely fail to catch
-  the drift; it actively reports the stale image as the fresher artifact.
-- A fresh clone flattens every mtime, which is the argument already recorded in
-  `ctest-fixtures.py`'s docstring for why the *fixture* stamp is a content hash.
-  It applies here too, but it is the weaker of the two reasons: the image is
-  gitignored, so a fresh clone has no image at all.
-
-### The alternative considered: hash the image itself
-
-Recording the sha256 of `rootfs.ext4` and re-checking it would prove the image
-had not been *tampered with*, which is not the question — and it would fail
-after every boot, for the same reason mtimes do: QEMU writes to it. Hashing the
-*inputs* rather than the output is what survives the artifact being mutated by
-the very act of testing it.
-
-### The cost, accepted
-
-The manifest is a gitignored file that can be deleted independently of the
-image it describes. `image-check` treats "image present, manifest absent" as a
-failure rather than a skip — the image predates the check, so what is in it
-genuinely cannot be established, and "cannot verify" must not read as "fine"
-(the `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT` rule). The remedy is one command,
-and it is printed. "No image at all" *is* a pass, with a printed line, because
-that is a legitimate configuration in which the Path-Z rungs self-skip.
-
-**Files.** `scripts/ctest-fixtures.py` (`cmd_image_stamp`, `cmd_image_check`,
-`STAGED_GLOBS`); `scripts/create-ext4-rootfs.sh` (the call, at the end, after
-`debugfs` reports the contents); `.gitignore` (`*.ext4.manifest`).
-
-**Not yet wired.** `scripts/boot-test.sh` is lane A's file, so the
-`image-check` call that makes any of this fire is
-`requests/b-a-boot-test-boots-a-rootfs-image-that-may-predate-the-fixtures-in-it.md`.
-Until it lands the checker is inert, and this entry describes a guard that
-exists rather than one that runs.
-
----
-
-## §206 — One wait primitive under three ABIs, a target *enum* instead of an overloaded selector, and an extensible out-parameter for the facts that do not survive the reap
-
-**Date:** 2026-08-16
-**Decided by:** Claude (autonomous) — in response to lane B's request
-`requests/b-a-waitid-needs-an-explicit-idtype-wait.md`, which asked for three
-specific capabilities; the shape chosen to deliver them is mine.
-
-**In short:** three different syscalls let a program wait for its child process
-to finish — one for programs built for our own system, and two more for
-programs ported from Linux. All three were separately written copies of the
-same logic, and they had drifted apart: one of them could not be interrupted by
-a Ctrl-C at all, none of them could say "wait for the processes in group 1",
-and none could tell you the child's user ID or how much CPU it used, because by
-the time they answered, the child's records had already been deleted. This
-change merges the three copies into one and adds the missing facts to the
-answer. The choices worth recording are: one shared body rather than three;
-naming *what kind* of thing you are waiting on with a separate field instead of
-squeezing it into the sign of a number; and returning the extra facts in a
-caller-sized structure that can grow later without needing a new syscall.
-
-### The decision
-
-1. **One primitive.** `kernel/src/syscall/wait.rs` owns child selection, the
-   reap, and the blocking loop. `wait4`, `waitid` and the native
-   `SYS_PROCESS_WAIT_STATUS` are marshalling layers over it: `wait4` and the
-   native syscall encode a POSIX `wstatus` word, `waitid` encodes a
-   `siginfo_t`, and none of them decides *which* child.
-2. **`WaitTarget { Any, Pid, Pgid }`** replaces the overloaded signed selector
-   inside the kernel. The `waitpid`-shaped callers convert at the boundary with
-   `WaitTarget::from_posix_selector`; callers that can say what they mean
-   (`waitid`'s `P_PGID`, the native `WPGID` bit) construct `Pgid` directly.
-3. **Native option bits `WPGID` (1<<16) and `WNOWAIT` (1<<24)**, both
-   previously rejected by the options mask, so no existing caller changes.
-4. **A `WaitInfo` out-parameter** (`arg3` pointer, `arg4` size, 72 bytes today)
-   carrying pid, uid, wstatus and six usage counters, written under the
-   `clone3`/`sched_setattr` convention: the kernel writes `min(caller, kernel)`
-   bytes and zero-fills any tail it does not know about.
-
-### Why one primitive, and what the two extra copies had already cost
-
-The three entry points read the *same* records — process groups, zombie exit
-info, job-control reports. If they disagree about which child a selector names,
-which transition is reported first, or whether a report was consumed, then a
-program on our libc and a ported glibc program waiting on the same child
-observe different histories. That is not hypothetical: `sys_waitid` had **no
-signal handling whatsoever** — no pending-signal check, no `ERESTARTSYS`, no
-signalfd registration, just `block_current()` — while `wait4` a few hundred
-lines away had all three. A process blocked in `waitid` could not be
-interrupted. Nobody decided that; it is what two copies of one primitive decay
-into.
-
-*Against:* a shared body is a shared blast radius — a bug in `scan_once` is now
-a bug in three ABIs at once, and the three callers can no longer be tuned
-independently. *For:* they were never *supposed* to differ, and the one place
-they did differ was a defect. A shared bug that shows up in three tests is
-strictly easier to find than three subtly different behaviours that each look
-locally reasonable.
-
-### Why a target enum rather than "just add a flag"
-
-`waitpid`'s single `pid_t` overloads four meanings onto one integer (`>0` a
-pid, `0` my group, `-1` any child, `<-1` group `-pid`), which cannot name
-process group 1: that would need `-1`, already spoken for. This is lane B's
-item 1, and it is a real user-visible hole — an init or a shell most wants to
-wait on exactly that group.
-
-Linux does not patch the encoding; it never overloads internally, resolving
-`sys_waitid`'s arguments to a `(type, struct pid *)` pair before calling
-`do_wait`. `WaitTarget` is that pair. The alternative — keep the signed
-selector everywhere and special-case group 1 with a sentinel — was rejected
-because a sentinel is exactly how the hole was made in the first place, and the
-next un-nameable value would need another one.
-
-*Cost:* every caller now converts, and `from_posix_selector` is one more place
-a mistake can live. *Benefit:* the conversion is total — there is no encoding a
-caller can pass that means two things at once — and the ABI-specific gate that
-rejects `INT_MIN` stays at the syscall boundary where it belongs, rather than
-becoming a property of waiting itself.
-
-### A second bug the consolidation surfaced: registration was answering a question it could not see
-
-The any-child/group branch of the blocking wait registered the waiter *before*
-scanning, and returned the registration error as the answer:
-
-```rust
-// "Registering first ... also reports ECHILD when the caller has no children at all."
-if let Err(e) = pcb::set_wait_any_task(parent_pid, task_id) { return Err(e); }
-```
-
-That comment's second clause was false. `set_wait_any_task` looks up **the
-caller** and fails with `NoSuchProcess` when the caller has no PCB — it never
-examines children at all. So a registration failure was standing in for ECHILD,
-and every any-child and every group wait from a caller without a process record
-returned ECHILD without scanning.
-
-It survived because the two pre-existing tests both miss that branch: the
-group-filter test goes through `SYS_PROCESS_TRY_WAIT`, which calls `scan_once`
-directly, and the job-control test names a pid, taking the branch that scans
-*before* registering. That asymmetry between the two branches was itself the
-tell, and is only visible once both live in one function.
-
-The fix separates the two questions: registration failure is recorded rather
-than returned, `scan_once` answers ECHILD from `!has_child` as it already
-could, and only a caller that would actually have to **park** is defeated by
-having no wake slot — parking without one is a permanent hang, so that case
-returns `NoSuchProcess`, which `wait_err_to_echild` folds to ECHILD at the
-boundary. That guard is load-bearing rather than defensive: `linux.rs`'s wait4
-register-truncation test deliberately passes an `options` word that truncates
-to `0` — no `WNOHANG` — on a wait-any, and is the one caller in the tree that
-reaches the park point with no PCB.
-
-### Why an extensible struct rather than a second return register
-
-Lane B's items 3 and 4 (`si_uid`, CPU times) share the property that decides
-the shape: **they do not survive the reap.** Once the PCB is destroyed there is
-no one left to ask, so a follow-up query syscall is not merely inelegant, it is
-impossible. The facts must ride out on the wait itself.
-
-Two ways to do that were considered:
-
-- **A second return register** (`syscall3_2ret` already exists on the libc
-  side). Cheap, and enough for `si_uid` alone. Rejected because it is enough
-  for *exactly* `si_uid`: the six usage counters do not fit, and lane B
-  explicitly noted that leaving room for CPU time now saves a second ABI change
-  later. A one-off register would have made that second change mandatory.
-- **A caller-sized struct.** Chosen. An older caller on a newer kernel passes a
-  smaller size and gets the prefix it understands, never a write past its
-  buffer; a newer caller on this kernel passes a larger size and gets zeros in
-  the fields this kernel cannot fill — which is the *correct* answer for every
-  counter here, since an unknown count reads as none rather than as garbage.
-  Size 0 (or a null pointer) means "don't want it", so the cost to callers that
-  never use it is two zero registers.
-
-*Against the struct:* it is a userspace layout the kernel writes field by
-field, which is the larger trust boundary §112 cited when it deferred a
-`siginfo_t`-shaped syscall. *Why that objection does not bite here:* §112's
-concern was a 128-byte layout with a union whose interpretation depends on
-`si_code`. This is a flat array of `u64`s — no union, no pointers, nothing
-variable-length — written through the same `copy_to_user` as every other
-out-parameter, and validated **before** the wait blocks as well as inside the
-write, because a caller that passed a bad pointer should learn so now, not
-after sleeping for an arbitrarily long wait and reaping a child it then cannot
-be told about.
-
-### The out-parameter must be opt-in — an extension bit, not just a size
-
-**In short:** you cannot start reading a syscall argument register that the
-callers who already exist never write. The first version of this change did,
-and it turned `waitpid` into a wild pointer.
-
-`SYS_PROCESS_WAIT_STATUS` shipped taking three arguments. Every caller it has
-therefore reaches it through a three-argument wrapper — `posix`'s `syscall3`
-emits `in("rdi")`, `in("rsi")`, `in("rdx")` and nothing else, so `r10` and `r8`
-arrive holding whatever the caller last left in them. Reading them as
-`(ptr, size)` meant the kernel validated a pointer userspace never supplied,
-and on the success path would have written 72 bytes through it. `ctest-pgroup`,
-`ctest-jobctl` and `ctest-ctty` all failed inside one boot; the EFAULT they saw
-was the lucky outcome, not the characteristic one.
-
-So `arg3`/`arg4` are read only under a new option bit, `WINFO = 0x0002_0000`.
-
-*The tempting wrong answer* is that the size field already covers this —
-`arg4 == 0` means "don't want it", so surely an old caller is safe. It is not:
-garbage is zero with probability 2⁻⁶⁴. **The size convention protects against a
-struct that grew, not against a register that was never written**, and those
-are different failures with different remedies. The option word is the only
-argument every existing caller demonstrably sets, so an option bit is the only
-place an "I am new enough to have filled in `r10`" signal can live.
-
-*Against the bit:* it spends option space on something the size field
-superficially seems to cover, and a caller must now set two things
-(bit + pointer) instead of one. *For it:* the alternative is unsound, and the
-generalisation is worth stating plainly for the next syscall that grows —
-**`number.rs` already carried this exact warning about `SYS_PROCESS_WAIT`'s
-callers leaving garbage in the argument registers, and this change failed to
-apply it to the syscall doing the growing.** Any syscall gaining an argument
-beyond the arity it shipped with needs an in-band opt-in, not just a
-self-describing payload.
-
-### The one unit that is deliberately inconsistent
-
-`WaitInfo` carries CPU time in **microseconds**; `waitid`'s `si_utime` /
-`si_stime` carry it in **USER_HZ ticks**. That looks like an oversight and is
-not. `siginfo_t`'s fields are `clock_t` and Linux fills them via
-`nsec_to_clock_t`, so any conversion applied there would make ported binaries
-wrong — no conversion is right, and any conversion would be wrong. `WaitInfo`
-has no such constraint, so it uses the unit that does not require the caller to
-know `USER_HZ`; a caller that guessed wrong would be off by a factor of ten
-with nothing to notice it by. The tick-to-microsecond factor lives in exactly
-one place (`US_PER_TICK` in `wait_info_image`), next to a note pointing at
-`sys_getrusage` — the other consumer of the same counters, which must not
-disagree.
-
-### A premise in the request that was already false
-
-Lane B's item 4 states "There is no per-process CPU accounting, so libc zeroes
-all of it." That was true when `wait4`'s `clear_user_rusage` was written and is
-not true now: `pcb`'s `acct_*` / `child_*` counters and
-`thread::process_cpu_ticks` / `process_fault_counts` / `process_ctxsw_counts`
-have existed for a while, and `sys_getrusage` already encodes all 144 bytes
-from them. `clear_user_rusage` was a **false zero** — the data was there and
-the call threw it away. `wait4` now reports it, so item 4 is closed rather than
-deferred.
-
-### How to reverse
-
-`wait.rs` is additive: the three callers could be given back private copies by
-inlining `scan_once` / `wait_for_child_event`, at the cost of reintroducing
-exactly the drift described above. The two option bits and the out-parameter
-are pure extensions — removing them returns the syscall to its previous
-behaviour for every existing caller, since all three inputs were previously
-rejected or ignored.
-
-### Where it lives
-
-- `kernel/src/syscall/wait.rs` — the whole primitive.
-- `kernel/src/syscall/handlers.rs` — `wait_opt`, `WAIT_INFO_SIZE`,
-  `wait_info_image`, `write_wait_info`, `sys_process_wait_status`,
-  `sys_process_wait`, `sys_process_try_wait`.
-- `kernel/src/syscall/linux.rs` — `sys_wait4`, `write_user_rusage`,
-  `sys_waitid`, `waitid_scan`, `waitid_siginfo`.
-- `kernel/src/proc/thread.rs` — `ProcessUsage`, `process_usage_both`.
-- Tests: `dispatch.rs` — `test_dispatch_wait_status_wpgid_and_wnowait`,
-  `test_dispatch_wait_info_layout`, `test_dispatch_wait_process_group_filter`;
-  `linux.rs` — `test_waitid_scan`.
 
 ---

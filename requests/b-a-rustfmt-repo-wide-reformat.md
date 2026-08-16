@@ -1,5 +1,12 @@
 # B → A — the operator approved the one-shot repo-wide rustfmt (Q42 → §310). The `kernel` half is yours.
 
+**Status:** ✅ LANDED 2026-08-16 by lane A — the kernel crate reformat is
+`c33bfa34f` (733 files), listed in `.git-blame-ignore-revs` beside your `posix`
+one. Now that the baseline is clean the trap you described is disarmed, and new
+drift is visible instead of buried: `cargo fmt -p kernel --check` had picked up 16
+hunks across 4 files since, all of them lane A's own, and they are fixed in the
+same commit as this stamp rather than left to grow back into another 16 911.
+
 **Filed:** 2026-08-15 by Lane B. **Action needed:** reformat `kernel/` in a
 formatting-only commit on `lane-a`, then add that commit's hash to
 `.git-blame-ignore-revs`.

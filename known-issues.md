@@ -302,6 +302,71 @@ Two lessons, both about this entry rather than about the benchmarks:
   That is why the coverage instrument asserts the mismatch rather than assuming
   it away.
 
+**RESOLVED 2026-08-16 (lane A).** Every measurement window is now either
+recorded or declared a diagnostic; the coverage line should read `0 unjudged` on
+every boot from here.
+
+*The diff is no longer by name.* `BenchResult` gained a `seq` — its index into a
+new `MEASUREMENTS` list, assigned by `note_measurement` and consumed by `record`
+— so a window counts as covered precisely when *that window* was handed to
+`record`. This matters more than the correction above implied: the name diff was
+not wrong about one benchmark, it was wrong about **five**. `lock_tracked`→
+`lock_uncontended`, `syscall_dispatch_task_id`→`syscall_dispatch`,
+`heap_raw_alloc_free_64`→`heap_alloc_free_64`, `io_ring_nop_submit`→
+`io_ring_nop`, `page_fault_anonymous`→`page_fault`. All five have been recording
+history for weeks and all five would have been reported as uncovered, sending
+the reader to wire up something already wired. The soundness check survives in a
+stronger form: an out-of-range `seq` is counted in `SCORED_WITHOUT_MEASUREMENT`
+and printed, because `seq` is a plain index and an invented one would mark the
+*wrong* window covered — one mistake reported as two, in the direction that
+hides work rather than inventing it.
+
+*Thirteen windows declared diagnostics*, via a new `run_diagnostic()`: the six
+`bench_syscall_dispatch_breakdown` stages and the five `bench_lock_primitives`
+variants (both decompositions, as the correction established), plus
+`vfs_stat_breakdown_full2` — a coherence re-measurement of a whole that is
+already scored — and `self_test_nop`, which measures the harness rather than the
+kernel. Declaring them is what lets the report reach zero; a report that nags
+forever about settled decisions is one the reader learns to skip, which is the
+same failure mode as an assertion that fires on every healthy boot.
+
+*Eight real benchmarks were found genuinely unwired*, which is the part the
+static table missed entirely because it had no row for them — they are `run()`
+calls whose result was **discarded on the spot** (`run("x", …);` with no
+binding), so no `record()` call existed to be counted as absent:
+
+| Benchmark | Now | Why it mattered |
+|---|---|---|
+| `rdtsc_overhead` | `track` | The instrument every other benchmark is measured with. If it moves, every number in the suite shifts together and the comparator reads a suite-wide regression with no visible cause. |
+| `page_alloc_zeroed_free` | `track` | Cold path; its hot-path sibling `page_alloc_zeroed_pool` was already tracked, so the zero pool's whole reason for existing — the gap between the two — had only one side recorded. |
+| `heap_raw_alloc_free_512` | `track` | A regression confined to one size class is invisible in the 64 B number, which was the only one recorded. |
+| `heap_raw_alloc_free_4096` | `track` | As above, and the size most likely to change allocator routing. |
+| `compress_zero_page` | `track` | The compressor's best case, and the input the swap path hits most often. |
+| `compress_repeating` | `track` | Paired with it: recording one leaves the compressor's *shape* — how steeply cost rises with entropy — unrecorded. |
+| `hpet_read` | `track` | MMIO cost under every monotonic-clock read. Conditional; see below. |
+| `futex_wait_mismatch` | `score` (500 ns) | The worst of the eight: it **already had a target and already graded itself against it**, in prose. Exactly the shape `ScoreEntry::target_ns` documents — a human-readable verdict is not a record. |
+
+*A third lesson, then.* The correction above was about the static scan
+misclassifying what it found. The deeper problem is that it could not find these
+eight at all: a scan that works by pairing `run()` against `record()` sees
+nothing when the result is dropped in the same expression. Only the runtime
+instrument found them, because it counts windows rather than reading source.
+`rdtsc_overhead` has been measured on every `--bench` boot for months and appears
+in `bench/history.jsonl` zero times.
+
+*One consequence accepted deliberately:* `hpet_read` is conditional, so a boot
+without HPET will fail `test-bench-history.py`'s vanished-benchmark check. That
+is the intended behaviour — a run missing a benchmark is a run not comparable to
+its predecessor — and `page_alloc_zeroed_pool` was already conditional and
+recorded, so this is precedent rather than a new hazard.
+
+Also fixed in the same pass: `run_all()` cleared `SCORECARD` but not the
+`SPLIT_TALLY_*` atomics. Since the coverage figure was a subtraction of one from
+the other, a second `run_all()` in one boot would not have degraded the report
+but *inverted* it, fabricating a suite-sized gap. `reset_suite_state()` now
+clears everything, and the per-window computation means the report no longer
+depends on two totals agreeing.
+
 ## Byte-indexed display truncation panics on non-ASCII text (lane C)
 
 **Status: FIXED 2026-08-15** (lane C, commits `f508f76cf`, `f53562a09`,

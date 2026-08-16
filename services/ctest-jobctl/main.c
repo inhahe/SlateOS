@@ -55,13 +55,58 @@
  * in both directions; the pipe makes the child's lifetime exactly "until the
  * parent no longer needs it".
  *
+ * What the 100s, 120s and 140s add: `waitid`.  As of 2026-08-16 our `waitid`
+ * is no longer a stub that ignored its `siginfo_t` argument and refused every
+ * process-group wait — it fills the structure, and it accepts `P_PGID`.
+ * Neither fact is testable on the host, for the same reason the rest of this
+ * file is not: the host build compiles `waitpid`'s syscall arm out entirely,
+ * so a host `waitid` returns ENOSYS before a status word ever exists to
+ * decode.  The `wstatus` → `siginfo_t` mapping — the part a C caller reads
+ * back through a pointer it supplied — therefore has exactly one place it can
+ * be checked against a status the kernel really encoded, and this is it.
+ *
+ *   * **100s** re-runs the stop/continue cycle through `waitid` instead of
+ *     `waitpid`.  It is a *second* cycle, not a re-read of the first, because
+ *     a job-control report is consumed by whichever call observes it: had
+ *     `waitid` read the same stop check 53 read, one of the two decoders
+ *     would be testing nothing.  So the child raises SIGTSTP twice, checks
+ *     52-65 keep the first cycle, and 100-111 own the second.  Check 105/106
+ *     is the consumption proof — an immediately following `WNOHANG` wait must
+ *     report `si_pid == 0`, not hand back the same stop again.
+ *   * **120s** covers the termination codes (`CLD_EXITED`, `CLD_KILLED`),
+ *     which need *fresh* children: the long-lived child's exit is already
+ *     claimed by the 70s.  Check 124 is the one worth naming — `si_status`
+ *     must be the child's exit *code*, so a libc that forwarded the raw
+ *     `wstatus` word would show `code << 8` and be caught here instead of
+ *     silently mis-reporting every exit status to every caller.
+ *   * **140s** checks argument validation, which is stricter for `waitid`
+ *     than for `waitpid` precisely because `waitid` *names* its selector
+ *     instead of overloading a signed integer: a bad `id` has to be an error,
+ *     never a silently *different* wait.
+ *
+ * Every `waitid` here goes through `waitid_retry`, which poisons the
+ * `siginfo_t` before each call — see its comment for why zeroing it instead
+ * would hide the exact failure these checks exist to catch.
+ *
+ * Three POSIX `waitid` features are still unreachable from userspace because
+ * the facts they need do not survive the reap (`WNOWAIT`, `si_uid`, a wait on
+ * process group 1).  Nothing here tests them; they are written up in
+ * known-issues.md → TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT
+ * and requested of lane A in requests/b-a-waitid-needs-an-explicit-idtype-wait.md.
+ *
  * Exit code 42 == every check passed; anything else identifies the first
- * failing check (see the legend in kernel/src/proc/spawn.rs::self_test_jobctl).
+ * failing check.  `kernel/src/proc/spawn.rs::self_test_jobctl` prints the code
+ * and points back here rather than duplicating a table, so a new check needs
+ * no change on the kernel side — but its doc comment does paraphrase this one,
+ * and as of 2026-08-16 that paraphrase still describes only the waitpid half.
+ * It is lane A's file; `requests/b-a-jobctl-fixture-now-covers-waitid.md` asks
+ * for the paragraph.
  */
 
 #include <errno.h>
 #include <signal.h>
 #include <unistd.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 
 /* The value the child exits with once the parent releases it.  Distinct from
@@ -74,6 +119,16 @@
  * was expected, and check 52/53 names it — so a broken SYS_SIGNAL_STOP_SELF
  * surfaces as a decisive failure instead of a hang. */
 #define CHILD_RAISE_FAILED 91
+
+/* Same, for the *second* stop — the one the 100s checks observe with `waitid`.
+ * A distinct code so a failure names which of the two raises broke. */
+#define CHILD_RAISE2_FAILED 92
+
+/* Exit code of the short-lived children the 120s checks reap.  Deliberately not
+ * CHILD_OK: those children are reaped while the long-lived one is still alive,
+ * so a `waitid` that reported the wrong child would otherwise be
+ * indistinguishable from one that reported the right one. */
+#define BRIEF_CHILD_OK 23
 
 /* waitpid(), retrying if a signal interrupts the wait.
  *
@@ -91,6 +146,32 @@ static pid_t wait_retry(pid_t pid, int *status, int options)
             continue;
         }
         return w;
+    }
+}
+
+/* waitid(), retrying on EINTR, with the siginfo_t pre-poisoned.
+ *
+ * The poison is the point: POSIX has `waitid` *write* the structure, and the
+ * failure this guards against is a libc that returns 0 having written nothing.
+ * Zeroing instead would make that failure look like a legitimate "no child
+ * changed state" report (which is `si_pid == 0`), so the caller could not tell
+ * "filled in with zero" from "never touched".  0x5A is nobody's pid, nobody's
+ * CLD_* code and nobody's signal number.
+ *
+ * Returns waitid's own return value; the caller inspects `info`. */
+static int waitid_retry(idtype_t idtype, id_t id, siginfo_t *info, int options)
+{
+    for (;;) {
+        unsigned char *raw = (unsigned char *)info;
+        for (unsigned i = 0; i < sizeof(*info); i++) {
+            raw[i] = 0x5A;
+        }
+        errno = 0;
+        const int r = waitid(idtype, id, info, options);
+        if (r < 0 && errno == EINTR) {
+            continue;
+        }
+        return r;
     }
 }
 
@@ -116,6 +197,17 @@ int main(void)
         if (raise(SIGTSTP) != 0) {
             close(fds[0]);
             _exit(CHILD_RAISE_FAILED);
+        }
+
+        /* Stop a second time.  The parent observes this cycle through
+         * `waitid` rather than `waitpid` (checks 100-111).  Two cycles rather
+         * than one because a job-control report is *consumed* by the first
+         * observer: whichever call reads the stop, the other cannot also see
+         * it.  Re-stopping is the only way to exercise both decoders against
+         * a real kernel-encoded event without either weakening the other. */
+        if (raise(SIGTSTP) != 0) {
+            close(fds[0]);
+            _exit(CHILD_RAISE2_FAILED);
         }
 
         /* Resumed.  Hold still until the parent has finished observing the
@@ -184,6 +276,143 @@ int main(void)
     st = 0;
     if (wait_retry(child, &st, WNOHANG | WCONTINUED) != 0) { rc = 65; goto done; }
 
+    /* ---------------------------------------------------------------- *
+     * 100s — the same stop/continue cycle, observed through `waitid`.
+     *
+     * The numbering skips 80–99 deliberately: the child's own failure codes
+     * (91, 92) live in that range, and a parent code that collided with one
+     * would make a failing exit status ambiguous to read.
+     *
+     * `waitid` reports a state change as a `siginfo_t` rather than as a
+     * bit-packed status word, so nothing above proves any of it: the status
+     * word is the kernel's encoding, while `si_code`/`si_status` are libc's
+     * *decoding* of that word into POSIX's terms, and a decoder that got
+     * CLD_STOPPED and CLD_CONTINUED backwards would pass every check so far.
+     *
+     * This is also the only place the decoding is testable at all — the host
+     * test suite compiles `waitpid`'s syscall arm out entirely, so on the
+     * host every `waitid` returns ENOSYS before reaching a status word.
+     * ---------------------------------------------------------------- */
+    {
+        siginfo_t info;
+
+        /* Blocking, like check 52: the child may not have reached its second
+         * `raise` yet.  WEXITED is set alongside WSTOPPED so that a child
+         * which died instead of stopping is *reported* (as CLD_EXITED, failing
+         * 102 with a name) rather than leaving us parked forever. */
+        if (waitid_retry(P_PID, (id_t)child, &info, WSTOPPED | WEXITED) != 0) {
+            rc = 100; goto done;
+        }
+        if (info.si_pid != child)              { rc = 101; goto done; }
+        if (info.si_code != CLD_STOPPED)       { rc = 102; goto done; }
+        if (info.si_status != SIGTSTP)         { rc = 103; goto done; }
+        if (info.si_signo != SIGCHLD)          { rc = 104; goto done; }
+
+        /* Consumed, exactly as the waitpid-observed stop was.  WNOHANG makes
+         * this decisive: a correct kernel has nothing to report, and a
+         * `waitid` that returned 0 without writing would leave si_pid at the
+         * poison value rather than at the 0 POSIX specifies for a miss. */
+        if (waitid_retry(P_PID, (id_t)child, &info, WNOHANG | WSTOPPED) != 0) {
+            rc = 105; goto done;
+        }
+        if (info.si_pid != 0)                  { rc = 106; goto done; }
+
+        if (kill(child, SIGCONT) != 0)         { rc = 107; goto done; }
+
+        if (waitid_retry(P_PID, (id_t)child, &info, WCONTINUED | WEXITED) != 0) {
+            rc = 108; goto done;
+        }
+        if (info.si_code != CLD_CONTINUED)     { rc = 109; goto done; }
+        if (info.si_pid != child)              { rc = 110; goto done; }
+        if (info.si_status != SIGCONT)         { rc = 111; goto done; }
+    }
+
+    /* ---------------------------------------------------------------- *
+     * 120s — `waitid` on children that *terminate*, which the long-lived child
+     * cannot supply: its own exit is claimed by the 70s checks below, and a
+     * termination can only be observed once.
+     *
+     * Both children are reaped while the long-lived child is still alive and
+     * still has an outstanding relationship with us, so `si_pid` here is also
+     * a check that `waitid` reported the child it was asked about.
+     * ---------------------------------------------------------------- */
+    {
+        siginfo_t info;
+
+        const pid_t brief = fork();
+        if (brief < 0)                          { rc = 120; goto done; }
+        if (brief == 0) {
+            _exit(BRIEF_CHILD_OK);
+        }
+        if (waitid_retry(P_PID, (id_t)brief, &info, WEXITED) != 0) {
+            rc = 121; goto done;
+        }
+        if (info.si_pid != brief)               { rc = 122; goto done; }
+        if (info.si_code != CLD_EXITED)         { rc = 123; goto done; }
+        /* For CLD_EXITED, si_status is the exit *code* — not the packed
+         * status word.  Reporting `BRIEF_CHILD_OK << 8` here would mean libc
+         * forwarded the raw word, which is the likeliest way to get this
+         * wrong. */
+        if (info.si_status != BRIEF_CHILD_OK)   { rc = 124; goto done; }
+
+        /* Reaped: `waitid` consumed it, so there is no such child left. */
+        errno = 0;
+        if (waitid_retry(P_PID, (id_t)brief, &info, WNOHANG | WEXITED) != -1) {
+            rc = 125; goto done;
+        }
+        if (errno != ECHILD)                    { rc = 126; goto done; }
+
+        /* A signal death reports CLD_KILLED with the *signal* in si_status.
+         * SIGKILL because it cannot be caught, blocked or handled, so the
+         * child's own code cannot change the outcome. */
+        const pid_t doomed = fork();
+        if (doomed < 0)                         { rc = 127; goto done; }
+        if (doomed == 0) {
+            /* Park until killed.  `pause` returns only via a handler, and we
+             * install none, so the only way out is the signal itself. */
+            for (;;) {
+                pause();
+            }
+        }
+        if (kill(doomed, SIGKILL) != 0)         { rc = 128; goto done; }
+        if (waitid_retry(P_PID, (id_t)doomed, &info, WEXITED) != 0) {
+            rc = 129; goto done;
+        }
+        if (info.si_pid != doomed)              { rc = 130; goto done; }
+        if (info.si_code != CLD_KILLED)         { rc = 131; goto done; }
+        if (info.si_status != SIGKILL)          { rc = 132; goto done; }
+    }
+
+    /* ---------------------------------------------------------------- *
+     * 140s — `waitid`'s argument validation, which is stricter than
+     * `waitpid`'s because `waitpid`'s single selector overloads 0 and
+     * negatives as *group* selectors.  Each of these, unvalidated, would
+     * become a different wait rather than an error — and since these all run
+     * with a live child, "a different wait" means one that could block or
+     * reap.  That they return promptly is itself part of the check.
+     * ---------------------------------------------------------------- */
+    {
+        siginfo_t info;
+
+        errno = 0;
+        if (waitid_retry(P_PID, 0, &info, WEXITED) != -1)      { rc = 140; goto done; }
+        if (errno != EINVAL)                                   { rc = 141; goto done; }
+
+        errno = 0;
+        if (waitid_retry(P_PGID, (id_t)-1, &info, WEXITED) != -1) { rc = 142; goto done; }
+        if (errno != EINVAL)                                   { rc = 143; goto done; }
+
+        /* At least one of WEXITED/WSTOPPED/WCONTINUED is required. */
+        errno = 0;
+        if (waitid_retry(P_ALL, 0, &info, WNOHANG) != -1)      { rc = 144; goto done; }
+        if (errno != EINVAL)                                   { rc = 145; goto done; }
+
+        /* An unknown option bit is rejected outright, not ignored. */
+        errno = 0;
+        if (waitid_retry(P_ALL, 0, &info, WEXITED | (1 << 4)) != -1) { rc = 146; goto done; }
+        if (errno != EINVAL)                                   { rc = 147; goto done; }
+    }
+
 done:
     /* Releasing the write end is what lets the resumed child's read() see EOF.
      * If the child is still *stopped* (an early failure above), it would never
@@ -211,6 +440,11 @@ done:
     if (WIFSTOPPED(st))                     return 73;
     if (WEXITSTATUS(st) == CHILD_RAISE_FAILED) return 74;
     if (WEXITSTATUS(st) != CHILD_OK)        return 75;
+    /* There is deliberately no companion check for CHILD_RAISE2_FAILED here.
+     * A failed *second* raise makes the child exit rather than stop, and the
+     * blocking `waitid` at check 100 reports that exit as CLD_EXITED — so it
+     * fails 102 and reaps the child, and this wait never sees it.  Naming it
+     * again here would be an unreachable branch pretending to be a check. */
 
     /* Reaped exactly once: there is no child left to wait for. */
     errno = 0;

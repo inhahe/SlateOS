@@ -452,6 +452,18 @@ Refusing is recoverable; guessing is not.
 Until then the divergences are documented on `waitid`'s doc comment, which is
 where someone debugging a `WNOWAIT` that reaped will actually look.
 
+**What *is* covered, so this entry is not mistaken for "waitid is untested."**
+Everything `waitid` can do is exercised on target by
+`services/ctest-jobctl/main.c` checks 100-111 (`CLD_STOPPED`/`CLD_CONTINUED`
+against a real kernel-encoded job-control event, plus the proof that observing
+one consumes it), 120-132 (`CLD_EXITED` with the exit *code* in `si_status`,
+`ECHILD` on re-wait, `CLD_KILLED`/`SIGKILL`), and 140-147 (argument
+validation). The fixture is the only place the `wstatus` → `siginfo_t` decoding
+is testable at all: `waitpid`'s syscall arm is compiled out for anything but
+`target_os = "none"`, so a host `waitid` returns `ENOSYS` before a status word
+exists to decode. The three gaps above are exactly the residue — the facts that
+do not survive the reap — and nothing there tests them because nothing can.
+
 ### TD-POSIX-TIMES-FLAKE. `posix::sys_times::tests::test_times_increments_each_call` fails intermittently under a full-workspace run — 2026-08-15 — ✅ FIXED 2026-08-15 by lane B (`posix/src/sys_times.rs`), and the triage found a second, worse bug underneath it
 
 **Status: FIXED 2026-08-15** (lane B, `posix/src/sys_times.rs`). Stays here

@@ -1063,27 +1063,48 @@ impl InputDialog {
             Key::Enter => {
                 self.try_accept();
             }
+            // `cursor_pos` is a *byte* offset: `String::insert` and
+            // `String::remove` index by bytes, and both panic outright on an
+            // offset that is not a character boundary. Every move below is
+            // therefore by the width of a character in bytes rather than by
+            // one — a one-byte step lands inside an `é` and the next edit takes
+            // the dialog, and the process, down.
             Key::Backspace => {
-                if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
+                if let Some(ch) = self
+                    .input_text
+                    .get(..self.cursor_pos)
+                    .and_then(|before| before.chars().next_back())
+                {
+                    self.cursor_pos -= ch.len_utf8();
                     self.input_text.remove(self.cursor_pos);
                     self.validation_error = None;
                 }
             }
             Key::Delete => {
                 if self.cursor_pos < self.input_text.len() {
+                    // `remove` takes the whole character at the offset, so no
+                    // width arithmetic is needed here — only the guard that the
+                    // offset is inside the string.
                     self.input_text.remove(self.cursor_pos);
                     self.validation_error = None;
                 }
             }
             Key::Left => {
-                if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
+                if let Some(ch) = self
+                    .input_text
+                    .get(..self.cursor_pos)
+                    .and_then(|before| before.chars().next_back())
+                {
+                    self.cursor_pos -= ch.len_utf8();
                 }
             }
             Key::Right => {
-                if self.cursor_pos < self.input_text.len() {
-                    self.cursor_pos += 1;
+                if let Some(ch) = self
+                    .input_text
+                    .get(self.cursor_pos..)
+                    .and_then(|after| after.chars().next())
+                {
+                    self.cursor_pos += ch.len_utf8();
                 }
             }
             Key::Home => {
@@ -1097,7 +1118,7 @@ impl InputDialog {
                     && !ch.is_control()
                 {
                     self.input_text.insert(self.cursor_pos, ch);
-                    self.cursor_pos += 1;
+                    self.cursor_pos += ch.len_utf8();
                     self.validation_error = None;
                 }
             }
@@ -2825,6 +2846,60 @@ mod tests {
         });
         dialog.handle_event(&end);
         assert_eq!(dialog.cursor_pos, 5);
+    }
+
+    /// Typing a character that is more than one byte long, then editing around
+    /// it, used to abort the process: the cursor moved one *byte* per keypress
+    /// while `String::insert`/`remove` index by bytes and panic on an offset
+    /// inside a character. Every non-ASCII name a user could type — `café`, any
+    /// Cyrillic or CJK text — was a crash one keystroke later.
+    #[test]
+    fn a_multi_byte_character_can_be_typed_moved_over_and_deleted() {
+        fn typed(ch: char) -> Event {
+            Event::Key(KeyEvent {
+                // The `key` code is irrelevant here: a character arrives in
+                // `text`, and `Key` has no per-character variant. `é` has no
+                // key code at all on most layouts, which is the point.
+                key: Key::Unknown(0),
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: Some(ch),
+            })
+        }
+        fn pressed(key: Key) -> Event {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: None,
+            })
+        }
+
+        let mut dialog = InputDialog::prompt("Test", "Type:", "");
+        dialog.show();
+        for ch in "café".chars() {
+            dialog.handle_event(&typed(ch));
+        }
+        assert_eq!(dialog.input_text(), "café");
+        // Five bytes for four characters: the cursor counts bytes.
+        assert_eq!(dialog.cursor_pos, 5);
+
+        // Stepping over the two-byte `é` must land on its start, not inside it.
+        dialog.handle_event(&pressed(Key::Left));
+        assert_eq!(dialog.cursor_pos, 3);
+        dialog.handle_event(&pressed(Key::Right));
+        assert_eq!(dialog.cursor_pos, 5);
+
+        // Backspace removes the whole character, not one of its two bytes.
+        dialog.handle_event(&pressed(Key::Backspace));
+        assert_eq!(dialog.input_text(), "caf");
+        assert_eq!(dialog.cursor_pos, 3);
+
+        // Delete from before a multi-byte character takes all of it.
+        dialog.handle_event(&typed('é'));
+        dialog.handle_event(&pressed(Key::Left));
+        dialog.handle_event(&pressed(Key::Delete));
+        assert_eq!(dialog.input_text(), "caf");
     }
 
     #[test]

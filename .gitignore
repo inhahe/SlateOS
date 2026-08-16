@@ -5,6 +5,11 @@
 # host test profile (separate from the cross-compile `target/`). Same
 # contents — codegen units, rlibs — that we never want to commit.
 **/target-test/
+# Likewise `target-hl/`: a second alternate host build dir. Two cargo
+# invocations must never share one CARGO_TARGET_DIR — they take the same lock,
+# so a foreground build silently blocks behind a background test suite — so a
+# lane running one in the background needs a second dir for the other.
+**/target-hl/
 **/*.rs.bk
 # Stray rustc codegen-unit objects written to the Windows `nul` device name
 # (these land in the crate root, not target/, when a build/clippy invocation

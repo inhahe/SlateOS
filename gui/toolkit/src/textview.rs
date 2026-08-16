@@ -1769,31 +1769,67 @@ impl RichTextView {
         }
     }
 
-    /// Distance in pixels from the start of `wl` to character `col`.
+    /// Byte offset of character `col` of `s`, clamped to the end of the string.
     ///
-    /// Walks the spans rather than multiplying by a cell width, because each
-    /// span carries its own size and weight — a line that mixes bold and normal
-    /// text has no single column width, so multiplying by one put selection
-    /// highlights over the wrong words.
-    fn x_of_col(&self, wl: &WrappedLine, col: usize) -> f32 {
+    /// Clamping rather than panicking is deliberate: `col` comes from a
+    /// selection that a re-layout may have left pointing past the end of a line
+    /// that got shorter, and a stale selection should paint the wrong highlight
+    /// for one frame, not take the window down.
+    fn byte_of_char(s: &str, col: usize) -> usize {
+        s.char_indices().nth(col).map_or(s.len(), |(i, _)| i)
+    }
+
+    /// The boxes to paint to highlight characters `from..to` of `wl`, as
+    /// `(left, width)` pairs in pixels from the start of the line.
+    ///
+    /// A *list*, because a highlight is not a rectangle. Two things break the
+    /// single-rectangle form this replaced, which took the x of each end and
+    /// filled between them:
+    ///
+    /// - **Spans.** Each span carries its own size and weight, so a line that
+    ///   mixes bold and normal text has no one column width. That much the old
+    ///   two-edge code already handled, by walking the spans to find each edge.
+    /// - **Direction.** Characters that are contiguous in the *string* need not
+    ///   be contiguous on the *screen*. Select from the middle of a Latin word
+    ///   into the middle of a Hebrew one and the two halves are drawn apart,
+    ///   with unselected characters between them — which the two-edge form
+    ///   highlights as well, telling the user they selected text they did not.
+    ///
+    /// Each span is shaped and drawn on its own, at its own pen position, so
+    /// each span's boxes come from that span alone and are shifted by where the
+    /// span starts. Boxes that meet are merged: abutting rectangles of the same
+    /// colour already look like one, so the merge saves draw commands rather
+    /// than fixing an appearance, and the float tolerance it needs cannot cause
+    /// a visible error — the worst case is the two commands it started with.
+    fn selection_boxes_of_cols(&self, wl: &WrappedLine, from: usize, to: usize) -> Vec<(f32, f32)> {
+        let mut boxes: Vec<(f32, f32)> = Vec::new();
+        if from >= to {
+            return boxes;
+        }
         let heading = self.heading_of(wl);
         let mut x = 0.0;
         let mut seen = 0usize;
         for span in &wl.spans {
             let len = span.text.chars().count();
-            if seen.saturating_add(len) <= col {
-                x += self.span_width(span, heading);
-                seen = seen.saturating_add(len);
-                continue;
+            let next = seen.saturating_add(len);
+            if next > from && seen < to {
+                // Character columns are the widget's currency; the shaper's is
+                // bytes. Converting here rather than at the call site keeps the
+                // conversion next to the string it indexes into.
+                let lo = Self::byte_of_char(&span.text, from.saturating_sub(seen));
+                let hi = Self::byte_of_char(&span.text, to.saturating_sub(seen));
+                let (size, weight) = self.span_font(span, heading);
+                for (bx, bw) in crate::text::selection_boxes(&span.text, lo, hi, size, weight) {
+                    match boxes.last_mut() {
+                        Some(prev) if (prev.0 + prev.1 - (x + bx)).abs() < 0.01 => prev.1 += bw,
+                        _ => boxes.push((x + bx, bw)),
+                    }
+                }
             }
-            // The target character is inside this span.
-            let take = col.saturating_sub(seen);
-            let bytes: usize = span.text.chars().take(take).map(char::len_utf8).sum();
-            let (size, weight) = self.span_font(span, heading);
-            let prefix = span.text.get(..bytes).unwrap_or(&span.text);
-            return x + crate::text::measure(prefix, size, weight);
+            x += self.span_width(span, heading);
+            seen = next;
         }
-        x
+        boxes
     }
 
     /// The character index in `wl` nearest to `x` pixels from its start.
@@ -2400,7 +2436,10 @@ impl RichTextView {
                 && vis_idx >= sel.start.line
                 && vis_idx <= sel.end.line
             {
-                let line_len: usize = wl.spans.iter().map(|s| s.text.len()).sum();
+                // Characters, not bytes: `Selection`'s columns count characters,
+                // so a byte length here overshot the end of any line holding a
+                // character outside ASCII.
+                let line_len: usize = wl.spans.iter().map(|s| s.text.chars().count()).sum();
                 let sel_start = if vis_idx == sel.start.line {
                     sel.start.col
                 } else {
@@ -2411,10 +2450,14 @@ impl RichTextView {
                 } else {
                     line_len
                 };
-                if sel_start < sel_end {
-                    let x1 = gutter_w + wl.indent + self.x_of_col(wl, sel_start);
-                    let x2 = gutter_w + wl.indent + self.x_of_col(wl, sel_end);
-                    tree.fill_rect(x1, render_y, x2 - x1, wl.line_height, SELECTION_COLOR);
+                for (bx, bw) in self.selection_boxes_of_cols(wl, sel_start, sel_end) {
+                    tree.fill_rect(
+                        gutter_w + wl.indent + bx,
+                        render_y,
+                        bw,
+                        wl.line_height,
+                        SELECTION_COLOR,
+                    );
                 }
             }
 
@@ -2426,9 +2469,9 @@ impl RichTextView {
                     } else {
                         SEARCH_MATCH_COLOR
                     };
-                    let x1 = gutter_w + wl.indent + self.x_of_col(wl, ms);
-                    let x2 = gutter_w + wl.indent + self.x_of_col(wl, me);
-                    tree.fill_rect(x1, render_y, x2 - x1, wl.line_height, color);
+                    for (bx, bw) in self.selection_boxes_of_cols(wl, ms, me) {
+                        tree.fill_rect(gutter_w + wl.indent + bx, render_y, bw, wl.line_height, color);
+                    }
                 }
             }
 
@@ -2970,6 +3013,80 @@ mod tests {
         view.select_all();
         let text = view.selected_text().unwrap();
         assert_eq!(text, "test content");
+    }
+
+    /// A highlight that runs across two spans is drawn as one rectangle, not
+    /// two: the spans are laid out end to end, so their boxes abut and merge.
+    /// This is the case the old two-edge code got right, and the check that the
+    /// list form did not regress it.
+    #[test]
+    fn a_highlight_across_two_spans_is_still_one_rectangle() {
+        let mut view = RichTextView::new(4000.0, 200.0);
+        view.set_blocks(vec![RichBlock::Paragraph {
+            spans: vec![RichSpan::plain("plain "), RichSpan::bold("bold")],
+            spacing_above: 0.0,
+            spacing_below: 0.0,
+        }]);
+        view.rebuild_layout();
+        let wl = view
+            .wrapped_lines
+            .first()
+            .expect("one paragraph wraps to at least one line")
+            .clone();
+
+        let all = view.selection_boxes_of_cols(&wl, 0, 10);
+        assert_eq!(all.len(), 1, "{all:?}");
+        // …and it covers the whole line, both spans included.
+        let total: f32 = wl
+            .spans
+            .iter()
+            .map(|s| view.span_width(s, None))
+            .sum();
+        assert!((all[0].0).abs() < 0.001, "starts at {}", all[0].0);
+        assert!((all[0].1 - total).abs() < 0.01, "width {} vs line {total}", all[0].1);
+
+        // Splitting the range in two tiles the same ground: the box for the
+        // second half begins exactly where the box for the first half ends.
+        // Stated against the two halves rather than against a span width
+        // because wrapping is free to cut a span up — "plain " arrives as
+        // "plain" and " " — so a span index is not a column count.
+        let left = view.selection_boxes_of_cols(&wl, 0, 6);
+        let right = view.selection_boxes_of_cols(&wl, 6, 10);
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert_eq!(right.len(), 1, "{right:?}");
+        let seam = left[0].0 + left[0].1;
+        assert!((right[0].0 - seam).abs() < 0.01, "{} vs {seam}", right[0].0);
+        assert!(
+            (left[0].1 + right[0].1 - all[0].1).abs() < 0.01,
+            "halves {} + {} vs whole {}",
+            left[0].1,
+            right[0].1,
+            all[0].1
+        );
+    }
+
+    /// The degenerate ranges paint nothing rather than a zero-width sliver, and
+    /// a range past the end of the line is clamped instead of panicking — a
+    /// selection can outlive the re-layout that shortened its line.
+    #[test]
+    fn a_highlight_of_nothing_or_of_too_much_does_not_panic() {
+        let mut view = RichTextView::new(4000.0, 200.0);
+        view.set_blocks(vec![RichBlock::Paragraph {
+            spans: vec![RichSpan::plain("héllo")],
+            spacing_above: 0.0,
+            spacing_below: 0.0,
+        }]);
+        view.rebuild_layout();
+        let wl = view.wrapped_lines.first().expect("one line").clone();
+
+        assert!(view.selection_boxes_of_cols(&wl, 2, 2).is_empty());
+        assert!(view.selection_boxes_of_cols(&wl, 4, 1).is_empty());
+        // Five characters, six bytes: a column count is not a byte count, and
+        // asking for column 99 must clamp to the end of the string.
+        let past = view.selection_boxes_of_cols(&wl, 0, 99);
+        assert_eq!(past.len(), 1, "{past:?}");
+        let full = view.span_width(&wl.spans[0], None);
+        assert!((past[0].1 - full).abs() < 0.01, "{} vs {full}", past[0].1);
     }
 
     #[test]

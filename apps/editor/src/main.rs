@@ -20,6 +20,7 @@ mod syntree;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderTree};
 use guitk::text;
+use highlight::{DEFAULT_THEME, HighlightState, StyledToken, Token};
 use syntree::{Pos, SyntaxTree};
 
 use diffcore::{
@@ -27,6 +28,7 @@ use diffcore::{
     normalize_content,
 };
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
@@ -53,7 +55,14 @@ pub struct Document {
     pub selection_anchor: Option<(usize, usize)>,
     /// Scroll offset (first visible line).
     pub scroll_line: usize,
-    /// Horizontal scroll offset.
+    /// Horizontal scroll offset — a **byte** offset into the line, the same
+    /// units as [`Document::cursor_col`].
+    ///
+    /// It has to be, because the two are subtracted from one another to place
+    /// the caret and to clip a highlighted token to the visible part of its
+    /// line. A character count and a byte offset only agree on ASCII, and the
+    /// disagreement is silent: the caret lands beside the character it is on,
+    /// by one pixel per byte of accumulated difference.
     pub scroll_col: usize,
     /// Undo history.
     pub undo_stack: VecDeque<EditAction>,
@@ -70,29 +79,74 @@ pub struct Document {
     /// External-change tracker: records the last loaded/saved content and mtime
     /// so edits made to the file by other programs can be detected and merged.
     pub sync: FileSync,
+    /// Memoized syntax state, one entry per line: `hl_entry[i]` is the state the
+    /// highlighter is in *entering* line `i`, so `hl_entry[0]` is always
+    /// [`HighlightState::Normal`]. Only a prefix is stored; anything past
+    /// `hl_entry.len()` has not been computed yet.
+    ///
+    /// **Why this cache exists at all.** A block comment opened on line 3 colours
+    /// line 4000, so the state entering the first *visible* line is a function of
+    /// every line above it. Without a memo, drawing a screen 4000 lines down a
+    /// file would re-tokenize those 4000 lines on every frame — for a caret
+    /// blink, for a mouse move, for nothing. With it, scrolling down one line
+    /// tokenizes one line.
+    ///
+    /// **Why it is not `pub`, and why `RefCell`.** Rendering takes `&self` (it
+    /// produces a command list and changes nothing the user can see), but it is
+    /// the only place that knows how far down the file the memo needs to reach.
+    /// The alternative — computing states eagerly on every edit — does work
+    /// proportional to the whole file per keystroke, which is the cost this
+    /// exists to avoid.
+    ///
+    /// **Invariant, and the one way to break it:** every mutation of `lines` or
+    /// `language` must call [`Document::invalidate_highlight`] with the first
+    /// line it touched. `lines` is `pub`, so code outside this module can in
+    /// principle edit it without saying so; `set_lines_from_text` and the editing
+    /// operations below all do say so, and
+    /// `the_syntax_cache_agrees_with_a_recomputation_after_every_edit` walks each
+    /// of them and checks the memo against a from-scratch answer.
+    hl_entry: RefCell<Vec<HighlightState>>,
 }
 
-/// An edit action for undo/redo.
+/// One undoable edit, recorded as *what the affected lines were* and *what they
+/// became*.
+///
+/// This deliberately does not describe the edit — no "inserted this character
+/// at this column", no per-operation variant. It stores the two states of a
+/// contiguous run of lines, so undo is `after → before` and redo is
+/// `before → after`, and both are exact by construction.
+///
+/// The previous design was a four-variant enum naming the operation, and it was
+/// wrong in three separate ways at once, all of them the same mistake: an
+/// operation's *description* has to be kept in agreement with what the
+/// operation actually does, and nothing enforces that agreement.
+///
+/// - Pressing Enter recorded `Insert { text: "\n" }`, and undo reverted it by
+///   deleting one byte from the line — but by then the newline was not in any
+///   line, the split had already moved the tail into a new entry. Undo deleted
+///   an unrelated character and left the file split.
+/// - Enter's auto-indent copied the previous line's leading whitespace into the
+///   new line and recorded nothing at all, so those bytes could not be undone.
+/// - `InsertLine` was matched by both `undo` and `redo` and constructed by
+///   nothing, which is exactly the state a describe-the-operation model rots
+///   into.
+///
+/// Storing the text costs two copies of each touched line per edit. For a
+/// 1000-entry stack of single-character edits on 80-column lines that is on the
+/// order of 100 KiB — the price of an undo stack that cannot disagree with the
+/// buffer, which is the only property that matters here.
 #[derive(Clone, Debug)]
-pub enum EditAction {
-    Insert {
-        line: usize,
-        col: usize,
-        text: String,
-    },
-    Delete {
-        line: usize,
-        col: usize,
-        text: String,
-    },
-    InsertLine {
-        line: usize,
-        text: String,
-    },
-    DeleteLine {
-        line: usize,
-        text: String,
-    },
+pub struct EditAction {
+    /// Index of the first line the edit replaced.
+    line: usize,
+    /// The lines occupying `line..line + before.len()` before the edit.
+    before: Vec<String>,
+    /// The lines occupying `line..line + after.len()` after it.
+    after: Vec<String>,
+    /// Caret position before the edit; where undo puts it back.
+    cursor_before: (usize, usize),
+    /// Caret position after the edit; where redo puts it back.
+    cursor_after: (usize, usize),
 }
 
 /// Line ending style.
@@ -172,6 +226,23 @@ impl Language {
     }
 }
 
+/// The nearest character boundary in `line` at or before byte offset `col`.
+///
+/// A column carried from one line to another — pressing Down, or re-clamping
+/// after the document shrinks — is a byte offset that meant something on the
+/// *old* line. On the new one it may land in the middle of a multi-byte
+/// character, and every subsequent `String::insert`/`remove` at that offset
+/// panics. Moving *back* to the boundary rather than forward keeps the cursor
+/// on the character the user was over rather than skipping past it.
+fn snap_to_boundary(line: &str, col: usize) -> usize {
+    let mut col = col.min(line.len());
+    // Terminates: offset 0 is always a boundary.
+    while !line.is_char_boundary(col) {
+        col -= 1;
+    }
+    col
+}
+
 impl Default for Document {
     fn default() -> Self {
         Self::new()
@@ -197,6 +268,7 @@ impl Document {
             use_spaces: true,
             language: Language::Plain,
             sync: FileSync::new(),
+            hl_entry: RefCell::new(Vec::new()),
         }
     }
 
@@ -221,10 +293,7 @@ impl Document {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Untitled".to_string());
 
-        let language = path
-            .extension()
-            .map(|e| Language::from_extension(&e.to_string_lossy()))
-            .unwrap_or(Language::Plain);
+        let language = highlight::language_of_path(path);
 
         // Record the load-time snapshot (LF-normalized, matching our in-memory
         // representation) and mtime so we can later detect external edits and
@@ -249,6 +318,7 @@ impl Document {
             use_spaces: true,
             language,
             sync,
+            hl_entry: RefCell::new(Vec::new()),
         })
     }
 
@@ -286,10 +356,10 @@ impl Document {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Untitled".to_string());
-        self.language = path
-            .extension()
-            .map(|e| Language::from_extension(&e.to_string_lossy()))
-            .unwrap_or(Language::Plain);
+        self.language = highlight::language_of_path(path);
+        // The language decides the colours, so every memoized state is now an
+        // answer to a different question.
+        self.invalidate_highlight(0);
         self.save()
     }
 
@@ -402,91 +472,201 @@ impl Document {
         if self.cursor_line > last_line {
             self.cursor_line = last_line;
         }
-        let line_len = self
+        // Snapped rather than merely clamped to the length: the line the cursor
+        // has been moved to may hold a multi-byte character straddling the old
+        // column, and a `cursor_col` inside one panics the next edit.
+        self.cursor_col = self
             .lines
             .get(self.cursor_line)
-            .map_or(0, std::string::String::len);
-        if self.cursor_col > line_len {
-            self.cursor_col = line_len;
-        }
+            .map_or(0, |line| snap_to_boundary(line, self.cursor_col));
         if self.scroll_line > last_line {
             self.scroll_line = last_line;
         }
+        self.invalidate_highlight(0);
+    }
+
+    // ======================================================================
+    // Syntax state
+    // ======================================================================
+
+    /// Discard the memoized syntax state for `from_line` and everything below.
+    ///
+    /// Takes the *first* line whose text changed. The state entering that line
+    /// is still whatever it was — the lines above it did not move — so the entry
+    /// for `from_line` survives and only the ones after it are dropped. Passing a
+    /// line earlier than the edit is merely wasteful; passing a later one is a
+    /// bug, and shows up as text that keeps a colour it has stopped deserving.
+    fn invalidate_highlight(&mut self, from_line: usize) {
+        let keep = from_line.saturating_add(1);
+        let entries = self.hl_entry.get_mut();
+        if entries.len() > keep {
+            entries.truncate(keep);
+        }
+    }
+
+    /// The highlighter's state entering `line`, computing and memoizing whatever
+    /// prefix of the file is still missing.
+    ///
+    /// Costs one tokenization per not-yet-computed line, so the first draw of a
+    /// file pays for everything above the viewport once and scrolling pays one
+    /// line at a time.
+    fn entry_state(&self, line: usize) -> HighlightState {
+        let mut entries = self.hl_entry.borrow_mut();
+        if entries.is_empty() {
+            entries.push(HighlightState::Normal);
+        }
+        while entries.len() <= line {
+            let index = entries.len() - 1;
+            // `last()` rather than an index: the vector is never empty here — it
+            // was seeded just above and only grows in this loop.
+            let mut state = entries.last().cloned().unwrap_or(HighlightState::Normal);
+            let source = self.lines.get(index).map_or("", String::as_str);
+            drop(highlight::highlight_line(source, self.language, &mut state));
+            entries.push(state);
+        }
+        entries.get(line).cloned().unwrap_or(HighlightState::Normal)
     }
 
     // ======================================================================
     // Editing operations
     // ======================================================================
 
+    /// Run `edit`, recording what it did to `lines[line..]` so it can be undone
+    /// exactly.
+    ///
+    /// `before_count` is how many lines starting at `line` the edit may touch —
+    /// 1 for an edit within a line, 2 for one that joins two. The count
+    /// *afterwards* is not asked for, because it is not something a caller
+    /// should have to get right: it is derived from how the buffer's total
+    /// length changed, which is a fact rather than a claim. That is the whole
+    /// discipline here — every call site states only what it is about to touch,
+    /// and the recording is taken from the buffer itself, so an edit cannot
+    /// describe itself incorrectly.
+    ///
+    /// This is also where the redo stack is cleared, so it happens for every
+    /// edit rather than only the ones whose author remembered. Before, only
+    /// `insert_char` cleared it, and a backspace after an undo left a redo
+    /// entry that would re-apply an edit on top of a buffer that had moved on.
+    fn record_edit<R>(
+        &mut self,
+        line: usize,
+        before_count: usize,
+        edit: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let cursor_before = (self.cursor_line, self.cursor_col);
+        let before = Self::snapshot(&self.lines, line, before_count);
+        let old_len = self.lines.len();
+
+        let result = edit(self);
+
+        // The edit replaced `before_count` lines with however many the buffer
+        // grew or shrank by, relative to that.
+        let after_count = before
+            .len()
+            .saturating_add(self.lines.len())
+            .saturating_sub(old_len);
+        let after = Self::snapshot(&self.lines, line, after_count);
+
+        self.modified = true;
+        self.invalidate_highlight(line);
+        self.redo_stack.clear();
+        self.push_undo(EditAction {
+            line,
+            before,
+            after,
+            cursor_before,
+            cursor_after: (self.cursor_line, self.cursor_col),
+        });
+        result
+    }
+
+    /// `lines[at..at + count]`, clamped, cloned.
+    fn snapshot(lines: &[String], at: usize, count: usize) -> Vec<String> {
+        let start = at.min(lines.len());
+        let end = start.saturating_add(count).min(lines.len());
+        lines.get(start..end).unwrap_or_default().to_vec()
+    }
+
+    /// Replace `lines[at..at + remove]` with `insert`.
+    fn splice_lines(&mut self, at: usize, remove: usize, insert: &[String]) {
+        let start = at.min(self.lines.len());
+        let end = start.saturating_add(remove).min(self.lines.len());
+        self.lines
+            .splice(start..end, insert.iter().cloned())
+            .for_each(drop);
+        self.invalidate_highlight(at);
+    }
+
     /// Insert a character at the cursor position.
     pub fn insert_char(&mut self, ch: char) {
         let line = self.cursor_line;
         let col = self.cursor_col;
 
-        if ch == '\n' {
-            // Split line
-            let current_line = self.lines.get(line).cloned().unwrap_or_default();
-            let (before, after) = current_line.split_at(col.min(current_line.len()));
-            self.lines[line] = before.to_string();
-            self.lines.insert(line + 1, after.to_string());
-            self.cursor_line += 1;
-            self.cursor_col = 0;
+        self.record_edit(line, 1, |doc| {
+            if ch == '\n' {
+                // Split the line. `col` is a byte offset and is snapped first,
+                // because `split_at` panics rather than rounds when it lands
+                // inside a character.
+                let current_line = doc.lines.get(line).cloned().unwrap_or_default();
+                let at = snap_to_boundary(&current_line, col);
+                let (head, tail) = current_line.split_at(at);
 
-            // Auto-indent: copy leading whitespace from previous line
-            let indent: String = self.lines[line]
-                .chars()
-                .take_while(|c| c.is_whitespace())
-                .collect();
-            if !indent.is_empty() {
-                self.lines[line + 1] = format!("{indent}{}", self.lines[line + 1]);
-                self.cursor_col = indent.len();
+                // Auto-indent: the new line starts with the old line's leading
+                // whitespace. This is part of the same recorded edit, so undo
+                // takes it back with the split rather than leaving it behind.
+                let indent: String = head.chars().take_while(|c| c.is_whitespace()).collect();
+                doc.cursor_col = indent.len();
+                let tail = format!("{indent}{tail}");
+
+                if let Some(slot) = doc.lines.get_mut(line) {
+                    slot.truncate(at);
+                }
+                doc.lines.insert(line.saturating_add(1), tail);
+                doc.cursor_line = line.saturating_add(1);
+            } else if ch == '\t' && doc.use_spaces {
+                // Insert spaces instead of a tab.
+                let spaces = " ".repeat(doc.tab_width.saturating_sub(col % doc.tab_width));
+                if let Some(current_line) = doc.lines.get_mut(line) {
+                    let at = snap_to_boundary(current_line, col);
+                    current_line.insert_str(at, &spaces);
+                    doc.cursor_col = at.saturating_add(spaces.len());
+                }
+            } else if let Some(current_line) = doc.lines.get_mut(line) {
+                let at = snap_to_boundary(current_line, col);
+                current_line.insert(at, ch);
+                doc.cursor_col = at.saturating_add(ch.len_utf8());
             }
-        } else if ch == '\t' && self.use_spaces {
-            // Insert spaces instead of tab
-            let spaces = " ".repeat(self.tab_width - (col % self.tab_width));
-            let current_line = self.lines.get_mut(line).unwrap();
-            current_line.insert_str(col.min(current_line.len()), &spaces);
-            self.cursor_col += spaces.len();
-        } else {
-            let current_line = self.lines.get_mut(line).unwrap();
-            current_line.insert(col.min(current_line.len()), ch);
-            self.cursor_col += ch.len_utf8();
-        }
-
-        self.modified = true;
-        self.redo_stack.clear();
-        self.push_undo(EditAction::Insert {
-            line,
-            col,
-            text: ch.to_string(),
         });
     }
 
     /// Delete the character before the cursor (backspace).
     pub fn backspace(&mut self) {
-        if self.cursor_col > 0 {
+        if let Some(ch) = self.char_before_cursor() {
             let line = self.cursor_line;
-            let current_line = self.lines.get_mut(line).unwrap();
-            if self.cursor_col <= current_line.len() {
-                let removed = current_line.remove(self.cursor_col - 1);
-                self.cursor_col -= 1;
-                self.modified = true;
-                self.push_undo(EditAction::Delete {
-                    line,
-                    col: self.cursor_col,
-                    text: removed.to_string(),
-                });
-            }
+            // Step back by the character's width in bytes, not by one:
+            // `cursor_col` is a byte offset, and `String::remove` panics on an
+            // offset that is not a character boundary.
+            let col = self.cursor_col.saturating_sub(ch.len_utf8());
+            self.record_edit(line, 1, |doc| {
+                if let Some(current_line) = doc.lines.get_mut(line)
+                    && col < current_line.len()
+                    && current_line.is_char_boundary(col)
+                {
+                    current_line.remove(col);
+                }
+                doc.cursor_col = col;
+            });
         } else if self.cursor_line > 0 {
-            // Join with previous line
-            let current_text = self.lines.remove(self.cursor_line);
-            self.cursor_line -= 1;
-            self.cursor_col = self.lines[self.cursor_line].len();
-            self.lines[self.cursor_line].push_str(&current_text);
-            self.modified = true;
-            self.push_undo(EditAction::DeleteLine {
-                line: self.cursor_line + 1,
-                text: current_text,
+            // Join with the previous line. Both lines are in the recorded
+            // range, because the join changes both of them.
+            let line = self.cursor_line.saturating_sub(1);
+            self.record_edit(line, 2, |doc| {
+                let current_text = doc.lines.remove(doc.cursor_line);
+                doc.cursor_line = line;
+                doc.cursor_col = doc.lines.get(line).map_or(0, String::len);
+                if let Some(previous) = doc.lines.get_mut(line) {
+                    previous.push_str(&current_text);
+                }
             });
         }
     }
@@ -494,25 +674,24 @@ impl Document {
     /// Delete the character at the cursor (delete key).
     pub fn delete_forward(&mut self) {
         let line = self.cursor_line;
-        let current_line = &self.lines[line];
+        let col = self.cursor_col;
+        let line_len = self.lines.get(line).map_or(0, String::len);
 
-        if self.cursor_col < current_line.len() {
-            let current_line = self.lines.get_mut(line).unwrap();
-            let removed = current_line.remove(self.cursor_col);
-            self.modified = true;
-            self.push_undo(EditAction::Delete {
-                line,
-                col: self.cursor_col,
-                text: removed.to_string(),
+        if col < line_len {
+            self.record_edit(line, 1, |doc| {
+                if let Some(current_line) = doc.lines.get_mut(line)
+                    && current_line.is_char_boundary(col)
+                {
+                    current_line.remove(col);
+                }
             });
-        } else if line + 1 < self.lines.len() {
-            // Join with next line
-            let next_text = self.lines.remove(line + 1);
-            self.lines[line].push_str(&next_text);
-            self.modified = true;
-            self.push_undo(EditAction::DeleteLine {
-                line: line + 1,
-                text: next_text,
+        } else if line.saturating_add(1) < self.lines.len() {
+            // Join with the next line; again both lines are recorded.
+            self.record_edit(line, 2, |doc| {
+                let next_text = doc.lines.remove(line.saturating_add(1));
+                if let Some(current_line) = doc.lines.get_mut(line) {
+                    current_line.push_str(&next_text);
+                }
             });
         }
     }
@@ -520,32 +699,9 @@ impl Document {
     /// Undo the last action.
     pub fn undo(&mut self) {
         if let Some(action) = self.undo_stack.pop_back() {
-            match &action {
-                EditAction::Insert { line, col, text } => {
-                    let current = self.lines.get_mut(*line).unwrap();
-                    for _ in 0..text.len() {
-                        if *col < current.len() {
-                            current.remove(*col);
-                        }
-                    }
-                    self.cursor_line = *line;
-                    self.cursor_col = *col;
-                }
-                EditAction::Delete { line, col, text } => {
-                    let current = self.lines.get_mut(*line).unwrap();
-                    current.insert_str(*col, text);
-                    self.cursor_line = *line;
-                    self.cursor_col = col + text.len();
-                }
-                EditAction::InsertLine { line, .. } => {
-                    self.lines.remove(*line);
-                    self.cursor_line = line.saturating_sub(1);
-                }
-                EditAction::DeleteLine { line, text } => {
-                    self.lines.insert(*line, text.clone());
-                    self.cursor_line = *line;
-                }
-            }
+            self.splice_lines(action.line, action.after.len(), &action.before);
+            (self.cursor_line, self.cursor_col) = action.cursor_before;
+            self.clamp_cursor();
             self.redo_stack.push_back(action);
             self.modified = true;
         }
@@ -554,35 +710,27 @@ impl Document {
     /// Redo the last undone action.
     pub fn redo(&mut self) {
         if let Some(action) = self.redo_stack.pop_back() {
-            match &action {
-                EditAction::Insert { line, col, text } => {
-                    let current = self.lines.get_mut(*line).unwrap();
-                    current.insert_str(*col, text);
-                    self.cursor_line = *line;
-                    self.cursor_col = col + text.len();
-                }
-                EditAction::Delete { line, col, text } => {
-                    let current = self.lines.get_mut(*line).unwrap();
-                    for _ in 0..text.len() {
-                        if *col < current.len() {
-                            current.remove(*col);
-                        }
-                    }
-                    self.cursor_line = *line;
-                    self.cursor_col = *col;
-                }
-                EditAction::InsertLine { line, text } => {
-                    self.lines.insert(*line, text.clone());
-                    self.cursor_line = *line;
-                }
-                EditAction::DeleteLine { line, .. } => {
-                    self.lines.remove(*line);
-                    self.cursor_line = line.saturating_sub(1);
-                }
-            }
+            self.splice_lines(action.line, action.before.len(), &action.after);
+            (self.cursor_line, self.cursor_col) = action.cursor_after;
+            self.clamp_cursor();
             self.undo_stack.push_back(action);
             self.modified = true;
         }
+    }
+
+    /// Pull the caret back inside the buffer and onto a character boundary.
+    ///
+    /// A recorded caret position was valid against the buffer state that is
+    /// being restored, so this should never have anything to do — but "should
+    /// never" is not a guarantee, and every later edit indexes a `String` by
+    /// `cursor_col`, where being wrong is a panic rather than a wrong answer.
+    fn clamp_cursor(&mut self) {
+        self.cursor_line = self.cursor_line.min(self.lines.len().saturating_sub(1));
+        let col = self.cursor_col;
+        self.cursor_col = self
+            .lines
+            .get(self.cursor_line)
+            .map_or(0, |line| snap_to_boundary(line, col.min(line.len())));
     }
 
     fn push_undo(&mut self, action: EditAction) {
@@ -596,9 +744,36 @@ impl Document {
     // Cursor movement
     // ======================================================================
 
+    /// The character immediately before the cursor, if the cursor is not at the
+    /// start of its line.
+    ///
+    /// `cursor_col` is a *byte* offset — `String::insert` and `String::remove`
+    /// index by bytes — so every backward step must be the width of a character
+    /// in bytes and never one byte. A one-byte step lands inside a `é` and the
+    /// next edit panics, because both of those methods reject an offset that is
+    /// not on a character boundary.
+    fn char_before_cursor(&self) -> Option<char> {
+        self.lines
+            .get(self.cursor_line)?
+            .get(..self.cursor_col)?
+            .chars()
+            .next_back()
+    }
+
+    /// The character the cursor sits on, if it is not at the end of its line.
+    /// The forward counterpart of [`Document::char_before_cursor`], and byte
+    /// offsets for the same reason.
+    fn char_at_cursor(&self) -> Option<char> {
+        self.lines
+            .get(self.cursor_line)?
+            .get(self.cursor_col..)?
+            .chars()
+            .next()
+    }
+
     pub fn move_left(&mut self) {
-        if self.cursor_col > 0 {
-            self.cursor_col -= 1;
+        if let Some(ch) = self.char_before_cursor() {
+            self.cursor_col -= ch.len_utf8();
         } else if self.cursor_line > 0 {
             self.cursor_line -= 1;
             self.cursor_col = self.lines[self.cursor_line].len();
@@ -606,9 +781,8 @@ impl Document {
     }
 
     pub fn move_right(&mut self) {
-        let line_len = self.lines[self.cursor_line].len();
-        if self.cursor_col < line_len {
-            self.cursor_col += 1;
+        if let Some(ch) = self.char_at_cursor() {
+            self.cursor_col += ch.len_utf8();
         } else if self.cursor_line + 1 < self.lines.len() {
             self.cursor_line += 1;
             self.cursor_col = 0;
@@ -618,14 +792,14 @@ impl Document {
     pub fn move_up(&mut self) {
         if self.cursor_line > 0 {
             self.cursor_line -= 1;
-            self.cursor_col = self.cursor_col.min(self.lines[self.cursor_line].len());
+            self.cursor_col = snap_to_boundary(&self.lines[self.cursor_line], self.cursor_col);
         }
     }
 
     pub fn move_down(&mut self) {
         if self.cursor_line + 1 < self.lines.len() {
             self.cursor_line += 1;
-            self.cursor_col = self.cursor_col.min(self.lines[self.cursor_line].len());
+            self.cursor_col = snap_to_boundary(&self.lines[self.cursor_line], self.cursor_col);
         }
     }
 
@@ -1209,6 +1383,78 @@ impl EditorState {
         }
     }
 
+    /// The x at which a line's text starts: just right of the gutter.
+    ///
+    /// One definition rather than `gutter_width + 8.0` repeated, because the
+    /// caret and the text it sits in must agree to the pixel — and they only
+    /// agree by construction if they read the same number.
+    fn text_x(&self) -> f32 {
+        self.gutter_width + 8.0
+    }
+
+    /// Draw one line as a row of coloured runs, one per syntax token.
+    ///
+    /// `scroll_col` is a byte offset into `line`; tokens entirely left of it are
+    /// skipped and the one straddling it is cut. Drawing stops once the pen has
+    /// passed `right`, so a line thousands of columns wide costs a screenful of
+    /// commands rather than one per token.
+    ///
+    /// Each run's x is the previous run's x plus that run's measured width,
+    /// which is how the toolkit's own multi-span text (`guitk::textview`) is
+    /// laid out. It forgoes kerning *across* a token boundary — but drawing the
+    /// runs in separate commands already does, and a token boundary is almost
+    /// always a change of character class, where there is no kern pair to lose.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_tokens(
+        tree: &mut RenderTree,
+        line: &str,
+        tokens: &[StyledToken],
+        scroll_col: usize,
+        left: f32,
+        y: f32,
+        right: f32,
+        font_size: f32,
+    ) {
+        let start = snap_to_boundary(line, scroll_col);
+        let mut x = left;
+        // Where the last drawn run ended, so a token that begins after it — a
+        // gap the tokenizer left — is still drawn rather than silently dropped.
+        // `every_byte_of_a_line_is_covered_by_some_token` asserts there are no
+        // gaps; this is what keeps a future one from deleting the user's text
+        // off the screen instead of merely mis-colouring it.
+        let mut covered = start;
+        for token in tokens {
+            if token.end <= covered {
+                continue;
+            }
+            if token.start > covered
+                && let Some(gap) = line.get(covered..token.start)
+            {
+                tree.text(x, y, gap, DEFAULT_THEME.color_for(Token::Plain), font_size);
+                x += text::measure(gap, font_size, FontWeightHint::Regular);
+            }
+            let from = token.start.max(covered);
+            let Some(piece) = line.get(from..token.end) else {
+                continue;
+            };
+            if !piece.is_empty() {
+                tree.text(x, y, piece, DEFAULT_THEME.color_for(token.kind), font_size);
+                x += text::measure(piece, font_size, FontWeightHint::Regular);
+            }
+            covered = token.end;
+            if x > right {
+                return;
+            }
+        }
+        // Anything the tokens did not reach — again, defence rather than an
+        // expected path.
+        if let Some(tail) = line.get(covered..)
+            && !tail.is_empty()
+        {
+            tree.text(x, y, tail, DEFAULT_THEME.color_for(Token::Plain), font_size);
+        }
+    }
+
     fn render_editor(&self, tree: &mut RenderTree) {
         let doc = self.active_document();
         let editor_y = 32.0;
@@ -1220,6 +1466,13 @@ impl EditorState {
 
         let visible_lines = self.visible_lines();
         let end_line = (doc.scroll_line + visible_lines).min(doc.lines.len());
+
+        // The syntax state entering the first visible line. Everything above the
+        // viewport has to be tokenized to know it — a block comment opened on
+        // line 3 colours line 4000 — which is what `entry_state`'s memo is for.
+        // From here the loop carries the state forward itself, since it is
+        // tokenizing each visible line anyway.
+        let mut state = doc.entry_state(doc.scroll_line);
 
         for i in doc.scroll_line..end_line {
             let y = editor_y + (i - doc.scroll_line) as f32 * self.line_height;
@@ -1244,17 +1497,17 @@ impl EditorState {
                 );
             }
 
-            // Line text
-            let line = &doc.lines[i];
-            let display_text: String = line
-                .chars()
-                .skip(doc.scroll_col)
-                .collect();
-            tree.text(
-                self.gutter_width + 8.0,
+            // Line text, one drawn run per syntax token.
+            let line = doc.lines.get(i).map_or("", String::as_str);
+            let tokens = highlight::highlight_line(line, doc.language, &mut state);
+            Self::draw_tokens(
+                tree,
+                line,
+                &tokens,
+                doc.scroll_col,
+                self.text_x(),
                 y + 3.0,
-                &display_text,
-                Color::from_hex(0xCDD6F4),
+                w,
                 self.font_size,
             );
         }
@@ -1268,19 +1521,16 @@ impl EditorState {
         if doc.cursor_line >= doc.scroll_line && doc.cursor_line < end_line {
             let cursor_y =
                 editor_y + (doc.cursor_line - doc.scroll_line) as f32 * self.line_height;
-            let before_cursor: String = doc
-                .lines
-                .get(doc.cursor_line)
-                .map(|line| {
-                    line.chars()
-                        .skip(doc.scroll_col)
-                        .take(doc.cursor_col.saturating_sub(doc.scroll_col))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let cursor_x = self.gutter_width
-                + 8.0
-                + text::measure(&before_cursor, self.font_size, FontWeightHint::Regular);
+            let before_cursor = doc.lines.get(doc.cursor_line).map_or("", |line| {
+                // Both offsets are bytes, and both are snapped, so the slice
+                // cannot land inside a character even if the caller left the
+                // scroll offset somewhere odd.
+                let from = snap_to_boundary(line, doc.scroll_col);
+                let to = snap_to_boundary(line, doc.cursor_col.max(from));
+                line.get(from..to).unwrap_or("")
+            });
+            let cursor_x = self.text_x()
+                + text::measure(before_cursor, self.font_size, FontWeightHint::Regular);
             tree.fill_rect(cursor_x, cursor_y + 2.0, 2.0, self.line_height - 4.0, Color::from_hex(0x89B4FA));
         }
     }
@@ -1704,6 +1954,537 @@ mod caret_tests {
             "a scrolled line put the caret at {}, not {expected}",
             caret_x(&editor)
         );
+    }
+
+    /// `cursor_col` is a byte offset, and every move used to step by one byte.
+    /// One step into a multi-byte character armed a crash that the *next* edit
+    /// fired, because `String::insert`/`remove` panic on an offset that is not
+    /// a character boundary. Any non-ASCII file — a comment in Russian, a
+    /// string literal holding `é` — was one keystroke from taking the editor
+    /// down with unsaved work in it.
+    #[test]
+    fn editing_around_a_multi_byte_character_does_not_panic() {
+        let mut doc = Document::new();
+        doc.lines = vec!["café au lait".to_string()];
+        doc.cursor_line = 0;
+        // Four characters in, five bytes in: `é` is two bytes.
+        doc.cursor_col = 5;
+
+        // One press crosses the whole character, in both directions.
+        doc.move_left();
+        assert_eq!(doc.cursor_col, 3);
+        doc.move_right();
+        assert_eq!(doc.cursor_col, 5);
+
+        // Backspace removes the character, not one of its bytes.
+        doc.backspace();
+        assert_eq!(doc.lines[0], "caf au lait");
+        assert_eq!(doc.cursor_col, 3);
+
+        // …and typing it back leaves the line as it was.
+        doc.insert_char('é');
+        assert_eq!(doc.lines[0], "café au lait");
+        assert_eq!(doc.cursor_col, 5);
+
+        // Delete takes the whole character from in front of the cursor.
+        doc.cursor_col = 3;
+        doc.delete_forward();
+        assert_eq!(doc.lines[0], "caf au lait");
+    }
+
+    /// A column carried between lines is a byte offset that meant something on
+    /// the *old* line. Moving down onto a line whose byte 3 is inside a
+    /// character must snap back to a boundary, not sit inside it.
+    #[test]
+    fn a_column_carried_between_lines_lands_on_a_character() {
+        let mut doc = Document::new();
+        // Byte 3 of the second line is the middle of the three-byte `日`.
+        doc.lines = vec!["abcdef".to_string(), "ab日本".to_string()];
+        doc.cursor_line = 0;
+        doc.cursor_col = 3;
+
+        doc.move_down();
+        assert_eq!(doc.cursor_line, 1);
+        assert!(
+            doc.lines[1].is_char_boundary(doc.cursor_col),
+            "column {} is inside a character of {:?}",
+            doc.cursor_col,
+            doc.lines[1]
+        );
+        // Snapping goes back to the character the user was over, not past it.
+        assert_eq!(doc.cursor_col, 2);
+
+        // And the edit that used to panic now works.
+        doc.insert_char('x');
+        assert_eq!(doc.lines[1], "abx日本");
+    }
+}
+
+// ============================================================================
+// Syntax highlighting, as the user actually sees it
+// ============================================================================
+
+/// The highlighter has always worked; until now nothing called it outside its
+/// own tests, so the editor drew every file in one colour while its module doc
+/// advertised "syntax highlighting for common languages". These tests are about
+/// the *connection* — that tokens reach the render tree, that a construct
+/// opened above the viewport still colours what is on screen, and that the memo
+/// which makes the second of those affordable cannot go stale.
+#[cfg(test)]
+mod highlight_render_tests {
+    use super::*;
+    use guitk::render::RenderCommand;
+
+    /// Every `Text` command in a rendered frame, as `(x, text, colour)`.
+    fn drawn(editor: &EditorState) -> Vec<(f32, String, Color)> {
+        editor
+            .render()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { x, text, color, .. } => Some((*x, text.clone(), *color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn editor_showing(src: &str, language: Language) -> EditorState {
+        let mut editor = EditorState::new();
+        let doc = editor.active_document_mut();
+        doc.lines = src.split('\n').map(str::to_string).collect();
+        doc.language = language;
+        doc.invalidate_highlight(0);
+        editor
+    }
+
+    /// Recompute the state entering `line` from the top of the file, with no
+    /// memo at all — the answer the cache has to keep agreeing with.
+    fn state_from_scratch(doc: &Document, line: usize) -> HighlightState {
+        let mut state = HighlightState::Normal;
+        for i in 0..line {
+            let src = doc.lines.get(i).map_or("", String::as_str);
+            drop(highlight::highlight_line(src, doc.language, &mut state));
+        }
+        state
+    }
+
+    const LANGUAGES: [Language; 12] = [
+        Language::Plain,
+        Language::Rust,
+        Language::C,
+        Language::Python,
+        Language::JavaScript,
+        Language::Html,
+        Language::Css,
+        Language::Shell,
+        Language::Toml,
+        Language::Yaml,
+        Language::Json,
+        Language::Markdown,
+    ];
+
+    /// The renderer draws one run per token and nothing else, so a byte no token
+    /// claims is a byte the user does not see. `draw_tokens` covers a gap
+    /// defensively rather than dropping it — this is the assertion that says the
+    /// defence should never have to fire.
+    #[test]
+    fn every_byte_of_a_line_is_covered_by_some_token() {
+        let lines = [
+            "fn main() { let x: u32 = 0x1F; /* hi */ }",
+            "  # comment with  spaces\tand a tab",
+            "s = \"a string\" + 'another' # tail",
+            "### heading **bold** [link](http://x) `code`",
+            "int *p = &q; // c",
+            "key = [1, 2, 3]  # toml",
+            "{\"a\": [1, null, true]}",
+            "export PATH=$HOME/bin:$PATH  # sh",
+            "",
+            "   ",
+        ];
+        for language in LANGUAGES {
+            for line in lines {
+                let mut state = HighlightState::Normal;
+                let tokens = highlight::highlight_line(line, language, &mut state);
+                let mut at = 0usize;
+                for token in &tokens {
+                    assert_eq!(
+                        token.start, at,
+                        "{language:?} on {line:?}: token {token:?} does not start where the \
+                         previous one ended ({at}), so those bytes would not be drawn"
+                    );
+                    assert!(
+                        line.is_char_boundary(token.start) && line.is_char_boundary(token.end),
+                        "{language:?} on {line:?}: token {token:?} splits a character"
+                    );
+                    at = token.end;
+                }
+                assert_eq!(
+                    at,
+                    line.len(),
+                    "{language:?} on {line:?}: the trailing bytes belong to no token"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_rust_line_is_drawn_as_several_coloured_runs() {
+        let editor = editor_showing("fn main() {}", Language::Rust);
+        let runs = drawn(&editor);
+        let keyword = DEFAULT_THEME.color_for(Token::Keyword);
+        let function = DEFAULT_THEME.color_for(Token::Function);
+        assert!(
+            runs.iter().any(|(_, t, c)| t == "fn" && *c == keyword),
+            "`fn` was not drawn in the keyword colour; runs were {runs:?}"
+        );
+        assert!(
+            runs.iter().any(|(_, t, c)| t == "main" && *c == function),
+            "`main` was not drawn in the function colour; runs were {runs:?}"
+        );
+    }
+
+    /// The whole reason the state has to be carried between lines. Before this
+    /// was wired up the editor drew every one of these lines in one colour.
+    #[test]
+    fn a_block_comment_keeps_its_colour_onto_the_next_line() {
+        let editor = editor_showing("/* opens here\nstill a comment\n*/ code", Language::Rust);
+        let comment = DEFAULT_THEME.color_for(Token::Comment);
+        let runs = drawn(&editor);
+        assert!(
+            runs.iter()
+                .any(|(_, t, c)| t.contains("still a comment") && *c == comment),
+            "the second line of a block comment was not drawn as a comment; runs were {runs:?}"
+        );
+    }
+
+    /// …and it must survive the viewport being scrolled past the line that
+    /// opened it, which is the case the memo exists to make cheap.
+    #[test]
+    fn a_comment_opened_above_the_viewport_still_colours_what_is_on_screen() {
+        let mut src = String::from("/* opens on line 1\n");
+        for i in 0..200 {
+            src.push_str(&format!("body line {i}\n"));
+        }
+        src.push_str("*/");
+        let mut editor = editor_showing(&src, Language::Rust);
+        editor.active_document_mut().scroll_line = 150;
+        let comment = DEFAULT_THEME.color_for(Token::Comment);
+        let runs = drawn(&editor);
+        assert!(
+            runs.iter()
+                .any(|(_, t, c)| t.contains("body line 149") && *c == comment),
+            "a line 150 rows below the `/*` lost the comment colour; runs were {runs:?}"
+        );
+    }
+
+    /// The memo is only correct if every mutation says which line it touched.
+    /// `lines` is public, so nothing in the type system enforces that — this
+    /// walks each editing operation and checks the memo against a from-scratch
+    /// recomputation, which is what would catch a future edit path that forgets.
+    #[test]
+    fn the_syntax_cache_agrees_with_a_recomputation_after_every_edit() {
+        fn check(doc: &Document, what: &str) {
+            let line = doc.lines.len().saturating_sub(1);
+            assert_eq!(
+                doc.entry_state(line),
+                state_from_scratch(doc, line),
+                "after {what}, the memoized state entering line {line} is stale"
+            );
+        }
+
+        let mut doc = Document::new();
+        doc.language = Language::Rust;
+        doc.lines = vec![
+            "let a = 1;".to_string(),
+            "let b = 2;".to_string(),
+            "let c = 3;".to_string(),
+            "let d = 4;".to_string(),
+        ];
+        doc.invalidate_highlight(0);
+        check(&doc, "the initial fill");
+
+        // Typing `/*` on line 0 turns every line below it into a comment.
+        doc.cursor_line = 0;
+        doc.cursor_col = 0;
+        doc.insert_char('/');
+        doc.insert_char('*');
+        check(&doc, "opening a block comment on line 0");
+
+        doc.backspace();
+        check(&doc, "backspacing the `*` back out");
+
+        doc.cursor_col = 0;
+        doc.delete_forward();
+        check(&doc, "deleting the `/` forward");
+
+        doc.cursor_line = 1;
+        doc.cursor_col = 0;
+        doc.insert_char('\n');
+        check(&doc, "splitting a line");
+
+        doc.backspace();
+        check(&doc, "joining it again");
+
+        doc.cursor_line = 2;
+        doc.cursor_col = doc.lines[2].len();
+        doc.delete_forward();
+        check(&doc, "joining with the next line");
+
+        doc.undo();
+        check(&doc, "an undo");
+
+        doc.redo();
+        check(&doc, "a redo");
+
+        doc.set_lines_from_text("/* everything\nis a comment\nnow */");
+        check(&doc, "replacing the whole buffer");
+    }
+
+    /// `scroll_col` is a byte offset. Slicing a line at one that is not a
+    /// character boundary panics, and a line scrolled into the middle of a
+    /// multi-byte character is not hypothetical — a horizontal scroll lands
+    /// wherever the arithmetic puts it.
+    #[test]
+    fn a_line_scrolled_into_the_middle_of_a_character_does_not_panic() {
+        let mut editor = editor_showing("caf\u{e9} au lait", Language::Plain);
+        for scroll in 0..16 {
+            editor.active_document_mut().scroll_col = scroll;
+            editor.active_document_mut().cursor_col = scroll;
+            drop(editor.render());
+        }
+    }
+
+    /// The undo stack records the *text* an edit inserted and reverts it by
+    /// taking those bytes back out. Doing that a character at a time, once per
+    /// byte, removed one character too many for every non-ASCII one.
+    #[test]
+    fn undoing_a_multi_byte_insertion_removes_only_that_character() {
+        let mut doc = Document::new();
+        doc.lines = vec!["ab".to_string()];
+        doc.cursor_line = 0;
+        doc.cursor_col = 1;
+        doc.insert_char('\u{e9}');
+        assert_eq!(doc.lines[0], "a\u{e9}b");
+        doc.undo();
+        assert_eq!(
+            doc.lines[0], "ab",
+            "undo removed the character after the one it inserted"
+        );
+    }
+}
+
+// ============================================================================
+// Undo/redo
+// ============================================================================
+
+#[cfg(test)]
+mod undo_tests {
+    use super::*;
+
+    fn doc_with(lines: &[&str], line: usize, col: usize) -> Document {
+        let mut doc = Document::new();
+        doc.lines = lines.iter().map(|s| (*s).to_string()).collect();
+        doc.cursor_line = line;
+        doc.cursor_col = col;
+        doc
+    }
+
+    /// The bug this module exists for. Enter used to be recorded as "inserted
+    /// the text `\n` at this column", and undo reverted it by deleting one byte
+    /// from that line — but the split had already moved the newline out of every
+    /// line, so undo deleted an unrelated character and left the file split.
+    #[test]
+    fn undoing_enter_puts_the_line_back_together() {
+        let mut doc = doc_with(&["abcd"], 0, 2);
+        doc.insert_char('\n');
+        assert_eq!(doc.lines, vec!["ab".to_string(), "cd".to_string()]);
+
+        doc.undo();
+        assert_eq!(
+            doc.lines,
+            vec!["abcd".to_string()],
+            "undoing Enter must rejoin the line it split, not delete a character"
+        );
+        assert_eq!((doc.cursor_line, doc.cursor_col), (0, 2));
+    }
+
+    /// Enter's auto-indent is part of the same edit, so undo has to take it back
+    /// with the split. Recording only the newline left the copied whitespace
+    /// behind with nothing on the stack that could remove it.
+    #[test]
+    fn undoing_enter_also_takes_back_the_auto_indent() {
+        let mut doc = doc_with(&["    body();"], 0, 11);
+        doc.insert_char('\n');
+        assert_eq!(
+            doc.lines,
+            vec!["    body();".to_string(), "    ".to_string()],
+            "a new line starts at the previous line's indent"
+        );
+        assert_eq!(doc.cursor_col, 4);
+
+        doc.undo();
+        assert_eq!(doc.lines, vec!["    body();".to_string()]);
+    }
+
+    #[test]
+    fn undoing_a_join_restores_both_lines() {
+        let mut doc = doc_with(&["one", "two"], 1, 0);
+        doc.backspace();
+        assert_eq!(doc.lines, vec!["onetwo".to_string()]);
+
+        doc.undo();
+        assert_eq!(doc.lines, vec!["one".to_string(), "two".to_string()]);
+        assert_eq!((doc.cursor_line, doc.cursor_col), (1, 0));
+    }
+
+    #[test]
+    fn undoing_a_forward_join_restores_both_lines() {
+        let mut doc = doc_with(&["one", "two"], 0, 3);
+        doc.delete_forward();
+        assert_eq!(doc.lines, vec!["onetwo".to_string()]);
+
+        doc.undo();
+        assert_eq!(doc.lines, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    /// Only `insert_char` used to clear the redo stack, so a backspace after an
+    /// undo left a redo entry describing an edit against a buffer that had since
+    /// moved on — pressing redo then re-applied it at a stale position.
+    #[test]
+    fn a_new_edit_after_an_undo_clears_the_redo_stack() {
+        let mut doc = doc_with(&["ab"], 0, 2);
+        doc.insert_char('c');
+        doc.undo();
+        assert_eq!(doc.redo_stack.len(), 1);
+
+        doc.backspace();
+        assert!(
+            doc.redo_stack.is_empty(),
+            "an edit made after an undo invalidates the redo stack, whatever the edit was"
+        );
+    }
+
+    /// Every editing operation, applied in sequence to a document with
+    /// non-ASCII text and indentation, then undone one step at a time and
+    /// redone one step at a time.
+    ///
+    /// The assertion is against a snapshot taken *between* every pair of steps,
+    /// not just at the ends: an undo stack can arrive back at the original text
+    /// while having been wrong at every intermediate point, and it is the
+    /// intermediate points the user actually looks at.
+    #[test]
+    fn every_edit_operation_round_trips_one_step_at_a_time() {
+        type Step = (&'static str, fn(&mut Document));
+        const STEPS: &[Step] = &[
+            ("insert ascii", |d| {
+                d.cursor_line = 0;
+                d.cursor_col = 3;
+                d.insert_char('X');
+            }),
+            ("insert two-byte char", |d| {
+                d.cursor_line = 0;
+                d.cursor_col = 1;
+                d.insert_char('\u{e9}');
+            }),
+            ("insert four-byte char", |d| {
+                d.cursor_line = 1;
+                d.cursor_col = 0;
+                d.insert_char('\u{1f600}');
+            }),
+            ("split a line", |d| {
+                d.cursor_line = 0;
+                d.cursor_col = 2;
+                d.insert_char('\n');
+            }),
+            ("split an indented line (auto-indent)", |d| {
+                d.cursor_line = 2;
+                d.cursor_col = d.lines[2].len();
+                d.insert_char('\n');
+            }),
+            ("tab expanded to spaces", |d| {
+                d.cursor_line = 0;
+                d.cursor_col = 0;
+                d.use_spaces = true;
+                d.insert_char('\t');
+            }),
+            ("backspace over a character", |d| {
+                d.cursor_line = 1;
+                d.cursor_col = d.lines[1].len();
+                d.backspace();
+            }),
+            ("backspace joining two lines", |d| {
+                d.cursor_line = 1;
+                d.cursor_col = 0;
+                d.backspace();
+            }),
+            ("delete forward over a character", |d| {
+                d.cursor_line = 0;
+                d.cursor_col = 0;
+                d.delete_forward();
+            }),
+            ("delete forward joining two lines", |d| {
+                d.cursor_line = 0;
+                d.cursor_col = d.lines[0].len();
+                d.delete_forward();
+            }),
+        ];
+
+        let mut doc = doc_with(
+            &["  caf\u{e9} au lait", "\u{4e2d}\u{6587}", "    if x:"],
+            0,
+            0,
+        );
+
+        // `history[i]` is the buffer *before* step `i` ran.
+        let mut history = vec![doc.lines.clone()];
+        for (name, step) in STEPS {
+            step(&mut doc);
+            assert!(
+                !doc.lines.iter().any(|l| l.contains('\n')),
+                "{name} left a newline inside a line; the buffer is one string per line"
+            );
+            history.push(doc.lines.clone());
+        }
+
+        for (i, (name, _)) in STEPS.iter().enumerate().rev() {
+            doc.undo();
+            assert_eq!(
+                doc.lines, history[i],
+                "undoing {name:?} (step {i}) did not restore the buffer"
+            );
+        }
+
+        for (i, (name, _)) in STEPS.iter().enumerate() {
+            doc.redo();
+            assert_eq!(
+                doc.lines,
+                history[i + 1],
+                "redoing {name:?} (step {i}) did not re-apply it"
+            );
+        }
+    }
+
+    /// Undo must never leave the caret inside a character or past the end of the
+    /// buffer, because every later edit indexes a `String` by `cursor_col` and
+    /// being wrong there is a panic rather than a wrong answer.
+    #[test]
+    fn undo_leaves_the_caret_on_a_character_boundary() {
+        let mut doc = doc_with(&["\u{4e2d}\u{6587}"], 0, 0);
+        doc.cursor_col = 3;
+        doc.insert_char('\u{e9}');
+        doc.undo();
+        doc.redo();
+        for _ in 0..4 {
+            doc.undo();
+        }
+        let line = &doc.lines[doc.cursor_line];
+        assert!(
+            line.is_char_boundary(doc.cursor_col),
+            "caret at byte {} is inside a character of {line:?}",
+            doc.cursor_col
+        );
+        // The caret being valid is only useful if editing there does not panic.
+        doc.insert_char('z');
     }
 }
 

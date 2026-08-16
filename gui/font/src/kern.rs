@@ -33,16 +33,17 @@
 //! # What is deliberately not implemented
 //!
 //! * **Script and language selection.** Every feature tagged `kern` is used,
-//!   whichever script system lists it. Per-script kerning differences are rare
-//!   in practice (the feature is nearly always shared), and honouring them
-//!   requires knowing the script of the run — which is a shaper's job, and
-//!   there is no shaper yet.
+//!   whichever script system lists it. That is a limitation of the *interface*
+//!   rather than of the reader: a pair of glyph ids carries no run, so there is
+//!   nothing to select with. Shaped text does not go through here — it goes
+//!   through [`gpos`](crate::gpos), whose `ByScript` selects properly, and
+//!   reaches this module only for the legacy `kern` table, which has no script
+//!   systems in it to select among. Per-script `GPOS` kerning differences are
+//!   in any case rare; the feature is nearly always shared.
 //! * **Contextual and cross-stream kerning**, `GPOS` lookup types other than
 //!   `PairPos`, and the legacy table's format 2 (class-based) subtables. Each
 //!   is a small fraction of the corrections in a font and none can be applied
 //!   correctly by a pair-at-a-time interface.
-//! * **Device tables.** They tune a value for one specific ppem; the value
-//!   without them is the designer's intent at any size.
 //!
 //! # Reading across a mark
 //!
@@ -63,6 +64,7 @@
 
 use alloc::vec::Vec;
 
+use crate::device::Ppem;
 use crate::gpos::pair_values;
 use crate::otl::{MAX_SUBTABLES, binary_search, feature_lookups};
 use crate::sfnt::{Span, i16_at, u16_at};
@@ -187,7 +189,18 @@ impl Kerning {
     /// OpenType applies lookups in order — a later lookup positions the output
     /// of an earlier one, so for a single adjustment the earliest match is the
     /// one that would have been applied.
-    pub(crate) fn pair(&self, data: &[u8], left: u16, right: u16, between: &[u16]) -> i16 {
+    /// `ppem` is the size the pair will be drawn at, which selects the row of
+    /// any device table the `GPOS` value record carries. It matters here for
+    /// the same reason the shared reader does: a pair that measures at one
+    /// correction and draws at another puts the caret in the wrong place.
+    pub(crate) fn pair(
+        &self,
+        data: &[u8],
+        left: u16,
+        right: u16,
+        between: &[u16],
+        ppem: Ppem,
+    ) -> i16 {
         for group in &self.gpos {
             if !between.is_empty() {
                 let skip = Skipper::new(
@@ -203,7 +216,7 @@ impl Kerning {
                 }
             }
             for &off in &group.subtables {
-                if let Some(v) = pair_pos(data, off, left, right) {
+                if let Some(v) = pair_pos(data, off, left, right, ppem) {
                     return v;
                 }
             }
@@ -278,8 +291,8 @@ fn parse_gpos(data: &[u8], span: Span) -> Option<Vec<Group>> {
 /// value is zero, and even when its value format carries no advance at all: the
 /// font has stated what happens to this pair, and a later subtable restating it
 /// would never have been reached.
-fn pair_pos(data: &[u8], sub: usize, left: u16, right: u16) -> Option<i16> {
-    let (first, _, _) = pair_values(data, sub, left, right)?;
+fn pair_pos(data: &[u8], sub: usize, left: u16, right: u16, ppem: Ppem) -> Option<i16> {
+    let (first, _, _) = pair_values(data, sub, left, right, ppem)?;
     Some(first.x_advance)
 }
 
@@ -417,13 +430,13 @@ mod tests {
     #[test]
     fn pair_pos_format_1_finds_the_pair_and_only_the_pair() {
         let t = pair_pos_1_subtable();
-        assert_eq!(pair_pos(&t, 0, 1, 2), Some(-80));
-        assert_eq!(pair_pos(&t, 0, 1, 3), Some(-50));
-        assert_eq!(pair_pos(&t, 0, 1, 9), Some(0));
+        assert_eq!(pair_pos(&t, 0, 1, 2, Ppem::NONE), Some(-80));
+        assert_eq!(pair_pos(&t, 0, 1, 3, Ppem::NONE), Some(-50));
+        assert_eq!(pair_pos(&t, 0, 1, 9, Ppem::NONE), Some(0));
         // 'A' does not kern before this one.
-        assert_eq!(pair_pos(&t, 0, 1, 4), None);
+        assert_eq!(pair_pos(&t, 0, 1, 4, Ppem::NONE), None);
         // Nothing kerns before 'A': the first glyph is not covered.
-        assert_eq!(pair_pos(&t, 0, 2, 1), None);
+        assert_eq!(pair_pos(&t, 0, 2, 1, Ppem::NONE), None);
     }
 
     #[test]
@@ -472,13 +485,13 @@ mod tests {
         t.extend(class2);
         t.extend(coverage1(&[1, 2]));
 
-        assert_eq!(pair_pos(&t, 0, 1, 6), Some(-30));
-        assert_eq!(pair_pos(&t, 0, 2, 7), Some(-70));
+        assert_eq!(pair_pos(&t, 0, 1, 6, Ppem::NONE), Some(-30));
+        assert_eq!(pair_pos(&t, 0, 2, 7, Ppem::NONE), Some(-70));
         // Class 0 on either axis is a real cell, and this font puts 0 there.
-        assert_eq!(pair_pos(&t, 0, 1, 99), Some(0));
+        assert_eq!(pair_pos(&t, 0, 1, 99, Ppem::NONE), Some(0));
         // An uncovered first glyph is not kerned at all, even though its class
         // would index a valid row.
-        assert_eq!(pair_pos(&t, 0, 3, 6), None);
+        assert_eq!(pair_pos(&t, 0, 3, 6, Ppem::NONE), None);
     }
 
     /// A whole legacy `kern` table with one format-0 subtable.
@@ -508,9 +521,9 @@ mod tests {
         let data = legacy_table(0x0001, &[(1, 2, -80), (1, 3, -50), (4, 2, -20)]);
         let k = Kerning::parse(&data, None, Some(span(0, data.len())), None).expect("kern parses");
         assert!(k.is_legacy());
-        assert_eq!(k.pair(&data, 1, 2, &[]), -80);
-        assert_eq!(k.pair(&data, 4, 2, &[]), -20);
-        assert_eq!(k.pair(&data, 2, 1, &[]), 0);
+        assert_eq!(k.pair(&data, 1, 2, &[], Ppem::NONE), -80);
+        assert_eq!(k.pair(&data, 4, 2, &[], Ppem::NONE), -20);
+        assert_eq!(k.pair(&data, 2, 1, &[], Ppem::NONE), 0);
     }
 
     #[test]
@@ -537,9 +550,9 @@ mod tests {
             // Whatever survives parsing must still answer without reading past
             // the end: a font file is untrusted input.
             if let Some(k) = Kerning::parse(data, None, Some(span(0, data.len())), None) {
-                let _ = k.pair(data, 1, 2, &[]);
-                let _ = k.pair(data, 1, 3, &[]);
-                let _ = k.pair(data, 7, 7, &[]);
+                let _ = k.pair(data, 1, 2, &[], Ppem::NONE);
+                let _ = k.pair(data, 1, 3, &[], Ppem::NONE);
+                let _ = k.pair(data, 7, 7, &[], Ppem::NONE);
             }
         }
     }
@@ -560,7 +573,7 @@ mod tests {
         )
         .expect("GPOS parses");
         assert!(!k.is_legacy());
-        assert_eq!(k.pair(&data, 1, 2, &[]), -80);
+        assert_eq!(k.pair(&data, 1, 2, &[], Ppem::NONE), -80);
     }
 
     /// A face that ships both keeps both. Which one a run should read is a
@@ -582,7 +595,7 @@ mod tests {
         .expect("both parse");
         assert!(!k.is_legacy());
         assert!(k.has_legacy());
-        assert_eq!(k.pair(&data, 1, 2, &[]), -80);
+        assert_eq!(k.pair(&data, 1, 2, &[], Ppem::NONE), -80);
         assert_eq!(k.legacy_pair(&data, 1, 2, &[]), -10);
         // The legacy table has no lookup flags and so reads across nothing.
         assert_eq!(k.legacy_pair(&data, 1, 2, &[3]), 0);
@@ -603,7 +616,7 @@ mod tests {
         )
         .expect("falls back to kern");
         assert!(k.is_legacy());
-        assert_eq!(k.pair(&data, 1, 2, &[]), -10);
+        assert_eq!(k.pair(&data, 1, 2, &[], Ppem::NONE), -10);
     }
 
     #[test]
@@ -611,7 +624,7 @@ mod tests {
         let data = gpos_table_extension(-65);
         let k =
             Kerning::parse(&data, Some(span(0, data.len())), None, None).expect("extension parses");
-        assert_eq!(k.pair(&data, 1, 2, &[]), -65);
+        assert_eq!(k.pair(&data, 1, 2, &[], Ppem::NONE), -65);
     }
 
     /// A minimal GPOS with a `kern` feature over one `PairPos` lookup.
@@ -749,21 +762,21 @@ mod tests {
     fn a_kern_lookup_that_ignores_marks_reads_the_pair_across_one() {
         let (data, k) = with_gdef(&gpos_table_flagged(-80, IGNORE_MARKS), &gdef_marks(&[90]));
         // The pair itself is unchanged by the flag.
-        assert_eq!(k.pair(&data, 1, 2, &[]), -80);
+        assert_eq!(k.pair(&data, 1, 2, &[], Ppem::NONE), -80);
         // An accent between the two letters is stepped over, which is the whole
         // point: `A` and `V` keep kerning with a mark between them.
-        assert_eq!(k.pair(&data, 1, 2, &[90]), -80);
+        assert_eq!(k.pair(&data, 1, 2, &[90], Ppem::NONE), -80);
         // Several of them, still all marks.
-        assert_eq!(k.pair(&data, 1, 2, &[90, 90]), -80);
+        assert_eq!(k.pair(&data, 1, 2, &[90, 90], Ppem::NONE), -80);
     }
 
     #[test]
     fn ignoring_marks_does_not_mean_ignoring_letters() {
         let (data, k) = with_gdef(&gpos_table_flagged(-80, IGNORE_MARKS), &gdef_marks(&[90]));
         // Glyph 7 is not a mark, so the pair is not adjacent and is not kerned.
-        assert_eq!(k.pair(&data, 1, 2, &[7]), 0);
+        assert_eq!(k.pair(&data, 1, 2, &[7], Ppem::NONE), 0);
         // One mark and one letter is still a letter in the way.
-        assert_eq!(k.pair(&data, 1, 2, &[90, 7]), 0);
+        assert_eq!(k.pair(&data, 1, 2, &[90, 7], Ppem::NONE), 0);
     }
 
     #[test]
@@ -771,8 +784,8 @@ mod tests {
         // The historically correct reading for a lookup that never asked to
         // skip: kerning applies to strictly adjacent glyphs.
         let (data, k) = with_gdef(&gpos_table_flagged(-80, 0), &gdef_marks(&[90]));
-        assert_eq!(k.pair(&data, 1, 2, &[]), -80);
-        assert_eq!(k.pair(&data, 1, 2, &[90]), 0);
+        assert_eq!(k.pair(&data, 1, 2, &[], Ppem::NONE), -80);
+        assert_eq!(k.pair(&data, 1, 2, &[90], Ppem::NONE), 0);
     }
 
     #[test]
@@ -782,8 +795,8 @@ mod tests {
         let data = gpos_table_flagged(-80, IGNORE_MARKS);
         let k = Kerning::parse(&data, Some(span(0, data.len())), None, None)
             .expect("a flagged lookup parses without a GDEF");
-        assert_eq!(k.pair(&data, 1, 2, &[]), -80);
-        assert_eq!(k.pair(&data, 1, 2, &[90]), 0);
+        assert_eq!(k.pair(&data, 1, 2, &[], Ppem::NONE), -80);
+        assert_eq!(k.pair(&data, 1, 2, &[90], Ppem::NONE), 0);
     }
 
     #[test]
@@ -793,7 +806,7 @@ mod tests {
         let data = legacy_table(0x0001, &[(1, 2, -10)]);
         let k =
             Kerning::parse(&data, None, Some(span(0, data.len())), None).expect("legacy parses");
-        assert_eq!(k.pair(&data, 1, 2, &[]), -10);
-        assert_eq!(k.pair(&data, 1, 2, &[90]), 0);
+        assert_eq!(k.pair(&data, 1, 2, &[], Ppem::NONE), -10);
+        assert_eq!(k.pair(&data, 1, 2, &[90], Ppem::NONE), 0);
     }
 }

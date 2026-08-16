@@ -8,8 +8,6 @@
 //! tracked via [`HighlightState`], which must be carried from one line to the
 //! next during rendering.
 
-#![allow(dead_code)]
-
 use crate::Language;
 use guitk::color::Color;
 
@@ -194,15 +192,16 @@ pub static DEFAULT_THEME: Theme = Theme::catppuccin_mocha();
 // Language detection
 // ============================================================================
 
-/// Detect language from a filename (extension-based).
-pub fn detect_language(filename: &str) -> Option<Language> {
-    let ext = filename.rsplit('.').next()?;
-    let lang = Language::from_extension(ext);
-    if lang == Language::Plain {
-        None
-    } else {
-        Some(lang)
-    }
+/// The language a path's extension names, or [`Language::Plain`] for a path
+/// with no extension or an unrecognised one.
+///
+/// The one place the mapping happens, because a document that is *loaded* as
+/// Rust and *coloured* as plain text is a disagreement the user sees and cannot
+/// explain.
+pub fn language_of_path(path: &std::path::Path) -> Language {
+    path.extension().map_or(Language::Plain, |ext| {
+        Language::from_extension(&ext.to_string_lossy())
+    })
 }
 
 // ============================================================================
@@ -1928,21 +1927,30 @@ mod tests {
     // Language detection
     // ====================================================================
 
+    fn lang_of(name: &str) -> Language {
+        language_of_path(std::path::Path::new(name))
+    }
+
     #[test]
     fn detect_language_from_filename() {
-        assert_eq!(detect_language("main.rs"), Some(Language::Rust));
-        assert_eq!(detect_language("script.py"), Some(Language::Python));
-        assert_eq!(detect_language("app.js"), Some(Language::JavaScript));
-        assert_eq!(detect_language("app.ts"), Some(Language::JavaScript));
-        assert_eq!(detect_language("lib.c"), Some(Language::C));
-        assert_eq!(detect_language("lib.cpp"), Some(Language::C));
-        assert_eq!(detect_language("lib.h"), Some(Language::C));
-        assert_eq!(detect_language("config.json"), Some(Language::Json));
-        assert_eq!(detect_language("Cargo.toml"), Some(Language::Toml));
-        assert_eq!(detect_language("README.md"), Some(Language::Markdown));
-        assert_eq!(detect_language("run.sh"), Some(Language::Shell));
-        assert_eq!(detect_language("file.txt"), None);
-        assert_eq!(detect_language("noext"), None);
+        assert_eq!(lang_of("main.rs"), Language::Rust);
+        assert_eq!(lang_of("script.py"), Language::Python);
+        assert_eq!(lang_of("app.js"), Language::JavaScript);
+        assert_eq!(lang_of("app.ts"), Language::JavaScript);
+        assert_eq!(lang_of("lib.c"), Language::C);
+        assert_eq!(lang_of("lib.cpp"), Language::C);
+        assert_eq!(lang_of("lib.h"), Language::C);
+        assert_eq!(lang_of("config.json"), Language::Json);
+        assert_eq!(lang_of("Cargo.toml"), Language::Toml);
+        assert_eq!(lang_of("README.md"), Language::Markdown);
+        assert_eq!(lang_of("run.sh"), Language::Shell);
+        assert_eq!(lang_of("file.txt"), Language::Plain);
+        assert_eq!(lang_of("noext"), Language::Plain);
+        // A whole path, not just a name: this is the form the document loader
+        // actually calls it with.
+        assert_eq!(lang_of("/home/u/src/main.rs"), Language::Rust);
+        // A dotfile's leading dot is a name, not an extension.
+        assert_eq!(lang_of(".bashrc"), Language::Plain);
     }
 
     // ====================================================================

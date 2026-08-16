@@ -627,20 +627,18 @@ impl BattleshipApp {
 
     fn handle_placement_key(&mut self, key: Key) {
         match key {
-            Key::Up
-                if self.placement_row > 0 => {
-                    self.placement_row -= 1;
-                }
+            Key::Up if self.placement_row > 0 => {
+                self.placement_row -= 1;
+            }
             Key::Down => {
                 if self.placement_row + 1 < GRID_SIZE {
                     self.placement_row += 1;
                 }
                 self.clamp_placement();
             }
-            Key::Left
-                if self.placement_col > 0 => {
-                    self.placement_col -= 1;
-                }
+            Key::Left if self.placement_col > 0 => {
+                self.placement_col -= 1;
+            }
             Key::Right => {
                 if self.placement_col + 1 < GRID_SIZE {
                     self.placement_col += 1;
@@ -667,7 +665,8 @@ impl BattleshipApp {
                 self.placement_orientation = Orientation::Horizontal;
                 if self.placement_index >= SHIP_DEFS.len() {
                     self.phase = GamePhase::Firing;
-                    self.message = String::from("All ships placed! Select target and fire (Enter).");
+                    self.message =
+                        String::from("All ships placed! Select target and fire (Enter).");
                 } else {
                     let (next_kind, next_size) = SHIP_DEFS[self.placement_index];
                     self.message = format!(
@@ -684,22 +683,18 @@ impl BattleshipApp {
 
     fn handle_firing_key(&mut self, key: Key) {
         match key {
-            Key::Up
-                if self.cursor_row > 0 => {
-                    self.cursor_row -= 1;
-                }
-            Key::Down
-                if self.cursor_row + 1 < GRID_SIZE => {
-                    self.cursor_row += 1;
-                }
-            Key::Left
-                if self.cursor_col > 0 => {
-                    self.cursor_col -= 1;
-                }
-            Key::Right
-                if self.cursor_col + 1 < GRID_SIZE => {
-                    self.cursor_col += 1;
-                }
+            Key::Up if self.cursor_row > 0 => {
+                self.cursor_row -= 1;
+            }
+            Key::Down if self.cursor_row + 1 < GRID_SIZE => {
+                self.cursor_row += 1;
+            }
+            Key::Left if self.cursor_col > 0 => {
+                self.cursor_col -= 1;
+            }
+            Key::Right if self.cursor_col + 1 < GRID_SIZE => {
+                self.cursor_col += 1;
+            }
             Key::Enter | Key::Space => {
                 self.fire_at_opponent();
             }
@@ -708,12 +703,17 @@ impl BattleshipApp {
     }
 
     fn fire_at_opponent(&mut self) {
-        if self.opponent_fleet.already_fired(self.cursor_row, self.cursor_col) {
+        if self
+            .opponent_fleet
+            .already_fired(self.cursor_row, self.cursor_col)
+        {
             self.message = String::from("Already fired there! Choose a new target.");
             return;
         }
 
-        let (hit, sunk) = self.opponent_fleet.receive_fire(self.cursor_row, self.cursor_col);
+        let (hit, sunk) = self
+            .opponent_fleet
+            .receive_fire(self.cursor_row, self.cursor_col);
         self.player_shots += 1;
         if hit {
             self.player_hits += 1;
@@ -746,18 +746,14 @@ impl BattleshipApp {
         self.ai_state.record_shot(ar, ac, hit);
 
         if let Some(kind) = sunk {
-            self.message = format!(
-                "AI sank your {}! Select your next target.",
-                kind.name()
-            );
+            self.message = format!("AI sank your {}! Select your next target.", kind.name());
         } else if hit {
             // Keep the player's message if they sank something, otherwise note AI hit.
             if self.last_sunk_message.is_empty() || !self.message.starts_with("You sank") {
                 self.message = String::from("AI hit your ship! Select your next target.");
             } else {
                 // Player just sank something; append AI info.
-                self.message
-                    .push_str(" AI hit your ship! Your turn.");
+                self.message.push_str(" AI hit your ship! Your turn.");
             }
         } else if !self.message.starts_with("You sank") {
             self.message = format!(
@@ -773,8 +769,7 @@ impl BattleshipApp {
         if self.player_fleet.all_sunk() {
             self.phase = GamePhase::GameOver;
             self.player_won = false;
-            self.message =
-                String::from("DEFEAT! All your ships are sunk! Press N for new game.");
+            self.message = String::from("DEFEAT! All your ships are sunk! Press N for new game.");
         }
     }
 
@@ -926,9 +921,8 @@ impl BattleshipApp {
         }
         // Row labels: A-J
         for r in 0..GRID_SIZE {
-            let y = grid_y + LABEL_OFFSET + r as f32 * (CELL_SIZE + CELL_GAP)
-                + CELL_SIZE / 2.0
-                - 7.0;
+            let y =
+                grid_y + LABEL_OFFSET + r as f32 * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2.0 - 7.0;
             let label = String::from((b'A' + r as u8) as char);
             cmds.push(RenderCommand::Text {
                 x: grid_x - LABEL_OFFSET + 2.0,
@@ -1005,29 +999,30 @@ impl BattleshipApp {
 
         // Placement preview overlay
         if self.phase == GamePhase::Placement
-            && let Some(ship) = self.placement_preview_ship() {
-                let valid = self.is_placement_valid();
-                let preview_color = if valid {
-                    Color::rgba(166, 227, 161, 120) // Green tint
-                } else {
-                    Color::rgba(243, 139, 168, 120) // Red tint
-                };
-                let cells = ship.cells();
-                for (r, c) in cells {
-                    if r < GRID_SIZE && c < GRID_SIZE {
-                        let cx = gx + c as f32 * (CELL_SIZE + CELL_GAP);
-                        let cy = gy + r as f32 * (CELL_SIZE + CELL_GAP);
-                        cmds.push(RenderCommand::FillRect {
-                            x: cx,
-                            y: cy,
-                            width: CELL_SIZE,
-                            height: CELL_SIZE,
-                            color: preview_color,
-                            corner_radii: CornerRadii::all(CORNER_RADIUS),
-                        });
-                    }
+            && let Some(ship) = self.placement_preview_ship()
+        {
+            let valid = self.is_placement_valid();
+            let preview_color = if valid {
+                Color::rgba(166, 227, 161, 120) // Green tint
+            } else {
+                Color::rgba(243, 139, 168, 120) // Red tint
+            };
+            let cells = ship.cells();
+            for (r, c) in cells {
+                if r < GRID_SIZE && c < GRID_SIZE {
+                    let cx = gx + c as f32 * (CELL_SIZE + CELL_GAP);
+                    let cy = gy + r as f32 * (CELL_SIZE + CELL_GAP);
+                    cmds.push(RenderCommand::FillRect {
+                        x: cx,
+                        y: cy,
+                        width: CELL_SIZE,
+                        height: CELL_SIZE,
+                        color: preview_color,
+                        corner_radii: CornerRadii::all(CORNER_RADIUS),
+                    });
                 }
             }
+        }
     }
 
     fn render_opponent_grid(&self, cmds: &mut Vec<RenderCommand>) {
@@ -1246,12 +1241,8 @@ impl BattleshipApp {
     fn render_help(&self, cmds: &mut Vec<RenderCommand>) {
         let help_y = GRID_TOP + LABEL_OFFSET + GRID_WIDTH + 80.0;
         let help_text = match self.phase {
-            GamePhase::Placement => {
-                "Arrow keys: move | R: rotate | Enter: place | N: new game"
-            }
-            GamePhase::Firing => {
-                "Arrow keys: move cursor | Enter/Space: fire | N: new game"
-            }
+            GamePhase::Placement => "Arrow keys: move | R: rotate | Enter: place | N: new game",
+            GamePhase::Firing => "Arrow keys: move cursor | Enter/Space: fire | N: new game",
             GamePhase::GameOver => "N: new game | Esc: reset",
         };
         cmds.push(RenderCommand::Text {
@@ -2170,10 +2161,7 @@ mod tests {
         let mut occupied = [[false; GRID_SIZE]; GRID_SIZE];
         for ship in &app.opponent_fleet.ships {
             for (r, c) in ship.cells() {
-                assert!(
-                    !occupied[r][c],
-                    "AI ships overlap at ({r}, {c})"
-                );
+                assert!(!occupied[r][c], "AI ships overlap at ({r}, {c})");
                 occupied[r][c] = true;
             }
         }
@@ -2241,9 +2229,9 @@ mod tests {
     fn test_render_has_title() {
         let app = BattleshipApp::new();
         let cmds = app.render();
-        let has_title = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text == "Battleship")
-        });
+        let has_title = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Battleship"));
         assert!(has_title);
     }
 
@@ -2251,12 +2239,12 @@ mod tests {
     fn test_render_has_grid_titles() {
         let app = BattleshipApp::new();
         let cmds = app.render();
-        let has_your_fleet = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text == "Your Fleet")
-        });
-        let has_opponent = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text == "Opponent's Ocean")
-        });
+        let has_your_fleet = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Your Fleet"));
+        let has_opponent = cmds.iter().any(
+            |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Opponent's Ocean"),
+        );
         assert!(has_your_fleet);
         assert!(has_opponent);
     }
@@ -2267,9 +2255,9 @@ mod tests {
         let cmds = app.render();
         for num in 1..=10 {
             let num_str = format!("{num}");
-            let has_label = cmds.iter().any(|cmd| {
-                matches!(cmd, RenderCommand::Text { text, .. } if text == &num_str)
-            });
+            let has_label = cmds
+                .iter()
+                .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == &num_str));
             assert!(has_label, "Missing column label {num}");
         }
     }
@@ -2280,9 +2268,9 @@ mod tests {
         let cmds = app.render();
         for ch in b'A'..=b'J' {
             let label = String::from(ch as char);
-            let has_label = cmds.iter().any(|cmd| {
-                matches!(cmd, RenderCommand::Text { text, .. } if text == &label)
-            });
+            let has_label = cmds
+                .iter()
+                .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == &label));
             assert!(has_label, "Missing row label {}", label);
         }
     }
@@ -2301,9 +2289,9 @@ mod tests {
     fn test_render_has_help_text() {
         let app = BattleshipApp::new();
         let cmds = app.render();
-        let has_help = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Arrow keys"))
-        });
+        let has_help = cmds.iter().any(
+            |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Arrow keys")),
+        );
         assert!(has_help);
     }
 
@@ -2314,9 +2302,9 @@ mod tests {
         app.cursor_col = 4;
         let cmds = app.render();
         // Should have a StrokeRect for the cursor.
-        let has_cursor = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::StrokeRect { color, .. } if *color == YELLOW)
-        });
+        let has_cursor = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::StrokeRect { color, .. } if *color == YELLOW));
         assert!(has_cursor);
     }
 
@@ -2333,9 +2321,9 @@ mod tests {
     fn test_render_stats_panel() {
         let app = BattleshipApp::new();
         let cmds = app.render();
-        let has_shots = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Shots:"))
-        });
+        let has_shots = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Shots:")));
         assert!(has_shots);
     }
 
@@ -2343,9 +2331,9 @@ mod tests {
     fn test_render_ships_remaining_stat() {
         let app = BattleshipApp::new();
         let cmds = app.render();
-        let has_enemy_ships = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Enemy Ships:"))
-        });
+        let has_enemy_ships = cmds.iter().any(
+            |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Enemy Ships:")),
+        );
         assert!(has_enemy_ships);
     }
 
@@ -2353,9 +2341,9 @@ mod tests {
     fn test_render_hit_rate_stat() {
         let app = BattleshipApp::new();
         let cmds = app.render();
-        let has_rate = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Hit Rate:"))
-        });
+        let has_rate = cmds.iter().any(
+            |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Hit Rate:")),
+        );
         assert!(has_rate);
     }
 
@@ -2377,9 +2365,9 @@ mod tests {
         app.handle_key(Key::Enter);
         let cmds = app.render();
         // Should have hit markers (Line commands for the X)
-        let has_hit_line = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Line { color, .. } if *color == RED)
-        });
+        let has_hit_line = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Line { color, .. } if *color == RED));
         assert!(has_hit_line);
     }
 
@@ -2401,9 +2389,9 @@ mod tests {
         app.handle_key(Key::Enter);
         let cmds = app.render();
         // Should have a blue miss dot (FillRect with BLUE color)
-        let has_miss_dot = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::FillRect { color, .. } if *color == BLUE)
-        });
+        let has_miss_dot = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::FillRect { color, .. } if *color == BLUE));
         assert!(has_miss_dot);
     }
 
@@ -2414,9 +2402,9 @@ mod tests {
         app.player_won = true;
         app.message = String::from("VICTORY!");
         let cmds = app.render();
-        let has_victory = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Victory"))
-        });
+        let has_victory = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Victory")));
         assert!(has_victory);
     }
 
@@ -2427,9 +2415,9 @@ mod tests {
         app.player_won = false;
         app.message = String::from("DEFEAT!");
         let cmds = app.render();
-        let has_defeat = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Defeat"))
-        });
+        let has_defeat = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Defeat")));
         assert!(has_defeat);
     }
 
@@ -2540,11 +2528,36 @@ mod tests {
     fn test_fleet_place_all_five_ships() {
         let mut fleet = Fleet::new();
         let ships = [
-            Ship { kind: ShipKind::Carrier, row: 0, col: 0, orientation: Orientation::Horizontal },
-            Ship { kind: ShipKind::Battleship, row: 1, col: 0, orientation: Orientation::Horizontal },
-            Ship { kind: ShipKind::Cruiser, row: 2, col: 0, orientation: Orientation::Horizontal },
-            Ship { kind: ShipKind::Submarine, row: 3, col: 0, orientation: Orientation::Horizontal },
-            Ship { kind: ShipKind::Destroyer, row: 4, col: 0, orientation: Orientation::Horizontal },
+            Ship {
+                kind: ShipKind::Carrier,
+                row: 0,
+                col: 0,
+                orientation: Orientation::Horizontal,
+            },
+            Ship {
+                kind: ShipKind::Battleship,
+                row: 1,
+                col: 0,
+                orientation: Orientation::Horizontal,
+            },
+            Ship {
+                kind: ShipKind::Cruiser,
+                row: 2,
+                col: 0,
+                orientation: Orientation::Horizontal,
+            },
+            Ship {
+                kind: ShipKind::Submarine,
+                row: 3,
+                col: 0,
+                orientation: Orientation::Horizontal,
+            },
+            Ship {
+                kind: ShipKind::Destroyer,
+                row: 4,
+                col: 0,
+                orientation: Orientation::Horizontal,
+            },
         ];
         for ship in &ships {
             assert!(fleet.place_ship(*ship));

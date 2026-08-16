@@ -31,6 +31,7 @@
 use guitk::color::Color;
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::tabs::Tabs;
 use guitk::text;
 use guitk::textfind::{self, Case};
 
@@ -2353,261 +2354,208 @@ pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
     spans
 }
 
+/// Offset of the next `needle` byte at or after `from`, or `None` if there is
+/// none.
+///
+/// Scanning bytes for an ASCII delimiter is sound on UTF-8 text: a continuation
+/// byte is never equal to an ASCII one, so a hit is always on a character
+/// boundary — which is what the renderer needs, since it slices the line by the
+/// offsets these scans produce.
+fn scan_to(bytes: &[u8], from: usize, needle: u8) -> Option<usize> {
+    bytes
+        .get(from..)?
+        .iter()
+        .position(|&b| b == needle)
+        .map(|p| from.saturating_add(p))
+}
+
+/// Offset of the next doubled `needle` byte (`**`, `__`, `~~`) at or after
+/// `from`, or `None` if there is none.
+fn scan_to_pair(bytes: &[u8], from: usize, needle: u8) -> Option<usize> {
+    bytes
+        .get(from..)?
+        .windows(2)
+        .position(|w| matches!(w, [a, b] if *a == needle && *b == needle))
+        .map(|p| from.saturating_add(p))
+}
+
 /// Highlight inline markdown elements within a line starting at a byte offset.
 fn highlight_inline_spans(line: &str, start_offset: usize, spans: &mut Vec<HighlightSpan>) {
-    let segment = &line[start_offset..];
+    // `start_offset` is computed by the caller from a prefix it has already
+    // matched, so it is a boundary in practice — but it is a *computed* offset
+    // into a line the user is still typing into, and the failure mode of
+    // getting that wrong is the whole editor going down rather than one line
+    // drawing oddly.
+    let segment = line.get(start_offset..).unwrap_or("");
     let bytes = segment.as_bytes();
     let mut pos = 0;
     let mut text_start = 0;
 
-    while pos < bytes.len() {
+    // The six constructs below share two moves: emit the plain text that ran
+    // up to the construct, then emit the construct's own spans. Both are
+    // stated in terms of offsets within `segment`, which these close over and
+    // shift by `start_offset`.
+    let push = |spans: &mut Vec<HighlightSpan>, from: usize, to: usize, color, weight| {
+        spans.push(HighlightSpan {
+            start: start_offset.saturating_add(from),
+            end: start_offset.saturating_add(to),
+            color,
+            weight,
+        });
+    };
+
+    while let Some(&b) = bytes.get(pos) {
+        let next = bytes.get(pos.saturating_add(1)).copied();
+
         // Inline code: `code`.
-        if bytes[pos] == b'`' {
+        if b == b'`' {
             if pos > text_start {
-                spans.push(HighlightSpan {
-                    start: start_offset + text_start,
-                    end: start_offset + pos,
-                    color: TEXT,
-                    weight: FontWeightHint::Regular,
-                });
+                push(spans, text_start, pos, TEXT, FontWeightHint::Regular);
             }
-            let code_start = pos + 1;
-            let mut code_end = code_start;
-            while code_end < bytes.len() && bytes[code_end] != b'`' {
-                code_end += 1;
-            }
-            if code_end < bytes.len() {
-                spans.push(HighlightSpan {
-                    start: start_offset + pos,
-                    end: start_offset + code_end + 1,
-                    color: GREEN,
-                    weight: FontWeightHint::Regular,
-                });
-                pos = code_end + 1;
+            if let Some(code_end) = scan_to(bytes, pos.saturating_add(1), b'`') {
+                push(
+                    spans,
+                    pos,
+                    code_end.saturating_add(1),
+                    GREEN,
+                    FontWeightHint::Regular,
+                );
+                pos = code_end.saturating_add(1);
                 text_start = pos;
                 continue;
             }
         }
 
         // Bold markers: ** or __.
-        if pos + 1 < bytes.len()
-            && ((bytes[pos] == b'*' && bytes[pos + 1] == b'*')
-                || (bytes[pos] == b'_' && bytes[pos + 1] == b'_'))
-        {
-            let marker = bytes[pos];
-            let inner_start = pos + 2;
-            let mut inner_end = inner_start;
-            while inner_end + 1 < bytes.len() {
-                if bytes[inner_end] == marker && bytes[inner_end + 1] == marker {
-                    break;
-                }
-                inner_end += 1;
-            }
-            if inner_end + 1 < bytes.len() {
+        if (b == b'*' || b == b'_') && next == Some(b) {
+            let inner_start = pos.saturating_add(2);
+            if let Some(inner_end) = scan_to_pair(bytes, inner_start, b) {
                 if pos > text_start {
-                    spans.push(HighlightSpan {
-                        start: start_offset + text_start,
-                        end: start_offset + pos,
-                        color: TEXT,
-                        weight: FontWeightHint::Regular,
-                    });
+                    push(spans, text_start, pos, TEXT, FontWeightHint::Regular);
                 }
-                // Dim the opening markers.
-                spans.push(HighlightSpan {
-                    start: start_offset + pos,
-                    end: start_offset + inner_start,
-                    color: OVERLAY0,
-                    weight: FontWeightHint::Regular,
-                });
-                // Bold text.
-                spans.push(HighlightSpan {
-                    start: start_offset + inner_start,
-                    end: start_offset + inner_end,
-                    color: TEXT,
-                    weight: FontWeightHint::Bold,
-                });
-                // Dim the closing markers.
-                spans.push(HighlightSpan {
-                    start: start_offset + inner_end,
-                    end: start_offset + inner_end + 2,
-                    color: OVERLAY0,
-                    weight: FontWeightHint::Regular,
-                });
-                pos = inner_end + 2;
+                // Dim the opening markers, bold the text, dim the closing ones.
+                push(spans, pos, inner_start, OVERLAY0, FontWeightHint::Regular);
+                push(spans, inner_start, inner_end, TEXT, FontWeightHint::Bold);
+                push(
+                    spans,
+                    inner_end,
+                    inner_end.saturating_add(2),
+                    OVERLAY0,
+                    FontWeightHint::Regular,
+                );
+                pos = inner_end.saturating_add(2);
                 text_start = pos;
                 continue;
             }
         }
 
         // Strikethrough markers: ~~.
-        if pos + 1 < bytes.len() && bytes[pos] == b'~' && bytes[pos + 1] == b'~' {
-            let inner_start = pos + 2;
-            let mut inner_end = inner_start;
-            while inner_end + 1 < bytes.len() {
-                if bytes[inner_end] == b'~' && bytes[inner_end + 1] == b'~' {
-                    break;
-                }
-                inner_end += 1;
-            }
-            if inner_end + 1 < bytes.len() {
+        if b == b'~' && next == Some(b'~') {
+            if let Some(inner_end) = scan_to_pair(bytes, pos.saturating_add(2), b'~') {
                 if pos > text_start {
-                    spans.push(HighlightSpan {
-                        start: start_offset + text_start,
-                        end: start_offset + pos,
-                        color: TEXT,
-                        weight: FontWeightHint::Regular,
-                    });
+                    push(spans, text_start, pos, TEXT, FontWeightHint::Regular);
                 }
-                spans.push(HighlightSpan {
-                    start: start_offset + pos,
-                    end: start_offset + inner_end + 2,
-                    color: OVERLAY0,
-                    weight: FontWeightHint::Regular,
-                });
-                pos = inner_end + 2;
+                push(
+                    spans,
+                    pos,
+                    inner_end.saturating_add(2),
+                    OVERLAY0,
+                    FontWeightHint::Regular,
+                );
+                pos = inner_end.saturating_add(2);
                 text_start = pos;
                 continue;
             }
         }
 
         // Italic markers: single * or _.
-        if (bytes[pos] == b'*' || bytes[pos] == b'_')
-            && (pos + 1 >= bytes.len() || bytes[pos + 1] != bytes[pos])
-        {
-            let marker = bytes[pos];
-            let inner_start = pos + 1;
-            let mut inner_end = inner_start;
-            while inner_end < bytes.len() && bytes[inner_end] != marker {
-                inner_end += 1;
-            }
-            if inner_end < bytes.len() {
+        if (b == b'*' || b == b'_') && next != Some(b) {
+            let inner_start = pos.saturating_add(1);
+            if let Some(inner_end) = scan_to(bytes, inner_start, b) {
                 if pos > text_start {
-                    spans.push(HighlightSpan {
-                        start: start_offset + text_start,
-                        end: start_offset + pos,
-                        color: TEXT,
-                        weight: FontWeightHint::Regular,
-                    });
+                    push(spans, text_start, pos, TEXT, FontWeightHint::Regular);
                 }
-                spans.push(HighlightSpan {
-                    start: start_offset + pos,
-                    end: start_offset + pos + 1,
-                    color: OVERLAY0,
-                    weight: FontWeightHint::Regular,
-                });
-                spans.push(HighlightSpan {
-                    start: start_offset + inner_start,
-                    end: start_offset + inner_end,
-                    color: LAVENDER,
-                    weight: FontWeightHint::Light,
-                });
-                spans.push(HighlightSpan {
-                    start: start_offset + inner_end,
-                    end: start_offset + inner_end + 1,
-                    color: OVERLAY0,
-                    weight: FontWeightHint::Regular,
-                });
-                pos = inner_end + 1;
+                push(spans, pos, inner_start, OVERLAY0, FontWeightHint::Regular);
+                push(
+                    spans,
+                    inner_start,
+                    inner_end,
+                    LAVENDER,
+                    FontWeightHint::Light,
+                );
+                push(
+                    spans,
+                    inner_end,
+                    inner_end.saturating_add(1),
+                    OVERLAY0,
+                    FontWeightHint::Regular,
+                );
+                pos = inner_end.saturating_add(1);
                 text_start = pos;
                 continue;
             }
         }
 
-        // Links: [text](url).
-        if bytes[pos] == b'[' {
-            let bracket_start = pos;
-            let mut bracket_end = bracket_start + 1;
-            while bracket_end < bytes.len() && bytes[bracket_end] != b']' {
-                bracket_end += 1;
-            }
-            if bracket_end < bytes.len()
-                && bracket_end + 1 < bytes.len()
-                && bytes[bracket_end + 1] == b'('
+        // Links: [text](url), and images, which are a link with a `!` in front.
+        if b == b'[' || (b == b'!' && next == Some(b'[')) {
+            let is_image = b == b'!';
+            let bracket_start = if is_image {
+                pos.saturating_add(1)
+            } else {
+                pos
+            };
+            if let Some(bracket_end) = scan_to(bytes, bracket_start.saturating_add(1), b']')
+                && bytes.get(bracket_end.saturating_add(1)) == Some(&b'(')
+                && let Some(paren_end) = scan_to(bytes, bracket_end.saturating_add(2), b')')
             {
-                let paren_start = bracket_end + 2;
-                let mut paren_end = paren_start;
-                while paren_end < bytes.len() && bytes[paren_end] != b')' {
-                    paren_end += 1;
+                if pos > text_start {
+                    push(spans, text_start, pos, TEXT, FontWeightHint::Regular);
                 }
-                if paren_end < bytes.len() {
-                    if pos > text_start {
-                        spans.push(HighlightSpan {
-                            start: start_offset + text_start,
-                            end: start_offset + pos,
-                            color: TEXT,
-                            weight: FontWeightHint::Regular,
-                        });
-                    }
-                    // Link text.
-                    spans.push(HighlightSpan {
-                        start: start_offset + bracket_start,
-                        end: start_offset + bracket_end + 1,
-                        color: BLUE,
-                        weight: FontWeightHint::Regular,
-                    });
-                    // URL part.
-                    spans.push(HighlightSpan {
-                        start: start_offset + bracket_end + 1,
-                        end: start_offset + paren_end + 1,
-                        color: OVERLAY0,
-                        weight: FontWeightHint::Regular,
-                    });
-                    pos = paren_end + 1;
-                    text_start = pos;
-                    continue;
+                if is_image {
+                    // An image is drawn as one span: its alt text is not the
+                    // link text a reader clicks, so colouring it as one would
+                    // be a lie about what it is.
+                    push(
+                        spans,
+                        pos,
+                        paren_end.saturating_add(1),
+                        PEACH,
+                        FontWeightHint::Regular,
+                    );
+                } else {
+                    push(
+                        spans,
+                        bracket_start,
+                        bracket_end.saturating_add(1),
+                        BLUE,
+                        FontWeightHint::Regular,
+                    );
+                    push(
+                        spans,
+                        bracket_end.saturating_add(1),
+                        paren_end.saturating_add(1),
+                        OVERLAY0,
+                        FontWeightHint::Regular,
+                    );
                 }
+                pos = paren_end.saturating_add(1);
+                text_start = pos;
+                continue;
             }
         }
 
-        // Image: ![alt](url).
-        if bytes[pos] == b'!' && pos + 1 < bytes.len() && bytes[pos + 1] == b'[' {
-            let bracket_start = pos + 1;
-            let mut bracket_end = bracket_start + 1;
-            while bracket_end < bytes.len() && bytes[bracket_end] != b']' {
-                bracket_end += 1;
-            }
-            if bracket_end < bytes.len()
-                && bracket_end + 1 < bytes.len()
-                && bytes[bracket_end + 1] == b'('
-            {
-                let paren_start = bracket_end + 2;
-                let mut paren_end = paren_start;
-                while paren_end < bytes.len() && bytes[paren_end] != b')' {
-                    paren_end += 1;
-                }
-                if paren_end < bytes.len() {
-                    if pos > text_start {
-                        spans.push(HighlightSpan {
-                            start: start_offset + text_start,
-                            end: start_offset + pos,
-                            color: TEXT,
-                            weight: FontWeightHint::Regular,
-                        });
-                    }
-                    spans.push(HighlightSpan {
-                        start: start_offset + pos,
-                        end: start_offset + paren_end + 1,
-                        color: PEACH,
-                        weight: FontWeightHint::Regular,
-                    });
-                    pos = paren_end + 1;
-                    text_start = pos;
-                    continue;
-                }
-            }
-        }
-
-        pos += 1;
+        pos = pos.saturating_add(1);
     }
 
     // Remaining text.
     if text_start < bytes.len() {
-        spans.push(HighlightSpan {
-            start: start_offset + text_start,
-            end: start_offset + bytes.len(),
-            color: TEXT,
-            weight: FontWeightHint::Regular,
-        });
+        push(
+            spans,
+            text_start,
+            bytes.len(),
+            TEXT,
+            FontWeightHint::Regular,
+        );
     }
 }
 
@@ -2644,18 +2592,22 @@ pub fn insert_strikethrough(doc: &mut Document) {
 
 /// Insert a heading at the current line.
 pub fn insert_heading(doc: &mut Document, level: u8) {
-    let prefix: String = "#".repeat(level as usize);
+    let prefix = format!("{} ", "#".repeat(level as usize));
     let line = doc.cursor_line;
-    if line < doc.lines.len() {
-        let old = doc.lines[line].clone();
-        doc.lines[line] = format!("{} {}", prefix, old);
-        doc.cursor_col = doc.lines[line].len();
-        doc.push_undo(EditAction::Delete {
-            line,
-            col: 0,
-            text: old,
-        });
-    }
+    let Some(text) = doc.lines.get_mut(line) else {
+        return;
+    };
+    text.insert_str(0, &prefix);
+    doc.cursor_col = doc.line_text(line).len();
+    // What happened here is an *insertion* of the prefix, so its undo is an
+    // erase of the prefix. Recording it as a `Delete` of the old line — which
+    // is what this used to do — made undo re-insert the whole line in front of
+    // itself, so `# Hello` undid to `Hello# Hello` instead of `Hello`.
+    doc.push_undo(EditAction::Insert {
+        line,
+        col: 0,
+        text: prefix,
+    });
 }
 
 /// Insert a link template.
@@ -2820,14 +2772,19 @@ pub fn render_editor(
             .any(|&(start, end)| line_num > start && line_num < end)
     };
 
-    for i in 0..visible_lines {
-        let line_num = doc.scroll_line + i;
-        if line_num >= doc.lines.len() {
-            break;
-        }
-
+    // `skip`/`take` say the same thing the old index-and-break said — draw at
+    // most `visible_lines` lines starting at the scroll position — but say it
+    // once, so a `scroll_line` past the end of a document that shrank under
+    // the viewport draws nothing rather than indexing off the end.
+    for (i, (line_num, line)) in doc
+        .lines
+        .iter()
+        .enumerate()
+        .skip(doc.scroll_line)
+        .take(visible_lines)
+        .enumerate()
+    {
         let line_y = y + (i as f32) * LINE_HEIGHT;
-        let line = &doc.lines[line_num];
 
         // Current line highlight.
         if line_num == doc.cursor_line {
@@ -3822,12 +3779,14 @@ pub fn render_toolbar(buttons: &[ToolbarButton], x: f32, y: f32, width: f32) -> 
 
 /// Render the tab bar for multi-document editing.
 pub fn render_tab_bar(
-    documents: &[Document],
-    active_idx: usize,
+    documents: &Tabs<Document>,
     x: f32,
     y: f32,
     width: f32,
 ) -> Vec<RenderCommand> {
+    // Which tab is in front is the tab set's own business, so it is read
+    // from it rather than passed alongside — the two could not disagree.
+    let active_idx = documents.active_index();
     let mut cmds = Vec::new();
 
     // Tab bar background.
@@ -4377,10 +4336,13 @@ pub fn render_template_chooser(x: f32, y: f32, width: f32, height: f32) -> Vec<R
 
 /// The full state of the markdown editor application.
 pub struct App {
-    /// All open documents.
-    pub documents: Vec<Document>,
-    /// Index of the currently active document.
-    pub active_doc: usize,
+    /// All open documents, and which one is in front.
+    ///
+    /// A `Vec<Document>` plus an `active_doc: usize` said the same thing but
+    /// left "there is always a document open" and "the index names one" as
+    /// conventions the call sites had to keep. `Tabs` makes both facts the
+    /// type's job — see [`guitk::tabs::Tabs`].
+    pub documents: Tabs<Document>,
     /// Current view mode.
     pub view_mode: ViewMode,
     /// Whether the table of contents sidebar is visible.
@@ -4442,8 +4404,7 @@ impl App {
         let blocks = parse_markdown(&text);
         let toc = extract_toc(&text);
         Self {
-            documents: vec![doc],
-            active_doc: 0,
+            documents: Tabs::with(doc),
             view_mode: ViewMode::Split,
             toc_visible: false,
             find_state: FindReplaceState::new(),
@@ -4461,67 +4422,57 @@ impl App {
 
     /// Get a reference to the currently active document.
     pub fn active_document(&self) -> &Document {
-        &self.documents[self.active_doc]
+        self.documents.active()
     }
 
     /// Get a mutable reference to the currently active document.
     pub fn active_document_mut(&mut self) -> &mut Document {
-        &mut self.documents[self.active_doc]
+        self.documents.active_mut()
+    }
+
+    /// Index of the tab in front.
+    pub fn active_doc(&self) -> usize {
+        self.documents.active_index()
     }
 
     /// Refresh the cached parsed markdown and TOC for the active document.
     pub fn refresh_cache(&mut self) {
-        let text = self.documents[self.active_doc].full_text();
+        let text = self.documents.active().full_text();
         self.cached_blocks = parse_markdown(&text);
         self.cached_toc = extract_toc(&text);
     }
 
     /// Create a new blank document and add it as a new tab.
     pub fn new_document(&mut self) {
-        let doc = Document::new();
-        self.documents.push(doc);
-        self.active_doc = self.documents.len() - 1;
+        self.documents.open(Document::new());
         self.refresh_cache();
     }
 
     /// Create a new document from a template and add it as a new tab.
     pub fn new_from_template(&mut self, template: Template) {
-        let doc = Document::from_template(template);
-        self.documents.push(doc);
-        self.active_doc = self.documents.len() - 1;
+        self.documents.open(Document::from_template(template));
         self.refresh_cache();
     }
 
     /// Open a file and add it as a new tab.
     pub fn open_file(&mut self, path: &std::path::Path) -> std::io::Result<()> {
         let doc = Document::from_file(path)?;
-        self.documents.push(doc);
-        self.active_doc = self.documents.len() - 1;
+        self.documents.open(doc);
         self.refresh_cache();
         Ok(())
     }
 
-    /// Close the document at the given index.
+    /// Close the document at the given index. Closing the last one leaves a
+    /// fresh empty document rather than no document at all.
     pub fn close_document(&mut self, idx: usize) {
-        if self.documents.len() <= 1 {
-            // Always keep at least one document open.
-            self.documents[0] = Document::new();
-            self.active_doc = 0;
-        } else {
-            self.documents.remove(idx);
-            if self.active_doc >= self.documents.len() {
-                self.active_doc = self.documents.len() - 1;
-            } else if self.active_doc > idx {
-                self.active_doc -= 1;
-            }
-        }
+        self.documents.close(idx);
         self.refresh_cache();
     }
 
     /// Switch to the document at the given index.
     pub fn switch_tab(&mut self, idx: usize) {
-        if idx < self.documents.len() {
-            self.active_doc = idx;
+        if idx < self.documents.count() {
+            self.documents.set_active(idx);
             self.refresh_cache();
         }
     }
@@ -4541,7 +4492,7 @@ impl App {
         if self.external_prompt.is_some() {
             return false;
         }
-        let tab = self.active_doc;
+        let tab = self.active_doc();
         let Some(doc) = self.documents.get(tab) else {
             return false;
         };
@@ -4754,7 +4705,7 @@ impl App {
         if !self.autosave_enabled {
             return;
         }
-        for doc in &mut self.documents {
+        for doc in self.documents.iter_mut() {
             doc.seconds_since_save += elapsed_seconds;
             if doc.modified
                 && doc.path.is_some()
@@ -4767,12 +4718,12 @@ impl App {
 
     /// Compute scroll sync: map editor scroll position to preview scroll position.
     pub fn sync_scroll(&mut self) {
-        let doc = &self.documents[self.active_doc];
+        let doc = self.documents.active();
         let total_lines = doc.lines.len().max(1) as f32;
         let scroll_fraction = doc.scroll_line as f32 / total_lines;
         // Estimate total preview height (rough approximation).
         let estimated_preview_height = total_lines * LINE_HEIGHT * 1.5;
-        self.documents[self.active_doc].preview_scroll = scroll_fraction * estimated_preview_height;
+        self.documents.active_mut().preview_scroll = scroll_fraction * estimated_preview_height;
     }
 
     /// Render the full application frame.
@@ -4803,7 +4754,6 @@ impl App {
         // Tab bar.
         cmds.extend(render_tab_bar(
             &self.documents,
-            self.active_doc,
             0.0,
             content_y,
             self.window_width,
@@ -6188,6 +6138,90 @@ mod tests {
         assert!(state.matches.is_empty());
     }
 
+    /// A match range is an offset into the line the user is editing, not into
+    /// a lowercased copy of it.
+    ///
+    /// Find used to search `line.to_lowercase()` and hand the offsets it got
+    /// there straight to the highlighter and to `replace_range`. Folding is
+    /// not length-preserving: Turkish `İ` (U+0130) is two bytes and folds to
+    /// three, so every offset after one is shifted. Here the real match
+    /// `abc` starts at byte 2; in the folded copy it starts at byte 3.
+    #[test]
+    fn a_match_offset_is_an_offset_into_the_line_the_user_is_editing() {
+        let mut state = FindReplaceState::new();
+        state.query = "ABC".to_string();
+        state.case_sensitive = false;
+        let lines = vec!["\u{130}abc".to_string()];
+        state.find_all(&lines);
+        assert_eq!(state.matches, vec![(0, 2, 5)]);
+        // The offsets slice the line the user can see.
+        assert_eq!(&lines[0][2..5], "abc");
+    }
+
+    /// Matches do not overlap: `aa` occurs twice in `aaaa`, not three times.
+    /// The old scan resumed one byte past the *start* of the match it had
+    /// just found, so replace-all could rewrite text it had already
+    /// rewritten.
+    #[test]
+    fn matches_do_not_overlap_one_another() {
+        let mut state = FindReplaceState::new();
+        state.query = "aa".to_string();
+        let lines = vec!["aaaa".to_string()];
+        state.find_all(&lines);
+        assert_eq!(state.matches, vec![(0, 0, 2), (0, 2, 4)]);
+
+        let mut lines = lines;
+        assert_eq!(state.replace_all(&mut lines), 2);
+        assert_eq!(lines[0], "");
+    }
+
+    /// A case-insensitive match may be longer or shorter than the needle, so
+    /// the end offset has to come from the search rather than from
+    /// `start + query.len()`.
+    #[test]
+    fn a_match_is_not_assumed_to_be_as_long_as_the_query() {
+        let mut state = FindReplaceState::new();
+        state.query = "i\u{307}".to_string(); // `i` + combining dot: 3 bytes.
+        state.case_sensitive = false;
+        let lines = vec!["x\u{130}y".to_string()]; // `İ`: 2 bytes, folds to 3.
+        state.find_all(&lines);
+        assert_eq!(state.matches, vec![(0, 1, 3)]);
+
+        state.replacement = "I".to_string();
+        let mut lines = lines;
+        assert_eq!(state.replace_all(&mut lines), 1);
+        assert_eq!(lines[0], "xIy");
+    }
+
+    /// Replace refuses a range recorded against a document that has since
+    /// changed, rather than slicing a line at a byte that is now inside a
+    /// character.
+    ///
+    /// The window stays open while the document is editable, so the user can
+    /// find, then type or switch tabs, then press Replace. `replace_range`
+    /// panics on a non-boundary or out-of-range index — which took the whole
+    /// editor down, losing every unsaved tab.
+    #[test]
+    fn a_stale_replace_range_is_refused_rather_than_panicking() {
+        let mut state = FindReplaceState::new();
+        state.query = "needle".to_string();
+        state.replacement = "x".to_string();
+        let mut lines = vec!["a needle here".to_string()];
+        state.find_all(&lines);
+        assert_eq!(state.matches.len(), 1);
+
+        // The user edits: the line is now shorter than the recorded range,
+        // and byte 8 is inside a character.
+        lines[0] = "\u{65e5}\u{672c}".to_string();
+        assert!(!state.replace_current(&mut lines));
+        assert_eq!(lines[0], "\u{65e5}\u{672c}");
+
+        // A line that no longer exists at all is refused the same way.
+        let mut empty: Vec<String> = Vec::new();
+        state.find_all(&["a needle here".to_string()]);
+        assert!(!state.replace_current(&mut empty));
+    }
+
     // --- HTML export tests ---
 
     #[test]
@@ -6464,12 +6498,66 @@ mod tests {
         assert!(doc.lines[0].starts_with("### "));
     }
 
+    /// Undoing a heading removes the `#` prefix — it does not paste the old
+    /// line in front of itself.
+    ///
+    /// `insert_heading` was the one edit that hand-rolled its own undo entry,
+    /// and it recorded the wrong *kind*: an `EditAction::Delete` naming the
+    /// whole previous line, whose undo is "put that text back at column 0".
+    /// Since nothing had been deleted, undo appended rather than removed, so
+    /// Ctrl+H then Ctrl+Z turned `Title` into `Title# Title`.
+    #[test]
+    fn undoing_a_heading_removes_the_prefix_rather_than_duplicating_the_line() {
+        let mut doc = Document::new();
+        doc.lines = vec!["Title".to_string()];
+        doc.cursor_line = 0;
+
+        insert_heading(&mut doc, 2);
+        assert_eq!(doc.line_text(0), "## Title");
+
+        doc.undo();
+        assert_eq!(doc.line_text(0), "Title");
+
+        // And the redo of that undo puts the heading back, once.
+        doc.redo();
+        assert_eq!(doc.line_text(0), "## Title");
+    }
+
+    /// A heading on a cursor line the document no longer has is a no-op, not
+    /// a panic. The toolbar button reads `cursor_line`, which a reload or an
+    /// external-change adopt can leave past the end.
+    #[test]
+    fn a_heading_on_a_line_that_is_gone_does_nothing() {
+        let mut doc = Document::new();
+        doc.lines = vec!["only".to_string()];
+        doc.cursor_line = 40;
+        insert_heading(&mut doc, 1);
+        assert_eq!(doc.lines, vec!["only".to_string()]);
+    }
+
     // --- Rendering tests ---
 
     #[test]
     fn test_render_editor_produces_commands() {
         let doc = Document::new();
         let find = FindReplaceState::new();
+        let cmds = render_editor(&doc, 0.0, 0.0, 800.0, 600.0, &find);
+        assert!(!cmds.is_empty());
+    }
+
+    /// Drawing a document whose `scroll_line` is past its last line draws no
+    /// lines, rather than indexing off the end. A reload from disk or an
+    /// adopted external change can shrink the document under a scroll
+    /// position that was valid a frame ago.
+    #[test]
+    fn rendering_past_the_end_of_a_shrunken_document_draws_nothing() {
+        let mut doc = Document::new();
+        doc.lines = vec!["one".to_string()];
+        doc.scroll_line = 500;
+        doc.cursor_line = 0;
+        let find = FindReplaceState::new();
+        // The frame furniture (background, gutter) is still drawn; the point
+        // is that it returns at all.
         let cmds = render_editor(&doc, 0.0, 0.0, 800.0, 600.0, &find);
         assert!(!cmds.is_empty());
     }
@@ -6490,8 +6578,8 @@ mod tests {
 
     #[test]
     fn test_render_tab_bar_produces_commands() {
-        let docs = vec![Document::new()];
-        let cmds = render_tab_bar(&docs, 0, 0.0, 0.0, 1200.0);
+        let docs = Tabs::with(Document::new());
+        let cmds = render_tab_bar(&docs, 0.0, 0.0, 1200.0);
         assert!(!cmds.is_empty());
     }
 
@@ -6539,8 +6627,8 @@ mod tests {
     #[test]
     fn test_app_new() {
         let app = App::new(1280.0, 800.0);
-        assert_eq!(app.documents.len(), 1);
-        assert_eq!(app.active_doc, 0);
+        assert_eq!(app.documents.count(), 1);
+        assert_eq!(app.active_doc(), 0);
         assert_eq!(app.view_mode, ViewMode::Split);
     }
 
@@ -6548,8 +6636,8 @@ mod tests {
     fn test_app_new_document() {
         let mut app = App::new(1280.0, 800.0);
         app.new_document();
-        assert_eq!(app.documents.len(), 2);
-        assert_eq!(app.active_doc, 1);
+        assert_eq!(app.documents.count(), 2);
+        assert_eq!(app.active_doc(), 1);
     }
 
     #[test]
@@ -6557,14 +6645,14 @@ mod tests {
         let mut app = App::new(1280.0, 800.0);
         app.new_document();
         app.close_document(0);
-        assert_eq!(app.documents.len(), 1);
+        assert_eq!(app.documents.count(), 1);
     }
 
     #[test]
     fn test_app_close_last_document() {
         let mut app = App::new(1280.0, 800.0);
         app.close_document(0);
-        assert_eq!(app.documents.len(), 1); // always keeps one
+        assert_eq!(app.documents.count(), 1); // always keeps one
     }
 
     #[test]
@@ -6572,7 +6660,7 @@ mod tests {
         let mut app = App::new(1280.0, 800.0);
         app.new_document();
         app.switch_tab(0);
-        assert_eq!(app.active_doc, 0);
+        assert_eq!(app.active_doc(), 0);
     }
 
     #[test]
@@ -6623,7 +6711,7 @@ mod tests {
     fn test_app_new_from_template() {
         let mut app = App::new(1280.0, 800.0);
         app.new_from_template(Template::MeetingNotes);
-        assert_eq!(app.documents.len(), 2);
+        assert_eq!(app.documents.count(), 2);
         assert!(app.active_document().full_text().contains("Meeting Notes"));
     }
 
@@ -6995,7 +7083,7 @@ mod tests {
     fn test_toolbar_action_apply_template() {
         let mut app = App::new(1280.0, 800.0);
         app.handle_toolbar_action(&ToolbarAction::ApplyTemplate(1));
-        assert_eq!(app.documents.len(), 2);
+        assert_eq!(app.documents.count(), 2);
     }
 
     #[test]

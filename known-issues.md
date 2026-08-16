@@ -590,10 +590,11 @@ on an invariant maintained by four other methods. All three are now a single
 
 ## The same broken reduction is copy-pasted into 27 crates, and `randrange` now exists to replace it (lane C)
 
-**Status: OPEN 2026-08-16 — thirteen of 27 crates fixed** (`simon`,
+**Status: OPEN 2026-08-16 — fourteen of 27 crates fixed** (`simon`,
 `battleship`, `sliding`, `asteroids`, `yahtzee`, `hearts`, `solitaire`,
-`freecell`, `minesweeper`, `flood`, `snake`, `wordsearch`, `pacman`); the
-shared crate that the rest should move to is written and green.
+`freecell`, `minesweeper`, `flood`, `snake`, `wordsearch`, `pacman`,
+`breakout`); the shared crate that the rest should move to is written and
+green.
 
 The defect above is not `simon`'s. A scan of the tree
 (`build/scratch/lcg_scan.py`) finds the same LCG constants in **~36 places** and
@@ -626,6 +627,7 @@ measured:
 | `apps/snake` | 20, 20 | the food could reach 50 of the 400 cells, in a fixed diagonal lattice | fixed `4d448a617` |
 | `apps/wordsearch` | 26, 2..30 | every second filler letter came from {A,C,…,Y} and the ones between from {B,D,…,Z} — 0 repeats in 2000 draws, 76 expected; and BISON was picked for 14% of puzzles against ZEBRA's 41% | fixed `4cce605f8` |
 | `apps/pacman` | 31, 28 | each frightened ghost could flee to 7 of the 28 columns and 217 of the 868 cells; all four together to 14 columns, the seed choosing only *which* 14 | fixed `481f36e8d` |
+| `apps/breakout` | 1000 | every game in a session opened at the same launch parity: 500 of the 1000 angles and 4 of the 8 residues mod 8 over a chain of 5000 new games | fixed `589045fe1` |
 
 **The three card games are one shape and worth reading together.** All three
 shuffle 52 cards with a correct downward Fisher–Yates and draw the partner with
@@ -651,9 +653,36 @@ so long: most call sites use an odd or non-power-of-two bound and look fine,
 and the ones that do not still pass every distribution test written against
 them.
 
-Still degenerate, not yet migrated: `breakout`, `dots`, `hangman`, `life`,
-`lightsout`, `match3`, `maze`, `memory`, `pinball`, `sudoku`, `tetris`,
-`wordle`.
+Still degenerate, not yet migrated: `dots`, `hangman`, `life`, `lightsout`,
+`match3`, `maze`, `memory`, `pinball`, `sudoku`, `tetris`, `wordle`.
+
+**`breakout` is the case for not clearing a crate because its bound has an odd
+factor.** Its only bound was 1000, and by the rule of thumb above the factor 125
+should have restored the period — the *values* are uniform and a histogram of
+them is perfect. But 8 also divides 1000, and that is enough: `(state % 1000) %
+8` is exactly `state % 8`, so the draw's bottom three bits are the raw LCG's,
+whatever the other factor does. **Check a bound for a power-of-two divisor, not
+for being a power of two.** `1000 = 8 × 125` reads as safe and is not; the same
+reasoning re-opens `life`'s `% 100` (= 4 × 25), which this entry has been
+calling mild, and it should be re-measured rather than assumed when its turn
+comes.
+
+**`breakout` is also the clearest case of a reseed turning fine structure into
+half the range.** A period-8 cycle in the bottom bits is usually invisible,
+because a game draws often enough to walk the whole cycle. What made it
+permanent is that `start_game` reseeds from the running generator and the fresh
+generator's *first* output is the opening launch angle — `init_bricks` draws
+nothing in between. So the one draw a player meets at the start of every single
+game was pinned to a fixed stride through that cycle: over 5000 consecutive new
+games the opening angle held one parity for ever and reached 4 of the 8 residues
+mod 8. **When a crate reseeds per game, look hardest at the first draw after the
+reseed** — it is both the most exposed to the low-bit cycle and the one the
+player sees most often. `solitaire` and `freecell` are the same shape.
+
+The corollary for the remaining eleven: *counting distinct values is not enough
+to clear a draw.* Breakout's chain produced 500 distinct opening angles out of
+1000, which looks plentiful and would pass any "does it vary?" test. The parity
+is the part that had to be asserted, and it is one line away.
 
 **`pacman` is the cleanest case of the two-draws-per-consumer stride**, and it
 is the one to remember when a crate draws for several actors in a round-robin.

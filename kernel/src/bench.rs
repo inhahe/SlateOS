@@ -437,11 +437,96 @@ static SPLIT_TALLY_WORST_PCT: AtomicU64 = AtomicU64::new(0);
 /// Number of windows too short for a split check ([`SPLIT_MIN_ITERATIONS`]).
 static SPLIT_TALLY_UNCHECKED: AtomicU64 = AtomicU64::new(0);
 
-/// Fold one measurement's split verdict into the suite-wide tally.
+/// One measurement window, as seen by the coverage report.
+///
+/// `&'static str` rather than `String`: every call site passes a literal, so the
+/// only allocation is the containing `Vec`'s own growth. Storing owned strings
+/// would put a per-measurement heap allocation inside the benchmark harness,
+/// which is the one place in the kernel that must not perturb what it measures.
+struct Measurement {
+    /// The name the window was *measured* under — which is not always the name
+    /// it is *recorded* under. See [`MEASUREMENTS`].
+    name: &'static str,
+    /// Set by [`record`] when this window reaches the scorecard, and therefore
+    /// `bench/history.jsonl` and run-over-run regression detection.
+    scored: bool,
+    /// Set by [`run_diagnostic`]: this window is deliberately print-only.
+    ///
+    /// A sub-measurement of a decomposition benchmark means nothing on its own —
+    /// it exists to be differenced against its siblings and its parent — so
+    /// there is nothing for a regression comparator to compare. Marking it says
+    /// the judgement has been *made*, which is the difference between a coverage
+    /// report that can reach zero and one that nags forever about settled
+    /// decisions until the reader learns to skip it.
+    diagnostic: bool,
+}
+
+/// Every measurement window the suite opened, in measurement order.
+///
+/// Exists so the coverage line can *name* the windows that never reach the
+/// scorecard instead of only counting them. A count says "20 windows have no
+/// regression detection" and leaves the reader to rediscover which 20 by
+/// grepping — which is how the gap sat unexamined in the first place. Closing it
+/// needs a per-measurement judgement (is this a benchmark, or a diagnostic
+/// sub-measurement?), and that judgement cannot be made against an integer.
+///
+/// The link to the scorecard is the **index into this vector**, carried on
+/// [`BenchResult::seq`], not the name. Names cannot do this job: at least four
+/// benchmarks measure under one name and record under another
+/// (`lock_tracked`→`lock_uncontended`, `syscall_dispatch_task_id`→
+/// `syscall_dispatch`, `io_ring_nop_submit`→`io_ring_nop`,
+/// `page_fault_anonymous`→`page_fault`), so a name diff reports four fully
+/// covered benchmarks as uncovered — and the reader who acts on that goes and
+/// wires up something already wired. The index makes the diff exact and leaves
+/// the naming free.
+static MEASUREMENTS: Mutex<alloc::vec::Vec<Measurement>> = Mutex::new(alloc::vec::Vec::new());
+
+/// Scorecard entries whose `seq` did not name a live measurement.
+///
+/// Should always be 0. It is not decoration: `seq` is a plain index, so a
+/// hand-built [`BenchResult`] that invents one instead of calling
+/// [`note_measurement`] would silently mark the *wrong* window covered and
+/// leave its own uncovered — one error reported as two. Counting the misses
+/// turns that from a silent miscount into a printed anomaly.
+static SCORED_WITHOUT_MEASUREMENT: AtomicU64 = AtomicU64::new(0);
+
+/// Discard every trace of a previous suite run.
+///
+/// One function rather than a clear at each call site, because the state it
+/// resets is read *comparatively*: the coverage line subtracts the scorecard
+/// length from the split tally, so clearing one without the other does not
+/// degrade the report, it inverts it. A second `run_all()` in one boot would
+/// have compared a fresh scorecard against a tally still holding the first
+/// run's windows and reported a coverage gap roughly the size of the whole
+/// suite — a fabricated emergency, which is a worse failure than the silence
+/// it replaced.
+///
+/// The clear in `run_all` is documented "from any previous run", so a second
+/// run is anticipated rather than impossible; the reset must therefore be
+/// total. Adding new suite-wide state means adding it here.
+fn reset_suite_state() {
+    SCORECARD.lock().clear();
+    MEASUREMENTS.lock().clear();
+    SCORED_WITHOUT_MEASUREMENT.store(0, Ordering::Relaxed);
+    SPLIT_TALLY_CHECKED.store(0, Ordering::Relaxed);
+    SPLIT_TALLY_UNSTABLE.store(0, Ordering::Relaxed);
+    SPLIT_TALLY_WORST_PCT.store(0, Ordering::Relaxed);
+    SPLIT_TALLY_UNCHECKED.store(0, Ordering::Relaxed);
+}
+
+/// Register a measurement window and fold its split verdict into the tally.
 ///
 /// Called from every function that produces a [`BenchResult`], immediately
-/// after the split is computed and before the result can be discarded.
-fn note_split(split: SplitCheck) {
+/// after the split is computed and before the result can be discarded. Returns
+/// the window's index, which the caller **must** store in
+/// [`BenchResult::seq`] — it is the only link between a measurement and the
+/// scorecard entry that covers it.
+fn note_measurement(name: &'static str, split: SplitCheck) -> usize {
+    let seq = {
+        let mut m = MEASUREMENTS.lock();
+        m.push(Measurement { name, scored: false, diagnostic: false });
+        m.len().saturating_sub(1)
+    };
     match split {
         SplitCheck::NotChecked => {
             SPLIT_TALLY_UNCHECKED.fetch_add(1, Ordering::Relaxed);
@@ -459,6 +544,41 @@ fn note_split(split: SplitCheck) {
             }
         }
     }
+    seq
+}
+
+/// Declare a measurement window deliberately print-only.
+///
+/// See [`Measurement::diagnostic`]. Takes the whole result rather than a bare
+/// index so the declaration cannot drift onto a different window than the one
+/// the caller is looking at.
+fn declare_diagnostic(result: &BenchResult) {
+    if let Some(m) = MEASUREMENTS.lock().get_mut(result.seq) {
+        m.diagnostic = true;
+    }
+}
+
+/// [`run`], for a window whose number is not a benchmark of the kernel.
+///
+/// Four shapes qualify: a decomposition stage that only means anything
+/// differenced against its siblings; a component measured alone to price it; a
+/// re-measurement of a whole taken to check a block's own coherence; and the
+/// harness's self-test, which measures the harness rather than the system. None
+/// of them has anything a regression comparator could compare against, so
+/// recording them would add noise to the record rather than coverage.
+///
+/// Reach for [`track`] instead whenever the number *would* mean something on its
+/// own next boot — including when it has no hardware target. Untargeted is not
+/// the same as uncomparable, and conflating the two is the easier mistake: it is
+/// how seven real benchmarks came to be measured every boot and recorded never.
+///
+/// Identical to `run` except that the window is pre-judged as print-only, so it
+/// drops out of the coverage report instead of appearing there as an unwired
+/// benchmark forever.
+fn run_diagnostic<F: FnMut()>(name: &'static str, iterations: u32, f: F) -> BenchResult {
+    let result = run(name, iterations, f);
+    declare_diagnostic(&result);
+    result
 }
 
 /// Renders as the single `<split>` token of the SCORE line — see
@@ -515,6 +635,13 @@ pub struct BenchResult {
     /// Cross-check of `min_cycles` against the two halves of its own
     /// measurement window. See [`SplitCheck`].
     pub split: SplitCheck,
+    /// Index of this result's window in [`MEASUREMENTS`].
+    ///
+    /// Obtain it **only** from [`note_measurement`]; it is what lets [`record`]
+    /// mark the window covered, and an invented value marks the wrong one. A
+    /// value out of range is counted into [`SCORED_WITHOUT_MEASUREMENT`] and
+    /// printed, so the mistake is loud rather than silent.
+    pub seq: usize,
 }
 
 /// Time a single execution of `f`, in TSC cycles.
@@ -602,7 +729,7 @@ const SPLIT_MIN_ITERATIONS: u32 = 20;
 /// a change to the reported figure.
 ///
 /// Returns the `BenchResult` for programmatic comparison.
-pub fn run<F: FnMut()>(name: &str, iterations: u32, mut f: F) -> BenchResult {
+pub fn run<F: FnMut()>(name: &'static str, iterations: u32, mut f: F) -> BenchResult {
     // Warmup: 10% of iterations, minimum 5.
     let warmup = core::cmp::max(iterations / 10, 5);
 
@@ -647,7 +774,7 @@ pub fn run<F: FnMut()>(name: &str, iterations: u32, mut f: F) -> BenchResult {
     };
     // Tally here, not at scorecard-print time: a benchmark that never calls
     // `record()` still measured a window, and its instability must still count.
-    note_split(split);
+    let seq = note_measurement(name, split);
 
     let mean = total.checked_div(iterations as u64).unwrap_or(0);
     let min_ns = cycles_to_ns(min);
@@ -697,6 +824,7 @@ pub fn run<F: FnMut()>(name: &str, iterations: u32, mut f: F) -> BenchResult {
         min_ns,
         mean_ns,
         split,
+        seq,
     }
 }
 
@@ -712,7 +840,7 @@ pub fn run<F: FnMut()>(name: &str, iterations: u32, mut f: F) -> BenchResult {
 ///
 /// Falls back to plain `run()` if PMU is unavailable.
 #[allow(dead_code)]
-pub fn run_with_cache_info<F: FnMut()>(name: &str, iterations: u32, mut f: F) -> BenchResult {
+pub fn run_with_cache_info<F: FnMut()>(name: &'static str, iterations: u32, mut f: F) -> BenchResult {
     use crate::pmc;
 
     let has_pmc = pmc::is_available();
@@ -764,7 +892,7 @@ pub fn run_with_cache_info<F: FnMut()>(name: &str, iterations: u32, mut f: F) ->
     };
     // Tally here, not at scorecard-print time: a benchmark that never calls
     // `record()` still measured a window, and its instability must still count.
-    note_split(split);
+    let seq = note_measurement(name, split);
 
     if has_pmc {
         pmc::stop(0);
@@ -806,6 +934,7 @@ pub fn run_with_cache_info<F: FnMut()>(name: &str, iterations: u32, mut f: F) ->
         min_ns,
         mean_ns,
         split,
+        seq,
     }
 }
 
@@ -977,6 +1106,20 @@ fn record(name: &'static str, result: &BenchResult, target_ns: Option<u64>) {
         iterations: result.iterations,
         split: result.split,
     });
+    // Mark the *measurement* covered, keyed by index rather than by name.
+    //
+    // This is what makes the coverage report exact. The name cannot serve: four
+    // benchmarks record under a name they did not measure under (see
+    // [`MEASUREMENTS`]), so a name diff calls them uncovered while their history
+    // has in fact been accumulating for weeks. Keyed by index, a benchmark is
+    // covered precisely when its own window was handed to `record` — which is
+    // the question the report is actually asking.
+    match MEASUREMENTS.lock().get_mut(result.seq) {
+        Some(m) => m.scored = true,
+        None => {
+            SCORED_WITHOUT_MEASUREMENT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
     // Sampled here, after the lock is released, rather than from a list of
     // hand-placed call sites in `run_all`: hooking the one function every
     // benchmark already calls spreads the samples across the suite
@@ -1085,7 +1228,7 @@ fn print_scorecard() {
     // count for the reason given on `SplitCheck::NotChecked`: an entry nobody
     // examined has not passed.
     //
-    // The numbers come from the suite-wide tally (see `note_split`), not from a
+    // The numbers come from the suite-wide tally (see `note_measurement`), not from a
     // fold over `entries`. The fold undercounted: a benchmark that calls `run()`
     // but never `record()` is not a scorecard entry, so its flag was printed on
     // its own line and then contradicted by this summary. Counting at the
@@ -1109,16 +1252,60 @@ fn print_scorecard() {
             unchecked
         );
 
-        let measured = checked.saturating_add(unchecked);
-        let recorded = entries.len() as u64;
-        if measured > recorded {
+        // Coverage, computed per-window rather than by subtracting two totals.
+        //
+        // The three counts are disjoint and exhaustive over `MEASUREMENTS`:
+        // `scored` reached the scorecard and so has run-over-run regression
+        // detection; `diagnostic` was declared print-only on purpose; `unjudged`
+        // is neither, and is the only number that asks anything of the reader.
+        //
+        // Printed unconditionally, including when `unjudged` is 0. A report that
+        // only appears when it has a complaint cannot be distinguished from one
+        // that has stopped running — and this instrument exists because a
+        // coverage gap sat unnoticed for want of a line stating the invariant.
+        let measurements = MEASUREMENTS.lock();
+        let total = measurements.len();
+        let scored = measurements.iter().filter(|m| m.scored).count();
+        let diagnostic = measurements.iter().filter(|m| !m.scored && m.diagnostic).count();
+        let unjudged = total.saturating_sub(scored).saturating_sub(diagnostic);
+        serial_println!(
+            "[bench] === Scorecard coverage: {} of {} measured windows reached the \
+             scorecard, {} are declared diagnostics, {} unjudged (print-only: no SCORE \
+             line, no history entry, so no regression detection) ===",
+            scored,
+            total,
+            diagnostic,
+            unjudged
+        );
+
+        // Name the unjudged ones. Closing this gap needs a per-measurement
+        // judgement — a `_breakdown`'s stages are diagnostics that only mean
+        // anything relative to each other, whereas an unrecorded lock primitive
+        // would be a real benchmark that can regress silently — and no such
+        // judgement can be made against a bare count. Declared diagnostics are
+        // deliberately *not* listed: they are a settled decision, and a report
+        // that re-litigates settled decisions every boot is one the reader
+        // learns to skip.
+        for m in measurements.iter().filter(|m| !m.scored && !m.diagnostic) {
+            serial_println!("[bench]   unjudged print-only: {}", m.name);
+        }
+
+        // Soundness check on the diff above, not decoration.
+        //
+        // The diff is keyed by `BenchResult::seq`, a plain index, so it is
+        // trustworthy only while every recorded result carries an index it got
+        // from `note_measurement`. A hand-built result that invents one would
+        // mark some *other* window covered and leave its own uncovered — one
+        // mistake reported as two, in the direction that hides work rather than
+        // inventing it. Out-of-range indices are caught in `record`; report them
+        // here rather than letting the count quietly absorb them.
+        let orphans = SCORED_WITHOUT_MEASUREMENT.load(Ordering::Relaxed);
+        if orphans > 0 {
             serial_println!(
-                "[bench] === Scorecard coverage: {} of {} measured windows reached the \
-                 scorecard; {} are print-only (no SCORE line, no history entry, so no \
-                 regression detection) ===",
-                recorded,
-                measured,
-                measured.saturating_sub(recorded)
+                "[bench]   NOTE: {} scorecard entr(y/ies) carried a seq that names no \
+                 measurement window — a BenchResult was built without calling \
+                 note_measurement, so the coverage figures above are unreliable",
+                orphans
             );
         }
     }
@@ -1956,7 +2143,7 @@ fn report_canary(start: Option<u64>) {
 pub fn run_all() {
     serial_println!("[bench] === Kernel micro-benchmarks ===");
     // Clear scorecard from any previous run.
-    SCORECARD.lock().clear();
+    reset_suite_state();
 
     // Note: iteration counts are kept modest because these run during
     // boot under QEMU emulation.  For real hardware benchmarks, increase
@@ -2540,11 +2727,18 @@ pub fn run_all() {
     // The second benchmark pre-fills the pool to measure the hot path.
     {
         use crate::mm::frame;
-        run("page_alloc_zeroed_free", 500, || {
+        let result = run("page_alloc_zeroed_free", 500, || {
             let f = frame::alloc_frame_zeroed().expect("bench: alloc_zeroed");
             // SAFETY: frame was just allocated, exclusively ours.
             unsafe { frame::free_frame(f).expect("bench: free"); }
         });
+        // Tracked, not scored: this is the cold path, whose cost is dominated by
+        // a 16 KiB memset and therefore by host memory bandwidth, so a published
+        // per-allocation figure is not the right yardstick. Its hot-path sibling
+        // `page_alloc_zeroed_pool` was already tracked; leaving the cold path
+        // untracked meant the *pool's* whole reason for existing — the gap
+        // between the two — had only one side recorded.
+        track("page_alloc_zeroed_free", &result);
     }
 
     // --- Page allocation from pre-zeroed pool (hot path) ---
@@ -2637,7 +2831,7 @@ pub fn run_all() {
     {
         let layout = core::alloc::Layout::from_size_align(512, 8)
             .expect("valid layout");
-        run("heap_raw_alloc_free_512", 2000, || {
+        let result = run("heap_raw_alloc_free_512", 2000, || {
             // SAFETY: layout is valid, allocator is initialized.
             let ptr = unsafe { alloc::alloc::alloc(layout) };
             debug_assert!(!ptr.is_null(), "bench: alloc returned null");
@@ -2645,13 +2839,22 @@ pub fn run_all() {
             // SAFETY: ptr was just allocated with this layout and is non-null.
             unsafe { alloc::alloc::dealloc(ptr, layout); }
         });
+        // Tracked rather than scored: the 400ns target on the 64-byte cycle is
+        // derived from a published *small*-allocation figure and does not
+        // transfer to a larger size class. Inventing one here would grade a
+        // benchmark against a number nobody measured — see `ScoreEntry::
+        // target_ns` — whereas tracking gives it the run-over-run comparison
+        // that is the actual thing missing. The size sweep is the point: a
+        // regression confined to one size class is invisible in the 64B number
+        // alone, which was the only one recorded.
+        track("heap_raw_alloc_free_512", &result);
     }
 
     // --- Raw heap alloc + dealloc (4096 bytes) ---
     {
         let layout = core::alloc::Layout::from_size_align(4096, 8)
             .expect("valid layout");
-        run("heap_raw_alloc_free_4096", 500, || {
+        let result = run("heap_raw_alloc_free_4096", 500, || {
             // SAFETY: layout is valid, allocator is initialized.
             let ptr = unsafe { alloc::alloc::alloc(layout) };
             debug_assert!(!ptr.is_null(), "bench: alloc returned null");
@@ -2659,6 +2862,10 @@ pub fn run_all() {
             // SAFETY: ptr was just allocated with this layout and is non-null.
             unsafe { alloc::alloc::dealloc(ptr, layout); }
         });
+        // See the 512-byte case. This size is the one most likely to change
+        // routing (slab vs. large-object path), so it is the size whose
+        // regression a 64-byte-only record would most easily miss.
+        track("heap_raw_alloc_free_4096", &result);
     }
 
     // --- Page compression (zero page) ---
@@ -2666,10 +2873,15 @@ pub fn run_all() {
         use alloc::vec;
         use crate::mm::compress;
         let data = vec![0u8; 16384];
-        run("compress_zero_page", 200, || {
+        let bench = run("compress_zero_page", 200, || {
             let result = compress::compress(&data);
             core::hint::black_box(&result);
         });
+        // The all-zero page is the compressor's best case and the one the swap
+        // path hits most often, so it is the input whose cost most directly
+        // sets zswap throughput. No published figure to grade against, hence
+        // tracked.
+        track("compress_zero_page", &bench);
     }
 
     // --- Page compression (repeating pattern) ---
@@ -2681,17 +2893,31 @@ pub fn run_all() {
             #[allow(clippy::cast_possible_truncation)]
             { *b = (i & 0xFF) as u8; }
         }
-        run("compress_repeating", 200, || {
+        let bench = run("compress_repeating", 200, || {
             let result = compress::compress(&data);
             core::hint::black_box(&result);
         });
+        // The realistic case, paired with the zero page above. Recording only
+        // one of the two would leave the compressor's *shape* — how steeply
+        // cost rises with entropy — unrecorded, which is the property an
+        // algorithm change actually moves.
+        track("compress_repeating", &bench);
     }
 
     // --- TSC read overhead ---
     {
-        run("rdtsc_overhead", 5000, || {
+        let result = run("rdtsc_overhead", 5000, || {
             let _ = core::hint::black_box(rdtsc());
         });
+        // The most consequential entry on this list to have been unrecorded.
+        // `rdtsc` is the instrument every other benchmark in this file is
+        // measured with, so its cost is the floor under all of them: if it
+        // moves — a TCG change, a different host, a CPUID-driven fallback —
+        // every number in the suite shifts together and the comparator reads
+        // that as a suite-wide regression with no visible cause. Tracking it
+        // makes the floor itself diffable, so a uniform shift can be attributed
+        // to the ruler rather than to the code.
+        track("rdtsc_overhead", &result);
     }
 
     // --- HPET read overhead ---
@@ -2700,9 +2926,19 @@ pub fn run_all() {
     // via MMIO.  This is the overhead for every hpet::elapsed_ns()
     // call, which SYS_CLOCK_MONOTONIC should use.
     if crate::hpet::is_available() {
-        run("hpet_read", 5000, || {
+        let result = run("hpet_read", 5000, || {
             let _ = core::hint::black_box(crate::hpet::read_counter());
         });
+        // Tracked, with one consequence worth stating rather than discovering:
+        // this benchmark is *conditional*, so a boot on a machine without HPET
+        // drops the entry, and the history drift check in
+        // `scripts/test-bench-history.py` fails on a benchmark that vanishes.
+        // That is the intended behaviour, not an accident of it — a run missing
+        // a benchmark is a run that is not comparable to its predecessor, and
+        // the reason being benign is exactly what the failure message is for.
+        // (`page_alloc_zeroed_pool` is conditional in the same way and already
+        // recorded, so this is precedent, not a new hazard.)
+        track("hpet_read", &result);
     }
 
     // --- Context switch (yield to another task and back) ---
@@ -3056,6 +3292,10 @@ fn bench_context_switch() {
         // Derived by halving a paired-switch measurement, not produced by
         // `run`, so there are no half-window sample sets to compare.
         split: SplitCheck::NotChecked,
+        // Registered by hand because this result did not come from `run`.
+        // Without it the window is absent from the coverage tally and the
+        // scorecard entry below is an orphan — see `SCORED_WITHOUT_MEASUREMENT`.
+        seq: note_measurement("context_switch", SplitCheck::NotChecked),
     };
     score("context_switch", &ctx_result, target_ns);
     if per_switch_ns <= target_ns {
@@ -3152,6 +3392,22 @@ fn bench_pick_next_scaling() {
     // Mid priority; the specific level is irrelevant to the O(1) claim.
     const PRIO: u8 = 16;
     const DEPTHS: [u32; 5] = [1, 8, 64, 256, 1024];
+    // One name per depth, and a parallel array rather than a formatted string
+    // because `run` takes `&'static str` — deliberately, so that recording a
+    // measurement never allocates inside the harness.
+    //
+    // All five used to run under the single name `sched_pick_next_isolated`,
+    // which is why they could not be recorded even in principle: five history
+    // entries under one key is not a series, it is four values overwriting each
+    // other. The shared name also made the log five identical lines apart from
+    // the numbers.
+    const DEPTH_NAMES: [&str; 5] = [
+        "sched_pick_next_d1",
+        "sched_pick_next_d8",
+        "sched_pick_next_d64",
+        "sched_pick_next_d256",
+        "sched_pick_next_d1024",
+    ];
 
     let mut shallow_ns = 0u64;
     let mut deepest = None;
@@ -3162,8 +3418,13 @@ fn bench_pick_next_scaling() {
             rq.enqueue(id, PRIO);
         }
 
+        // `get` rather than `DEPTH_NAMES[i]`: the two arrays are the same
+        // length by construction, but indexing would be a panic path in the
+        // kernel if that ever stopped being true.
+        let name = DEPTH_NAMES.get(i).copied().unwrap_or("sched_pick_next_unknown_depth");
+
         // Steady-state rotation keeps `depth` tasks queued throughout.
-        let result = run("sched_pick_next_isolated", 2000, || {
+        let result = run(name, 2000, || {
             if let Some(id) = rq.pick_next() {
                 rq.enqueue(id, PRIO);
                 core::hint::black_box(id);
@@ -3176,6 +3437,23 @@ fn bench_pick_next_scaling() {
 
         if i == 0 {
             shallow_ns = result.min_ns;
+        }
+        // Every depth but the last is tracked here; the last is scored below
+        // under the stable name `sched_pick_next`, so recording it here too
+        // would enter the same measurement twice.
+        //
+        // Tracked rather than declared diagnostics, which is the opposite call
+        // from the `_breakdown` stages, and for a reason that is about what the
+        // benchmark asserts. A decomposition's stages are meaningless apart
+        // from their siblings — there is nothing for a comparator to compare.
+        // A scaling sweep's points are each a complete measurement of the same
+        // operation at a different load, and the *claim* is the shape they
+        // trace. The in-kernel verdict below only tests the two endpoints
+        // against a 4x threshold with generous headroom, so a regression that
+        // bent the middle of the curve would pass it. Recording each point is
+        // what makes the shape diffable across boots.
+        if i + 1 < DEPTHS.len() {
+            track(name, &result);
         }
         deepest = Some(result);
     }
@@ -3285,21 +3563,21 @@ fn bench_syscall_dispatch_breakdown(dispatch_result: &BenchResult) {
 
     // Stage 1: the handler itself — the only work a caller actually asked for.
     // Everything else this function measures is overhead by definition.
-    let handler = run("sd_handler", 2000, || {
+    let handler = run_diagnostic("sd_handler", 2000, || {
         core::hint::black_box(sys_task_id(&args));
     });
 
     // Stage 2: `sched::current_task_id()`.  Dispatch calls it once directly, and
     // each `ktrace::record` calls it again — so it is charged three times per
     // syscall, and is measured alone to price that.
-    let task_id = run("sd_current_task_id", 2000, || {
+    let task_id = run_diagnostic("sd_current_task_id", 2000, || {
         core::hint::black_box(crate::sched::current_task_id());
     });
 
     // Stage 3: the syscall filter (seccomp equivalent).  Its doc comment claims
     // "O(1)" and "~5 ns"; two bullets later the same comment says "linear scan
     // miss".  Both cannot be true.  Measure it.
-    let scfilter = run("sd_scfilter_check", 2000, || {
+    let scfilter = run_diagnostic("sd_scfilter_check", 2000, || {
         core::hint::black_box(crate::scfilter::check(tid, SYS_TASK_ID));
     });
 
@@ -3313,7 +3591,7 @@ fn bench_syscall_dispatch_breakdown(dispatch_result: &BenchResult) {
     // stage, the breakdown would over-count and the `unexplained` residual
     // would go *negative*, which the coherence gate reads as "the parts do not
     // fit in the whole".
-    let ktrace = run("sd_ktrace_pair", 2000, || {
+    let ktrace = run_diagnostic("sd_ktrace_pair", 2000, || {
         crate::ktrace::record_with_task(
             crate::ktrace::Category::Syscall,
             crate::ktrace::event::SYSCALL_ENTER,
@@ -3331,7 +3609,7 @@ fn bench_syscall_dispatch_breakdown(dispatch_result: &BenchResult) {
     });
 
     // Stage 5: the syscall-latency histogram, enter+exit as a pair.
-    let sclatency = run("sd_sclatency_pair", 2000, || {
+    let sclatency = run_diagnostic("sd_sclatency_pair", 2000, || {
         let s = crate::sclatency::enter();
         crate::sclatency::exit(s, SYS_TASK_ID);
     });
@@ -3383,7 +3661,7 @@ fn bench_syscall_dispatch_breakdown(dispatch_result: &BenchResult) {
     // whole at the end of the block and report the drift; and flag it when the
     // parts do not fit inside the whole, because "unexplained" computed with
     // `saturating_sub` renders that case as a comfortable 0.
-    let total_again = run("sd_dispatch_again", 2000, || {
+    let total_again = run_diagnostic("sd_dispatch_again", 2000, || {
         core::hint::black_box(crate::syscall::dispatch::dispatch(SYS_TASK_ID, &args));
     });
     let (lo, hi) = if total <= total_again.min_ns {
@@ -3704,6 +3982,7 @@ fn bench_ipc_channel_sync() {
         mean_ns,
         // Hand-rolled measurement loop, not `run`; no split sets exist.
         split: SplitCheck::NotChecked,
+        seq: note_measurement("ipc_channel_sync", SplitCheck::NotChecked),
     };
     score("ipc_channel_sync", &sync_result, target_ns);
     if min_ns <= target_ns {
@@ -3968,6 +4247,15 @@ fn bench_ipc_futex() {
     });
 
     // Target: < 500 ns.  Compare + return, no blocking.
+    //
+    // Scored, not merely printed. This benchmark already *had* a target and
+    // already graded itself against it — in prose, below — which is the exact
+    // shape `ScoreEntry::target_ns` documents as the reason a benchmark ends up
+    // ungraded *and* unrecorded: a human-readable verdict is not a record, so
+    // no SCORE line, no history entry, and no way for the comparator to notice
+    // the mismatch path regressing. The prose stays because it explains the
+    // number; the SCORE line is what preserves it.
+    score("futex_wait_mismatch", &result2, target_ns);
     if result2.min_ns <= target_ns {
         serial_println!(
             "[bench]   futex_wait_mismatch: PASS (min {}ns <= target {}ns)",
@@ -4253,6 +4541,7 @@ fn bench_io_ring_nop() {
         mean_ns,
         // Per-SQE figures divided out of a batch submission; no split sets.
         split: SplitCheck::NotChecked,
+        seq: note_measurement("io_ring_nop_submit", SplitCheck::NotChecked),
     };
     let target_ns = 200u64;
     score("io_ring_nop", &result, target_ns);
@@ -4377,6 +4666,7 @@ fn bench_page_fault() {
         mean_ns,
         // Hand-rolled fault-taking loop, not `run`; no split sets exist.
         split: SplitCheck::NotChecked,
+        seq: note_measurement("page_fault_anonymous", SplitCheck::NotChecked),
     };
 
     // Target: < 10 µs (Linux anonymous page fault: ~2-5 µs).
@@ -4487,6 +4777,7 @@ fn bench_isr_latency() {
                 // Aggregated by the ISR itself across real interrupts; the
                 // samples are not ours to partition.
                 split: SplitCheck::NotChecked,
+                seq: note_measurement("isr_latency", SplitCheck::NotChecked),
             };
             score("isr_latency", &isr_result, 10000);
             if m.min_cycles <= target_cycles {
@@ -4631,7 +4922,7 @@ fn bench_lock_primitives() {
     static RAW: spin::Mutex<u64> = spin::Mutex::new(0);
     static TRACKED: crate::sync::Mutex<u64> = crate::sync::Mutex::new(0);
 
-    let raw = run("lock_raw_spin", 2000, || {
+    let raw = run_diagnostic("lock_raw_spin", 2000, || {
         let mut g = RAW.lock();
         *g = core::hint::black_box(*g).wrapping_add(1);
     });
@@ -4648,7 +4939,7 @@ fn bench_lock_primitives() {
     // deadlock validator for the rest of the boot.
     let lockdep_was_on = crate::lockdep::is_enabled();
     crate::lockdep::set_enabled(false);
-    let no_lockdep = run("lock_no_lockdep", 2000, || {
+    let no_lockdep = run_diagnostic("lock_no_lockdep", 2000, || {
         let mut g = TRACKED.lock();
         *g = core::hint::black_box(*g).wrapping_add(1);
     });
@@ -4658,7 +4949,7 @@ fn bench_lock_primitives() {
     // reasoning: leaving it off would silently change the cost of every lock in
     // every benchmark that runs after this one.
     crate::sync::set_tracking_enabled(false);
-    let untracked = run("lock_tracked_no_stats", 2000, || {
+    let untracked = run_diagnostic("lock_tracked_no_stats", 2000, || {
         let mut g = TRACKED.lock();
         *g = core::hint::black_box(*g).wrapping_add(1);
     });
@@ -4666,11 +4957,11 @@ fn bench_lock_primitives() {
 
     // The two suspected components, measured on their own rather than
     // differenced out of the variants above.
-    let preempt = run("preempt_pair", 2000, || {
+    let preempt = run_diagnostic("preempt_pair", 2000, || {
         crate::sched::preempt_disable();
         crate::sched::preempt_enable();
     });
-    let tsc_pair = run("rdtsc_pair", 2000, || {
+    let tsc_pair = run_diagnostic("rdtsc_pair", 2000, || {
         let a = rdtsc();
         let b = rdtsc();
         let _ = core::hint::black_box(b.wrapping_sub(a));
@@ -4865,7 +5156,7 @@ fn bench_vfs_stat_breakdown() {
     // benchmarks and reported 2971 ns and 4976 ns in the same boot, while the
     // stage components summed to 133% of the whole they were subtracted from.
     // Both facts were printed and neither was flagged.
-    let full_again = run("vfs_stat_breakdown_full2", 500, || {
+    let full_again = run_diagnostic("vfs_stat_breakdown_full2", 500, || {
         let _ = core::hint::black_box(Vfs::stat("/"));
     });
     let (lo, hi) = if full.min_ns <= full_again.min_ns {
@@ -6336,7 +6627,7 @@ pub fn self_test() {
     serial_println!("[bench]   cycles_to_ns: OK ({}Hz → {}ns)", freq, ns);
 
     // Run a trivial benchmark.
-    let result = run("self_test_nop", 1000, || {
+    let result = run_diagnostic("self_test_nop", 1000, || {
         core::hint::black_box(42);
     });
     assert!(result.min_cycles < 10000, "NOP benchmark should be very fast");

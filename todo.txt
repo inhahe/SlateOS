@@ -54088,3 +54088,55 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##
 ## TRIGGER: when a userspace read path for fs::fontsettings exists, or when the
 ## operator reports that changing the monospace font in Settings does nothing.
+
+================================================================================
+## TOOLING TRAP (lane A, 2026-08-16): never pipe a long cargo/QEMU run into
+## `head` or `tail`.
+##
+## Cost ~20 minutes twice in one session, in two different ways, and neither
+## looked like a hang from the outside -- both looked like "the build is slow".
+##
+## (a) `cargo build 2>&1 | head -30` DEADLOCKS. `head` exits after 30 lines and
+##     closes the read end; under MSYS the writer does not reliably get EPIPE, so
+##     cargo blocks forever on a full pipe buffer -- while still holding the
+##     target-directory lock. Any second cargo in the same worktree then waits on
+##     that lock forever too. That is what happened: two `cargo build -p kernel`
+##     tasks sat at 0 bytes of output for 20 minutes, and the second was blameless.
+##
+## (b) `cargo build 2>&1 | tail -25` (and `boot-test.sh ... | tail -60`) does not
+##     deadlock but buffers everything until exit, so the background task's output
+##     file stays 0 bytes for the whole run. Progress is invisible, and "empty
+##     output file" is indistinguishable from "process wedged" -- which is what
+##     sent me looking for a deadlock that, that time, was not there.
+##
+## DO INSTEAD: redirect to a file and read it incrementally.
+##     python scripts/run-timeout.py --poll 60 900 cargo build -p kernel \
+##         > build/kbuild.log 2>&1
+## Then `tail` the FILE, not the pipe. run-timeout.py also bounds the hang and
+## kills the whole process tree, which is what makes (a) recoverable rather than
+## something to notice half an hour later.
+##
+## Symptom to recognise: a background task whose .output file is exactly 0 bytes
+## long after the command should have printed something. Check for a `head`/`tail`
+## in the command before assuming the build is merely slow.
+##
+## (c) ADDED 2026-08-16, after walking into (b) again in the same session: the
+##     invisibility is the SECOND-worst part. `boot-test.sh --bench | tail -120`
+##     also throws the verdict away -- a pipeline's exit status is the LAST
+##     command's, so `tail` exits 0 and a boot test that failed reports success.
+##     `pipefail` is not set in these one-off Bash-tool invocations, and would not
+##     help anyway if the reason for piping was to trim output.
+##
+##     This one is materially worse than (b) because it does not merely hide
+##     progress, it inverts the result, and it does so silently on the exact runs
+##     that matter -- the failing ones. It is the same shape as every bug this
+##     project keeps rediscovering: a check that cannot fire is indistinguishable
+##     from a check that passes.
+##
+##     Caught this time only because the 0-byte output file from (b) prompted a
+##     restart. Had the run been merely slow rather than silent, a red boot would
+##     have been merged as green.
+##
+##     DO INSTEAD, for anything whose exit code is the point:
+##         ./scripts/boot-test.sh --bench; echo "=== EXIT=$? ==="
+##     unpiped, backgrounded via run_in_background, and read the .output file.

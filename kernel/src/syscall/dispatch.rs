@@ -2210,8 +2210,15 @@ fn test_dispatch_set_credentials_gate() -> KernelResult<()> {
         Err(KernelError::InternalError)
     }
 
-    // (current, arg0, arg1) -> (resolved, is_change, what)
-    let cases: [((u32, u32), u64, u64, (u32, u32), bool, &str); 9] = [
+    /// One row of the table below, named because the bare tuple is six
+    /// components wide and reads as noise at the declaration site:
+    /// the caller's current `(uid, gid)`, the two syscall arguments, the
+    /// `(uid, gid)` the request must resolve to, whether that counts as an
+    /// identity *change* (which is the whole of the capability gate), and the
+    /// description printed if the row fails.
+    type CredCase = ((u32, u32), u64, u64, (u32, u32), bool, &'static str);
+
+    let cases: [CredCase; 9] = [
         (
             (0, 0),
             CREDENTIALS_KEEP,

@@ -80,16 +80,16 @@ def test_parse_formats(bh, tmpdir):
                 "random noise\n")
     check("old-format SCORE parses with dispersion absent",
           bh.parse_serial(old),
-          {"page_alloc_free": (14052, 1000, "OVER", None, None),
-           "firewall_check": (228, 300, "PASS", None, None)})
+          {"page_alloc_free": (14052, 1000, "OVER", None, None, None),
+           "firewall_check": (228, 300, "PASS", None, None, None)})
 
     new = write(tmpdir, "new.txt",
                 "[bench] SCORE page_alloc_free 14052 1000 OVER 20110 1000\n"
                 "[bench] SCORE firewall_check 228 300 PASS 261 2000\n")
     check("new-format SCORE parses mean and iterations",
           bh.parse_serial(new),
-          {"page_alloc_free": (14052, 1000, "OVER", 20110, 1000),
-           "firewall_check": (228, 300, "PASS", 261, 2000)})
+          {"page_alloc_free": (14052, 1000, "OVER", 20110, 1000, None),
+           "firewall_check": (228, 300, "PASS", 261, 2000, None)})
 
     # A single boot can straddle the change only in a replayed/concatenated
     # log, but the parser should not care which line has the extension.
@@ -98,8 +98,55 @@ def test_parse_formats(bh, tmpdir):
                   "[bench] SCORE b 20 30 PASS\n")
     check("a log mixing both formats parses both",
           bh.parse_serial(mixed),
-          {"a": (10, 1, "OVER", 15, 500),
-           "b": (20, 30, "PASS", None, None)})
+          {"a": (10, 1, "OVER", 15, 500, None),
+           "b": (20, 30, "PASS", None, None, None)})
+
+
+def test_parse_split_column(bh, tmpdir):
+    """The split-sample token parses in all four of its shapes.
+
+    The three non-numeric shapes stay three distinct values rather than
+    collapsing to one "no answer", for the same reason the canary keeps
+    absent/broken/clean apart: a column that was never emitted, an entry the
+    kernel declined to check, and a check that ran but could not resolve the
+    work are three different facts, and only the middle one is the kernel's
+    choice. Fold them together and "nobody looked" starts reading as "looked
+    and found nothing wrong".
+    """
+    log = write(tmpdir, "split.txt",
+                "[bench] SCORE absent 10 20 PASS 12 500\n"
+                "[bench] SCORE unchecked 10 20 PASS 12 500 -\n"
+                "[bench] SCORE unresolved 10 20 PASS 12 500 ?\n"
+                "[bench] SCORE clean 10 20 PASS 12 500 3\n"
+                "[bench] SCORE flagged 10 20 PASS 12 500 41!\n"
+                "[bench] SCORE tracked 10 - TRACK 12 500 7\n")
+    got = bh.parse_serial(log)
+    check("split column: absent stays absent",
+          got["absent"][5], bh.SPLIT_ABSENT)
+    check("split column: unchecked is its own value",
+          got["unchecked"][5], bh.SPLIT_UNCHECKED)
+    check("split column: unresolved is its own value",
+          got["unresolved"][5], bh.SPLIT_UNRESOLVED)
+    check("split column: a clean percentage parses",
+          got["clean"][5], "3")
+    check("split column: a flagged percentage keeps its bang",
+          got["flagged"][5], "41!")
+    check("split column: a TRACK line carries it too",
+          got["tracked"][5], "7")
+
+    # The predicate, not just the token. `is_unstable` must be true for
+    # exactly one of these: an absent or unchecked column has found nothing,
+    # and must never be reported as a finding in either direction.
+    check("only the flagged token is unstable",
+          [bh.split_is_unstable(got[n][5])
+           for n in ("absent", "unchecked", "unresolved", "clean", "flagged")],
+          [False, False, False, False, True])
+    check("the percentage is recoverable from either numeric shape",
+          [bh.split_pct(got[n][5]) for n in ("clean", "flagged")], [3, 41])
+    check("the non-numeric shapes have no percentage",
+          [bh.split_pct(got[n][5])
+           for n in ("absent", "unchecked", "unresolved")],
+          [None, None, None])
 
 
 def test_malformed_rejected(bh, tmpdir):
@@ -107,7 +154,9 @@ def test_malformed_rejected(bh, tmpdir):
     bad = write(tmpdir, "bad.txt",
                 "[bench] SCORE a 10 1 OVER 15\n"        # half the extension
                 "[bench] SCORE b 20 30 MAYBE 1 2\n"     # verdict not PASS/OVER
-                "[bench] SCORE c 20 30 PASS 1 2 3\n"    # trailing junk
+                "[bench] SCORE c 20 30 PASS 1 2 3 4\n"  # trailing junk
+                "[bench] SCORE f 20 30 PASS 1 2 !\n"    # bang with no number
+                "[bench] SCORE g 20 30 PASS 1 2 5%\n"   # split not a bare int
                 "[bench] SCORE d 20 30\n"               # verdict missing
                 "[bench] SCORE e x 30 PASS\n")          # non-numeric
     check("malformed SCORE lines are rejected", bh.parse_serial(bad), {})
@@ -611,6 +660,75 @@ def test_run_position_needs_history(bh):
           _run_position(bh, foreign, foreign[0]["entries"], None), "")
 
 
+def test_unstable_split_withdraws_a_regression(bh):
+    """A movement whose own window was unstable is withdrawn, not reported.
+
+    This is the whole point of the split-sample column: the band asks whether
+    a movement is large for this benchmark and the canary asks whether the
+    host was busy between benchmarks, but neither can see a noise floor that
+    moved *inside* one benchmark's own measurement window. Without this, such
+    a run is indistinguishable from a real regression and fails the build.
+
+    Both halves are asserted, because either one alone would be a check that
+    cannot fire: that the flagged benchmark is withdrawn, *and* that an
+    unflagged one beside it still fails. A filter that swallowed everything
+    would pass the first assertion on its own.
+    """
+    import io
+    import contextlib
+
+    previous = {
+        "timestamp": "T", "commit": "c", "host": "h", "profile": "debug",
+        "entries": {"steady": 100, "shaky": 100, "filler": 100},
+    }
+
+    def run(current):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            failed = bh.report(previous, current, 25.0)
+        return failed, buf.getvalue()
+
+    # `filler` holds the suite median still, so `global_drift` does not simply
+    # rescale the two movements away and leave nothing to test.
+    both_moved = {
+        "steady": (300, 700, "OK", 320, 500, "2"),
+        "shaky": (300, 700, "OK", 320, 500, "44!"),
+        "filler": (100, 700, "OK", 105, 500, "1"),
+    }
+    failed, out = run(both_moved)
+    check("an unflagged regression is still claimed", "steady" in out, True)
+    check("a flagged one is withdrawn to the void list",
+          "MEASUREMENT VOID" in out, True)
+    check("...and the void block names it",
+          out.split("MEASUREMENT VOID")[1].find("shaky") > -1, True)
+    check("...and reports how far the sample sets were apart",
+          "44% apart" in out, True)
+    check("a run with a real regression beside it still fails", failed, True)
+
+    # Now the *only* threshold-crossing movement is the flagged one. Nothing
+    # is being claimed, so nothing may fail the build.
+    only_shaky = {
+        "steady": (100, 700, "OK", 105, 500, "2"),
+        "shaky": (300, 700, "OK", 320, 500, "44!"),
+        "filler": (100, 700, "OK", 105, 500, "1"),
+    }
+    failed, out = run(only_shaky)
+    check("a run whose only movement is void does not fail the build",
+          failed, False)
+    check("...and the summary says so rather than printing an all-clear",
+          "could not be judged at all" in out, True)
+
+    # An entry from a log predating the column must behave exactly as before:
+    # absent is not a licence to withdraw anything.
+    legacy = {
+        "steady": (300, 700, "OK", 320, 500),
+        "filler": (100, 700, "OK", 105, 500),
+    }
+    failed, out = run(legacy)
+    check("a pre-column log still reports its regression", failed, True)
+    check("...and prints no void block", "MEASUREMENT VOID" in out, False)
+
+
 def test_run_position_wired_into_report(bh):
     """The check must actually run in the real path, not merely exist.
 
@@ -832,7 +950,7 @@ def test_tracked_benchmarks_round_trip(bh, tmpdir):
     check("a tracked verdict is TRACK",
           entries["vfs_stat_breakdown_ns"][2], "TRACK")
     check("tracked dispersion survives",
-          entries["ipc_channel_roundtrip_64k"][3:], (55000, 200))
+          entries["ipc_channel_roundtrip_64k"][3:5], (55000, 200))
     check("a graded target still reads as a number",
           entries["graded_pass"][1], 500)
 
@@ -1773,9 +1891,9 @@ def main():
     ]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes, which is the bug this docstring is about. Assert a floor.
-    if len(tests) < 38:
+    if len(tests) < 40:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 38. Discovery is broken, not the code.")
+              f"suite has at least 40. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

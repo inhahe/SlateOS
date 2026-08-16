@@ -75,10 +75,29 @@ import sys
 # benchmark that is dropped by the parser is indistinguishable from one the
 # kernel never measured. The target column is `-` and not `0` so that "has no
 # target" cannot be confused with "has a target of zero and failed it".
+# The trailing `<split>` is a third, separately-optional extension, added the
+# same way and for the same reason. It carries the kernel's split-sample
+# cross-check of that benchmark's own measurement window as one token:
+#
+#   `-`    no cross-check was performed. NOT "stable" -- see SPLIT_ABSENT.
+#   `12`   checked; the two interleaved sample sets' minima differ by 12%.
+#   `31!`  checked and flagged past the kernel's gate.
+#   `?`    checked, but a set's minimum was zero, so there is no ratio.
+#
+# The `!` is matched as part of the token rather than as its own column so the
+# kernel stays the single owner of the threshold. Duplicating the constant here
+# would let the two drift, and a gate that two programs disagree about is worse
+# than no gate: it produces a verdict whose meaning depends on which half of the
+# pipeline you read.
 SCORE_RE = re.compile(
     r"^\[bench\]\s+SCORE\s+(\S+)\s+(\d+)\s+(\d+|-)\s+(PASS|OVER|TRACK)"
-    r"(?:\s+(\d+)\s+(\d+))?\s*$"
+    r"(?:\s+(\d+)\s+(\d+)(?:\s+(-|\?|\d+!?))?)?\s*$"
 )
+
+#: `split` token values with no percentage attached.
+SPLIT_ABSENT = None      # the log predates the column entirely
+SPLIT_UNCHECKED = "-"    # the kernel ran no cross-check for this entry
+SPLIT_UNRESOLVED = "?"   # cross-checked, but the timer could not resolve it
 
 # `[bench] CANARY <start> <end> <pct> [<min> <max> <spread> <samples>]`
 #
@@ -164,10 +183,34 @@ DEFAULT_SERIAL = os.path.join(REPO_ROOT, "build", "serial-test.txt")
 DEFAULT_HISTORY = os.path.join(REPO_ROOT, "bench", "history.jsonl")
 
 
-def parse_serial(path):
-    """Extract {name: (measured_ns, target_ns, verdict, mean_ns, iters)}.
+def split_is_unstable(token):
+    """True only if `token` is a cross-check the kernel actually flagged.
 
-    `mean_ns` and `iters` are `None` for a log predating their emission.
+    Everything else is False, and deliberately so: an absent column, an
+    unchecked entry and an unresolved one have each found *nothing*, which is
+    not the same as having found stability. Callers that need to distinguish
+    "checked and clean" from "never checked" must compare against
+    `SPLIT_ABSENT`/`SPLIT_UNCHECKED` themselves rather than read this bool --
+    the same rule `SplitCheck::is_unstable` states on the kernel side.
+    """
+    return isinstance(token, str) and token.endswith("!")
+
+
+def split_pct(token):
+    """The spread percentage in `token`, or None if it carries no number."""
+    if not isinstance(token, str):
+        return None
+    body = token[:-1] if token.endswith("!") else token
+    return int(body) if body.isdigit() else None
+
+
+def parse_serial(path):
+    """Extract {name: (measured_ns, target_ns, verdict, mean_ns, iters, split)}.
+
+    `mean_ns` and `iters` are `None` for a log predating their emission, and
+    `split` is `SPLIT_ABSENT` for a log predating *its* emission. The tuple is
+    extended only at the end so existing positional readers (`value[0]`,
+    `value[3]`) keep meaning what they meant.
 
     Returns an empty dict if the log has no scorecard, which is the normal
     case for a boot run without `--bench`.
@@ -180,7 +223,9 @@ def parse_serial(path):
             for line in handle:
                 match = SCORE_RE.match(line.strip())
                 if match:
-                    name, measured, target, verdict, mean, iters = match.groups()
+                    name, measured, target, verdict, mean, iters, split = (
+                        match.groups()
+                    )
                     entries[name] = (
                         int(measured),
                         # None for a tracked benchmark. Callers that grade
@@ -191,6 +236,7 @@ def parse_serial(path):
                         verdict,
                         int(mean) if mean is not None else None,
                         int(iters) if iters is not None else None,
+                        split,
                     )
     except FileNotFoundError:
         print(f"bench-history: no serial log at {path}", file=sys.stderr)
@@ -1966,6 +2012,39 @@ def report(previous, current_entries, threshold_pct,
     reg_out, reg_within, reg_unjudged = split_by_band(regressed, bands, True)
     imp_out, imp_within, imp_unjudged = split_by_band(improved, bands, False)
 
+    # A movement whose *own* measurement window was unstable is withdrawn from
+    # the claim lists entirely.
+    #
+    # This is a different disqualification from the band and from the canary,
+    # and it catches what neither can. The band asks "is this size of movement
+    # normal for this benchmark?" -- it cannot tell a real jump from a
+    # measurement taken while the floor was moving, because both look like a
+    # large number. The canary asks "was the host busy?" -- but it samples
+    # between benchmarks, so a burst that lands squarely inside one benchmark's
+    # window and ends before the next sample is invisible to it. The split-
+    # sample check is taken *inside* the window being questioned, which is the
+    # only place the answer exists.
+    #
+    # Withdrawn, not demoted: these are not "small movements", they are
+    # movements whose measurement is void. Printing them under a heading that
+    # implies a finding is how the earlier over-claiming warnings taught
+    # readers to stop believing the instrument.
+    def _split_token(name):
+        vals = current_entries.get(name)
+        return vals[5] if vals is not None and len(vals) > 5 else SPLIT_ABSENT
+
+    def _withdraw_unstable(rows):
+        keep, void = [], []
+        for row in rows:
+            (void if split_is_unstable(_split_token(row[0])) else keep).append(row)
+        return keep, void
+
+    reg_out, reg_void = _withdraw_unstable(reg_out)
+    reg_unjudged, reg_unjudged_void = _withdraw_unstable(reg_unjudged)
+    imp_out, imp_void = _withdraw_unstable(imp_out)
+    imp_unjudged, imp_unjudged_void = _withdraw_unstable(imp_unjudged)
+    void_rows = reg_void + reg_unjudged_void + imp_void + imp_unjudged_void
+
     def _print_movements(header, rows, key):
         print(header)
         for name, before, after, raw, adj, band in sorted(rows, key=key):
@@ -2002,6 +2081,27 @@ def report(previous, current_entries, threshold_pct,
             f"but landed inside this benchmark's own recent spread -- this is "
             f"NOT a finding in either direction):",
             reg_within + imp_within, worst_first)
+    if void_rows:
+        print(
+            "  MEASUREMENT VOID (this run's two interleaved sample sets "
+            "disagreed, so the run's own noise floor moved *during* the "
+            "window -- the number below is not a measurement of anything and "
+            "is NOT counted as a regression):"
+        )
+        for name, before, after, raw, adj, band in sorted(void_rows,
+                                                          key=worst_first):
+            pct = split_pct(_split_token(name))
+            spread = f"; sample sets {pct}% apart" if pct is not None else ""
+            print(
+                f"    {name}: {before}ns -> {after}ns "
+                f"({adj:+.0f}% vs suite, {raw:+.0f}% raw){spread}"
+            )
+        print(
+            "    -> re-run the suite; if the same benchmark voids repeatedly "
+            "on a quiet host,\n"
+            "       it is not ambient load but the benchmark alternating "
+            "between two populations."
+        )
     # Independent of everything above: a sustained shift is invisible to the
     # run-over-run comparison by construction (see level_shifts.__doc__), so it
     # is computed from its own pre-window reference and printed unconditionally
@@ -2081,15 +2181,30 @@ def report(previous, current_entries, threshold_pct,
             print(f"  No benchmark moved by more than {threshold_pct:g}%.")
     elif not (reg_out or reg_unjudged or imp_out or imp_unjudged
               or added or removed or shifts):
-        # Everything that crossed the threshold was demoted. Say so, rather
-        # than printing only the demoted list and leaving the reader to work
-        # out that nothing was found -- the whole point of the band is that
-        # this outcome is common and unremarkable.
-        print(
-            f"  No benchmark moved outside its own recent range "
-            f"({len(reg_within) + len(imp_within)} crossed "
-            f"{threshold_pct:g}% run-over-run and are listed above)."
-        )
+        # Everything that crossed the threshold was demoted or withdrawn. Say
+        # so, rather than printing only the demoted list and leaving the reader
+        # to work out that nothing was found -- the whole point of the band is
+        # that this outcome is common and unremarkable.
+        #
+        # The voided count is named separately and never folded into the
+        # demoted one. "Landed inside its own range" is a finding of no change;
+        # "its measurement was void" is no finding at all, and a summary line
+        # that reported them together would let an unmeasurable suite read as a
+        # quiet one -- which is the same failure as a check that cannot fire.
+        if void_rows:
+            print(
+                f"  No benchmark moved outside its own recent range "
+                f"({len(reg_within) + len(imp_within)} crossed "
+                f"{threshold_pct:g}% run-over-run), but {len(void_rows)} "
+                f"crossing movement(s) could not be judged at all because "
+                f"their measurement was void -- see above."
+            )
+        else:
+            print(
+                f"  No benchmark moved outside its own recent range "
+                f"({len(reg_within) + len(imp_within)} crossed "
+                f"{threshold_pct:g}% run-over-run and are listed above)."
+            )
 
     # The return value drives --fail-on-regression, so it must count only what
     # is still being *claimed* as a regression: confirmed ones and the ones
@@ -2311,6 +2426,18 @@ def main(argv=None):
             record["mean_ns"] = mean_ns
         if iters:
             record["iterations"] = iters
+        # The split-sample tokens, same sibling-map convention. Stored raw
+        # rather than pre-reduced to a boolean for the reason the canary block
+        # below gives about storing the measurement and not only the verdict: if
+        # the kernel's gate is ever retuned, a stored `31!` can be re-judged
+        # against the new threshold and a stored `True` cannot.
+        splits = {
+            n: v[5]
+            for n, v in current_entries.items()
+            if len(v) > 5 and v[5] is not SPLIT_ABSENT
+        }
+        if splits:
+            record["split"] = splits
         # Same append-only reasoning: a sibling key, absent on older records.
         # Recorded even when clean, because a stored verdict with no stored
         # measurement could never be re-judged if the tolerance is retuned --

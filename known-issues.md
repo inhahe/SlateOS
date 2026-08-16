@@ -1,5 +1,84 @@
 # Known Issues — OS kernel
 
+## Benchmark `min_cycles` had no in-window stability check at all (lane A)
+
+**Status: FIXED 2026-08-15** (lane A). `bench::run` now splits each measurement
+window into contiguous halves and reports the disagreement between their
+minima as a new `<split>` column on the SCORE line;
+`scripts/bench-history.py` withdraws any benchmark whose split is flagged from
+the regression verdict instead of reporting it as a move.
+
+**What was wrong.** `scripts/bench-history.py` diffs `min_cycles` boot-over-boot
+and fails the build on a regression, but nothing checked whether the window that
+produced `min_cycles` was quiet. `min` is robust to *spikes*; it is not robust to
+a window that is uniformly busier than the boot it is being compared against —
+the minimum of a busy window is simply the busy floor. `ab_interleaved`'s doc
+comment already said this in as many words, and the `frame_owner` A/B that
+motivated it had reported a 10826-cycle cost that vanished when interleaved. The
+same failure mode applies to every history-tracked benchmark, and there was no
+check on it whatsoever, which is the limiting case of a check that cannot fire.
+
+Three disqualifications exist now and none substitutes for another:
+
+| Check | Question it answers | Blind to |
+|---|---|---|
+| per-benchmark band | is a movement of this size normal *for this benchmark*? | a boot where the whole host was slow |
+| canary | was the host busy? | a burst *inside* one benchmark's window — it samples between benchmarks |
+| split-sample (new) | did the floor move *during this window*? | a window that was uniformly busy start to finish |
+
+**The finding worth keeping: interleaving is the wrong tool here, and provably
+so.** The first implementation split by parity — even iterations to set A, odd to
+set B — by analogy with `ab_interleaved`, and it was caught before commit by
+deriving what it actually detects. Consider the motivating case: load arrives
+half-way through the window and stays. An even/odd split gives *both* sets
+samples from the quiet part and from the busy part. Each set's `min` is therefore
+the quiet-part floor. The two agree exactly, and the check reports a serene 0% on
+precisely the window it exists to reject.
+
+The generalisable lesson is that **the property that makes interleaving robust is
+exactly the property that makes it insensitive.** Interleaving is correct for
+`ab_interleaved`, where the question is "what does X cost *relative to* Y" and
+the whole point is that ambient load must lift both arms equally so it cancels in
+the difference. Here the question is the opposite — "did ambient conditions
+change?" — and a construction designed to cancel out ambient change cannot
+measure it. Contiguous halves work because the halves are *not* interchangeable;
+that asymmetry is the signal.
+
+Corollary for future checks: before building a self-check, write down the failure
+it is for and trace that specific failure through the proposed construction. Both
+designs here look equally reasonable in the abstract, and the difference is only
+visible once a concrete failure is pushed through them.
+
+**Known cost of the choice, accepted deliberately.** Halves reintroduce a bias
+interleaving did not have: the first half is colder. `run`'s warmup is 10% of
+iterations, enough for first-touch costs but not to saturate a slowly-filling
+cache or TCG translation cache, so a benchmark that warms across its whole window
+will show `min_first > min_second` on a quiet host every boot. That is not
+treated as a false positive — a benchmark still warming during its own
+measurement has no single noise floor, so its `min_cycles` is a function of how
+far the warmup got, and diffing it compares two arbitrary points on a curve. The
+flag says to lengthen *that benchmark's* warmup, not to loosen the gate. A
+systematic flag is also self-announcing: it fires every boot, so it appears in
+the suite-level count as a constant, where a noise flag comes and goes.
+
+**Not yet calibrated.** `SPLIT_UNSTABLE_REL_PCT = 15` and
+`SPLIT_UNSTABLE_ABS_CYCLES = 8` are guesses. The absolute floor exists because
+the fastest entries land in the low tens of cycles, where one cycle of `rdtsc`
+jitter is already several percent, and a gate that fires on those fires on
+everything. Both constants are calibratable by construction: the per-benchmark
+spread is printed *even when clean*, and the scorecard ends with a suite-level
+`N of M checked entries unstable` line, so "68/70" (too tight) and "0/70" (too
+loose) are both visible at a glance — neither is visible from a per-benchmark
+flag alone. See the open todo to set them from a real `--bench` boot.
+
+**A withdrawn measurement is not a passed one.** `bench-history.py` prints
+flagged benchmarks under a separate `MEASUREMENT VOID` heading and counts them
+apart from the ones that moved-but-within-band. Folding the two together would
+let a suite where nothing could be measured read as a suite where nothing
+changed. For the same reason `SplitCheck::NotChecked` — a hand-assembled
+`BenchResult`, a derived per-switch figure, a run below `SPLIT_MIN_ITERATIONS`
+— renders as `-` and never as a stability verdict in either direction.
+
 ## Byte-indexed display truncation panics on non-ASCII text (lane C)
 
 **Status: FIXED 2026-08-15** (lane C, commits `f508f76cf`, `f53562a09`,

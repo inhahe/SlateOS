@@ -238,6 +238,174 @@ pub fn cycles_to_ns(cycles: u64) -> u64 {
 // Benchmark runner
 // ---------------------------------------------------------------------------
 
+/// Whether a benchmark's reported minimum was cross-checked by splitting its
+/// own measurement window into a first and a second half.
+///
+/// [`ab_interleaved`]'s doc comment explains why a single contiguous window is
+/// not self-validating: `min` is robust to *spikes*, not to a window that is
+/// uniformly busier than its neighbour, and one window has no neighbour to be
+/// compared against. Every history-tracked benchmark goes through [`run`], and
+/// `scripts/bench-history.py` diffs `min_cycles` boot-over-boot — so a boot
+/// whose window happened to be busy is indistinguishable from a real
+/// regression. Before this existed there was no check on that at all, which is
+/// the limiting case of a check that cannot fire.
+///
+/// [`run`] fixes it for free: it accumulates a separate minimum over the first
+/// half of the iterations and over the second half, at no cost beyond one extra
+/// accumulator, and `min_cycles` remains `min(min_first, min_second)` exactly as
+/// before. Under a quiet window the two halves see the same noise floor and
+/// agree to within timer quantisation. When they diverge, the achievable floor
+/// *moved during the window*, and `min_cycles` is not a stable property of the
+/// code under test.
+///
+/// **Halves, deliberately not per-iteration interleaving.** Interleaving is the
+/// right answer for [`ab_interleaved`], where the question is "what does X cost
+/// relative to Y" and both arms must feel identical ambient conditions. It is
+/// the *wrong* answer here, and provably blind to the case this exists for:
+/// if load arrives half-way through and stays, an even/odd split gives both
+/// sets samples from the quiet part and from the busy part, so each set's `min`
+/// is the quiet-part floor, the two agree perfectly, and the check reports a
+/// serene 0% on a window it was built to reject. The property that makes
+/// interleaving robust is exactly the property that makes it insensitive. Split
+/// halves are sensitive to it because the halves are *not* interchangeable —
+/// that asymmetry is the signal.
+///
+/// The cost of choosing halves is a bias interleaving did not have: the first
+/// half is *colder*. [`run`]'s warmup is 10% of iterations, which is enough to
+/// pay first-touch costs but not to saturate a slowly-filling cache or a TCG
+/// translation cache, so a benchmark that warms across its whole window will
+/// show `min_first > min_second` every boot, on a quiet host, forever. That is
+/// deliberately **not** treated as a false positive: a benchmark still warming
+/// during its own measurement has no single noise floor, so its `min_cycles` is
+/// a function of how far the warmup got, and diffing it boot-over-boot compares
+/// two arbitrary points on a curve. The flag is correct there; what it is
+/// telling us is to lengthen that benchmark's warmup, not to loosen the gate.
+/// A systematic flag is also self-announcing — it fires on every boot, so it
+/// shows up in the suite-level count as a constant, where a noise flag comes
+/// and goes.
+///
+/// Two causes produce a divergence and both are disqualifying in the same way,
+/// which is why one flag covers both: ambient load that arrived part-way
+/// through, and a benchmark whose own cost genuinely drifts across the window
+/// (a structure that grows as it is filled, a cache that saturates). In either
+/// case the reported `min` is a minimum over a mixture, and diffing it against
+/// another boot's mixture means nothing.
+#[derive(Debug, Clone, Copy)]
+pub enum SplitCheck {
+    /// Both half-window minima were collected, in cycles.
+    Checked {
+        /// Minimum over the first half of the iterations.
+        min_first: u64,
+        /// Minimum over the second half.
+        ///
+        /// When `iterations` is odd this half holds one extra sample. A `min`
+        /// over more samples is biased slightly low, so the imbalance can only
+        /// ever make the halves look *more* different, never less — the check
+        /// errs toward flagging, which is the safe direction for a gate whose
+        /// job is to withhold verdicts.
+        min_second: u64,
+    },
+    /// No cross-check was performed, so nothing is claimed about stability.
+    ///
+    /// This is *not* "stable". It is the honest value for a [`BenchResult`]
+    /// assembled by hand from a derived figure (a per-switch estimate, a phase
+    /// decomposition) rather than measured by [`run`]: such a result has no
+    /// half-window sample sets, and reporting it as stable would manufacture a
+    /// passing verdict from a check that never ran.
+    NotChecked,
+}
+
+/// Relative disagreement, in percent, above which the two half-window sample
+/// sets are treated as measuring different things.
+///
+/// Provisional — see [`SplitCheck::instability_pct`] for how it is calibrated
+/// and `known-issues.md` for the recorded per-boot flag counts.
+const SPLIT_UNSTABLE_REL_PCT: u64 = 15;
+
+/// Absolute disagreement, in cycles, below which a relative excess is ignored.
+///
+/// Without this, quantisation dominates the small benchmarks: the fastest
+/// entries in the suite land in the low tens of cycles, where a single cycle of
+/// `rdtsc` jitter is already several percent. A gate that fires on those is a
+/// gate that fires on everything, which is as useless as one that never fires.
+const SPLIT_UNSTABLE_ABS_CYCLES: u64 = 8;
+
+impl SplitCheck {
+    /// Relative disagreement between the two sample sets, in percent of the
+    /// smaller one, or `None` if no cross-check was performed.
+    pub fn instability_pct(self) -> Option<u64> {
+        match self {
+            Self::NotChecked => None,
+            Self::Checked { min_first, min_second } => {
+                let lo = min_first.min(min_second);
+                let hi = min_first.max(min_second);
+                if lo == 0 {
+                    // A zero floor means the timer could not resolve the work
+                    // at all; there is no ratio to report and calling it 0%
+                    // would read as "perfectly stable".
+                    return None;
+                }
+                Some(hi.saturating_sub(lo).saturating_mul(100) / lo)
+            }
+        }
+    }
+
+    /// Whether the two sample sets disagree enough that `min_cycles` should not
+    /// be diffed against another boot.
+    ///
+    /// Requires *both* a relative and an absolute excess: see
+    /// [`SPLIT_UNSTABLE_ABS_CYCLES`]. Returns `false` for [`Self::NotChecked`]
+    /// — an unperformed check has found nothing, and must not be reported as a
+    /// finding in either direction. Consumers that need to distinguish "checked
+    /// and stable" from "not checked" must match on the variant, not read this
+    /// bool.
+    pub fn is_unstable(self) -> bool {
+        match self {
+            Self::NotChecked => false,
+            Self::Checked { min_first, min_second } => {
+                let lo = min_first.min(min_second);
+                let hi = min_first.max(min_second);
+                let abs = hi.saturating_sub(lo);
+                abs >= SPLIT_UNSTABLE_ABS_CYCLES
+                    && self.instability_pct().is_some_and(|p| p >= SPLIT_UNSTABLE_REL_PCT)
+            }
+        }
+    }
+}
+
+/// Renders as the single `<split>` token of the SCORE line — see
+/// [`print_scorecard`] for the token table.
+///
+/// A `Display` impl rather than a `format!`-built string on purpose: the
+/// scorecard printer is inside the benchmark harness, and building a fragment
+/// of its own diagnostic through `alloc::format` would put a heap allocation
+/// where the harness is supposed to be measuring the heap.
+impl core::fmt::Display for SplitCheck {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::NotChecked => f.write_str("-"),
+            Self::Checked { min_first, min_second } => match self.instability_pct() {
+                Some(pct) => {
+                    write!(f, "{pct}")?;
+                    if self.is_unstable() {
+                        f.write_str("!")
+                    } else {
+                        Ok(())
+                    }
+                }
+                // Checked, but one set's minimum was zero: the timer could not
+                // resolve the work, so there is no ratio. Distinct from `-`,
+                // which means no check ran at all — collapsing the two would
+                // hide a benchmark that is measuring nothing.
+                None => {
+                    let _ = (min_first, min_second);
+                    f.write_str("?")
+                }
+            },
+        }
+    }
+}
+
 /// Result of a benchmark run.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields are available for external benchmark analysis.
@@ -256,6 +424,9 @@ pub struct BenchResult {
     pub min_ns: u64,
     /// Mean nanoseconds per iteration.
     pub mean_ns: u64,
+    /// Cross-check of `min_cycles` against the two halves of its own
+    /// measurement window. See [`SplitCheck`].
+    pub split: SplitCheck,
 }
 
 /// Time a single execution of `f`, in TSC cycles.
@@ -316,11 +487,31 @@ where
     (min_a, min_b)
 }
 
+/// Fewest iterations for which the half-window split-sample cross-check is
+/// meaningful.
+///
+/// Below this each half holds a handful of samples, so its `min` is not a noise
+/// floor but a single lucky draw, and comparing two lucky draws produces noise
+/// dressed as a verdict. Benchmarks under this count report
+/// [`SplitCheck::NotChecked`] rather than a check nobody should believe.
+const SPLIT_MIN_ITERATIONS: u32 = 20;
+
 /// Run a micro-benchmark, reporting min/mean/max cycles.
 ///
 /// Executes `f` a total of `warmup + iterations` times.  The first
 /// `warmup` runs are discarded (cache warming).  Results are printed
 /// to serial.
+///
+/// The `iterations` samples are additionally split into two **contiguous
+/// halves** — the first `iterations / 2` to one, the rest to the other — and
+/// their minima are compared. This costs nothing (the same samples, two
+/// accumulators) and does not move `min_cycles`, which remains the minimum over
+/// all iterations exactly as before; `min_cycles == min(min_first, min_second)`
+/// identically. What it adds is the only evidence available from a single
+/// window about whether that window was quiet throughout. See [`SplitCheck`]
+/// for why a lone window cannot otherwise be trusted, why halves rather than an
+/// even/odd interleave, and why the check is deliberately additive rather than
+/// a change to the reported figure.
 ///
 /// Returns the `BenchResult` for programmatic comparison.
 pub fn run<F: FnMut()>(name: &str, iterations: u32, mut f: F) -> BenchResult {
@@ -331,18 +522,28 @@ pub fn run<F: FnMut()>(name: &str, iterations: u32, mut f: F) -> BenchResult {
         f();
     }
 
-    let mut min = u64::MAX;
     let mut max = 0u64;
     let mut total = 0u64;
+    // The two half-window sample sets: iterations before the midpoint feed the
+    // first, the rest feed the second. Contiguous halves rather than an
+    // even/odd interleave, because an interleave is blind to exactly the case
+    // this exists for — see `SplitCheck`.
+    let mut min_first = u64::MAX;
+    let mut min_second = u64::MAX;
+    let midpoint = iterations / 2;
 
-    for _ in 0..iterations {
+    for i in 0..iterations {
         let start = rdtsc_serialized();
         f();
         let end = rdtsc();
         let elapsed = end.saturating_sub(start);
 
-        if elapsed < min {
-            min = elapsed;
+        if i < midpoint {
+            if elapsed < min_first {
+                min_first = elapsed;
+            }
+        } else if elapsed < min_second {
+            min_second = elapsed;
         }
         if elapsed > max {
             max = elapsed;
@@ -350,14 +551,51 @@ pub fn run<F: FnMut()>(name: &str, iterations: u32, mut f: F) -> BenchResult {
         total = total.saturating_add(elapsed);
     }
 
+    let min = min_first.min(min_second);
+    let split = if iterations >= SPLIT_MIN_ITERATIONS {
+        SplitCheck::Checked { min_first, min_second }
+    } else {
+        SplitCheck::NotChecked
+    };
+
     let mean = total.checked_div(iterations as u64).unwrap_or(0);
     let min_ns = cycles_to_ns(min);
     let mean_ns = cycles_to_ns(mean);
 
-    serial_println!(
-        "[bench] {}: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters]",
-        name, min, min_ns, mean, mean_ns, max, iterations
-    );
+    // The split is printed unconditionally when it was performed, not only when
+    // it trips the threshold. The threshold is provisional and can only be
+    // calibrated from the distribution of real spreads; printing solely the
+    // flagged ones would leave that distribution unobservable and freeze the
+    // constant at whatever it was first guessed to be.
+    match split {
+        SplitCheck::Checked { min_first, min_second } => serial_println!(
+            "[bench] {}: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters] \
+             split 1st={} 2nd={} ({}%{})",
+            name,
+            min,
+            min_ns,
+            mean,
+            mean_ns,
+            max,
+            iterations,
+            min_first,
+            min_second,
+            split.instability_pct().unwrap_or(0),
+            if split.is_unstable() { " UNSTABLE" } else { "" }
+        ),
+        SplitCheck::NotChecked => serial_println!(
+            "[bench] {}: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters] \
+             split not-checked (<{} iters)",
+            name,
+            min,
+            min_ns,
+            mean,
+            mean_ns,
+            max,
+            iterations,
+            SPLIT_MIN_ITERATIONS
+        ),
+    }
 
     BenchResult {
         name: String::from(name),
@@ -367,6 +605,7 @@ pub fn run<F: FnMut()>(name: &str, iterations: u32, mut f: F) -> BenchResult {
         max_cycles: max,
         min_ns,
         mean_ns,
+        split,
     }
 }
 
@@ -399,9 +638,12 @@ pub fn run_with_cache_info<F: FnMut()>(name: &str, iterations: u32, mut f: F) ->
         f();
     }
 
-    let mut min = u64::MAX;
     let mut max = 0u64;
     let mut total = 0u64;
+    // Same half-window split as `run`; see `SplitCheck`.
+    let mut min_first = u64::MAX;
+    let mut min_second = u64::MAX;
+    let midpoint = iterations / 2;
 
     // Start PMC counters for the measurement phase.
     if has_pmc {
@@ -411,15 +653,24 @@ pub fn run_with_cache_info<F: FnMut()>(name: &str, iterations: u32, mut f: F) ->
         pmc::start(1);
     }
 
-    for _ in 0..iterations {
+    for i in 0..iterations {
         let start = rdtsc_serialized();
         f();
         let end = rdtsc();
         let elapsed = end.saturating_sub(start);
-        if elapsed < min { min = elapsed; }
+        if i < midpoint {
+            if elapsed < min_first { min_first = elapsed; }
+        } else if elapsed < min_second { min_second = elapsed; }
         if elapsed > max { max = elapsed; }
         total = total.saturating_add(elapsed);
     }
+
+    let min = min_first.min(min_second);
+    let split = if iterations >= SPLIT_MIN_ITERATIONS {
+        SplitCheck::Checked { min_first, min_second }
+    } else {
+        SplitCheck::NotChecked
+    };
 
     if has_pmc {
         pmc::stop(0);
@@ -431,8 +682,12 @@ pub fn run_with_cache_info<F: FnMut()>(name: &str, iterations: u32, mut f: F) ->
     let mean_ns = cycles_to_ns(mean);
 
     serial_println!(
-        "[bench] {}: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters]",
-        name, min, min_ns, mean, mean_ns, max, iterations
+        "[bench] {}: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters] \
+         split 1st={} 2nd={} ({}%{})",
+        name, min, min_ns, mean, mean_ns, max, iterations,
+        min_first, min_second,
+        split.instability_pct().unwrap_or(0),
+        if split.is_unstable() { " UNSTABLE" } else { "" }
     );
 
     // Report PMC data if available.
@@ -456,6 +711,7 @@ pub fn run_with_cache_info<F: FnMut()>(name: &str, iterations: u32, mut f: F) ->
         max_cycles: max,
         min_ns,
         mean_ns,
+        split,
     }
 }
 
@@ -520,6 +776,17 @@ struct ScoreEntry {
     /// Iterations the mean was taken over; a mean over 50 samples and one over
     /// 2000 do not carry the same weight.
     iterations: u32,
+    /// The split-sample cross-check of this entry's own measurement window.
+    ///
+    /// Carried onto the SCORE line so `scripts/bench-history.py` can refuse to
+    /// call a diff a regression when either side's window was not stable. Note
+    /// this is a *different* question from `mean_ns`: `mean/min` says how
+    /// dispersed the samples were, which is a property the benchmark has on a
+    /// good day too (a page-fault benchmark is inherently spiky). The split
+    /// says whether the noise *floor moved during the window*, which is never a
+    /// property of healthy code and is the specific failure that makes one
+    /// boot's `min` incomparable to another's.
+    split: SplitCheck,
 }
 
 /// Public view of a scorecard entry for the dashboard API.
@@ -614,6 +881,7 @@ fn record(name: &'static str, result: &BenchResult, target_ns: Option<u64>) {
         passed,
         mean_ns: result.mean_ns,
         iterations: result.iterations,
+        split: result.split,
     });
     // Sampled here, after the lock is released, rather than from a list of
     // hand-placed call sites in `run_all`: hooking the one function every
@@ -629,8 +897,8 @@ fn record(name: &'static str, result: &BenchResult, target_ns: Option<u64>) {
 /// entry, passing or not:
 ///
 /// ```text
-/// [bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER> <mean_ns> <iters>
-/// [bench] SCORE <name> <measured_ns> -           TRACK      <mean_ns> <iters>
+/// [bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER> <mean_ns> <iters> <split>
+/// [bench] SCORE <name> <measured_ns> -           TRACK      <mean_ns> <iters> <split>
 /// ```
 ///
 /// The second form is a benchmark recorded by [`track`] rather than [`score`]:
@@ -644,6 +912,20 @@ fn record(name: &'static str, result: &BenchResult, target_ns: Option<u64>) {
 /// back. They are not a second performance figure — see [`ScoreEntry::mean_ns`]
 /// for why the comparator needs a per-benchmark dispersion number and why the
 /// spread across past runs could not supply one.
+///
+/// `<split>` is a second append-only column, added the same way and equally
+/// optional, carrying [`SplitCheck`] as a single token:
+///
+/// | Token | Meaning |
+/// |---|---|
+/// | `-` | no cross-check was performed — **not** "stable" |
+/// | `12` | checked; the two half-window minima differ by 12% |
+/// | `31!` | checked and **flagged**: past both the relative and absolute gates |
+///
+/// The `!` is part of the token rather than a separate column so that a parser
+/// which does not know about it still reads a number-shaped field, and one that
+/// does can test a suffix instead of re-deriving the threshold — the kernel and
+/// the script must not each own a copy of the constant that decides this.
 ///
 /// `scripts/bench-history.py` parses those, appends them to
 /// `bench/history.jsonl`, and diffs the run against the previous boot **on the
@@ -676,22 +958,60 @@ fn print_scorecard() {
     for entry in &*entries {
         match entry.target_ns {
             Some(target) => serial_println!(
-                "[bench] SCORE {} {} {} {} {} {}",
+                "[bench] SCORE {} {} {} {} {} {} {}",
                 entry.name,
                 entry.measured_ns,
                 target,
                 if entry.passed { "PASS" } else { "OVER" },
                 entry.mean_ns,
-                entry.iterations
+                entry.iterations,
+                entry.split
             ),
             // `-` rather than `0`: a zero target is indistinguishable from a
             // real target of zero, and the parser has to be able to tell "no
             // target" from "a target this failed to meet".
             None => serial_println!(
-                "[bench] SCORE {} {} - TRACK {} {}",
-                entry.name, entry.measured_ns, entry.mean_ns, entry.iterations
+                "[bench] SCORE {} {} - TRACK {} {} {}",
+                entry.name, entry.measured_ns, entry.mean_ns, entry.iterations, entry.split
             ),
         }
+    }
+
+    // Suite-level view of the split-sample cross-check, on one line.
+    //
+    // This exists so the threshold is *calibratable*. `SPLIT_UNSTABLE_REL_PCT`
+    // is a provisional constant, and the two ways it can be wrong are
+    // symmetrical and equally invisible from a per-benchmark flag: set too
+    // tight it fires on nearly every entry, set too loose it never fires at
+    // all, and either way each individual line looks unremarkable. A count
+    // against a denominator makes both failures obvious in the same glance —
+    // "3/70 unstable" is a working gate, "68/70" and "0/70" are not.
+    //
+    // `unchecked` is reported separately rather than folded into the stable
+    // count for the reason given on `SplitCheck::NotChecked`: an entry nobody
+    // examined has not passed.
+    {
+        let checked = entries
+            .iter()
+            .filter(|e| matches!(e.split, SplitCheck::Checked { .. }))
+            .count();
+        let unstable = entries.iter().filter(|e| e.split.is_unstable()).count();
+        let unchecked = entries.len().saturating_sub(checked);
+        let worst = entries
+            .iter()
+            .filter_map(|e| e.split.instability_pct())
+            .max()
+            .unwrap_or(0);
+        serial_println!(
+            "[bench] === Split-sample check: {} of {} checked entries unstable \
+             (worst spread {}%, gate {}% and {} cycles); {} entries not checked ===",
+            unstable,
+            checked,
+            worst,
+            SPLIT_UNSTABLE_REL_PCT,
+            SPLIT_UNSTABLE_ABS_CYCLES,
+            unchecked
+        );
     }
 
     // Two whole lines rather than a computed suffix: `format!` is not in scope
@@ -2618,6 +2938,9 @@ fn bench_context_switch() {
         min_ns: per_switch_ns,
         mean_ns: cycles_to_ns(mean / 2),
         iterations: BENCH_ITERS,
+        // Derived by halving a paired-switch measurement, not produced by
+        // `run`, so there are no half-window sample sets to compare.
+        split: SplitCheck::NotChecked,
     };
     score("context_switch", &ctx_result, target_ns);
     if per_switch_ns <= target_ns {
@@ -3264,6 +3587,8 @@ fn bench_ipc_channel_sync() {
         max_cycles: max,
         min_ns,
         mean_ns,
+        // Hand-rolled measurement loop, not `run`; no split sets exist.
+        split: SplitCheck::NotChecked,
     };
     score("ipc_channel_sync", &sync_result, target_ns);
     if min_ns <= target_ns {
@@ -3811,6 +4136,8 @@ fn bench_io_ring_nop() {
         max_cycles: min_per_sqe, // no max tracked per-SQE
         min_ns,
         mean_ns,
+        // Per-SQE figures divided out of a batch submission; no split sets.
+        split: SplitCheck::NotChecked,
     };
     let target_ns = 200u64;
     score("io_ring_nop", &result, target_ns);
@@ -3933,6 +4260,8 @@ fn bench_page_fault() {
         max_cycles: max,
         min_ns,
         mean_ns,
+        // Hand-rolled fault-taking loop, not `run`; no split sets exist.
+        split: SplitCheck::NotChecked,
     };
 
     // Target: < 10 µs (Linux anonymous page fault: ~2-5 µs).
@@ -4040,6 +4369,9 @@ fn bench_isr_latency() {
                 max_cycles: m.max_cycles,
                 min_ns,
                 mean_ns,
+                // Aggregated by the ISR itself across real interrupts; the
+                // samples are not ours to partition.
+                split: SplitCheck::NotChecked,
             };
             score("isr_latency", &isr_result, 10000);
             if m.min_cycles <= target_cycles {

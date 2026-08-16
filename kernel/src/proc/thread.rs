@@ -924,6 +924,63 @@ pub fn process_ctxsw_counts(pid: ProcessId) -> (u64, u64) {
     (nvcsw, nivcsw)
 }
 
+/// Everything the wait family reports about one process's resource use.
+///
+/// Assembled by [`process_usage_both`]; consumed by `wait4`'s `struct
+/// rusage`, `waitid`'s `si_utime`/`si_stime`, and the native
+/// `SYS_PROCESS_WAIT_STATUS` out-parameter, so those three cannot describe
+/// the same child differently.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProcessUsage {
+    /// User-mode CPU time in `USER_HZ` (100 Hz) ticks.
+    pub user_ticks: u64,
+    /// Kernel-mode CPU time in `USER_HZ` ticks.
+    pub sys_ticks: u64,
+    /// Minor page faults (no I/O required).
+    pub min_flt: u64,
+    /// Major page faults (backing store read).
+    pub maj_flt: u64,
+    /// Voluntary context switches.
+    pub nvcsw: u64,
+    /// Involuntary context switches.
+    pub nivcsw: u64,
+}
+
+/// Snapshot a process's resource use **including its reaped descendants**
+/// — Linux's `RUSAGE_BOTH`, which is what the wait family reports.
+///
+/// A waiting parent asks about the child it is reaping, and POSIX defines
+/// that child's `rusage` to cover the whole subtree it already accounted
+/// for: `wait_task_zombie` in Linux fills the caller's `struct rusage` from
+/// `getrusage_both`, i.e. the child's own totals *plus* the children-time it
+/// accumulated from grandchildren it reaped itself. Reporting only the
+/// child's own totals would make time disappear whenever a process reaped
+/// its own children before exiting — which is exactly what a shell does.
+///
+/// Must be called while the process still exists: for a zombie the caller
+/// has to snapshot *before* `try_reap` destroys the record, since the reap
+/// folds these numbers into the parent's children-accumulators and drops the
+/// entry. An unknown PID yields the zero snapshot rather than an error, so a
+/// wait that raced a reap reports zeros instead of failing — the same
+/// degradation the `getrusage` surfaces already take.
+#[must_use]
+pub fn process_usage_both(pid: ProcessId) -> ProcessUsage {
+    let (user, sys) = process_cpu_ticks(pid);
+    let (cuser, csys) = pcb::process_child_ticks(pid);
+    let (min_flt, maj_flt) = process_fault_counts(pid);
+    let (cmin, cmaj) = pcb::process_child_faults(pid);
+    let (nvcsw, nivcsw) = process_ctxsw_counts(pid);
+    let (cnv, cniv) = pcb::process_child_ctxsw(pid);
+    ProcessUsage {
+        user_ticks: user.saturating_add(cuser),
+        sys_ticks: sys.saturating_add(csys),
+        min_flt: min_flt.saturating_add(cmin),
+        maj_flt: maj_flt.saturating_add(cmaj),
+        nvcsw: nvcsw.saturating_add(cnv),
+        nivcsw: nivcsw.saturating_add(cniv),
+    }
+}
+
 /// Map a POSIX **nice** value to a scheduler **priority** level.
 ///
 /// Nice ranges `-20..=19` (lower = more favourable / higher priority);

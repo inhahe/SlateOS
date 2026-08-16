@@ -28,7 +28,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use crate::cap::ResourceType;
-use crate::error::KernelError;
+use crate::error::{KernelError, KernelResult};
 use crate::ipc::channel::{self, ChannelHandle, Message};
 use crate::ipc::completion::{self, CpHandle, WaitSource};
 use crate::ipc::eventfd::{self, EventFdHandle};
@@ -3752,255 +3752,219 @@ fn write_reaped_pid(out_ptr: u64, child_pid: crate::proc::pcb::ProcessId) {
     let _ = crate::mm::user::write_user_value::<i32>(out_ptr, pid_i32);
 }
 
-/// Resolve the process-group restriction for a non-positive `waitpid`
-/// argument, shared by [`sys_process_wait`] and [`sys_process_try_wait`]
-/// so the blocking and non-blocking forms cannot drift apart.
+// The wait selection, the blocking discipline and the `wstatus` encoding all
+// live in `crate::syscall::wait`, shared with the Linux ABI's `wait4` and
+// `waitid`.  They were duplicated here and in `linux.rs` until 2026-08-16;
+// see that module's docs for why one copy is not a style preference but a
+// correctness requirement (all three read the same kernel records, so they
+// cannot be allowed to disagree about which child a selector names).
+
+/// Option bits accepted by [`sys_process_wait_status`].
 ///
-/// * `-1` → `None` (any child, no restriction).
-/// * `0` → the caller's own process group.
-/// * `< -1` → group `-pid`.
-///
-/// A caller with no group record — pid 0, i.e. bare kernel tasks in the
-/// boot self-tests — yields `None` for the `0` case, which is the
-/// wait-any answer this path gave before group filtering existed.
-///
-/// `i64::MIN` has no positive counterpart, so `unsigned_abs` yields
-/// 2^63; that is a well-defined `u64` which simply matches no group, so
-/// the caller sees `ECHILD` rather than a panic or a wrapped-around
-/// group id.
-fn wait_pgid_filter(pid_arg: i64, parent_pid: u64) -> Option<u64> {
-    if pid_arg == 0 {
-        crate::proc::pcb::get_pgid(parent_pid)
-    } else if pid_arg < -1 {
-        Some(pid_arg.unsigned_abs())
-    } else {
-        None // pid_arg == -1: any child.
-    }
+/// The first three are Linux's `wait4` values, unchanged, so a program
+/// compiled for either ABI means the same thing by the same number. The last
+/// two occupy bits Linux leaves free in this word rather than reusing a Linux
+/// value for a different meaning, which would make the two ABIs disagree
+/// about one integer — the single most expensive kind of divergence to debug.
+mod wait_opt {
+    /// Don't block; report a miss as a `0` return.
+    pub const WNOHANG: u64 = 0x0000_0001;
+    /// Also report a child stopped by a job-control signal.
+    pub const WUNTRACED: u64 = 0x0000_0002;
+    /// Also report a child resumed by `SIGCONT`.
+    pub const WCONTINUED: u64 = 0x0000_0008;
+    /// Interpret `arg0` as a process *group* id rather than a pid selector.
+    ///
+    /// This is the whole reason the native ABI needs an option bit that Linux
+    /// does not have here: `waitpid`'s signed selector says "group g" as
+    /// `-g`, which cannot say group 1 because `-1` already means "any child".
+    /// With `WPGID` the argument is an unadorned pgid and group 1 — the
+    /// session leader's group, the one an init or a shell most wants to
+    /// wait on — is finally nameable. Linux reaches the same place through
+    /// `waitid(P_PGID)`, i.e. by adding a type field, not by overloading.
+    pub const WPGID: u64 = 0x0001_0000;
+    /// Report the state change but leave it unconsumed, so a later wait sees
+    /// it again (Linux `waitid`'s `WNOWAIT`). A zombie is peeked rather than
+    /// reaped; a stop/continue report is read without clearing it.
+    pub const WNOWAIT: u64 = 0x0100_0000;
+    /// `arg3`/`arg4` carry a `WaitInfo` out-parameter and its size. Without
+    /// this bit the kernel does not look at either register.
+    ///
+    /// The bit is not a convenience — it is a correctness requirement, and
+    /// leaving it out was a real bug caught by the ring-3 fixtures. This
+    /// syscall shipped reading three arguments, so every caller that already
+    /// exists reaches it through a three-argument wrapper: `posix`'s
+    /// `syscall3` writes `rdi`/`rsi`/`rdx` and *nothing else*, so `r10` and
+    /// `r8` arrive holding whatever the caller last left in them. Giving
+    /// those registers meaning retroactively does not merely read garbage —
+    /// it would have the kernel write 72 bytes through a pointer userspace
+    /// never supplied.
+    ///
+    /// A size field cannot rescue this. `arg4 = 0` means "no thanks", but
+    /// garbage is 0 with probability 2⁻⁶⁴; the size convention protects
+    /// against a struct that *grew*, not against a register that was never
+    /// written. Only an option bit distinguishes "I did not ask" from "I
+    /// asked and here is where to put it", because only the option word is
+    /// something every existing caller demonstrably does set.
+    pub const WINFO: u64 = 0x0002_0000;
+
+    /// Every bit this syscall understands. Anything else is `EINVAL` — an
+    /// unknown bit is a caller compiled against a *newer* kernel than this
+    /// one, and silently ignoring it would grant it the old semantics under
+    /// a name that promises different ones.
+    pub const KNOWN: u64 = WNOHANG | WUNTRACED | WCONTINUED | WPGID | WNOWAIT | WINFO;
 }
 
-/// Reap the lowest-PID eligible zombie child, honouring an optional
-/// process-group restriction.  Companion to [`wait_pgid_filter`].
-fn reap_any_filtered(
-    parent_pid: u64,
-    pgid_filter: Option<u64>,
-) -> Result<Option<(u64, crate::proc::pcb::ExitInfo)>, KernelError> {
-    match pgid_filter {
-        Some(pgid) => crate::proc::pcb::try_reap_group(parent_pid, pgid),
-        None => crate::proc::pcb::try_reap_any(parent_pid),
-    }
-}
-
-/// What a wait observed. Returned by [`wait_for_child_event`].
-pub enum WaitOutcome {
-    /// A child changed state: its PID and the encoded `wstatus` word.
-    Changed(u64, i32),
-    /// `WNOHANG` was requested and no child was ready.
-    NoHang,
-    /// A deliverable signal arrived before the caller parked. The caller
-    /// must return `restart::restart_result(ERESTARTSYS)`: the
-    /// signal-delivery checkpoint runs the handler and then either restarts
-    /// the wait (`SA_RESTART`) or substitutes `EINTR`.
-    Restart,
-}
-
-/// Poll one specific child for a state change, without blocking.
+/// Size in bytes of the `WaitInfo` structure `sys_process_wait_status` can
+/// write, and the layout it uses.
 ///
-/// `Ok(Some(wstatus))` if it exited (reaping it) or has a matching
-/// unconsumed job-control report (consuming the report, not the child).
-/// `Ok(None)` if it is alive with nothing to report. A child that is not
-/// ours, or does not exist, is `NoChildProcess` — POSIX says `waitpid` on a
-/// non-child is ECHILD, not EPERM/ESRCH.
-fn poll_child_event(
-    parent_pid: u64,
-    child_pid: u64,
-    want_stopped: bool,
-    want_continued: bool,
-) -> Result<Option<i32>, KernelError> {
-    use crate::proc::pcb;
+/// ```text
+///   off  size  field
+///     0     8  pid          u64   the child whose state changed
+///     8     4  uid          u32   that child's real UID (POSIX si_uid)
+///    12     4  (zero pad)
+///    16     4  wstatus      i32   the same word written to `arg2`
+///    20     4  (zero pad)
+///    24     8  utime_us     u64   user CPU time, microseconds
+///    32     8  stime_us     u64   system CPU time, microseconds
+///    40     8  minflt       u64   faults resolved without I/O
+///    48     8  majflt       u64   faults that required I/O
+///    56     8  nvcsw        u64   voluntary context switches
+///    64     8  nivcsw       u64   involuntary context switches
+/// ```
+///
+/// CPU time is in **microseconds, not ticks**, deliberately: ticks would
+/// force every caller to know `USER_HZ`, and a caller that guessed wrong
+/// would be wrong by a factor of ten with no way to notice. The counters
+/// are `RUSAGE_BOTH` — the child's own usage plus that of descendants it
+/// had already reaped — which is what `wait4`'s `rusage` argument reports.
+///
+/// Everything here is a fact that **does not survive the reap**. Once the
+/// PCB is destroyed there is no one left to ask for the child's UID or its
+/// CPU time, so a wait that does not produce them cannot be followed by a
+/// query that does. That is why they are returned by the wait rather than
+/// by a companion syscall.
+pub const WAIT_INFO_SIZE: usize = 72;
 
-    match pcb::try_reap(parent_pid, child_pid) {
-        Ok(Some(info)) => return Ok(Some(info.to_wstatus())),
-        Ok(None) => {}
-        Err(KernelError::PermissionDenied | KernelError::NoSuchProcess) => {
-            return Err(KernelError::NoChildProcess);
+/// Render a found event into the `WaitInfo` byte image.
+///
+/// Kept separate from [`write_wait_info`] — and visible to the crate — so
+/// the boot self-test can pin the on-wire byte offsets down without a user
+/// address space to write into. The layout is an ABI promise; a test that
+/// could only reach it through `copy_to_user` could not check it at all
+/// from a bare kernel task.
+pub(crate) fn wait_info_image(
+    found: &crate::syscall::wait::FoundEvent,
+) -> [u8; WAIT_INFO_SIZE] {
+    /// One tick is 10 ms at `USER_HZ == 100`; see `sys_getrusage`, which is
+    /// the other consumer of these same counters and must not disagree.
+    const US_PER_TICK: u64 = 10_000;
+
+    let mut buf = [0u8; WAIT_INFO_SIZE];
+    let mut put = |off: usize, v: u64| {
+        if let Some(dst) = buf.get_mut(off..off.saturating_add(8)) {
+            dst.copy_from_slice(&v.to_le_bytes());
         }
-        Err(e) => return Err(e),
-    }
-    if !(want_stopped || want_continued) {
-        return Ok(None);
-    }
-    match pcb::jc_report_for_child(parent_pid, child_pid, want_stopped, want_continued, true) {
-        Ok(Some(ev)) => Ok(Some(ev.to_wstatus())),
-        Ok(None) => Ok(None),
-        Err(KernelError::PermissionDenied | KernelError::NoSuchProcess) => {
-            Err(KernelError::NoChildProcess)
-        }
-        Err(e) => Err(e),
-    }
+    };
+    put(0, found.pid);
+    put(8, u64::from(found.uid)); // low 4 bytes = uid, high 4 = the zero pad
+    #[allow(clippy::cast_sign_loss)]
+    let ws = found.to_wstatus() as u32;
+    put(16, u64::from(ws)); // likewise: wstatus then zero pad
+    let u = &found.usage;
+    put(24, u.user_ticks.saturating_mul(US_PER_TICK));
+    put(32, u.sys_ticks.saturating_mul(US_PER_TICK));
+    put(40, u.min_flt);
+    put(48, u.maj_flt);
+    put(56, u.nvcsw);
+    put(64, u.nivcsw);
+    buf
 }
 
-/// Poll every eligible child for a state change, without blocking.
+/// Write the `WaitInfo` out-parameter under the extensible-struct convention.
 ///
-/// The any-child counterpart of [`poll_child_event`]; `pgid_filter`
-/// restricts the scan to one process group (the `waitpid(0)` /
-/// `waitpid(-pgid)` forms). Propagates `NoChildProcess` when the caller has
-/// no eligible children at all.
-fn poll_any_child_event(
-    parent_pid: u64,
-    pgid_filter: Option<u64>,
-    want_stopped: bool,
-    want_continued: bool,
-) -> Result<Option<(u64, i32)>, KernelError> {
-    use crate::proc::pcb;
-
-    if let Some((cpid, info)) = reap_any_filtered(parent_pid, pgid_filter)? {
-        return Ok(Some((cpid, info.to_wstatus())));
+/// The caller passes the size of the buffer it allocated and the kernel
+/// writes `min(caller, kernel)` bytes, zero-filling any tail it does not
+/// recognise. This is Linux's `clone3`/`sched_setattr` convention and it is
+/// what lets this structure grow later without a second syscall number:
+///
+/// * an **older caller** on a newer kernel passes a smaller size and gets
+///   the prefix it knows, never a write past its buffer;
+/// * a **newer caller** on this kernel passes a larger size and gets zeros
+///   in the fields this kernel cannot fill, which is the correct answer for
+///   every counter here — an unknown count reads as none, not as garbage.
+///
+/// A size of 0 (or a null pointer) means "don't want it", which is why the
+/// out-parameter is optional rather than a second syscall.
+fn write_wait_info(
+    ptr: u64,
+    size: usize,
+    found: &crate::syscall::wait::FoundEvent,
+) -> KernelResult<()> {
+    if ptr == 0 || size == 0 {
+        return Ok(());
     }
-    if !(want_stopped || want_continued) {
-        return Ok(None);
-    }
-    let jc = match pgid_filter {
-        Some(g) => pcb::jc_report_group(parent_pid, g, want_stopped, want_continued, true),
-        None => pcb::jc_report_any_child(parent_pid, want_stopped, want_continued, true),
-    }?;
-    Ok(jc.map(|(cpid, ev)| (cpid, ev.to_wstatus())))
-}
-
-/// The shared body of every POSIX-shaped wait: `wait4`/`waitpid` on the
-/// Linux ABI and `SYS_PROCESS_WAIT_STATUS` on ours.
-///
-/// This is one implementation rather than two because the two ABIs read the
-/// *same* kernel records — process groups, zombie exit info, job-control
-/// reports — so a program on our own libc and a glibc program waiting on the
-/// same child have to agree about which children the selector names, which
-/// transition is reported first, and what `wstatus` bits describe it. The
-/// two callers differ only in how they map errors and marshal the result.
-///
-/// `pid_arg` uses the POSIX selector encoding (`> 0` a specific child, `-1`
-/// any, `0` the caller's group, `< -1` group `-pid_arg`); `want_stopped` and
-/// `want_continued` are `WUNTRACED` and `WCONTINUED`.
-///
-/// ## Blocking discipline
-///
-/// Both branches register as a waiter *before* the final re-check and park
-/// only after it, so a state change that lands in the gap sets
-/// `pending_wake` and the re-check (or `block_current` itself) sees it —
-/// there is no lost wakeup. A stop or continue wakes the parent through the
-/// waiters `stop_process_for_signal` / `continue_process` collect. The
-/// any-child waiter flag lives on the *parent*, which survives reaping, so
-/// it is cleared on every exit path; the specific-pid flag lives on the
-/// child, which is destroyed when reaped, leaving nothing stale.
-///
-/// The signal-waiter registration around the park is what lets a signal
-/// interrupt the wait; it is bounded to just the park, so no early return
-/// can leak it.
-pub fn wait_for_child_event(
-    parent_pid: u64,
-    task_id: u64,
-    pid_arg: i64,
-    nohang: bool,
-    want_stopped: bool,
-    want_continued: bool,
-) -> Result<WaitOutcome, KernelError> {
-    use crate::proc::{pcb, signal};
-
-    if pid_arg > 0 {
-        #[allow(clippy::cast_sign_loss)]
-        let child_pid = pid_arg as u64;
-        loop {
-            if let Some(ws) = poll_child_event(parent_pid, child_pid, want_stopped, want_continued)?
-            {
-                return Ok(WaitOutcome::Changed(child_pid, ws));
+    let image = wait_info_image(found);
+    let known = size.min(WAIT_INFO_SIZE);
+    // SAFETY: `image` is a live kernel-owned array of exactly WAIT_INFO_SIZE
+    // bytes and `known <= WAIT_INFO_SIZE`, so the source range is in bounds;
+    // `copy_to_user` validates the destination and brackets the store with
+    // STAC/CLAC.
+    unsafe { crate::mm::user::copy_to_user(image.as_ptr(), ptr, known)? }
+    // Zero the tail this kernel does not know about, so a newer caller reads
+    // "no data" rather than whatever its allocator left there.
+    if let Some(tail) = size.checked_sub(known).filter(|t| *t > 0) {
+        let zeros = [0u8; 64];
+        let mut done = 0usize;
+        while done < tail {
+            let chunk = zeros.len().min(tail.saturating_sub(done));
+            // SAFETY: `zeros` is a live kernel array of 64 bytes and
+            // `chunk <= 64`; the destination is validated by `copy_to_user`.
+            unsafe {
+                crate::mm::user::copy_to_user(
+                    zeros.as_ptr(),
+                    ptr.saturating_add((known.saturating_add(done)) as u64),
+                    chunk,
+                )?;
             }
-            if nohang {
-                return Ok(WaitOutcome::NoHang);
-            }
-            // Only handler-backed signals can be pending-and-deliverable at a
-            // park point (`classify_post` drops no-handler default-ignore
-            // signals and terminates on fatal ones), so a restart can never
-            // spuriously livelock here.
-            let deliverable = !signal::blocked(parent_pid);
-            if signal::has_pending_in_mask(parent_pid, deliverable) {
-                return Ok(WaitOutcome::Restart);
-            }
-            pcb::set_wait_task(child_pid, task_id)?;
-            if let Some(ws) = poll_child_event(parent_pid, child_pid, want_stopped, want_continued)?
-            {
-                return Ok(WaitOutcome::Changed(child_pid, ws));
-            }
-            signal::register_signalfd_waiter(parent_pid, task_id, deliverable);
-            if signal::has_pending_in_mask(parent_pid, deliverable) {
-                signal::deregister_signalfd_waiter(parent_pid, task_id);
-                continue;
-            }
-            sched::block_current();
-            signal::deregister_signalfd_waiter(parent_pid, task_id);
-        }
-    } else {
-        let pgid_filter = wait_pgid_filter(pid_arg, parent_pid);
-        loop {
-            // Registering first means a child that changes state during the
-            // scan below still wakes us. It also reports ECHILD when the
-            // caller has no children at all.
-            if let Err(e) = pcb::set_wait_any_task(parent_pid, task_id) {
-                pcb::clear_wait_any_task(parent_pid, task_id);
-                return Err(e);
-            }
-            let polled =
-                poll_any_child_event(parent_pid, pgid_filter, want_stopped, want_continued);
-            match polled {
-                Ok(Some((cpid, ws))) => {
-                    pcb::clear_wait_any_task(parent_pid, task_id);
-                    return Ok(WaitOutcome::Changed(cpid, ws));
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    pcb::clear_wait_any_task(parent_pid, task_id);
-                    return Err(e);
-                }
-            }
-            if nohang {
-                pcb::clear_wait_any_task(parent_pid, task_id);
-                return Ok(WaitOutcome::NoHang);
-            }
-            let deliverable = !signal::blocked(parent_pid);
-            if signal::has_pending_in_mask(parent_pid, deliverable) {
-                pcb::clear_wait_any_task(parent_pid, task_id);
-                return Ok(WaitOutcome::Restart);
-            }
-            signal::register_signalfd_waiter(parent_pid, task_id, deliverable);
-            if signal::has_pending_in_mask(parent_pid, deliverable) {
-                signal::deregister_signalfd_waiter(parent_pid, task_id);
-                continue;
-            }
-            sched::block_current();
-            signal::deregister_signalfd_waiter(parent_pid, task_id);
+            done = done.saturating_add(chunk);
         }
     }
+    Ok(())
 }
 
 /// `SYS_PROCESS_WAIT_STATUS` — POSIX `waitpid` for the native ABI.
 ///
-/// `arg0` is the POSIX pid selector, `arg1` the option bits
-/// (`WNOHANG`/`WUNTRACED`/`WCONTINUED`, Linux values so no ABI remaps them),
-/// and `arg2` an optional user `*mut i32` for the `wstatus` word. Returns
-/// the PID whose state changed, or 0 for a `WNOHANG` miss.
+/// | arg  | meaning |
+/// |------|---------|
+/// | `arg0` | the POSIX pid selector, or a bare pgid when `WPGID` is set |
+/// | `arg1` | option bits — see [`wait_opt`] |
+/// | `arg2` | optional user `*mut i32` for the `wstatus` word (0 to skip) |
+/// | `arg3` | **only under `WINFO`:** user `*mut WaitInfo` (0 to skip) |
+/// | `arg4` | **only under `WINFO`:** size of that buffer, in bytes |
+///
+/// Returns the PID whose state changed, or 0 for a `WNOHANG` miss.
 ///
 /// See `number.rs` for why this is a new number rather than more arguments
 /// on `SYS_PROCESS_WAIT`: that syscall returns the exit code in `rax`, which
 /// cannot express "stopped", and its existing callers leave garbage in the
 /// argument registers a new options word would have to read.
+///
+/// That same objection applies to *this* syscall's own later growth, which is
+/// why `arg3`/`arg4` are gated behind [`wait_opt::WINFO`] rather than simply
+/// read. This syscall shipped taking three arguments; its existing callers
+/// therefore invoke it through three-argument wrappers that leave `r10`/`r8`
+/// untouched. Reading them unconditionally is not a compatible extension, it
+/// is a wild pointer.
+///
+/// The selection, the blocking discipline and the `wstatus` encoding are all
+/// [`crate::syscall::wait`]'s, shared verbatim with `wait4` and `waitid`.
 pub fn sys_process_wait_status(args: &SyscallArgs) -> SyscallResult {
     use crate::syscall::linux::restart;
-
-    // Same option bits as Linux `wait4`, so the value a caller passes means
-    // the same thing whichever ABI it is compiled for.
-    const WNOHANG: u64 = 0x0000_0001;
-    const WUNTRACED: u64 = 0x0000_0002;
-    const WCONTINUED: u64 = 0x0000_0008;
+    use crate::syscall::wait::{self, WaitClasses, WaitOutcome, WaitRequest, WaitTarget};
 
     let options = args.arg1;
-    if options & !(WNOHANG | WUNTRACED | WCONTINUED) != 0 {
+    if options & !wait_opt::KNOWN != 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     let status_ptr = args.arg2;
@@ -4009,25 +3973,67 @@ pub fn sys_process_wait_status(args: &SyscallArgs) -> SyscallResult {
             return SyscallResult::err(e);
         }
     }
+    // `arg3`/`arg4` are read *only* under `WINFO`. Every caller that predates
+    // the out-parameter reaches this syscall through a three-argument wrapper
+    // that never writes `r10`/`r8`, so without the bit those registers hold
+    // caller garbage — see `wait_opt::WINFO` for why no amount of validation
+    // substitutes for asking.
+    let (info_ptr, info_size) = if options & wait_opt::WINFO != 0 {
+        (
+            args.arg3,
+            usize::try_from(args.arg4).unwrap_or(usize::MAX),
+        )
+    } else {
+        (0, 0)
+    };
+    if info_ptr != 0 && info_size != 0 {
+        // Validate before blocking as well as inside the write: a caller that
+        // passed a bad pointer should learn so now, not after sleeping for an
+        // arbitrarily long wait and reaping a child it then cannot be told
+        // about. (`write_wait_info` re-validates because a peer thread may
+        // unmap the buffer while this one sleeps.)
+        if let Err(e) = crate::mm::user::validate_user_write(info_ptr, info_size) {
+            return SyscallResult::err(e);
+        }
+    }
 
-    #[allow(clippy::cast_possible_wrap)]
-    let pid_arg = args.arg0 as i64;
     let parent_pid = caller_pid().unwrap_or(0);
     let task_id = sched::current_task_id();
 
-    let outcome = wait_for_child_event(
-        parent_pid,
-        task_id,
-        pid_arg,
-        options & WNOHANG != 0,
-        options & WUNTRACED != 0,
-        options & WCONTINUED != 0,
-    );
-    let (child_pid, wstatus) = match outcome {
-        Ok(WaitOutcome::Changed(pid, ws)) => (pid, ws),
+    let target = if options & wait_opt::WPGID != 0 {
+        // A bare, unsigned pgid — the encoding that exists precisely so that
+        // group 1 is expressible. 0 means "my own group", as everywhere else.
+        if args.arg0 == 0 {
+            crate::proc::pcb::get_pgid(parent_pid).map_or(WaitTarget::Any, WaitTarget::Pgid)
+        } else {
+            WaitTarget::Pgid(args.arg0)
+        }
+    } else {
+        #[allow(clippy::cast_possible_wrap)]
+        let pid_arg = args.arg0 as i64;
+        WaitTarget::from_posix_selector(pid_arg, parent_pid)
+    };
+
+    let req = WaitRequest {
+        target,
+        classes: WaitClasses {
+            // `waitpid` always reports terminations; the other two classes are
+            // opt-in. (`waitid` differs — it makes all three explicit — which
+            // is why the classes are a struct rather than being derived from
+            // the options word inside `wait`.)
+            exited: true,
+            stopped: options & wait_opt::WUNTRACED != 0,
+            continued: options & wait_opt::WCONTINUED != 0,
+        },
+        nohang: options & wait_opt::WNOHANG != 0,
+        nowait: options & wait_opt::WNOWAIT != 0,
+    };
+
+    let found = match wait::wait_for_child_event(parent_pid, task_id, req) {
+        Ok(WaitOutcome::Changed(f)) => f,
         Ok(WaitOutcome::NoHang) => return SyscallResult::ok(0),
         Ok(WaitOutcome::Restart) => return restart::restart_result(restart::ERESTARTSYS),
-        Err(e) => return SyscallResult::err(e),
+        Err(e) => return SyscallResult::err(wait::wait_err_to_echild(e)),
     };
 
     if status_ptr != 0 {
@@ -4035,12 +4041,15 @@ pub fn sys_process_wait_status(args: &SyscallArgs) -> SyscallResult {
         // blocks, and the old code's claim that "the address space cannot have
         // changed since" was wrong — a peer thread is free to unmap the status
         // pointer while this one sleeps.
-        if let Err(e) = crate::mm::user::write_user_value::<i32>(status_ptr, wstatus) {
+        if let Err(e) = crate::mm::user::write_user_value::<i32>(status_ptr, found.to_wstatus()) {
             return SyscallResult::err(e);
         }
     }
+    if let Err(e) = write_wait_info(info_ptr, info_size, &found) {
+        return SyscallResult::err(e);
+    }
     #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(child_pid as i64)
+    SyscallResult::ok(found.pid as i64)
 }
 
 /// `SYS_PROCESS_WAIT` — wait for a child process to exit.
@@ -4058,105 +4067,62 @@ pub fn sys_process_wait_status(args: &SyscallArgs) -> SyscallResult {
 /// Returns the exit code on success, or a negative error
 /// (`NoChildProcess`/ECHILD when there are no matching children).
 pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::pcb;
+    use crate::syscall::linux::restart;
+    use crate::syscall::wait::{self, WaitOutcome, WaitTarget};
 
+    #[allow(clippy::cast_possible_wrap)]
     let pid_arg = args.arg0 as i64;
     let out_ptr = args.arg1;
-    // Resolve the calling process's PID so try_reap can verify the
+    // Resolve the calling process's PID so the reap can verify the
     // parent–child relationship.  Falls back to 0 (kernel) for bare
     // kernel tasks, which matches processes spawned with parent=0.
     let parent_pid = caller_pid().unwrap_or(0);
-
     let task_id = sched::current_task_id();
 
-    if pid_arg > 0 {
-        // --- Wait for a specific child ---
-        #[allow(clippy::cast_sign_loss)]
-        let child_pid = pid_arg as u64;
+    let target = WaitTarget::from_posix_selector(pid_arg, parent_pid);
+    let req = wait::WaitRequest {
+        target,
+        // This syscall returns the exit code in `rax` and has no way to say
+        // "stopped", so it asks only about terminations.  A caller that wants
+        // job-control transitions uses SYS_PROCESS_WAIT_STATUS, which is why
+        // that syscall exists at all.
+        classes: wait::WaitClasses {
+            exited: true,
+            stopped: false,
+            continued: false,
+        },
+        nohang: false,
+        nowait: false,
+    };
 
-        // Check-first, then register-and-recheck before blocking.
-        //
-        // We must NOT register the wait task until we've confirmed the
-        // target really is our running child: `try_reap` returns
-        // `PermissionDenied` for a non-child, and registering a waiter on
-        // someone else's process would deliver a stale wake when that
-        // process is later reaped.  Once we know the child is still
-        // running, we register then re-check — if the child zombied in
-        // the gap, `wake()` set `pending_wake` and the second `try_reap`
-        // (or `block_current`) sees it, so there is no lost wakeup.  The
-        // waiter flag lives on the child, which is destroyed when reaped,
-        // so there is nothing stale to clean up on success.
-        //
-        // Specific-pid does NOT write `arg1`: callers using a 1-arg
-        // syscall wrapper leave a stale (possibly valid) pointer in that
-        // register, and writing it would corrupt their memory.  Only the
-        // wait-any path, whose sole caller passes a real pointer, writes.
-        loop {
-            match pcb::try_reap(parent_pid, child_pid) {
-                Ok(Some(info)) => {
+    match wait::wait_for_child_event(parent_pid, task_id, req) {
+        Ok(WaitOutcome::Changed(found)) => {
+            // Specific-pid does NOT write `arg1`: callers using a 1-arg
+            // syscall wrapper leave a stale (possibly valid) pointer in that
+            // register, and writing it would corrupt their memory.  Only the
+            // wait-any/group forms, whose callers pass a real pointer, write.
+            if !matches!(target, WaitTarget::Pid(_)) {
+                write_reaped_pid(out_ptr, found.pid);
+            }
+            match found.event {
+                wait::ChildEvent::Exited(info) => {
                     #[allow(clippy::cast_possible_wrap)]
-                    return SyscallResult::ok(info.exit_code as i64);
+                    SyscallResult::ok(info.exit_code as i64)
                 }
-                Ok(None) => {} // Still running — fall through to register.
-                Err(e) => return SyscallResult::err(e),
-            }
-
-            // Register, then re-check to close the lost-wakeup race.
-            if let Err(e) = pcb::set_wait_task(child_pid, task_id) {
-                return SyscallResult::err(e);
-            }
-            match pcb::try_reap(parent_pid, child_pid) {
-                Ok(Some(info)) => {
-                    #[allow(clippy::cast_possible_wrap)]
-                    return SyscallResult::ok(info.exit_code as i64);
-                }
-                Ok(None) => {
-                    sched::block_current();
-                    // Woken (or spurious) — loop and re-check.
-                }
-                Err(e) => return SyscallResult::err(e),
-            }
-        }
-    } else {
-        // --- Wait for any child, optionally restricted to a group ---
-        //
-        // Same register-before-check discipline, but the waiter flag
-        // lives on the *parent* (this process), which survives reaping,
-        // so we must clear it on every exit path to avoid delivering a
-        // stale wake to a later, unrelated `block_current`.
-        //
-        // The group filter is resolved exactly as the Linux ABI's
-        // `wait4` resolves it (linux.rs `pgid_filter`), and deliberately
-        // so: both ABIs read the *same* kernel process-group records, so
-        // a program on our own libc and a glibc program must not
-        // disagree about which children a non-positive `pid` selects.
-        // Registration still happens unfiltered — the waiter is woken by
-        // any child exiting and re-scans under the filter, which costs a
-        // spurious wake at most and never misses one.
-        let pgid_filter = wait_pgid_filter(pid_arg, parent_pid);
-        loop {
-            if let Err(e) = pcb::set_wait_any_task(parent_pid, task_id) {
-                return SyscallResult::err(e);
-            }
-            match reap_any_filtered(parent_pid, pgid_filter) {
-                Ok(Some((child_pid, info))) => {
-                    pcb::clear_wait_any_task(parent_pid, task_id);
-                    write_reaped_pid(out_ptr, child_pid);
-                    #[allow(clippy::cast_possible_wrap)]
-                    return SyscallResult::ok(info.exit_code as i64);
-                }
-                Ok(None) => {
-                    // Living children exist but none are zombies — block
-                    // until one exits, then re-scan.
-                    sched::block_current();
-                }
-                Err(e) => {
-                    // No children left (ECHILD) or other error.
-                    pcb::clear_wait_any_task(parent_pid, task_id);
-                    return SyscallResult::err(e);
+                // Unreachable: no job-control class was requested, so
+                // `scan_once` cannot return one.  Handled rather than
+                // `unreachable!()` because a panic here would be a kernel
+                // panic reachable from an unprivileged syscall if that
+                // invariant ever broke.
+                wait::ChildEvent::JobControl(_) => {
+                    SyscallResult::err(KernelError::InvalidArgument)
                 }
             }
         }
+        // `nohang: false`, so the primitive cannot report a miss.
+        Ok(WaitOutcome::NoHang) => SyscallResult::err(KernelError::WouldBlock),
+        Ok(WaitOutcome::Restart) => restart::restart_result(restart::ERESTARTSYS),
+        Err(e) => SyscallResult::err(e),
     }
 }
 
@@ -4167,35 +4133,47 @@ pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
 /// `arg1` have the same meaning as in [`sys_process_wait`], including the
 /// process-group forms of a non-positive `arg0`.
 pub fn sys_process_try_wait(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::pcb;
+    use crate::syscall::wait::{self, WaitTarget};
 
+    #[allow(clippy::cast_possible_wrap)]
     let pid_arg = args.arg0 as i64;
     let out_ptr = args.arg1;
     // Resolve calling process PID for parent–child verification.
     let parent_pid = caller_pid().unwrap_or(0);
 
-    if pid_arg > 0 {
-        #[allow(clippy::cast_sign_loss)]
-        let child_pid = pid_arg as u64;
-        match pcb::try_reap(parent_pid, child_pid) {
-            Ok(Some(info)) => {
-                // See sys_process_wait: specific-pid does not write arg1.
-                #[allow(clippy::cast_possible_wrap)]
-                SyscallResult::ok(info.exit_code as i64)
+    let target = WaitTarget::from_posix_selector(pid_arg, parent_pid);
+    let req = wait::WaitRequest {
+        target,
+        classes: wait::WaitClasses {
+            exited: true,
+            stopped: false,
+            continued: false,
+        },
+        // The scan itself is the whole syscall — there is nothing to block on.
+        nohang: true,
+        nowait: false,
+    };
+
+    match wait::scan_once(parent_pid, req) {
+        Ok(Some(found)) => {
+            // See sys_process_wait: specific-pid does not write arg1.
+            if !matches!(target, WaitTarget::Pid(_)) {
+                write_reaped_pid(out_ptr, found.pid);
             }
-            Ok(None) => SyscallResult::err(KernelError::WouldBlock),
-            Err(e) => SyscallResult::err(e),
-        }
-    } else {
-        match reap_any_filtered(parent_pid, wait_pgid_filter(pid_arg, parent_pid)) {
-            Ok(Some((child_pid, info))) => {
-                write_reaped_pid(out_ptr, child_pid);
-                #[allow(clippy::cast_possible_wrap)]
-                SyscallResult::ok(info.exit_code as i64)
+            match found.event {
+                wait::ChildEvent::Exited(info) => {
+                    #[allow(clippy::cast_possible_wrap)]
+                    SyscallResult::ok(info.exit_code as i64)
+                }
+                // Unreachable — no job-control class was requested; see
+                // `sys_process_wait` for why this is handled, not panicked on.
+                wait::ChildEvent::JobControl(_) => {
+                    SyscallResult::err(KernelError::InvalidArgument)
+                }
             }
-            Ok(None) => SyscallResult::err(KernelError::WouldBlock),
-            Err(e) => SyscallResult::err(e),
         }
+        Ok(None) => SyscallResult::err(KernelError::WouldBlock),
+        Err(e) => SyscallResult::err(e),
     }
 }
 

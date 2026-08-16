@@ -12,7 +12,7 @@
 #     SLATE_SYSROOT   $SLATE_ROOT/toolchain/sysroot/lib
 #     SLATE_SPIKE     $SLATE_ROOT/build/spike   (created if absent)
 #     SLATE_ROOTFS    $SLATE_ROOT/rootfs.ext4   (may not exist yet)
-#     SLATE_ZIG       $SLATE_SPIKE/zig/zig      (may not exist yet)
+#     SLATE_ZIG       the pinned zig cross-toolchain; call slate_ensure_zig first
 #     SLATE_TMP       /tmp/slate-$SLATE_LANE    scratch, created; see below
 #
 # ---------------------------------------------------------------------------
@@ -46,6 +46,22 @@ SLATE_LANE="$(basename "$SLATE_ROOT")"
 SLATE_SYSROOT="$SLATE_ROOT/toolchain/sysroot/lib"
 SLATE_SPIKE="$SLATE_ROOT/build/spike"
 SLATE_ROOTFS="$SLATE_ROOT/rootfs.ext4"
+
+# The zig cross-toolchain. Pinned by version *and* hash: `zig cc
+# --target=x86_64-linux-musl` is what compiles the objects that get linked
+# against our libc.a, so a different zig is a different artifact, and
+# `bash-slateos.elf` is a shipped product (design-decisions.md §305) rather than
+# a scratch build.
+#
+# Unlike everything else in build/spike/, zig is *input* and not this tree's
+# output, so — and only so — it is shared between worktrees rather than copied
+# per lane. The cross-lane hazard this file exists to prevent is a lane reading
+# another lane's *build products* (see below); a pinned third-party tarball has
+# identical bytes for every lane by construction, so sharing it cannot make one
+# lane's artifact depend on another lane's source.
+SLATE_ZIG_VERSION="0.13.0"
+SLATE_ZIG_SHA256="d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea"
+SLATE_ZIG_CACHE="${SLATE_ZIG_CACHE:-$HOME/.cache/slateos}"
 SLATE_ZIG="$SLATE_SPIKE/zig/zig"
 
 # Scratch, keyed by worktree. The hard-coded paths were only half the problem:
@@ -75,10 +91,71 @@ mkdir -p "$SLATE_SPIKE" "$SLATE_TMP" 2>/dev/null || true
 # executables". These wrappers keep the space out of $CC. They are keyed by
 # lane so two lanes configuring at once cannot hand each other's zig to
 # autotools.
+# Resolve $SLATE_ZIG, downloading the pinned toolchain if this machine has not
+# got it yet.
+#
+# Until 2026-08-16 there was no such step: zig had been placed by hand in
+# *one* worktree's build/spike/, that directory is gitignored, and no script or
+# document recorded the version or the URL. So `scripts/bash-spike/` — which
+# §305 calls "the build recipe for a shipped artifact" and asks us to keep
+# working — could not be run in three of the four checkouts, and could not be
+# run at all in a fresh clone. The failure was silent in the way this repo keeps
+# rediscovering: the recipe looked fine because the one tree anybody tested it
+# in happened to have the missing piece lying around.
+slate_ensure_zig() {
+    # 1. A per-worktree copy, which is how the original spikes were provisioned.
+    #    Preferred when present so existing checkouts neither re-download nor
+    #    silently switch toolchain underneath a half-finished build tree.
+    if [ -x "$SLATE_SPIKE/zig/zig" ]; then
+        SLATE_ZIG="$SLATE_SPIKE/zig/zig"
+        return 0
+    fi
+
+    local dir="$SLATE_ZIG_CACHE/zig-linux-x86_64-$SLATE_ZIG_VERSION"
+    if [ -x "$dir/zig" ]; then
+        SLATE_ZIG="$dir/zig"
+        return 0
+    fi
+
+    local url="https://ziglang.org/download/$SLATE_ZIG_VERSION/zig-linux-x86_64-$SLATE_ZIG_VERSION.tar.xz"
+    local tarball="$SLATE_ZIG_CACHE/zig-linux-x86_64-$SLATE_ZIG_VERSION.tar.xz"
+    echo "worktree.sh: zig $SLATE_ZIG_VERSION not found; fetching to $SLATE_ZIG_CACHE" >&2
+    mkdir -p "$SLATE_ZIG_CACHE" || return 1
+    if [ ! -f "$tarball" ]; then
+        curl -sSL --fail --max-time 900 -o "$tarball.part" "$url" || {
+            echo "worktree.sh: download failed: $url" >&2
+            rm -f "$tarball.part"
+            return 1
+        }
+        mv "$tarball.part" "$tarball"
+    fi
+
+    # Verify before extracting, not after: an unverified archive is executed by
+    # the very next step, and this one produces a binary we ship.
+    local got
+    got="$(sha256sum "$tarball" | cut -d' ' -f1)"
+    if [ "$got" != "$SLATE_ZIG_SHA256" ]; then
+        echo "worktree.sh: zig tarball sha256 mismatch — refusing to extract." >&2
+        echo "             expected $SLATE_ZIG_SHA256" >&2
+        echo "             got      $got" >&2
+        echo "             ($tarball — delete it to retry the download)" >&2
+        return 1
+    fi
+
+    tar -xf "$tarball" -C "$SLATE_ZIG_CACHE" || return 1
+    if [ ! -x "$dir/zig" ]; then
+        echo "worktree.sh: extracted $tarball but $dir/zig is missing" >&2
+        return 1
+    fi
+    SLATE_ZIG="$dir/zig"
+    echo "worktree.sh: zig $SLATE_ZIG_VERSION ready at $SLATE_ZIG" >&2
+}
+
 slate_make_zig_wrappers() {
+    slate_ensure_zig || return 1
     if [ ! -x "$SLATE_ZIG" ]; then
         echo "worktree.sh: no zig at $SLATE_ZIG" >&2
-        echo "             The spikes need it; see scripts/bash-spike/README." >&2
+        echo "             The spikes need it; see scripts/bash-spike/README.md." >&2
         return 1
     fi
     SLATE_CC="/tmp/zigcc-$SLATE_LANE"

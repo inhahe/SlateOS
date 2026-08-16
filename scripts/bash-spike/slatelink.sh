@@ -30,7 +30,7 @@ SLATE_SYSROOT="/tmp/slate-sysroot-$LANE"
 
 if [ ! -d "$BUILD" ]; then
     echo "ERROR: $BUILD does not exist — bash's objects have not been compiled yet."
-    echo "       See scripts/bash-spike/README (the configure + make step) first;"
+    echo "       See scripts/bash-spike/README.md (the configure + make step) first;"
     echo "       this script only relinks objects that step produced."
     exit 1
 fi

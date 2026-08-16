@@ -617,7 +617,26 @@ artifacts, enumerate the set from the thing they have in common — here "links
 `libc.a`" — not from the directory that happened to hold them when the rule was
 written (`services/ctest-*`).
 
-### TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT. `waitid` cannot express process group 1, cannot honour `WNOWAIT`, and reports `si_uid` as 0 — all three because `SYS_PROCESS_WAIT_STATUS` is `waitpid`-shaped — LOGGED 2026-08-16 by lane B
+### TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT. `waitid` cannot express process group 1, cannot honour `WNOWAIT`, and reports `si_uid` as 0 — all three because `SYS_PROCESS_WAIT_STATUS` is `waitpid`-shaped — LOGGED 2026-08-16 by lane B — ✅ KERNEL SIDE FIXED 2026-08-16 by lane A; libc side still open
+
+**Status: the kernel half is done** (2026-08-16, lane A). All three gaps — and
+the `si_utime`/`si_stime`/`rusage` fourth one below, whose premise turned out to
+be false — are now expressible through the syscall. The entry stays open because
+**libc has not been changed to use any of it yet**: `waitid` still returns
+`ENOSYS` for the group-1 case, still ignores `WNOWAIT`, and still reports
+`si_uid` as 0, because it is still passing the old three arguments. What to
+change on the libc side is spelled out in
+`requests/a-b-wait-syscall-grew-wpgid-wnowait-and-a-waitinfo-struct.md`; the
+kernel rationale is `design-decisions.md` §206. Close this entry when
+`posix/src/process.rs` consumes the new ABI.
+
+**Correction to item 4 below ("there is no per-process CPU accounting").** That
+was already false when this entry was written. `pcb`'s `acct_*`/`child_*`
+counters and `thread::process_cpu_ticks`/`process_fault_counts`/
+`process_ctxsw_counts` were live, and `sys_getrusage` already encoded all 144
+bytes from them; `wait4`'s `clear_user_rusage` was a **false zero** — the data
+existed and the call threw it away. `wait4` now writes a real `rusage` and
+`waitid` fills `si_utime`/`si_stime` in USER_HZ ticks.
 
 **In short:** `waitid()` is the modern replacement for `waitpid()`, and it exists
 because `waitpid()`'s arguments cannot express some perfectly reasonable waits.
@@ -654,22 +673,31 @@ caller that asked for a group wait and got an arbitrary child has no way to
 detect the substitution and has lost the status of a child it was not managing.
 Refusing is recoverable; guessing is not.
 
-**Proper fix — all three are kernel-side**, and filed as
-`requests/b-a-waitid-needs-an-explicit-idtype-wait.md`:
+**Proper fix — all three were kernel-side, and all three landed** on
+2026-08-16 (lane A), exactly as this entry proposed:
 
-1. An option bit (e.g. `WPGID = 1 << 16`) that makes `arg0` an unsigned pgid,
-   bypassing `wait_pgid_filter`'s inference. Currently rejected by the mask, so
+1. ✅ **`WPGID = 1 << 16`** on `SYS_PROCESS_WAIT_STATUS` makes `arg0` an
+   unsigned pgid, so group 1 is nameable. Previously rejected by the mask, so
    no existing caller is affected.
-2. A `WNOWAIT` bit that finds the eligible child and encodes its `wstatus` but
-   skips the reap. `poll_any_child_event` already separates "find" from
-   "consume" for stop/continue; this applies the same split to exits.
-3. Return the child's uid — the PCB already carries it (`pcb.rs:88`). Widening
-   the `arg2` out-parameter from a bare `i32 wstatus` to a small struct is
-   probably cleaner than a second return register, and leaves room for the CPU
-   times if accounting ever lands.
+2. ✅ **`WNOWAIT = 1 << 24`** peeks: the zombie is left in place and the
+   job-control report is left unconsumed, so an identical second wait sees the
+   same event again.
+3. ✅ **The child's uid** rides out in a new `WaitInfo` out-parameter (`arg3`
+   pointer, `arg4` size, 72 bytes), which — as this entry predicted — also
+   carries the CPU times and four other counters. It is written under the
+   `clone3`/`sched_setattr` convention (`min(caller, kernel)` bytes, zero-filled
+   tail), so it can grow again without a new syscall number.
 
-Until then the divergences are documented on `waitid`'s doc comment, which is
-where someone debugging a `WNOWAIT` that reaped will actually look.
+One thing nobody asked for came out of the same work: **`sys_waitid` had no
+signal handling at all** — no pending-signal check, no `ERESTARTSYS`, no
+signalfd registration — so a process blocked in it could not be interrupted.
+`wait4` next door had all three. Unifying the three wait syscalls onto
+`kernel/src/syscall/wait.rs` fixed it, and it is the clearest evidence for why
+one primitive beats three copies.
+
+Until libc catches up, the divergences remain documented on `waitid`'s doc
+comment, which is where someone debugging a `WNOWAIT` that reaped will actually
+look — and that comment now needs a line saying the kernel *can* do it.
 
 **What *is* covered, so this entry is not mistaken for "waitid is untested."**
 Everything `waitid` can do is exercised on target by
@@ -22140,6 +22168,80 @@ skipped rung inside a passing boot test reads as success
 (`B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`). The Path-Z coverage banner is what
 eventually made it visible, which is an argument for that banner existing.
 
+## B-THE-BASH-BUILD-RECIPE-DEPENDED-ON-AN-UNRECORDED-ZIG-INSTALLED-BY-HAND
+
+**Status:** FIXED 2026-08-16 (Lane B). See `design-decisions.md` §316.
+
+`design-decisions.md` §305 makes `bash-slateos.elf` a shipped product and
+`scripts/bash-spike/` its build recipe — the README there says "keep them
+working". The recipe had a prerequisite recorded nowhere at all: the `zig`
+cross-compiler.
+
+**Symptom.** `scripts/bash-spike/*` and `scripts/pkgconf-spike/run.sh` could not
+run in `os-lane-a`, `os-lane-b` or `os-lane-c`, or in a fresh clone. Only the
+`os` integration checkout had a usable toolchain, because at some point someone
+extracted zig by hand into `os/build/spike/zig/` — a **gitignored** directory.
+Nothing in the tree recorded the version (0.13.0), the download URL, or a
+checksum; `grep -rn "0\.13\.0"` over the whole repo returned nothing relevant.
+
+**Why it went unnoticed for ~2 weeks.** The one checkout anybody ran the spikes
+in happened to be carrying the missing piece, so the recipe looked healthy. This
+is the same shape as the four other entries around it — *a step that appears to
+work because of undocumented local state* — and it compounded the hard-coded
+path bug directly above: while `slatelink.sh` still named `os` outright, it
+found `os`'s zig too, so the two defects concealed each other.
+
+**Fix.** `scripts/lib/worktree.sh` gained `slate_ensure_zig`, which resolves the
+toolchain in three steps: an existing per-worktree `build/spike/zig/zig` if
+present (so no existing checkout re-downloads or silently changes compiler
+mid-build), else a shared cache at `~/.cache/slateos/`, else download the pinned
+tarball and **verify its SHA-256 before extracting** — the archive's first use
+is being executed as a compiler whose output we ship, so checking afterwards
+would be checking too late. `slate_make_zig_wrappers` calls it, so the spikes
+just work. Version and hash are pinned in `worktree.sh`;
+`scripts/bash-spike/README.md` gained the Prerequisites section it never had.
+
+**Standing lesson.** A build recipe is only as reproducible as its least
+documented prerequisite, and an undocumented one is invisible precisely in the
+tree where it is satisfied. Prefer a pinned, verified, automatic fetch over a
+documented manual step: the manual kind fails silently and only in checkouts
+nobody is looking at.
+
+## B-THE-ROOT-LEVEL-PS1-BOOT-SCRIPTS-HARD-CODE-`os`-SO-WINDOWS-BOOT-TESTS-THE-WRONG-TREE
+
+**Status:** OPEN — **Lane A's zone** (the boot test). Found 2026-08-16 by Lane
+B, which has deliberately changed none of these files. Filed as
+`requests/b-a-ps1-boot-scripts-hard-code-the-os-worktree.md`.
+
+Six PowerShell scripts at the repo root name `D:\visual studio projects\os`
+outright: `boot-test.ps1` and `boot-test-2cpu.ps1` (`$cwd = "…\os"`),
+`boot-test-stdio.ps1` and `run-boot-test.ps1` (`Set-Location "…\os"` plus
+`$diskImg`/`$ext4Img`/`$swapImg`), `quick-boot-test.ps1` (`$serial_log`), and
+`build-init.ps1` (`$initDir = "…\os\userspace\init"`).
+
+**Impact.** Run from a lane worktree, they boot **main's** image and report
+PASSED — a false green in which every property the lane believes it verified is
+a statement about a different checkout. This is the same family as the two
+entries above, but it is the worst instance of it, for two reasons:
+
+1. **It is documented.** `README.md:65-68` offers `powershell ./boot-test.ps1`
+   as *the* Windows equivalent of `./scripts/boot-test.sh`. An agent that
+   follows the README does the wrong thing by doing what it was told.
+2. **`build-init.ps1` writes**, to `os\userspace\init` — a cross-lane write,
+   and into Lane B's zone specifically.
+
+**Mitigating.** `scripts/boot-test.sh` derives its own paths correctly and is
+what `CLAUDE.md`, the roadmap and every automated run actually use, so no
+current CI path is affected.
+
+**Proper fix.** Derive the root from the script's own location, as
+`scripts/lib/worktree.sh` now does for shell:
+`$root = Split-Path -Parent $MyInvocation.MyCommand.Path` (twice, for a script
+under `scripts/`), plus the same bail-out check that the derived root really is
+a SlateOS checkout. **Or delete them** — only `boot-test.ps1` is referenced
+anywhere in the tree; the other five have no references at all and look
+superseded by `scripts/boot-test.sh`. An unmaintained script that boots the
+wrong image is a trap whether or not anyone runs it today.
 
 ## `apps/editor` undo removed characters where it had inserted bytes (lane C)
 
@@ -22478,3 +22580,86 @@ positions in the sentence, not directions on the screen.
 
 If C-Q2 answers "logical", this entry closes with no code change and a comment
 at each of the three sites recording that the behaviour is deliberate.
+## B-BOOT-TEST-HANGS-INTERMITTENTLY-WITH-A-QEMU-GLIB-HANDLE-ERROR, AND LOOKS EXACTLY LIKE A KERNEL REGRESSION (lane B, 2026-08-16)
+
+**Status: OPEN — host-level, cause not identified. Recorded so the next lane
+that hits it does not spend the time I did blaming a code change.**
+
+### What happened
+
+A boot test of `lane-b` at `462cd7d09` (a merge of `origin/main`) timed out at
+1800s, having hung at Path Z Part 20:
+
+```
+[spawn] Running REAL dash shell background job `/bin/emit > file & wait` (ring 3, Path Z) test...
+```
+
+The immediately preceding boot of `6039c7d03` had PASSED in 405s. The obvious
+reading — "the merge broke it" — was wrong. A re-run of the *same commit*,
+changing nothing, passed: the rung logged `OK` at serial line 20812, 27 lines
+after the point the previous run stopped at.
+
+### Why it was convincing as a regression, and how each theory died
+
+The merge pulled in lane A's virtqueue rework (`3f0c22500`), which moved the
+descriptor free list out of device-visible memory into an Ada-backed pool.
+`... & wait` with a redirected stdout is disk I/O, so a descriptor leak was a
+plausible fit — and lane B's image carries bash *and* pkgconf, so it does far
+more I/O than lane A's, which would explain why lane A's own boot test passed.
+
+It was still wrong. Two hypotheses, both refuted by direct evidence:
+
+| theory | refuted by |
+|---|---|
+| virtio descriptor leak / mis-completion | `grep -c "\[virtio\]"` on the hung serial log → **0**. The `ada::is_allocated` rejection path at `kernel/src/virtio/queue.rs:595` logs whenever it fires; it never fired. `[ada] FFI boundary self-test … : OK` |
+| exit-hook table exhaustion | the log's one `[sched] WARNING: exit hook table full (8 slots)` is at line **284**, immediately followed by the self-test's own cleanup unregisters. It is step 6 of `test_exit_hooks` (`kernel/src/sched/mod.rs:7942-7976`) deliberately overfilling the table to prove rejection works, and a *passing* log contains it too. Only two real registrants exist in the kernel — `pacct.rs:131` and `sched/supervisor.rs:219` — both one-time at boot |
+
+**The lesson worth keeping: an expected-and-benign log line that contains the
+word WARNING is a magnet for a wrong diagnosis.** `exit hook table full` reads
+as a resource-exhaustion bug and is in fact a self-test asserting a limit. It
+cost a full investigative pass. A self-test that provokes a warning it expects
+should say so on the same line — e.g. `(expected)`.
+
+### The actual signal
+
+QEMU emitted, on the hung run only:
+
+```
+GLib: WaitForMultipleObjectsEx failed: The handle is invalid
+```
+
+and then **overran its own 900s `-serial` timeout**, running until the outer
+`run-timeout.py` budget of 1800s killed the tree. That is a host-level fault:
+QEMU's GLib main loop lost a handle it was waiting on. A kernel that hangs does
+not stop QEMU's own timeout from firing, so the overrun points away from the
+guest.
+
+### How to tell the two apart, next time
+
+Cheap and decisive, in this order:
+
+1. **Did QEMU blow past its own `TIMEOUT`?** If the wrapper killed it rather
+   than QEMU exiting on schedule, suspect the host. A guest hang still lets
+   QEMU's timeout fire on time.
+2. **Is `GLib: WaitForMultipleObjectsEx failed` in the run log?** Only present
+   on the flaky run here.
+3. **Re-run the identical commit before filing anything against another lane.**
+   One data point is not enough to accuse another lane's change, and the
+   re-run is ~7 minutes.
+
+### What is not known
+
+Why the handle goes invalid. Candidates not investigated: host memory
+pressure from a concurrent build, an antivirus scan touching the disk image
+mid-run, or an interaction with the boot-lock wait loop that had just released.
+The frequency is unknown — one occurrence in this session's runs. If it recurs,
+capturing QEMU's stderr separately from the serial log would narrow it.
+
+### Interaction with the stale-lock issue
+
+The hung run was killed by the Job Object, so it never released the boot lock,
+and the re-run then sat for 5 minutes waiting on a dead owner before I cleared
+it by hand — see
+`B-TIMED-OUT-BOOT-TEST-STRANDS-THE-CROSS-WORKTREE-LOCK-FOR-20-MINUTES` and
+`requests/b-a-boot-lock-survives-its-dead-owner.md`. The two compound: a flaky
+hang costs the 1800s timeout *plus* up to 20 minutes of the next run's time.

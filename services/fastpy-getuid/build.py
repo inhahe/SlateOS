@@ -40,10 +40,13 @@ and runs it as a ring-3 self-test (`self_test_fastpy_slateos_getuid`).  No
 filesystem capabilities beyond writing the output file are needed
 (`Rights::WRITE` for `/tmp`); the credential syscall needs no capability.
 
-Run from the fastpy repo root so `compiler` is importable, e.g.:
+Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
+the worktree you are actually working in. There are four checkouts of this
+repo, and naming one of them in a command is how a lane ends up building
+another lane's artifact -- see `scripts/lib/worktree.sh`:
 
     PYTHONPATH="D:/visual studio projects/fastpy" \
-        python "D:/visual studio projects/os/services/fastpy-getuid/build.py"
+        python services/fastpy-getuid/build.py
 
 The posix sysroot (`libc.a`) must already be built; see
 `toolchain/build-sysroot.ps1`.

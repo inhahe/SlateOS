@@ -29,10 +29,13 @@ Otherwise the compile flags mirror `toolchain/x86_64-slateos.json` (static
 relocation, large code model).  No `-msse` flag is needed or wanted: SSE2 is
 baseline for x86-64, so `zig cc` already uses the hard-float SysV ABI.
 
-Run from the fastpy repo root so `compiler` is importable, e.g.:
+Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
+the worktree you are actually working in. There are four checkouts of this
+repo, and naming one of them in a command is how a lane ends up building
+another lane's artifact -- see `scripts/lib/worktree.sh`:
 
     PYTHONPATH="D:/visual studio projects/fastpy" \
-        python "D:/visual studio projects/os/services/ctest-libm/build.py"
+        python services/ctest-libm/build.py
 
 The posix sysroot (`libc.a`) must already be built and must be *current* with
 `posix/src/` and with `toolchain/build-sysroot.ps1`'s RUSTFLAGS.

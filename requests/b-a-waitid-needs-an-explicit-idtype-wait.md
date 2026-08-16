@@ -1,5 +1,20 @@
 # B → A — `waitid` is three features short of POSIX, and all three are in the kernel's wait primitive
 
+**Status:** ✅ LANDED 2026-08-16 by lane A — kernel side complete; the libc half
+is lane B's. All four items shipped (item 4's premise turned out to be false —
+per-process CPU accounting already existed, and `clear_user_rusage` was throwing
+it away). The new ABI, including the **mandatory `WINFO` bit** without which the
+kernel does not read `arg3`/`arg4` at all, is described in
+`requests/a-b-wait-syscall-grew-wpgid-wnowait-and-a-waitinfo-struct.md`;
+the rationale is `design-decisions.md` §206.
+
+> This file was deleted in `d30e2a5ca` under the old rule 2 ("delete the file
+> when it lands") and restored here as soon as
+> `b-a-landed-requests-are-marked-not-deleted.md` merged in. It is cited by
+> name from `kernel/src/syscall/dispatch.rs`'s
+> `test_dispatch_wait_status_wpgid_and_wnowait`, so its deletion was exactly
+> the dangling-citation failure the new rule exists to prevent.
+
 **Filed:** 2026-08-16 by Lane B. **Action needed:** none urgent — this is a
 capability request, not a bug report. Nothing is broken today; libc now reports
 each gap honestly instead of faking it, and the request is what it would take to

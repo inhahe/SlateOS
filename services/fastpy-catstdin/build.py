@@ -25,10 +25,13 @@ It takes no arguments and touches no files — its only input is whatever the
 kernel wired onto fd 0, and its only output goes to fd 1.  Exits 0 on clean
 EOF; exits 1 if a write does not fully drain a chunk (short write).
 
-Run from the fastpy repo root so `compiler` is importable, e.g.:
+Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
+the worktree you are actually working in. There are four checkouts of this
+repo, and naming one of them in a command is how a lane ends up building
+another lane's artifact -- see `scripts/lib/worktree.sh`:
 
     PYTHONPATH="D:/visual studio projects/fastpy" \
-        python "D:/visual studio projects/os/services/fastpy-catstdin/build.py"
+        python services/fastpy-catstdin/build.py
 
 The posix sysroot (`libc.a`) must already be built; see
 `toolchain/build-sysroot.ps1`.

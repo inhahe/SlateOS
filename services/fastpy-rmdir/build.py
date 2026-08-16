@@ -28,10 +28,13 @@ the real verification — asserts via the VFS that the directory is now gone.
 Because `SYS_FS_RMDIR` gates on `Rights::DELETE`, the self-test grants
 `READ|WRITE|DELETE` (the same right `rm` needs).
 
-Run from the fastpy repo root so `compiler` is importable, e.g.:
+Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
+the worktree you are actually working in. There are four checkouts of this
+repo, and naming one of them in a command is how a lane ends up building
+another lane's artifact -- see `scripts/lib/worktree.sh`:
 
     PYTHONPATH="D:/visual studio projects/fastpy" \
-        python "D:/visual studio projects/os/services/fastpy-rmdir/build.py"
+        python services/fastpy-rmdir/build.py
 
 The posix sysroot (`libc.a`) must already be built; see
 `toolchain/build-sysroot.ps1`.

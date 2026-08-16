@@ -5,6 +5,31 @@
 `userspace/coreutils/src/bin/{grep,sed,cat}.rs`
 **Filed**: 2026-08-16 (rewritten the same day — see "Correction" at the end)
 
+**Status:** ✅ **LANDED 2026-08-16 by lane B** (`378c71b37`, `051ee45e7`,
+`bed21ae38`). Both arms were taken, in the order you recommended.
+
+* **The harness** — `userspace/oils/src/hostpath.rs` strikes cargo's two
+  injected directories out of the search path: bound as the shell variable
+  `PATH` for the in-process tests, and set on the `Command` for the three
+  end-to-end tests, since a child inherits the *process* environment and a shell
+  variable cannot reach it. `cargo test -p oils` is green on every target.
+  Written up in `known-issues.md` →
+  `B-THE-OILS-TESTS-RESOLVED-grep/sed/cat-FROM-THE-CARGO-BUILD-DIRECTORY`.
+* **The coreutils** — the engine they were missing is landed as
+  `userspace/ere` (`design-decisions.md` §322): osh's Pike VM moved out to a
+  crate, plus POSIX BRE by translation. Rewiring `grep`, `sed`, `awk`,
+  `expr` and `cat` onto it is tracked in `known-issues.md` →
+  `B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains` and is in
+  progress.
+
+Your framing was right and is what settled it: the tools these tests reach for
+are scaffolding, and the scaffolding has to be the reference implementation. Not
+deleted despite the closing line below — per `design-decisions.md` §315 a
+landed request is marked rather than removed, because the entries above cite it
+for the diagnosis, and the "Correction" section is worth keeping on its own.
+
+---
+
 ## The short version
 
 `cargo test --workspace --target x86_64-pc-windows-gnu` fails, reproducibly, in

@@ -24346,3 +24346,164 @@ checkout, written by a tool. A config that governs checkout cannot fix a file
 rewritten post-checkout, which is precisely why the durable fix belongs in the
 hash rule and not in git configuration — and why the fix works for any future
 tool that does the same thing without anyone having to notice.
+
+## B-THE-OILS-TESTS-RESOLVED-`grep`/`sed`/`cat`-FROM-THE-CARGO-BUILD-DIRECTORY (lane B, 2026-08-16) — ✅ **FIXED** (`378c71b37`, `051ee45e7`)
+
+**In short:** the shell's test suite passed or failed depending on *what else
+had been built* in the same tree. Cargo puts the build directory on the
+program-search path before it runs a test, and that directory holds ~200
+SlateOS coreutils — so a shell test that piped through `grep` ran *our* `grep`,
+whose regular-expression support was a substring search. `cargo test -p oils`
+was green and `cargo test --workspace` was red, from the same commit and the
+same test binary.
+
+Reported by lane C in
+`requests/c-b-workspace-test-red-slateos-coreutils-shadow-host.md`, and it was
+urgent: cargo stops at the first failing test binary, so `osh` failing meant
+every crate after it alphabetically — `p` through `z` — went untested on every
+workspace run anyone did.
+
+### Why it happens
+
+Before running a test binary, cargo prepends `target/<triple>/<profile>/deps`
+and the profile directory above it to the platform's dynamic-library search
+variable, which on Windows is `PATH` — so that a test can find the shared
+libraries its crate links against. It is not trying to stage executables; on
+this workspace the same directory simply *is* where every coreutil lands.
+
+So the shadowing is conditional on build order. `cargo test -p oils` in a clean
+tree builds no coreutils and the tests find the host's tools. `cargo test
+--workspace`, or any run after a `cargo build`, does not.
+
+### Why the tests are right to want the host's tools
+
+The tools these tests reach for are **scaffolding, and the scaffolding has to be
+the reference implementation.** They are differential tests against bash's
+documented behaviour: `set -o | grep '^posix'` is a question about `set -o`, and
+when it fails it must be because `set -o` is wrong. A `grep` of our own in that
+position turns every gap in our coreutils into a shell-test failure filed
+against the shell — the defect misattributed, and the real one hidden behind it.
+
+That is why fixing the harness is not hiding the bug. The coreutils gaps it
+uncovered are real and are fixed where they live; see
+`B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains` below.
+
+### The fix
+
+`userspace/oils/src/hostpath.rs`. It derives the two injected directories from
+`std::env::current_exe()` — `…/deps/<test binary>`, so its parent and
+grandparent — rather than matching on path shape, which keeps it working under
+a custom `--target-dir`, another profile, or a different triple. It then strikes
+them out of the ambient `PATH`.
+
+Two suites need it and they reach the child differently:
+
+| suite | how the shell is created | how the path reaches it |
+|---|---|---|
+| `src/interp.rs`'s `#[cfg(test)]` | a `Shell` in this process | bound as the shell **variable** `PATH` in `new_shell()` |
+| `tests/*.rs` | the real `osh` binary, spawned | `Command::env("PATH", …)`, via `hostpath::scrub` |
+
+The in-process half deliberately does **not** mutate the process environment:
+libtest runs every test on a thread, and `std::env::set_var` is unsound while
+another thread may be reading the environment — which is why Rust 2024 made it
+`unsafe`. A shell variable is per-shell and touches nothing shared. The
+end-to-end half cannot use a shell variable at all, because a child inherits the
+*process* environment; that is why the first commit fixed only the unit tests
+and `redirect_dup`'s `{ … | sed 's/^/piped: /'; } 2>&1` stayed red.
+
+`hostpath.rs` lives in `src/` and is declared `#[cfg(test)]` by `lib.rs`, while
+each integration test pulls the same file in with
+`#[path = "../src/hostpath.rs"]`. One definition serves both suites and none of
+it reaches the shipped shell — a `tests/common/mod.rs` would have served only
+the second, and a `pub` module only by shipping test scaffolding.
+
+### What guards it
+
+`a_test_shell_resolves_commands_outside_the_build_directory` (in `interp.rs`)
+asserts that neither injected directory is on the test shell's `$PATH` and that
+`command -v cat` does not resolve into the build tree. `hostpath`'s own three
+tests assert the same of the `OsString`, and — the other half, which is easy to
+forget — that *nothing else* was dropped: a scrub that removed too much would
+fail every test that needs a real `sed`, for a reason of its own making.
+
+### The general shape, for whoever hits this next
+
+**A test suite whose result depends on what else is in the build directory is
+not testing the code.** Any crate here that shells out to a program by name has
+the same exposure — the build directory is on the search path for the whole
+workspace, not just for `oils`. If you write such a test, take `hostpath` with
+it rather than re-deriving it.
+
+## B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-`str::contains` (lane B, 2026-08-16) — **engine landed (`bed21ae38`); callers still to be rewired**
+
+**In short:** `grep`, `sed`, `awk` and `expr` do not implement regular
+expressions. They search for the pattern as a *literal substring*. So
+`grep '^posix'` finds nothing at all, `sed 's/^/E:/'` copies its input through
+unchanged, and `grep '[ax]'` matches only a line that literally contains the
+four characters `[ax]`. Every one of those looks like the program working,
+which is how the whole family passed its own test suites: each test asserted the
+substring behaviour it had.
+
+Found while fixing
+`B-THE-OILS-TESTS-RESOLVED-grep/sed/cat-FROM-THE-CARGO-BUILD-DIRECTORY` above —
+the shell's tests had been running these instead of the host's tools, and what
+they were failing on was this.
+
+### The state of it
+
+| caller | wants | has |
+|---|---|---|
+| `osh`'s `[[ =~ ]]` | ERE | a real ERE engine (now the `ere` crate) |
+| `grep` | BRE, and ERE under `-E` | `hay.contains(pattern)` — `line_selected`, `grep.rs` |
+| `sed` | BRE | `str::contains`, plus a hand-rolled `.`/`*` matcher (`regex_match_at`, `sed.rs:395`) |
+| `awk`'s `/re/` and `~` | ERE | `simple_contains`, `awk.rs:250` |
+| `expr`'s `:` | BRE anchored at the start | `str::contains` |
+
+It is not four bugs; it is **one missing component, absent four times** — and
+the component already existed, inside the shell.
+
+### What has landed
+
+`userspace/ere` (`bed21ae38`): osh's engine moved out to a crate, plus `ch` (the
+character model) and `bre` (Basic REs translated to Extended). The shell now
+depends on it rather than owning it, so the shell and the utilities cannot drift
+about what `[a-z]` means. Two things worth knowing before using it:
+
+* **BRE is not a subset of ERE.** `a+b` is three literal characters in BRE and a
+  repetition in ERE; `\(x\)` groups in BRE and is literal in ERE; `*` is a
+  literal where nothing precedes it. `ere::bre::compile` is the one translator.
+* **Backreferences (`\1`) and word boundaries (`\<`, `\b`) are refused, by
+  name.** A Pike VM cannot express a backreference, and quietly turning `\1`
+  into a literal `1` would be a wrong answer rather than an error. If a caller
+  genuinely needs them, that is a separate design decision, not a patch.
+
+### What is left
+
+Rewrite the four callers on it. Each is its own task and each is more than a
+one-line substitution, because the missing regex is not the only thing missing:
+
+* **`grep`** — BRE by default, ERE under `-E`, literal under `-F`. Its argument
+  parser also errors on `-q`, on `--`, and on every option it does not know
+  (`-w -x -l -L -h -H -o -e -f -s -m`), which is why lane C saw `rc=2` from
+  invocations that should have worked.
+* **`sed`** — BRE in both addresses and `s///`. `regex_match_at` goes.
+* **`awk`** — ERE for `/re/`, `~`, `!~`, and for `split`/`sub`/`gsub`/`match`.
+* **`expr`** — BRE anchored at the start, with the POSIX `:` return rule (the
+  first group if there is one, else the match length).
+* **`cat`**, separately: `-v` and `-A` are missing, and an unknown option is
+  treated as a filename and **exits 0**, so a typo silently succeeds.
+
+### One thing already fixed in passing
+
+The engine bounded a single `{m,n}` at 1000 and nothing else — but intervals
+multiply under nesting, so `((a{1000}){1000}){1000}` asked for ~10⁹
+instructions, tens of gigabytes, from a 24-byte pattern. `MAX_PROG` now bounds
+the compiled program. This mattered more the moment the engine became shared:
+`grep -f patterns.txt` and `sed -f script.sed` read the pattern from a **file**,
+so it is as much untrusted input as the subject is.
+
+### Why not a third-party regex crate
+
+`posix/src/regex.rs` stays a separate implementation on purpose — it is
+`no_std`, fixed-buffer, C-ABI, and answers to POSIX's error codes byte for byte.
+For the Rust programs, see `design-decisions.md` §322.

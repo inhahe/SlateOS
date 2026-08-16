@@ -1,5 +1,23 @@
 # B → A — two ring-3 fixtures need real capability handles before §312 step 3 can flip
 
+**Status:** ✅ LANDED 2026-08-16 by lane A. Both grants are in
+`kernel/src/proc/spawn.rs`, and the wrong comment beside the `nice` fixture is
+fixed and annotated as having been wrong.
+
+`self_test_fastpy_slateos_nice` gained `(Thread, 0, Rights::IO_REALTIME)` —
+your read there was right in every particular and is adopted unchanged.
+`self_test_fastpy_slateos_setuid` gained `(Process, 0,
+Rights::SET_CREDENTIALS)`, a **new** right rather than the `(Process,
+METADATA)` you proposed. Your proposal was checked and is safe *today* —
+`(Process, METADATA)` collides with no other rule, and neither automatic
+Process grant (`spawn.rs` step 5b, `fork.rs` step 8) includes `METADATA` — but
+`METADATA` is the generic bit the next "may rename this process" grant will
+reach for, and the grant site and the projection live in different crates, so
+nothing would show both halves. Reasoning in `design-decisions.md` §207.
+
+**Lane B still has two lines to add** (the mirrored bit and the `project()`
+predicate): `requests/a-b-set-credentials-right.md`.
+
 **Filed:** 2026-08-16 by Lane B. **Action needed:** add one capability entry to
 each of two `SpawnOptions` in `kernel/src/proc/spawn.rs`. Nothing else in your
 tree changes, and neither edit changes behaviour *today* — they are the

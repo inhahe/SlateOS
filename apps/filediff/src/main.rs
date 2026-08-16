@@ -40,6 +40,7 @@ use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextO
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 use guitk::text;
+use guitk::textfind;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
 
@@ -332,24 +333,21 @@ impl SearchState {
             return;
         }
 
-        let query = if self.case_sensitive {
-            self.query.clone()
-        } else {
-            self.query.to_lowercase()
-        };
-
+        // The offsets have to be offsets into `edit.text` — that is the string
+        // the highlighter slices. Searching a `to_lowercase()` copy gave the
+        // copy's offsets, which drift apart from the real ones at the first
+        // character whose folded form is a different length (`İ` U+0130 is two
+        // bytes and folds to three). The match length was likewise taken from
+        // the query rather than from what matched, and the scan resumed one
+        // byte past each match's *start*, so `aa` in `aaaa` was reported three
+        // times, overlapping.
+        let case = textfind::Case::sensitive(self.case_sensitive);
+        // Cloned because `push_matches_for_edit` takes `&mut self`; the search
+        // itself borrows nothing but the edit's own text.
+        let query = self.query.clone();
         for (i, edit) in edits.iter().enumerate() {
-            let text = if self.case_sensitive {
-                edit.text.clone()
-            } else {
-                edit.text.to_lowercase()
-            };
-
-            let mut start = 0;
-            while let Some(pos) = text.get(start..).and_then(|s| s.find(&query)) {
-                let byte_offset = start.saturating_add(pos);
-                self.push_matches_for_edit(i, edit.op, byte_offset, query.len());
-                start = byte_offset.saturating_add(1);
+            for (start, end) in textfind::matches(&edit.text, &query, case) {
+                self.push_matches_for_edit(i, edit.op, start, end.saturating_sub(start));
                 if self.matches.len() >= MAX_SEARCH_RESULTS {
                     return;
                 }
@@ -2631,6 +2629,81 @@ mod tests {
             search.next_match();
         }
         assert!(search.current_match < count);
+    }
+
+    /// One edit, so a match's offsets can be checked against a known string.
+    fn edit(op: DiffOp, text: &str) -> Vec<DiffEdit> {
+        vec![DiffEdit {
+            op,
+            left_line: Some(1),
+            right_line: Some(1),
+            text: text.to_string(),
+        }]
+    }
+
+    #[test]
+    fn a_match_offset_is_an_offset_into_the_line_the_highlighter_slices() {
+        // `İ` (U+0130) is two bytes but folds to three (`i` + a combining dot),
+        // so an offset measured in a lower-cased copy of this line is one byte
+        // past the truth — enough to slice inside a character and panic the
+        // highlighter.
+        let mut search = SearchState {
+            query: "ABC".to_string(),
+            ..Default::default()
+        };
+        search.search(&edit(DiffOp::Delete, "\u{130}abc"));
+        assert_eq!(search.matches.len(), 1);
+        let m = &search.matches[0];
+        assert_eq!(m.byte_offset, 2);
+        assert_eq!(m.match_len, 3);
+    }
+
+    #[test]
+    fn a_match_is_not_assumed_to_be_as_long_as_the_query() {
+        // The query is three bytes (`i` + a combining dot); what it matches is
+        // the two-byte `İ`. Taking the length from the query would over-run the
+        // character by a byte.
+        let mut search = SearchState {
+            query: "i\u{307}".to_string(),
+            ..Default::default()
+        };
+        search.search(&edit(DiffOp::Delete, "x\u{130}y"));
+        assert_eq!(search.matches.len(), 1);
+        let m = &search.matches[0];
+        assert_eq!(m.byte_offset, 1);
+        assert_eq!(m.match_len, 2);
+    }
+
+    #[test]
+    fn matches_do_not_overlap_one_another() {
+        // Resuming one byte past a match's *start* reported `aa` three times in
+        // `aaaa`, so the highlighter painted overlapping runs.
+        let mut search = SearchState {
+            query: "aa".to_string(),
+            case_sensitive: true,
+            ..Default::default()
+        };
+        search.search(&edit(DiffOp::Delete, "aaaa"));
+        let spans: Vec<(usize, usize)> = search
+            .matches
+            .iter()
+            .map(|m| (m.byte_offset, m.match_len))
+            .collect();
+        assert_eq!(spans, vec![(0, 2), (2, 2)]);
+    }
+
+    #[test]
+    fn an_equal_line_is_highlighted_in_both_panels() {
+        let mut search = SearchState {
+            query: "b".to_string(),
+            case_sensitive: true,
+            ..Default::default()
+        };
+        search.search(&edit(DiffOp::Equal, "abc"));
+        assert_eq!(search.matches.len(), 2);
+        assert_eq!(search.matches[0].panel, 0);
+        assert_eq!(search.matches[1].panel, 1);
+        assert!(search.matches.iter().all(|m| m.byte_offset == 1));
     }
 
     // --- Merge tests ---

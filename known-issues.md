@@ -25196,7 +25196,7 @@ the same exposure — the build directory is on the search path for the whole
 workspace, not just for `oils`. If you write such a test, take `hostpath` with
 it rather than re-deriving it.
 
-## B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-`str::contains` (lane B, 2026-08-16) — **engine landed (`bed21ae38`); all four callers rewritten on it; only the unrelated `cat` item below is left**
+## B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-`str::contains` (lane B, 2026-08-16) — ✅ **FIXED 2026-08-16** (engine `bed21ae38`; `grep` `bb12be713`, `sed`, `awk`, `expr` `cd9e23600`, `cat` `de06e53e3`)
 
 **In short:** `grep`, `sed`, `awk` and `expr` did not implement regular
 expressions. They searched for the pattern as a *literal substring*. So
@@ -25307,8 +25307,50 @@ one-line substitution, because the missing regex is not the only thing missing:
   prints `0`, not an empty line; `+0` is true and `-0` is false, because null is
   exactly `^-?0+$` or empty; `index` searches for any character of a *set*; and
   `:` binds tighter than `*`.
-* **`cat`**, separately: `-v` and `-A` are missing, and an unknown option is
-  treated as a filename and **exits 0**, so a typo silently succeeds.
+* ~~**`cat`**, separately: `-v` and `-A` are missing, and an unknown option is
+  treated as a filename and **exits 0**, so a typo silently succeeds.~~
+  **Done, `de06e53e3`.** The missing options were the least of it, and this
+  entry understated it in the same way the `expr` row did. `cat` exited **0 on
+  every path**, including a file it could not open, so `cat "$f" > out || die`
+  never fired. And `-n` read through `BufRead::lines()`, which is UTF-8 and
+  `String`: on a file that is not valid UTF-8 it stopped at the first bad byte,
+  and on a CRLF file it **silently deleted the CR**. That last one is `cat`
+  failing at the only thing it does — its correctness condition is byte-for-byte
+  identity — and no option list mentions it.
+
+  Now: `-A -b -e -E -n -s -t -T -u -v` and the long forms, lines split with
+  `read_until` and copied as bytes, filenames carried as `OsString` from
+  `args_os` to `File::open`, and diagnostics through `coreutils::errmsg`.
+  `scripts/cat-diff.sh` compares **80 of 80** command lines against the host's
+  GNU `cat` — as hex dumps, because `$(...)` strips the trailing newlines and
+  eats the NULs that are exactly what is at issue here.
+
+### What the sweep turned out to be about
+
+Four of the five were rewrites, not rewirings, and the pattern is worth naming
+because it will recur in the rest of the coreutils. **The missing regex was
+never the whole bug; it was the part of the bug that was legible.** Underneath
+it, in each program, was the same shape: a plausible-looking implementation of
+a *subset*, with the rest of the specification simply absent, and a test suite
+that asserted the subset. `sed` had no ranges. `awk` had no variables — not
+`NR` — and its condition evaluator fell through to `true`. `expr` had no `:`,
+no `match`, no `substr`, no `index`, and `i64` arithmetic. `cat` exited 0 on
+every path and corrupted CRLF files under `-n`.
+
+Two consequences for how the remaining utilities get audited:
+
+* **A unit test cannot find this class of bug, because it is written from the
+  same belief as the code.** Every one of these programs passed its own tests.
+  What found the bugs was the differential harness: `scripts/{sed,awk,expr,cat}-diff.sh`
+  run the real GNU tool beside ours on identical input and compare bytes, which
+  is the one check that does not consult our opinion. Any coreutil claiming to
+  match a POSIX tool should acquire one before it is called done.
+* **A bug entry that describes the *symptom you noticed* will understate the
+  defect.** This entry's `expr` and `cat` rows were both written by reading the
+  neighbours and assuming the same failure, and both were milder than the truth
+  — `expr`'s `:` was recorded as a substring search when there was no `:` at
+  all. An entry that overstates how well something works is worse than no entry,
+  because it argues against going to look.
 
 ### One thing already fixed in passing
 

@@ -15,12 +15,28 @@
   variable cannot reach it. `cargo test -p oils` is green on every target.
   Written up in `known-issues.md` →
   `B-THE-OILS-TESTS-RESOLVED-grep/sed/cat-FROM-THE-CARGO-BUILD-DIRECTORY`.
-* **The coreutils** — the engine they were missing is landed as
-  `userspace/ere` (`design-decisions.md` §322): osh's Pike VM moved out to a
-  crate, plus POSIX BRE by translation. Rewiring `grep`, `sed`, `awk`,
-  `expr` and `cat` onto it is tracked in `known-issues.md` →
-  `B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains` and is in
-  progress.
+* **The coreutils** — ✅ **also complete, 2026-08-16.** The engine they were
+  missing landed as `userspace/ere` (`design-decisions.md` §322): osh's Pike VM
+  moved out to a crate, plus POSIX BRE by translation. All five callers are now
+  on it — `grep` (`bb12be713`), `sed`, `awk`, `expr` (`cd9e23600`) and `cat`
+  (`de06e53e3`) — and four of the five needed rewriting rather than rewiring.
+  Each is now checked against the host's GNU tool by a differential harness
+  (`scripts/{sed,awk,expr,cat}-diff.sh`) that compares stdout and the exit
+  status on identical input: **89, 121, 158 and 80 command lines** respectively,
+  with every deliberate divergence named in the script and the script failing if
+  one of them ever stops being true. Written up in `known-issues.md` →
+  `B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains`.
+
+  Worth passing back, because it bears on your framing: the second arm found
+  much more than the first arm predicted. `sed` had no line ranges (`1,5d`
+  deleted lines 1 and 5); `awk` had no variables at all — not even `NR` — and
+  its condition evaluator fell through to `true`, so a pattern it could not
+  parse matched every line; `expr` had no `:`, `match`, `substr` or `index`
+  whatsoever; and `cat` exited **0 on every path**, including a file it could
+  not open, while `-n` silently deleted the CR from every CRLF file it was
+  given. None of that was visible from the shell tests that surfaced the
+  problem. Your "the tests are right and our coreutils are wrong" reading was
+  the correct one, and it was right about more than the regexes.
 
 Your framing was right and is what settled it: the tools these tests reach for
 are scaffolding, and the scaffolding has to be the reference implementation. Not

@@ -134,8 +134,8 @@ pub(crate) type RlimitTable = [Rlimit; RLIMIT_NLIMITS];
 /// for the rule and the alternatives considered.
 mod limit_store {
     use super::{
-        RLIM_INFINITY, RLIMIT_CORE, RLIMIT_NLIMITS, RLIMIT_NOFILE, RLIMIT_STACK, Rlimit,
-        RlimitTable,
+        RLIM_INFINITY, RLIMIT_CORE, RLIMIT_NICE, RLIMIT_NLIMITS, RLIMIT_NOFILE, RLIMIT_RTPRIO,
+        RLIMIT_STACK, Rlimit, RlimitTable,
     };
 
     /// Cold-start limits, stated once for both builds.
@@ -164,6 +164,35 @@ mod limit_store {
 
         // Core dumps: 0 (disabled — we don't support them).
         limits[RLIMIT_CORE as usize] = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+
+        // Nice ceiling: 0, matching both Linux's own default
+        // (include/asm-generic/resource.h gives RLIMIT_NICE {0, 0}) and our
+        // kernel's, which seeds the same value in
+        // `kernel/src/proc/pcb.rs`'s RLIMITS_INIT and consults it from the
+        // Linux `setpriority` translation layer.
+        //
+        // Linux encodes this ceiling inverted: `rlim_cur = 20 - lowest
+        // allowed nice`, so 0 means "nice may never go below 20" — i.e. no
+        // priority boost without CAP_SYS_NICE, since the nice range tops out
+        // at 19.  Leaving it at the blanket RLIM_INFINITY (as this table did
+        // until §314's survey) told every caller of getrlimit that it had
+        // unlimited headroom while `nice()`/`setpriority()` went on refusing
+        // any boost — two of our own answers contradicting each other, and
+        // both contradicting the kernel.
+        limits[RLIMIT_NICE as usize] = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+
+        // Real-time priority ceiling: 0, same three-way agreement.  Encoded
+        // directly rather than inverted — `rlim_cur` is the highest
+        // `sched_priority` an RT policy switch may request, and every valid
+        // RT priority is in [1, 99], so 0 forbids SCHED_FIFO/SCHED_RR
+        // outright without CAP_SYS_NICE.
+        limits[RLIMIT_RTPRIO as usize] = Rlimit {
             rlim_cur: 0,
             rlim_max: 0,
         };
@@ -573,29 +602,83 @@ fn kernel_set_nice(nice: i32) -> i32 {
 /// the value AND maps it to a scheduler priority level, so the change actually
 /// affects scheduling (previously this only mutated a userspace-local static).
 ///
-/// Phase 168: Linux's `kernel/sys.c::sys_nice` gates negative
-/// increments on `CAP_SYS_NICE` (via `can_nice` /
-/// `task_rlimit(RLIMIT_NICE)`).  Positive increments (lowering
-/// priority) are always allowed; negative increments (raising
-/// priority) require CAP_SYS_NICE under the default RLIMIT_NICE = 0.
-/// On EPERM we return `-1` and set errno — callers must clear
-/// errno before calling and re-check it after, since `-1` is also
-/// a legitimate nice value.
+/// Linux's `can_nice()` (`kernel/sched/core.c`), evaluated against our own
+/// `RLIMIT_NICE`:
+///
+/// ```c
+/// static bool is_nice_reduction(const struct task_struct *task, int niceval)
+/// {
+///     /* Convert nice value [19,-20] to rlimit style value [1,40]: */
+///     int nice_rlim = nice_to_rlimit(niceval);   /* 20 - niceval */
+///     return (nice_rlim <= task_rlimit(task, RLIMIT_NICE));
+/// }
+/// int can_nice(const struct task_struct *p, const int nice)
+/// {
+///     return is_nice_reduction(p, nice) || capable(CAP_SYS_NICE);
+/// }
+/// ```
+///
+/// The rlimit is the **alternative**, not a formality: `CAP_SYS_NICE` is what
+/// you need *when the limit does not already cover you*.  Testing only the
+/// capability (as this file did before §314's survey) refuses a boost that a
+/// process with a raised `RLIMIT_NICE` is entitled to, and — because the
+/// capability words are a deliberately conservative projection under §312 —
+/// would refuse it for a process the kernel would have allowed.
+///
+/// `target_nice` is the **clamped** value the caller will end up at, matching
+/// where Linux evaluates the test.  The rlimit is read through our own
+/// `getrlimit`, so a `setrlimit`/`prlimit` raise takes effect here; that write
+/// path is itself gated on `CAP_SYS_RESOURCE` for hard-limit raises, so this
+/// does not become a way to grant yourself priority.
+fn can_nice(target_nice: i32) -> bool {
+    // 20 - target_nice, for target_nice in [-20, 19], is in [1, 40] — no
+    // overflow is possible, but say so with a checked op rather than relying
+    // on the caller having clamped.
+    let Some(nice_rlim) = 20i32.checked_sub(target_nice) else {
+        // Unreachable for any clamped nice; treat as "not covered by the
+        // limit" so the decision falls through to the capability.
+        return crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE);
+    };
+    let Ok(nice_rlim) = u64::try_from(nice_rlim) else {
+        // Negative only if `target_nice > 20`, i.e. above the top of the nice
+        // range entirely.  Linux's `nice_rlim <= rlimit` is then trivially
+        // true against any unsigned ceiling, so the caller is covered.
+        return true;
+    };
+    let mut rl = Rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // On the (unreachable) failure path leave the limit at 0, which is the
+    // cold-start value and the conservative one: the decision then rests on
+    // the capability alone, exactly as it did before this function existed.
+    if getrlimit(RLIMIT_NICE, &raw mut rl) == 0 && nice_rlim <= rl.rlim_cur {
+        return true;
+    }
+    crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE)
+}
+
+/// Phase 168 / §314: Linux's `kernel/sys.c::sys_nice` gates negative
+/// increments on `can_nice()` — "the target nice is within `RLIMIT_NICE`
+/// **or** the caller holds `CAP_SYS_NICE`".  Positive increments (lowering
+/// priority) are always allowed.  On `EPERM` we return `-1` and set errno —
+/// callers must clear errno before calling and re-check it after, since `-1`
+/// is also a legitimate nice value.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn nice(inc: i32) -> i32 {
-    // Phase 168: any negative increment is a priority-raise, which
-    // requires CAP_SYS_NICE.  Linux performs this check after
-    // computing the clamped target nice and consulting can_nice;
-    // with our flat (no per-task rlimit) model the test collapses
-    // to a pure cap probe.
-    if inc < 0 && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE) {
+    let current = kernel_get_nice();
+    // Clamp to [-20, 19] per POSIX.  Linux clamps the increment to [-40, 40]
+    // first and then clamps the sum; `saturating_add` + `clamp` reaches the
+    // same value for every input.
+    let new_val = current.saturating_add(inc).clamp(-20, 19);
+    // Only a priority *raise* is gated, and Linux evaluates can_nice against
+    // the clamped target — not the requested increment — so the clamp must
+    // happen first.  It is pure: nothing is stored until the gate passes.
+    if inc < 0 && !can_nice(new_val) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
-    let current = kernel_get_nice();
-    // Clamp to [-20, 19] per POSIX.
-    let new_val = current.saturating_add(inc).clamp(-20, 19);
     kernel_set_nice(new_val);
     new_val
 }
@@ -623,14 +706,16 @@ pub extern "C" fn getpriority(which: i32, _who: u32) -> i32 {
 /// `SYS_PROCESS_SET_NICE`, which re-prioritises the process's tasks — the
 /// change is real, not merely stored.  Returns 0 on success, -1 on error.
 ///
-/// Phase 169: Linux's `sys_setpriority` calls `set_one_prio` on each
+/// Phase 169 / §314: Linux's `sys_setpriority` calls `set_one_prio` on each
 /// task in scope.  After clamping `niceval` to `[MIN_NICE, MAX_NICE]`,
 /// `set_one_prio` does:
 ///   - cross-uid permission check → `EPERM` (collapses in our
 ///     single-user model);
 ///   - `if (niceval < task_nice(p) && !can_nice(p, niceval)) error =
-///     -EACCES;` — i.e. lowering the nice value (raising priority)
-///     requires `CAP_SYS_NICE` under the default `RLIMIT_NICE = 0`.
+///     -EACCES;` — i.e. lowering the nice value (raising priority) is
+///     permitted when the target is within `RLIMIT_NICE` **or** the caller
+///     holds `CAP_SYS_NICE`.  See [`can_nice`] for why the rlimit half is
+///     not optional.
 /// Note the errno is `EACCES`, not `EPERM` — that distinction is
 /// observable by callers that switch on errno.  Equivalent or higher
 /// nice values (lowering priority) are always allowed.
@@ -642,11 +727,11 @@ pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
     }
     let val = prio.clamp(-20, 19);
     let current = kernel_get_nice();
-    // Phase 169: priority-raise (new nice < current nice) requires
-    // CAP_SYS_NICE.  Linux returns EACCES from set_one_prio in this
-    // case (distinct from the cross-uid EPERM path).
-    if val < current && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE)
-    {
+    // Phase 169 / §314: a priority-raise (new nice < current nice) needs
+    // can_nice() — RLIMIT_NICE or CAP_SYS_NICE — evaluated against the
+    // clamped target, as in Linux.  Linux returns EACCES from set_one_prio
+    // here (distinct from the cross-uid EPERM path).
+    if val < current && !can_nice(val) {
         errno::set_errno(errno::EACCES);
         return -1;
     }
@@ -917,10 +1002,35 @@ mod tests {
         assert_eq!(rl.rlim_max, 0);
     }
 
+    /// `RLIMIT_NICE` and `RLIMIT_RTPRIO` default to `{0, 0}` — the same value
+    /// Linux uses (`include/asm-generic/resource.h`) and the same one our own
+    /// kernel seeds in `kernel/src/proc/pcb.rs`.
+    ///
+    /// This test exists because they used to default to `RLIM_INFINITY` here
+    /// while the gates in `nice`/`setpriority`/`sched_setscheduler` behaved as
+    /// if the limit were 0 — so `getrlimit` promised headroom the same crate
+    /// then refused to honour.  A future edit that "simplifies" `RLIMITS_INIT`
+    /// back to a blanket infinity re-creates that contradiction silently, and
+    /// this is what catches it.
+    #[test]
+    fn default_priority_limits_are_zero_like_linux_and_our_kernel() {
+        reset_global_state();
+        for res in [RLIMIT_NICE, RLIMIT_RTPRIO] {
+            let mut rl = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(getrlimit(res, &mut rl), 0, "getrlimit failed for {res}");
+            assert_eq!(rl.rlim_cur, 0, "resource {res} soft should be 0");
+            assert_eq!(rl.rlim_max, 0, "resource {res} hard should be 0");
+        }
+    }
+
     #[test]
     fn default_limits_others_are_infinity() {
         reset_global_state();
         // Resources that default to RLIM_INFINITY for both soft and hard.
+        // NICE and RTPRIO are deliberately absent — see the test above.
         let inf_resources = [
             RLIMIT_CPU,
             RLIMIT_FSIZE,
@@ -932,8 +1042,6 @@ mod tests {
             RLIMIT_LOCKS,
             RLIMIT_SIGPENDING,
             RLIMIT_MSGQUEUE,
-            RLIMIT_NICE,
-            RLIMIT_RTPRIO,
             RLIMIT_RTTIME,
         ];
         for &res in &inf_resources {
@@ -1809,9 +1917,18 @@ mod tests {
             };
             let ret = getrlimit(res, &mut rl);
             assert_eq!(ret, 0, "getrlimit failed for resource {res}");
-            // All default to RLIM_INFINITY.
-            assert_eq!(rl.rlim_cur, RLIM_INFINITY);
-            assert_eq!(rl.rlim_max, RLIM_INFINITY);
+            // Defaults follow Linux's `INIT_RLIMITS`, which is not uniform:
+            // the two priority ceilings start at zero (a process may not
+            // raise its own priority until something grants it headroom),
+            // everything else here starts unlimited.  See
+            // `default_priority_limits_are_zero_like_linux_and_our_kernel`.
+            let expected = if res == RLIMIT_NICE || res == RLIMIT_RTPRIO {
+                0
+            } else {
+                RLIM_INFINITY
+            };
+            assert_eq!(rl.rlim_cur, expected, "rlim_cur for resource {res}");
+            assert_eq!(rl.rlim_max, expected, "rlim_max for resource {res}");
         }
     }
 
@@ -2350,6 +2467,83 @@ mod tests {
                 crate::sys_capability::CAP_SYS_BOOT,
             ));
         }
+
+        // -- §314: RLIMIT_NICE is the alternative, not a formality ---------
+
+        /// Raise `RLIMIT_NICE` far enough to cover nice -1, drop
+        /// `CAP_SYS_NICE`, and the boost must still be granted.  This is the
+        /// whole point of Linux's `can_nice`: a service manager can hand one
+        /// process priority headroom without handing it a capability.
+        ///
+        /// Before §314 this returned `EPERM` — the gate tested only the
+        /// capability, so a raised limit meant nothing.
+        #[test]
+        fn test_nice_raise_permitted_by_rlimit_without_the_capability() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            // Linux's encoding is inverted: rlim_cur = 20 - lowest allowed
+            // nice.  21 therefore allows nice -1 and nothing lower.
+            let rl = Rlimit {
+                rlim_cur: 21,
+                rlim_max: 21,
+            };
+            assert_eq!(setrlimit(RLIMIT_NICE, &rl), 0, "setrlimit must succeed");
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(
+                nice(-1),
+                -1,
+                "nice(-1) from 0 lands at -1, which RLIMIT_NICE=21 covers"
+            );
+            assert_eq!(
+                errno::get_errno(),
+                0,
+                "a boost within RLIMIT_NICE must not be refused for want of \
+                 CAP_SYS_NICE (§314)"
+            );
+        }
+
+        /// The limit is a *ceiling*, not a switch: `rlim_cur = 21` allows
+        /// nice -1 but not nice -2, and without the capability the deeper
+        /// boost is still `EPERM`.  Guards against a fix that reads the
+        /// rlimit and then ignores its value.
+        #[test]
+        fn test_nice_raise_beyond_the_rlimit_is_still_eperm() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            let rl = Rlimit {
+                rlim_cur: 21,
+                rlim_max: 21,
+            };
+            assert_eq!(setrlimit(RLIMIT_NICE, &rl), 0);
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(nice(-2), -1);
+            assert_eq!(
+                errno::get_errno(),
+                errno::EPERM,
+                "nice -2 is outside a ceiling of 21 (which allows -1 at best)"
+            );
+        }
+
+        /// At the cold-start limit of 0 the capability is the only route —
+        /// i.e. this change is behaviour-preserving for every caller that
+        /// never touches `setrlimit`.
+        #[test]
+        fn test_nice_rlimit_zero_leaves_the_capability_as_the_only_route() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            let mut rl = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(getrlimit(RLIMIT_NICE, &mut rl), 0);
+            assert_eq!(rl.rlim_cur, 0, "cold-start RLIMIT_NICE must be 0");
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(nice(-1), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
     }
 
     // ----------------------------------------------------------------------
@@ -2676,6 +2870,55 @@ mod tests {
             errno::set_errno(0);
             assert_eq!(nice(-3), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- §314: RLIMIT_NICE is the alternative here too ------------------
+
+        /// A raise covered by `RLIMIT_NICE` succeeds without `CAP_SYS_NICE`,
+        /// and actually stores the value.  `setpriority` shares `can_nice`
+        /// with `nice`, so this also pins that the two agree.
+        #[test]
+        fn test_setpriority_raise_permitted_by_rlimit_without_the_capability() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            // rlim_cur = 25 allows nice down to -5.
+            let rl = Rlimit {
+                rlim_cur: 25,
+                rlim_max: 25,
+            };
+            assert_eq!(setrlimit(RLIMIT_NICE, &rl), 0);
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(
+                setpriority(PRIO_PROCESS, 0, -5),
+                0,
+                "nice -5 is exactly at a ceiling of 25 and must be granted"
+            );
+            errno::set_errno(0);
+            assert_eq!(getpriority(PRIO_PROCESS, 0), -5, "the raise must stick");
+        }
+
+        /// One past the ceiling is still `EACCES` — and `EACCES`, not the
+        /// `EPERM` that `nice` uses, since callers switch on the difference.
+        #[test]
+        fn test_setpriority_raise_beyond_the_rlimit_is_still_eacces() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            let rl = Rlimit {
+                rlim_cur: 25,
+                rlim_max: 25,
+            };
+            assert_eq!(setrlimit(RLIMIT_NICE, &rl), 0);
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, -6), -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+            errno::set_errno(0);
+            assert_eq!(
+                getpriority(PRIO_PROCESS, 0),
+                0,
+                "a refused raise must not have been stored"
+            );
         }
     }
 

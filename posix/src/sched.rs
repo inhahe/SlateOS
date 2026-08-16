@@ -105,11 +105,22 @@ pub extern "C" fn sched_getscheduler(pid: i32) -> i32 {
 ///   3. `param == NULL` → `EFAULT` (Linux: `copy_from_user` returns
 ///      `-EFAULT` for an invalid user pointer).
 ///   4. `sched_priority` outside `[min(policy), max(policy)]` → `EINVAL`.
-///   5. **Phase 170**: switching to a real-time policy (`SCHED_FIFO`,
-///      `SCHED_RR`) or `SCHED_DEADLINE` without `CAP_SYS_NICE` → `EPERM`.
-///      Linux gates this on `task_rlimit(RLIMIT_RTPRIO) == 0` and the
-///      cap; in our flat model (no per-task rlimit) the test
-///      collapses to a pure cap probe.
+///   5. **Phase 170 / §314**: switching to a real-time policy (`SCHED_FIFO`,
+///      `SCHED_RR`) is permitted when the requested `sched_priority` is
+///      within a non-zero `RLIMIT_RTPRIO` **or** the caller holds
+///      `CAP_SYS_NICE`; otherwise `EPERM`.  `SCHED_DEADLINE` has no rlimit
+///      alternative in Linux — `user_check_sched_setscheduler` refuses it
+///      for any unprivileged caller — so it stays a pure capability test.
+///
+///      The rlimit half is not a formality.  Linux's `RLIMIT_RTPRIO` is the
+///      *reason* `CAP_SYS_NICE` is only sometimes needed, and it is the
+///      mechanism by which a service manager hands a specific process the
+///      right to go real-time without handing it a capability.  This file
+///      previously claimed we had "no per-task rlimit model"; we do —
+///      `posix/src/resource.rs` keeps one, our kernel keeps another in
+///      `kernel/src/proc/pcb.rs`, and both seed `RLIMIT_RTPRIO` to 0, so
+///      writing the whole predicate changes nothing at cold start and starts
+///      honouring a raised limit.
 ///
 /// After validation we have no real scheduler hookup, so we report
 /// success without altering any task state.  Tests that wanted a
@@ -143,21 +154,70 @@ pub extern "C" fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedP
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // Phase 170: RT / deadline policies require CAP_SYS_NICE under
-    // the default RLIMIT_RTPRIO = 0.  Linux's __sched_setscheduler
-    // performs this check after argument validation but before any
-    // scheduler state mutation.  Our current task is always
-    // SCHED_OTHER, so any switch into FIFO/RR/DEADLINE is a "change
-    // of policy" requiring the cap.
+    // Phase 170 / §314.  Linux's __sched_setscheduler runs this after
+    // argument validation and before any scheduler state mutation.
+    //
+    //   if (rt_policy(policy)) {
+    //       unsigned long rlim_rtprio = task_rlimit(p, RLIMIT_RTPRIO);
+    //       if (policy != p->policy && !rlim_rtprio)        goto req_priv;
+    //       if (attr->sched_priority > p->rt_priority &&
+    //           attr->sched_priority > rlim_rtprio)         goto req_priv;
+    //   }
+    //   if (dl_policy(policy))                              goto req_priv;
+    //   ...
+    //   req_priv: if (!capable(CAP_SYS_NICE)) return -EPERM;
+    //
+    // Our task is always SCHED_OTHER with rt_priority 0, so `policy !=
+    // p->policy` holds for every RT switch and `p->rt_priority` is 0.  Both
+    // RT clauses therefore reduce to: the capability is required unless the
+    // limit is non-zero *and* covers the requested priority.
     let is_rt = matches!(policy, SCHED_FIFO | SCHED_RR);
     let is_deadline = policy == SCHED_DEADLINE;
-    if (is_rt || is_deadline)
-        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE)
-    {
+    // SCHED_DEADLINE first: it has no rlimit alternative at all, so an
+    // rlimit that would have covered an RT priority must not leak into it.
+    let needs_cap = if is_deadline {
+        true
+    } else if is_rt {
+        let rlim_rtprio = current_rtprio_limit();
+        // `prio` passed the [lo, hi] range check above and every RT policy's
+        // `lo` is 1, so it is strictly positive here — `unsigned_abs` is an
+        // exact widening, not a sign-losing cast.
+        rlim_rtprio == 0 || u64::from(prio.unsigned_abs()) > rlim_rtprio
+    } else {
+        false
+    };
+    if needs_cap && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
     0
+}
+
+/// The calling process's `RLIMIT_RTPRIO` soft limit — the highest
+/// `sched_priority` it may request for a real-time policy without
+/// `CAP_SYS_NICE`.  Cold-start value is 0 (see `resource.rs`'s
+/// `RLIMITS_INIT` and the kernel's matching one in `proc/pcb.rs`), which
+/// forbids RT policies outright since every valid RT priority is ≥ 1.
+///
+/// On the (unreachable) failure path returns 0, which leaves the decision
+/// entirely to the capability — i.e. exactly the behaviour this gate had
+/// before the rlimit arm existed.  That is deliberately the **opposite**
+/// default from `mman.rs`'s `current_memlock_limit`, which returns
+/// `u64::MAX` on the same failure, and the asymmetry is worth stating
+/// plainly rather than glossing: an unreadable rlimit is a bug in both
+/// cases, and each site picks the fallback that cannot regress *its own*
+/// callers.  For `mlock` a zero limit is a hard `EPERM`, so defaulting to
+/// zero would break every unprivileged `mlock` on a `getrlimit` failure;
+/// for an RT policy a zero limit merely falls back to `CAP_SYS_NICE`, which
+/// is where the decision sat until today.  Neither default is "the safe
+/// one" in the abstract — they are the two different no-change defaults.
+fn current_rtprio_limit() -> u64 {
+    let mut rl = crate::resource::Rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let rc = crate::resource::getrlimit(crate::resource::RLIMIT_RTPRIO, &raw mut rl);
+    if rc == 0 { rl.rlim_cur } else { 0 }
 }
 
 /// Get the scheduling parameters of a process.
@@ -2167,6 +2227,136 @@ mod tests {
             assert_eq!(sched_get_priority_max(SCHED_FIFO), 99);
             assert_eq!(sched_get_priority_min(SCHED_RR), 1);
             assert_eq!(sched_get_priority_max(SCHED_RR), 99);
+        }
+
+        // -- §314: RLIMIT_RTPRIO is the capability's alternative -----------
+        //
+        // Linux's `__sched_setscheduler` needs privilege for an RT policy
+        // only when `rlim_rtprio` cannot cover the request:
+        //
+        //     if (policy != p->policy && !rlim_rtprio)      goto req_priv;
+        //     if (attr->sched_priority > p->rt_priority &&
+        //         attr->sched_priority > rlim_rtprio)       goto req_priv;
+        //
+        // so `CAP_SYS_NICE` is the *fallback*, not the rule.  The gate above
+        // used to test the capability alone, on the strength of a comment
+        // claiming we had "no per-task rlimit model" — we do (`resource.rs`,
+        // mirroring `kernel/src/proc/pcb.rs`), and its cold-start value for
+        // `RLIMIT_RTPRIO` is `{0, 0}`, exactly like Linux's and our kernel's.
+        // With that default the whole predicate collapses to the old
+        // capability-only behaviour, which is why every test above still
+        // passes unchanged; these tests pin the part that was missing —
+        // that *raising* the limit actually buys something.
+        //
+        // NOTE: rlimits are per-thread in host builds and each `#[test]`
+        // runs on its own thread, so a limit set here cannot leak into a
+        // sibling test.
+
+        fn set_rtprio_limit(v: u64) {
+            let rl = crate::resource::Rlimit {
+                rlim_cur: v,
+                rlim_max: v,
+            };
+            assert_eq!(
+                crate::resource::setrlimit(crate::resource::RLIMIT_RTPRIO, &raw const rl),
+                0,
+                "setrlimit(RLIMIT_RTPRIO) must succeed with default caps",
+            );
+        }
+
+        /// A raised `RLIMIT_RTPRIO` permits an RT switch *without*
+        /// `CAP_SYS_NICE` — the arm the old capability-only gate omitted.
+        #[test]
+        fn test_sched_setscheduler_rtprio_rlimit_permits_without_the_capability() {
+            let _g = CapGuard::snapshot();
+            set_rtprio_limit(50);
+            drop_cap_sys_nice();
+            let p = SchedParam { sched_priority: 50 };
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, SCHED_FIFO, &raw const p),
+                0,
+                "sched_priority 50 is within RLIMIT_RTPRIO 50, so Linux permits \
+                 it with no capability at all",
+            );
+            // The same ceiling covers SCHED_RR: the rule is per-priority,
+            // not per-policy.
+            errno::set_errno(0);
+            assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const p), 0);
+        }
+
+        /// One step above the ceiling is still `EPERM` — the rlimit is a
+        /// ceiling, not a blanket exemption.
+        #[test]
+        fn test_sched_setscheduler_priority_above_the_rtprio_rlimit_is_still_eperm() {
+            let _g = CapGuard::snapshot();
+            set_rtprio_limit(50);
+            drop_cap_sys_nice();
+            let p = SchedParam { sched_priority: 51 };
+            errno::set_errno(0);
+            assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// `SCHED_DEADLINE` has no rlimit alternative in Linux
+        /// (`dl_policy(policy)` jumps straight to the capability test), so a
+        /// generous `RLIMIT_RTPRIO` must not leak into it.
+        #[test]
+        fn test_sched_setscheduler_deadline_ignores_the_rtprio_rlimit() {
+            let _g = CapGuard::snapshot();
+            set_rtprio_limit(99);
+            drop_cap_sys_nice();
+            let p = SchedParam { sched_priority: 0 };
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, SCHED_DEADLINE, &raw const p),
+                -1,
+                "SCHED_DEADLINE is capability-only on Linux however high \
+                 RLIMIT_RTPRIO is",
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// The cold-start limit is `0`, which leaves the capability as the
+        /// only route — this is what makes the change behaviour-preserving
+        /// for every existing caller.
+        #[test]
+        fn test_sched_setscheduler_cold_start_rtprio_rlimit_is_zero() {
+            let _g = CapGuard::snapshot();
+            let mut rl = crate::resource::Rlimit {
+                rlim_cur: u64::MAX,
+                rlim_max: u64::MAX,
+            };
+            assert_eq!(
+                crate::resource::getrlimit(crate::resource::RLIMIT_RTPRIO, &raw mut rl),
+                0,
+            );
+            assert_eq!(
+                (rl.rlim_cur, rl.rlim_max),
+                (0, 0),
+                "matches Linux's INIT_RLIMITS and kernel/src/proc/pcb.rs",
+            );
+            drop_cap_sys_nice();
+            // Even priority 1 — the lowest an RT policy accepts — is denied.
+            let p = SchedParam { sched_priority: 1 };
+            errno::set_errno(0);
+            assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Argument validation still runs ahead of the whole predicate: an
+        /// out-of-range priority is `EINVAL` even when the rlimit would have
+        /// covered a valid one.
+        #[test]
+        fn test_sched_setscheduler_einval_beats_the_rtprio_rlimit_path() {
+            let _g = CapGuard::snapshot();
+            set_rtprio_limit(99);
+            drop_cap_sys_nice();
+            // SCHED_FIFO's range is [1, 99]; 100 is out of range.
+            let p = SchedParam { sched_priority: 100 };
+            errno::set_errno(0);
+            assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
         }
     }
 

@@ -11029,9 +11029,14 @@ governs its Class A (7 sites, actionable) and the ptrace-family half of Class B
 (4 stub sites — `ptrace`, `process_vm_readv`/`writev`, `kcmp` — where the
 alternative genuinely is unevaluable and rule 3 applies). All eleven are done.
 The remaining three Class-B sites are the `RLIMIT` ones noted above; they are
-outside this decision and are fixed by writing the whole predicate. It is a
-**prerequisite for §312 step 3** — flipping the gates truthful before applying
-it would turn every one of these into a live regression on the same day.
+outside this decision and were fixed by writing the whole predicate (a
+`can_nice()` mirroring Linux's `is_nice_reduction || capable`, an RT gate
+consulting `RLIMIT_RTPRIO` with `SCHED_DEADLINE` left capability-only, and
+`RLIMIT_NICE`/`RLIMIT_RTPRIO` corrected to Linux's `{0, 0}` cold-start values
+so the change preserves current behaviour exactly). It is a **prerequisite for
+§312 step 3** — flipping the gates truthful before applying it would turn every
+one of these into a live regression on the same day. With all fourteen sites
+resolved, that prerequisite is met.
 
 ## §400 — Every GUI process finds its own UI font, lazily, from a compiled-in fallback list
 

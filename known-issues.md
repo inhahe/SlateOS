@@ -22610,7 +22610,7 @@ and that is boot-test-visible.
 
 ---
 
-### TD-POSIX-CAP-GATES-OMIT-LINUX-S-NON-CAPABILITY-ALTERNATIVE. A dozen libc capability gates test only the capability, where Linux's rule is "capability **or** something else" — so making them truthful would deny what the kernel permits — 🟡 **PARTLY FIXED (Class A + the ptrace family done, §314); RLIMIT rows still open and still block §312 step 3** — 2026-08-16
+### TD-POSIX-CAP-GATES-OMIT-LINUX-S-NON-CAPABILITY-ALTERNATIVE. A dozen libc capability gates test only the capability, where Linux's rule is "capability **or** something else" — so making them truthful would deny what the kernel permits — ✅ **FIXED (all 14 actionable sites); no longer blocks §312 step 3** — 2026-08-16
 
 > **Status 2026-08-16, later the same day.** Design decision **§314** was taken
 > to resolve *how* a conservative projection may be consumed, and applied:
@@ -22623,8 +22623,23 @@ and that is boot-test-visible.
 >   `process_vm_readv`, `process_vm_writev` and `kcmp` are all stubs, so under
 >   §314 rule 3 they now report `ENOSYS` unconditionally rather than inventing
 >   an `EPERM` from a capability that could not have made them work.
-> - **Class B, the three RLIMIT rows — still open, and worse than first
->   thought**: see the correction below. They are the remaining blocker.
+> - **Class B, the three RLIMIT rows — done, as the correction below prescribed
+>   and *not* under §314.** They were misclassified: their alternative was
+>   evaluable all along, so they got Linux's whole predicate rather than a
+>   removed gate. `RLIMIT_NICE`/`RLIMIT_RTPRIO` now seed to `{0, 0}` like
+>   Linux's `INIT_RLIMITS` and our own `kernel/src/proc/pcb.rs`; `nice` and
+>   `setpriority` route through a new `can_nice()` that mirrors Linux's
+>   `is_nice_reduction(p, nice) || capable(CAP_SYS_NICE)`, evaluated against
+>   the **clamped** target nice; `sched_setscheduler`'s RT arm consults
+>   `RLIMIT_RTPRIO` first and falls back to the capability, with
+>   `SCHED_DEADLINE` left capability-only. Because the corrected default is 0,
+>   behaviour for every existing caller is byte-identical — what changed is
+>   that raising the limit now means something, and `getrlimit` no longer
+>   contradicts the gate.
+>
+> **This entry no longer blocks §312 step 3.** Step 3 remains blocked on its own
+> prerequisites (fixture capability grants + QEMU + fail-closed `refresh()`),
+> which are recorded under TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S, not here.
 
 
 
@@ -22685,9 +22700,9 @@ fix.
 
 | Site | Function | Missing alternative | Status |
 |---|---|---|---|
-| `posix/src/sched.rs:155` | `sched_setscheduler` → RT/DEADLINE | `RLIMIT_RTPRIO` | ❌ **misclassified — see correction below** |
-| `posix/src/resource.rs:592` | `nice`, `inc < 0` | `RLIMIT_NICE`; its own comment says the test "collapses to a pure cap probe" | ❌ **ditto** |
-| `posix/src/resource.rs:648` | `setpriority`, raising priority | `RLIMIT_NICE`, same | ❌ **ditto** |
+| `posix/src/sched.rs:155` | `sched_setscheduler` → RT/DEADLINE | `RLIMIT_RTPRIO` | ✅ fixed — **misclassified**; got the whole predicate, see correction below |
+| `posix/src/resource.rs:592` | `nice`, `inc < 0` | `RLIMIT_NICE`; its own comment says the test "collapses to a pure cap probe" | ✅ fixed — ditto |
+| `posix/src/resource.rs:648` | `setpriority`, raising priority | `RLIMIT_NICE`, same | ✅ fixed — ditto |
 | `posix/src/unistd.rs:3039` | `ptrace` attach | same-thread-group bypass — we do not track thread groups | ✅ fixed (§314 rule 3: stub → `ENOSYS`) |
 | `posix/src/process.rs:3197` | `process_vm_readv` | `ptrace_may_access`: same-uid **and** dumpable | ✅ fixed (ditto) |
 | `posix/src/process.rs:3239` | `process_vm_writev` | ditto | ✅ fixed (ditto) |
@@ -22731,6 +22746,27 @@ it does not wait for step 3.
   With the corrected defaults this preserves today's behaviour exactly, while
   making a raised limit actually mean something.
 
+*Both halves landed 2026-08-16.* `RLIMITS_INIT` now overrides `RLIMIT_NICE` and
+`RLIMIT_RTPRIO` to `{0, 0}` (with the Linux and `pcb.rs` citations in place);
+`default_limits_others_are_infinity` no longer lists them and a new
+`default_priority_limits_are_zero_like_linux_and_our_kernel` pins them.
+`resource.rs` gained `can_nice()`, and `nice()` was reordered so the `[-20, 19]`
+clamp happens **before** the gate — Linux evaluates `can_nice` against the
+clamped value, so `nice(-100)` from a caller at nice 0 must be judged as a
+request for nice −20, not for nice −100. `sched.rs` gained
+`current_rtprio_limit()`; note it defaults to `0` on a failed `getrlimit`,
+deliberately the opposite of `mman.rs`'s `current_memlock_limit()`, which
+defaults to `u64::MAX`. Neither is "the safe default" in the abstract — each is
+the *no-change* default for its own site: a zero `RLIMIT_MEMLOCK` is a hard
+`EPERM`, so zero would break unprivileged `mlock`, whereas a zero
+`RLIMIT_RTPRIO` merely falls back to `CAP_SYS_NICE`, which is where that
+decision sat before today. Tests: 5 new in
+`resource.rs` (raise permitted by rlimit without the capability; one step past
+the ceiling still `EPERM`/`EACCES`; a zero limit leaves the capability as the
+only route) and 5 new in `sched.rs` (the same three shapes for RT, plus
+`SCHED_DEADLINE` ignoring a generous `RLIMIT_RTPRIO`, plus `EINVAL` still
+beating the whole predicate).
+
 **Class C — verified correct, for the record**, so a future survey does not
 re-walk them: `posix/src/mman.rs:331` (`check_mlock_caps` — `CAP_IPC_LOCK`
 **or** within `RLIMIT_MEMLOCK`, the pattern the Class A sites should copy),
@@ -22773,7 +22809,57 @@ fails the suite immediately — which is the correct outcome and worth knowing
 before trying it.
 
 **Found** 2026-08-16 by lane B while scoping §312 step 3, immediately after
-step 2 landed.
+step 2 landed. **Fixed** 2026-08-16, same day, in two commits (§314 for the
+eleven sites it governs; the whole-predicate treatment for the three RLIMIT
+sites). Fixing it surfaced a separate divergence, logged next.
+
+---
+
+### TD-POSIX-RLIMITS-ARE-A-SHADOW-OF-THE-KERNEL'S. libc keeps its own rlimit table instead of asking the kernel, so the two can disagree silently — 🔴 **OPEN** — 2026-08-16
+
+**In short.** Every process has a set of "resource limits" — ceilings on things
+like stack size, open files, or how much priority it may ask for. Our kernel
+keeps the real ones. Our libc keeps a *second*, private copy and never consults
+the kernel's. Today they happen to agree, because both were written from the
+same Linux defaults. Nothing keeps them agreeing: if the kernel lowers a limit
+for a process, libc will keep reporting and enforcing the old one, and a
+program that checks its limit will be told something the kernel does not
+believe.
+
+**Where it lives.** `posix/src/resource.rs` → `mod limit_store` (around line
+174): on target a `static mut RLIMITS`, on host a `thread_local!`. Every
+`getrlimit` / `setrlimit` / `prlimit64` reads and writes *that*. The kernel's
+authoritative table is `kernel/src/proc/pcb.rs` (the `RLIMIT_*_INDEX`
+constants and its own `INIT_RLIMITS`-equivalent).
+
+**Why libc cannot simply ask.** There is no native SlateOS syscall for
+rlimits. The kernel's table is reachable only through the Linux-compat
+translation layer's `GETRLIMIT` / `SETRLIMIT` / `PRLIMIT64` numbers — which is
+the path a *ported Linux program* takes, not the path our own libc's
+`getrlimit` currently takes. Making libc authoritative therefore needs either
+(a) a native `SYS_RLIMIT_GET`/`SYS_RLIMIT_SET` pair, or (b) libc routing its
+own calls through the compat numbers. Both are lane A's tree, so this needs a
+`requests/b-a-*.md` before it can be done.
+
+**Why it is not urgent.** Nothing today lowers a process's rlimits from the
+kernel side, so the two copies are still in sync — this is a latent
+correctness hazard, not a live bug. It becomes live the moment the kernel
+starts enforcing or adjusting a limit on its own (a container/namespace
+policy, an `execve` that resets limits, a service manager that sets them at
+spawn).
+
+**Proper fix.** File `requests/b-a-native-rlimit-syscalls.md` asking for a
+native rlimit get/set pair keyed on the kernel's `RLIMIT_*_INDEX` table, then
+make `limit_store` a cache-through to it (or delete the store entirely and
+call every time — rlimit reads are not a hot path). Until then, do **not** add
+more libc logic that treats the local table as authoritative beyond what
+`can_nice()` / `current_rtprio_limit()` / `check_mlock_caps()` already do.
+
+**Found** 2026-08-16 by lane B while fixing
+TD-POSIX-CAP-GATES-OMIT-LINUX-S-NON-CAPABILITY-ALTERNATIVE, on discovering
+that `RLIMITS_INIT` and `kernel/src/proc/pcb.rs` are two independent
+hand-written copies of Linux's `INIT_RLIMITS` that had already drifted apart
+on two rows.
 
 ---
 

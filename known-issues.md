@@ -71422,7 +71422,7 @@ Better still, for anything that builds or boots: assert the working directory
 first, so a mislanded command fails loudly instead of quietly compiling in
 someone else's tree.
 
-### [A] B-BENCH-A-PERSISTENT-REGRESSION-IS-REPORTED-ONCE-THEN-ABSORBED-INTO-ITS-OWN-RANGE — 2026-08-15 — ⚠️ PARTLY FIXED (harness defect FIXED; the two real regressions it exposed are still unattributed)
+### [A] B-BENCH-A-PERSISTENT-REGRESSION-IS-REPORTED-ONCE-THEN-ABSORBED-INTO-ITS-OWN-RANGE — 2026-08-15 — ⚠️ PARTLY FIXED (harness defect FIXED; `http_build_response_1KiB` RESOLVED as a layout lottery, not a regression — see Finding 3; `vfs_stat_*` still unattributed)
 
 **Two findings: two genuine regressions, and the reason the harness stopped
 reporting them on the very next run.**
@@ -71643,8 +71643,102 @@ defaults to it and default arguments bind at definition time. A mutation test
 that patches the module attribute silently tests nothing and reports success —
 pass `threshold_pct=` explicitly, as the test does.
 
-**Still open in this entry:** the *cause* of the two real regressions
-(the bisect described just above). Only the harness defect is fixed.
+**Still open in this entry:** the *cause* of the `vfs_stat_*` movement. The
+harness defect is fixed, and `http_build_response_1KiB` is resolved by Finding 3
+below — it was never a regression. Read Finding 3 before acting on Finding 1,
+which it supersedes for that benchmark.
+
+#### Finding 3 (2026-08-15, supersedes Finding 1 for `http_build_response_1KiB`) — there is no regressing commit; the metric is **bimodal**, and the mode is a property of the binary
+
+**In short:** I was bisecting for a commit that made this benchmark twice as
+slow. There isn't one. The benchmark has two stable speeds — about 6000 ns and
+about 10800 ns — and each *build* lands in one of them, essentially at random,
+depending on where the compiler happened to place the code. Re-running the same
+build always gives the same speed; changing almost any unrelated code can flip
+it. The "regression" is the metric flipping into its slow mode, and it has
+flipped **back and forth** several times already.
+
+**The evidence.** Taking every release-profile, non-`loaded` record in
+`bench/history.jsonl` (n = 20) and sorting by value gives a cleanly separated
+pair of clusters with **nothing in between**:
+
+| mode | n | mean | range |
+|---|---|---|---|
+| LOW  | 11 | 6055 ns | 5877 – 6396 |
+| HIGH |  9 | 10806 ns | 8546 – 12934 |
+
+The gap between the highest LOW (6396) and the lowest HIGH (8546) is empty.
+**HIGH/LOW = 1.78×**, which is the documented TCG page-straddle penalty (~1.7×)
+and not a number I chose.
+
+**The mode is deterministic per binary — this is the decisive test.** Three
+commits were measured more than once, seven measurements in total:
+
+| commit | n | values (ns) | modes |
+|---|---|---|---|
+| `26c1c7330` | 3 | 12934, 8818, 11381 | HIGH only |
+| `3f733c39c` | 2 | 9019, 11633 | HIGH only |
+| `c43ce8acc` | 2 | 5964, 6167 | LOW only |
+
+**Zero repeats cross the mode boundary.** Host noise moves a value by up to
+1.47× *within* the HIGH mode (8818 → 12934) but has never once carried a HIGH
+binary into LOW or the reverse. So the mode is a deterministic function of the
+compiled image, while the scatter inside a mode is run-to-run noise. That is
+exactly the layout-lottery signature: deterministic per binary, re-rolls
+whenever unrelated code shifts an address.
+
+**And the mode flips in both directions across the commit sequence:**
+
+```
+LOW LOW LOW | HIGH HIGH HIGH HIGH HIGH | LOW LOW | HIGH | LOW LOW LOW LOW LOW | HIGH HIGH HIGH
+```
+
+A regression caused by a bad commit does not un-regress and come back. This
+sequence has five direction changes.
+
+**What was wrong with Finding 1.** It read "sat at ~6000 ns for nine runs, then
+went 8546 → 12431 → 12407" and concluded a step change. But its *own* series
+table, printed directly above it, contains `7a96b55 → 10089` inside that
+supposedly-flat stretch — a HIGH-mode reading that was set aside as noise
+because it did not fit the step-change story. It is not noise; it is the same
+mode the last three runs are in. The two-consecutive-runs-agree-to-0.2%
+argument (12431 vs 12407) is still *true*, and still correctly rules out
+run-to-run noise — but agreeing to 0.2% is precisely what two runs of the same
+*mode* do. The argument distinguishes "not noise" from "noise"; it never
+distinguished "code got slower" from "layout re-rolled", which was the actual
+alternative.
+
+**Consistency with the step-1 straddle falsification above.** No contradiction:
+that analysis showed no *loop* straddle flip on the benchmark's path, and it
+was right. It also found straight-line page crossings on the path changing
+2 → 3, which at the time looked minor. Given the bimodality, straight-line
+crossings are now the leading mechanism, and the loop-only tool blind spot
+(since fixed) is why the first pass looked exculpatory.
+
+**Consequences.**
+
+- **The task "attribute the `http_build_response_1KiB` 2× regression" is closed
+  with a negative answer.** There is no commit to attribute it to. Bisecting
+  further is bisecting noise-with-structure and will keep producing
+  plausible-looking but false attributions — `c893184fa` is *not* guilty, it
+  merely re-rolled.
+- **This metric must not gate anything until it is de-lotteried.** Any
+  threshold between 6396 and 8546 fires on a coin flip. The harness's
+  own-range check (`f0cb9eccf`) partly absorbs this, but only by widening the
+  range until the metric says nothing at all.
+- **`vfs_stat_root` is a different shape and is NOT explained by this.** Its 20
+  release values run 2623 – 6454 as a continuous spread with no empty gap, so
+  the 3278 → 4488 "regression" sits comfortably inside its own historical
+  range. That points at plain range-noise rather than a mode flip; it needs its
+  own analysis and the bimodality result should not be assumed to carry over.
+
+**Method note, for reuse.** The test that settled this costs nothing and should
+be the *first* step next time a benchmark "regresses": group the history by
+commit, keep only commits measured more than once, and ask whether any of them
+straddles the proposed threshold. If repeats never cross it, the metric is
+mode-structured and bisection is the wrong tool. A great deal of straddle
+tooling was built before anyone ran that three-line query — the raw data it
+needed had been sitting in `bench/history.jsonl` the entire time.
 
 ### [A] TOOLING-A-BARE-`bench-history.py`-RECORDS-A-RUN-AND-MISLABELS-ITS-PROVENANCE — 2026-08-15 — ⚠️ OPEN (low severity, easy to trip)
 

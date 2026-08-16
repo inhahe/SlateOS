@@ -359,13 +359,45 @@ pub const P_PGID: i32 = 2;
 
 /// Extended wait for a child process.
 ///
-/// Stub: delegates to `waitpid` internally.  The `infop` parameter
-/// is not filled in (would need `siginfo_t` support).
+/// Implemented on top of [`waitpid`], which is the same kernel primitive
+/// (`SYS_PROCESS_WAIT_STATUS`) Linux's `waitid` and `wait4` also share.
+///
+/// # What `infop` receives
+///
+/// On a state change, the `siginfo_t` at `infop` (if non-NULL) is zeroed and
+/// then filled as POSIX requires: `si_signo = SIGCHLD`, `si_pid` = the child,
+/// `si_code` = one of `CLD_EXITED`/`CLD_KILLED`/`CLD_DUMPED`/`CLD_STOPPED`/
+/// `CLD_CONTINUED`, and `si_status` = the exit code for `CLD_EXITED` or the
+/// signal number otherwise.  On a `WNOHANG` miss it is zeroed and nothing
+/// else — matching Linux, which leaves `si_pid == 0` as the way to tell "no
+/// child changed state" from "a child did" when both return 0.
+///
+/// Two fields are left zero because nothing in this system can source them,
+/// and inventing a plausible value is worse than reporting none:
+///
+/// - **`si_uid`** — POSIX wants the child's *real* UID.  The child is reaped
+///   by the time `waitpid` returns, and `SYS_PROCESS_GET_CREDENTIALS` reports
+///   only the caller's own, so there is no one left to ask.  Using the
+///   caller's UID would be right for a child that never changed credentials
+///   and wrong for exactly the case a caller would check it — a child that
+///   dropped privilege.  Tracked as
+///   `TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT`.
+/// - **`si_utime`/`si_stime`** — no per-process CPU accounting exists yet;
+///   `wait3`/`wait4` zero their `rusage` for the same reason.
+///
+/// # Divergences from Linux
+///
+/// - `WNOWAIT` (leave the child waitable) is accepted but **not honoured** —
+///   the kernel wait primitive has no non-reaping mode, so the child is
+///   reaped anyway and a second `waitid` for it reports `ECHILD`.
+/// - `P_PIDFD` is not accepted (`EINVAL`); pidfds are not wired into wait.
+/// - `P_PGID` for process group 1 is `ENOSYS` unless the caller is itself in
+///   group 1 — see the comment at the `P_PGID` arm.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn waitid(
     idtype: i32,
     id: PidT,
-    _infop: *mut core::ffi::c_void,
+    infop: *mut core::ffi::c_void,
     options: i32,
 ) -> i32 {
     // Linux semantics (kernel/exit.c::sys_waitid):
@@ -388,15 +420,64 @@ pub extern "C" fn waitid(
         return -1;
     }
 
+    // Translate the (idtype, id) pair into waitpid's single overloaded pid
+    // selector.  Linux keeps them separate (a `type` plus a `struct pid`), so
+    // its id validation is per-idtype and stricter than waitpid's; reproduce
+    // it here rather than letting a bad id fall through to a wait that means
+    // something else entirely.  See kernel/exit.c::SYSCALL_DEFINE5(waitid).
     let pid = match idtype {
-        P_PID => id,
-        P_ALL => -1,
+        P_ALL => -1, // id is ignored, per POSIX.
+        P_PID => {
+            // Linux: `if (upid <= 0) return -EINVAL;`.  Without this, id 0
+            // would reach waitpid as "my process group" and id -5 as "process
+            // group 5" — two silent reinterpretations of a caller's mistake.
+            if id <= 0 {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+            id
+        }
         P_PGID => {
-            // We don't really support process groups.
-            errno::set_errno(errno::ENOSYS);
-            return -1;
+            // Linux: `if (upid < 0) return -EINVAL;` and `upid == 0` means the
+            // caller's own group.
+            if id < 0 {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+            if id == 0 || id == getpgrp() {
+                // 0 is waitpid's unambiguous "my process group" encoding.
+                // Preferring it whenever it applies is what makes the group-1
+                // case below reachable only for a caller outside group 1.
+                0
+            } else if id == 1 {
+                // waitpid's selector cannot express "process group 1": -1 is
+                // already spoken for as "any child".  That ambiguity is in
+                // POSIX's waitpid interface itself, and is part of why waitid
+                // exists — so the honest answer is to refuse rather than to
+                // wait for any child and call it a group wait.  Reaping the
+                // wrong child here would be unrecoverable: the status is
+                // consumed and the caller's group bookkeeping is silently
+                // wrong.  Lifting this needs a kernel wait that takes the
+                // idtype explicitly; see
+                // requests/b-a-waitid-needs-an-explicit-idtype-wait.md.
+                errno::set_errno(errno::ENOSYS);
+                return -1;
+            } else {
+                // waitpid: pid < -1 selects process group -pid.  `id >= 2`
+                // here, so the negation cannot overflow; `checked_neg` says
+                // that to the compiler rather than to a reader, and the
+                // unreachable arm costs one branch on a blocking syscall.
+                match id.checked_neg() {
+                    Some(neg) => neg,
+                    None => {
+                        errno::set_errno(errno::EINVAL);
+                        return -1;
+                    }
+                }
+            }
         }
         _ => {
+            // Includes P_PIDFD, which we do not accept.
             errno::set_errno(errno::EINVAL);
             return -1;
         }
@@ -404,13 +485,73 @@ pub extern "C" fn waitid(
 
     // Strip waitid-only bits before delegating to waitpid (which only
     // accepts WAITPID_VALID_OPTIONS).  WSTOPPED == WUNTRACED is
-    // already shared; WEXITED/WNOWAIT are not.  We don't actually
-    // implement the semantic difference (stop/continue tracking),
-    // so dropping them only loses the no-op equivalence — the wait
-    // behaviour for our exited-children-only model is unchanged.
+    // already shared; WEXITED/WNOWAIT are not.  WEXITED is implied by
+    // waitpid always reporting exits; WNOWAIT we cannot honour at all
+    // (see the divergence note in the doc comment).
     let pid_options = options & WAITPID_VALID_OPTIONS;
-    let ret = waitpid(pid, core::ptr::null_mut(), pid_options);
-    if ret < 0 { -1 } else { 0 }
+    let mut wstatus: i32 = 0;
+    let ret = waitpid(pid, core::ptr::addr_of_mut!(wstatus), pid_options);
+    if ret < 0 {
+        // errno is already set by waitpid.  Leave *infop alone: POSIX only
+        // specifies it on success, and a caller that inspects it after an
+        // error is reading its own uninitialised memory either way.
+        return -1;
+    }
+    if !infop.is_null() {
+        let info = infop.cast::<crate::signal::SiginfoT>();
+        let filled = if ret == 0 {
+            // WNOHANG miss.  Linux zeroes the whole structure so that
+            // `si_pid == 0` distinguishes this from a real state change,
+            // both of which return 0 from waitid.
+            crate::signal::SiginfoT::default()
+        } else {
+            siginfo_for_wstatus(ret, wstatus)
+        };
+        // SAFETY: the caller contract for `infop` is a writable
+        // `siginfo_t *` (128 bytes) or NULL, and NULL was just excluded.
+        // `SiginfoT` is `repr(C)` and exactly that size and layout.
+        unsafe {
+            core::ptr::write(info, filled);
+        }
+    }
+    0
+}
+
+/// Build the `SIGCHLD` `siginfo_t` that POSIX says `waitid` reports for a
+/// child whose wait status word is `wstatus`.
+///
+/// Split out from [`waitid`] so the status-word-to-`si_code` mapping — the
+/// part that is easy to get subtly wrong, and the part with no I/O in it —
+/// can be tested directly on the host.
+fn siginfo_for_wstatus(child: PidT, wstatus: i32) -> crate::signal::SiginfoT {
+    use crate::signal::{CLD_CONTINUED, CLD_DUMPED, CLD_EXITED, CLD_KILLED, CLD_STOPPED};
+
+    let mut info = crate::signal::SiginfoT::default();
+    info.si_signo = crate::signal::SIGCHLD;
+    info.si_pid = child;
+
+    // Order matters: `wifcontinued` is the exact word 0xFFFF, which also
+    // satisfies `wifstopped`'s low-byte test, so it has to be checked first.
+    if crate::sys_wait::wifcontinued(wstatus) {
+        info.si_code = CLD_CONTINUED;
+        info.si_status = crate::signal::SIGCONT;
+    } else if crate::sys_wait::wifstopped(wstatus) {
+        info.si_code = CLD_STOPPED;
+        info.si_status = crate::sys_wait::wstopsig(wstatus);
+    } else if crate::sys_wait::wifsignaled(wstatus) {
+        // CLD_DUMPED is CLD_KILLED plus a core file; the status word carries
+        // the distinction in bit 7, which is what `wcoredump` reads.
+        info.si_code = if crate::sys_wait::wcoredump(wstatus) {
+            CLD_DUMPED
+        } else {
+            CLD_KILLED
+        };
+        info.si_status = crate::sys_wait::wtermsig(wstatus);
+    } else {
+        info.si_code = CLD_EXITED;
+        info.si_status = crate::sys_wait::wexitstatus(wstatus);
+    }
+    info
 }
 
 // ---------------------------------------------------------------------------
@@ -3830,15 +3971,123 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
+    // waitid's id validation is per-idtype and stricter than waitpid's,
+    // because waitpid's single selector overloads 0 and negatives as group
+    // selectors.  Each of these would silently become a *different wait*
+    // rather than an error if the check were dropped.  All use WEXITED so
+    // the options prologue doesn't preempt the idtype dispatch.
+
     #[test]
-    fn test_waitid_pgid_returns_enosys() {
-        // Use WEXITED in options to satisfy Linux's prologue
-        // requirement that at least one of WEXITED/WSTOPPED/WCONTINUED
-        // be set; otherwise we'd hit the options-validation EINVAL
-        // before ever reaching the idtype dispatch.
+    fn test_waitid_ppid_rejects_nonpositive_id() {
+        // Linux: `case P_PID: if (upid <= 0) return -EINVAL;`.  Untranslated,
+        // id 0 would reach waitpid as "my process group" and id -5 as
+        // "process group 5".
+        for bad in [0, -1, -5] {
+            errno::set_errno(0);
+            assert_eq!(
+                waitid(P_PID, bad, core::ptr::null_mut(), WEXITED),
+                -1,
+                "P_PID id {bad} must be rejected"
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL, "P_PID id {bad}");
+        }
+    }
+
+    #[test]
+    fn test_waitid_pgid_rejects_negative_id() {
+        // Linux: `case P_PGID: if (upid < 0) return -EINVAL;`.
+        for bad in [-1, -2, -7] {
+            errno::set_errno(0);
+            assert_eq!(
+                waitid(P_PGID, bad, core::ptr::null_mut(), WEXITED),
+                -1,
+                "P_PGID id {bad} must be rejected"
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL, "P_PGID id {bad}");
+        }
+    }
+
+    #[test]
+    fn test_waitid_rejects_pidfd_and_unknown_idtypes() {
+        // P_PIDFD (3) is a real Linux idtype we deliberately do not accept;
+        // it must read as EINVAL, not fall through to some other wait.
+        for bad in [3, 4, 99, -1] {
+            errno::set_errno(0);
+            assert_eq!(waitid(bad, 1, core::ptr::null_mut(), WEXITED), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL, "idtype {bad}");
+        }
+    }
+
+    #[test]
+    fn test_waitid_pgid_one_is_enosys_when_not_our_group() {
+        // Process group 1 is the one group waitpid's selector cannot name:
+        // -1 already means "any child".  We refuse rather than reap the
+        // wrong child.  The guard keeps the test honest if the host double
+        // ever does put us in group 1 — then the request is expressible via
+        // the unambiguous 0 encoding and ENOSYS would be wrong.
+        if getpgrp() == 1 {
+            return;
+        }
         errno::set_errno(0);
-        assert_eq!(waitid(P_PGID, 0, core::ptr::null_mut(), WEXITED), -1);
+        assert_eq!(waitid(P_PGID, 1, core::ptr::null_mut(), WEXITED), -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- waitid's siginfo_t fill --
+
+    #[test]
+    fn test_siginfo_exited() {
+        let info = siginfo_for_wstatus(4321, 42 << 8);
+        assert_eq!(info.si_signo, crate::signal::SIGCHLD);
+        assert_eq!(info.si_pid, 4321);
+        assert_eq!(info.si_code, crate::signal::CLD_EXITED);
+        assert_eq!(info.si_status, 42, "si_status is the exit code");
+    }
+
+    #[test]
+    fn test_siginfo_killed_vs_dumped() {
+        // Bit 7 of the status word is the core-dump flag; it is the only
+        // thing separating CLD_KILLED from CLD_DUMPED.
+        let killed = siginfo_for_wstatus(7, crate::signal::SIGKILL);
+        assert_eq!(killed.si_code, crate::signal::CLD_KILLED);
+        assert_eq!(killed.si_status, crate::signal::SIGKILL);
+
+        let dumped = siginfo_for_wstatus(7, crate::signal::SIGSEGV | 0x80);
+        assert_eq!(dumped.si_code, crate::signal::CLD_DUMPED);
+        assert_eq!(
+            dumped.si_status,
+            crate::signal::SIGSEGV,
+            "the dump bit must not leak into si_status"
+        );
+    }
+
+    #[test]
+    fn test_siginfo_stopped() {
+        // Stopped encoding: (sig << 8) | 0x7F.
+        let info = siginfo_for_wstatus(9, (crate::signal::SIGTSTP << 8) | 0x7F);
+        assert_eq!(info.si_code, crate::signal::CLD_STOPPED);
+        assert_eq!(info.si_status, crate::signal::SIGTSTP);
+    }
+
+    #[test]
+    fn test_siginfo_continued_is_checked_before_stopped() {
+        // 0xFFFF satisfies wifstopped's low-byte test too, so an
+        // implementation that tests stopped first reports CLD_STOPPED with
+        // si_status 0xFF.  This is the ordering regression guard.
+        let info = siginfo_for_wstatus(11, 0xFFFF);
+        assert_eq!(info.si_code, crate::signal::CLD_CONTINUED);
+        assert_eq!(info.si_status, crate::signal::SIGCONT);
+    }
+
+    #[test]
+    fn test_siginfo_unsourced_fields_are_zero() {
+        // si_uid and the CPU times have no source in this system; they must
+        // read as an obvious zero rather than a plausible invention.
+        let info = siginfo_for_wstatus(3, 0);
+        assert_eq!(info.si_uid, 0);
+        assert_eq!(info.si_utime, 0);
+        assert_eq!(info.si_stime, 0);
+        assert_eq!(info.si_errno, 0);
     }
 
     // -- setpgrp delegates to setpgid(0,0) --

@@ -564,7 +564,11 @@ exists to stop — prefer any other Lane B roadmap item. Also open:
 `BUG-DASH-CMDSUB-INTERMITTENT-HANG`,
 `B-DASH-STDIN-FLAKE`, `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`,
 `TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP`,
-`TD-POSIX-SLOT-POOLS`.
+`TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` (§312 step 3 — **blocked**, on lane A
+acting on `requests/b-a-cap-grants-for-312-step3-fixtures.md` and on the
+operator answering `open-questions.md` Q48; do not flip the gates until both
+land). `TD-POSIX-SLOT-POOLS` was listed here until 2026-08-16 and is stale —
+it was fixed and archived to `known-issues-resolved.md` on 2026-08-13.
 
 This is by far the deepest backlog; lane B should never be idle. But depth here
 is mostly the `TD-OILS-*` family, which §305 has now capped — so "never idle"
@@ -2286,7 +2290,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] __ctype_b_loc/__ctype_tolower_loc/__ctype_toupper_loc: glibc ctype lookup tables (384-entry compile-time arrays)
   - [x] program_invocation_name/program_invocation_short_name/__progname/__progname_full: program name globals
   - [x] dirent additions: rewinddir, seekdir/telldir, dirfd (-1 stub), alphasort comparator
-  - [x] waitid: extended wait (P_PID/P_ALL/P_PGID, delegates to waitpid)
+  - [x] waitid: extended wait (P_PID/P_ALL/P_PGID with Linux's per-idtype id
+    validation; fills the caller's `siginfo_t`; built on waitpid). Covered on
+    target by `ctest-jobctl` checks 100-111 / 120-132 / 140-147 — the only
+    place the `wstatus` → `siginfo_t` decoding is testable, since `waitpid`'s
+    syscall arm is compiled out on the host. Three kernel-shaped gaps remain —
+    `WNOWAIT`, pgid 1, and `si_uid` — see `known-issues.md` →
+    `TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT`
   - [x] copy_file_range: cross-file copy (userspace read+write loop), offset tracking
   - [x] epoll stubs: epoll_create/create1/ctl/wait/pwait (all ENOSYS), EpollEvent struct, EPOLLIN/OUT/ERR/HUP/ET constants
   - [x] strftime/strptime expansion: 22 additional format specifiers (%C/%y/%e/%w/%u/%U/%W/%I/%k/%l/%P/%D/%F/%T/%R/%r/%x/%X/%z/%Z/%s + ISO 8601 %V/%G/%g), strptime month/weekday name parsing (%b/%B/%a/%A case-insensitive)

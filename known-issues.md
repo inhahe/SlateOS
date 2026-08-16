@@ -71547,6 +71547,36 @@ This limitation of the tool is real and remains: `straddle-check` cannot see
 straight-line page crossings, and here that had to be checked by hand. Logged so
 the next comparison does not quietly assume loops are the only mechanism.
 
+**Why the scratch worktree does not invalidate this.** The two binaries were
+built in `os-straddle-scratch`, not in `os-lane-a` where the recorded bench runs
+were built, and the two directory names differ in length — so if any absolute
+build path were embedded, `.rodata` would shift and the scratch pair would be a
+*different* draw of the layout lottery than the pair that produced the numbers.
+Checked rather than assumed: the only absolute path in the image is
+`D:\visual studio projects\os\netproto\src\ipv4.rs` and friends, which live
+inside the **prebuilt service ELFs** that `include_bytes!` embeds. Those blobs
+were built once on Aug 14 and copied in byte-for-byte, so they are identical in
+both builds and do not vary with the kernel's build directory. No Cargo.toml
+declares an absolute path dependency. The kernel therefore contains no string
+that depends on which worktree built it, and the scratch pair reproduces the
+lane-a pair.
+
+A second, independent consistency check points the same way: the compare
+quarantined exactly **9** recompiled functions, and they are precisely
+`namespace::resolve_path`, its callers and their self-tests. Build
+nondeterminism or a stale artifact would have produced signature changes
+scattered far beyond one commit's source footprint.
+
+**Tooling hazard found while checking this: `strings` is not installed on this
+machine, and neither is `llvm-strings` in the rustup toolchain.** `strings -a
+<elf> | grep …` therefore prints nothing at all — which is indistinguishable
+from "the string is not in the binary", and is exactly the false negative that
+would have "confirmed" path-independence for the wrong reason. It was caught
+only because `grep -a -c` had already reported a match on the same file, so the
+two disagreed. Use `grep -a -o -b ".\{0,60\}<pattern>.\{0,60\}" <elf>` instead;
+it needs no extra tool and prints the byte offset and surrounding context.
+`command -v strings` before trusting an empty result from it.
+
 **So the regression has a non-layout cause, and the leading hypothesis is now
 that the benchmark is not isolated from heap history.** The suite runs in a fixed
 order in one address space; `build_response` allocates a `String` and grows a

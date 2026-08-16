@@ -191,6 +191,55 @@ changed. For the same reason `SplitCheck::NotChecked` — a hand-assembled
 `BenchResult`, a derived per-switch figure, a run below `SPLIT_MIN_ITERATIONS`
 — renders as `-` and never as a stability verdict in either direction.
 
+### Follow-up 2026-08-16: the gate is calibrated, and the tally it was calibrated from was undercounting
+
+**Threshold set to 30% (was a provisional 15%).** The first `--bench` boot
+carrying the split column produced a strongly bimodal distribution over 91
+measured windows: 65 at 0%, 10 at 1%, 10 at 2%, one each at 4% and 11%, two at
+7% — then nothing at all until 74% (`page_alloc_zeroed_pool`) and 85%
+(`vfs_stat_breakdown_full`). Since the 11–74% region is empty, every gate in it
+flags the same two windows and the choice is purely about margin. 30% sits near
+the geometric mean of the gap, ~2.7x above the worst benign window and >2x below
+the smallest real disturbance.
+
+The margin is deliberately wide because **that boot was itself contaminated** —
+the canary fired and the dispersion instrument counted 18 stalled benchmarks — so
+11% is a benign spread measured *under stress*, not on a quiet host. Calibrating
+tightly against a stressed run guarantees spurious withdrawals on the next one.
+The asymmetry reinforces it: a spuriously flagged window is withdrawn from the
+regression verdict, so a too-tight gate erodes coverage *silently*, whereas a
+too-loose one shows up as a suite-level count of 0.
+
+Worth noting both flagged windows had `min_first < min_second` — the second half
+slower — i.e. genuine within-window degradation, and specifically *not* the
+warmup bias predicted for this design (which produces the opposite ordering).
+
+**The bug found while calibrating: the suite tally could not see some of its own
+flags.** The summary was computed by folding over the scorecard entries, but a
+benchmark only becomes a scorecard entry if it calls `record()`/`track()`.
+`page_alloc_zeroed_pool` calls `run()`, prints its line, and then dropped the
+result with `let _ = result;`. The consequence is visible twice in one log: the
+per-benchmark line reads `page_alloc_zeroed_pool: … (74% UNSTABLE)` and the
+summary a few hundred lines later reads `worst spread 85%`. **A summary that
+contradicts a line above it is worse than no summary**, because a reader who
+spots the flag and then checks the total concludes the flag was retracted.
+
+Fixed by moving the tally to the point the split is *measured* — `note_split()`
+is called inside `run()` and `run_with_cache_info()`, immediately after the split
+is computed and before the result can be discarded. This makes the escape
+structurally impossible rather than merely fixed in the one place it was noticed:
+there is no way to run a benchmark whose instability goes untallied, because the
+tally happens inside the function that does the running.
+
+`page_alloc_zeroed_pool` now calls `track()`, so a page-allocator fast path gets
+regression detection it never had. It was not alone: 91 windows were measured but
+only 70 reached the scorecard, so **21 measurements exist that no SCORE line, no
+history entry, and therefore no regression check ever sees**. The scorecard now
+prints a coverage line reporting that count, so the remaining gap is visible in
+every boot instead of having to be rediscovered. Closing it for the other 20 is
+open work — each needs a judgement about whether it is a real benchmark or a
+diagnostic sub-measurement that should stay print-only.
+
 ## Byte-indexed display truncation panics on non-ASCII text (lane C)
 
 **Status: FIXED 2026-08-15** (lane C, commits `f508f76cf`, `f53562a09`,

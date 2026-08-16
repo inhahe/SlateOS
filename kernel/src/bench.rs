@@ -318,9 +318,44 @@ pub enum SplitCheck {
 /// Relative disagreement, in percent, above which the two half-window sample
 /// sets are treated as measuring different things.
 ///
-/// Provisional — see [`SplitCheck::instability_pct`] for how it is calibrated
-/// and `known-issues.md` for the recorded per-boot flag counts.
-const SPLIT_UNSTABLE_REL_PCT: u64 = 15;
+/// **Calibrated 2026-08-16** from the first full `--bench` boot to carry the
+/// split column (release profile, 91 measured windows). The observed spreads
+/// were strongly bimodal, which is what makes a threshold defensible at all:
+///
+/// | spread | windows |
+/// |---|---|
+/// | 0% | 65 |
+/// | 1% | 10 |
+/// | 2% | 10 |
+/// | 4% | 1 |
+/// | 7% | 2 |
+/// | 11% | 1 |
+/// | **74%** | 1 (`page_alloc_zeroed_pool`) |
+/// | **85%** | 1 (`vfs_stat_breakdown_full`) |
+///
+/// There is nothing between 11% and 74%, so any gate in that range separates
+/// the same two populations and the choice is about *margin*, not about which
+/// entries get flagged. 30% sits near the geometric mean of the gap (≈28.5%),
+/// giving ~2.7x headroom over the worst benign window and >2x margin under the
+/// smallest real disturbance.
+///
+/// The headroom is deliberately generous because that boot was **itself
+/// contaminated** — the canary fired and the dispersion instrument counted 18
+/// stalled benchmarks — so 11% is a benign spread measured under stress, not on
+/// a quiet host. Calibrating tight against a stressed run would guarantee
+/// spurious withdrawals on the next stressed one. The failure mode is asymmetric
+/// in the other direction too: a spuriously flagged window is *withdrawn* from
+/// the regression verdict, so a gate set too tight silently erodes coverage
+/// rather than announcing itself.
+///
+/// Both flagged entries had `min_first < min_second` — the second half slower —
+/// which is the opposite of the warmup bias documented on [`SplitCheck`]. They
+/// are genuine within-window degradation, not cold-start artefacts.
+///
+/// One boot is one sample. Revisit if the suite-level count drifts far from the
+/// ~2/91 seen here: a run of 0 for many boots means the gate has gone slack,
+/// and a double-digit fraction means it is fitting noise.
+const SPLIT_UNSTABLE_REL_PCT: u64 = 30;
 
 /// Absolute disagreement, in cycles, below which a relative excess is ignored.
 ///
@@ -368,6 +403,59 @@ impl SplitCheck {
                 let abs = hi.saturating_sub(lo);
                 abs >= SPLIT_UNSTABLE_ABS_CYCLES
                     && self.instability_pct().is_some_and(|p| p >= SPLIT_UNSTABLE_REL_PCT)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Suite-wide split tally
+// ---------------------------------------------------------------------------
+//
+// The tally is kept here, at the point the split is *measured*, rather than
+// derived from the scorecard at print time.  It was originally computed by
+// folding over the scorecard entries, and that was wrong in a way the log
+// itself exposed: `page_alloc_zeroed_pool` calls `run()`, prints its line, and
+// then drops the result with `let _ = result;` without ever calling `record()`.
+// It is therefore not a scorecard entry, so the fold never saw it — and the
+// 2026-08-16 boot log contains `page_alloc_zeroed_pool: ... (74% UNSTABLE)` on
+// one line and `worst spread 85%` in the summary a few hundred lines later.  A
+// summary that contradicts a line above it is worse than no summary, because a
+// reader who spots the flag and checks the total concludes the flag was
+// retracted.
+//
+// Counting at the measurement site makes the escape structurally impossible:
+// there is no way to run a benchmark whose instability is not tallied, because
+// the tally happens inside the function that does the running.
+
+/// Number of windows on which a split check was actually performed.
+static SPLIT_TALLY_CHECKED: AtomicU64 = AtomicU64::new(0);
+/// Number of those that exceeded both thresholds.
+static SPLIT_TALLY_UNSTABLE: AtomicU64 = AtomicU64::new(0);
+/// Largest spread seen, in percent, across all checked windows.
+static SPLIT_TALLY_WORST_PCT: AtomicU64 = AtomicU64::new(0);
+/// Number of windows too short for a split check ([`SPLIT_MIN_ITERATIONS`]).
+static SPLIT_TALLY_UNCHECKED: AtomicU64 = AtomicU64::new(0);
+
+/// Fold one measurement's split verdict into the suite-wide tally.
+///
+/// Called from every function that produces a [`BenchResult`], immediately
+/// after the split is computed and before the result can be discarded.
+fn note_split(split: SplitCheck) {
+    match split {
+        SplitCheck::NotChecked => {
+            SPLIT_TALLY_UNCHECKED.fetch_add(1, Ordering::Relaxed);
+        }
+        SplitCheck::Checked { .. } => {
+            SPLIT_TALLY_CHECKED.fetch_add(1, Ordering::Relaxed);
+            if split.is_unstable() {
+                SPLIT_TALLY_UNSTABLE.fetch_add(1, Ordering::Relaxed);
+            }
+            // `instability_pct` is None only for a zero floor, which carries no
+            // ratio to compare — leave the worst-so-far untouched rather than
+            // folding in a 0 that would read as "measured, and stable".
+            if let Some(pct) = split.instability_pct() {
+                SPLIT_TALLY_WORST_PCT.fetch_max(pct, Ordering::Relaxed);
             }
         }
     }
@@ -557,6 +645,9 @@ pub fn run<F: FnMut()>(name: &str, iterations: u32, mut f: F) -> BenchResult {
     } else {
         SplitCheck::NotChecked
     };
+    // Tally here, not at scorecard-print time: a benchmark that never calls
+    // `record()` still measured a window, and its instability must still count.
+    note_split(split);
 
     let mean = total.checked_div(iterations as u64).unwrap_or(0);
     let min_ns = cycles_to_ns(min);
@@ -671,6 +762,9 @@ pub fn run_with_cache_info<F: FnMut()>(name: &str, iterations: u32, mut f: F) ->
     } else {
         SplitCheck::NotChecked
     };
+    // Tally here, not at scorecard-print time: a benchmark that never calls
+    // `record()` still measured a window, and its instability must still count.
+    note_split(split);
 
     if has_pmc {
         pmc::stop(0);
@@ -990,21 +1084,23 @@ fn print_scorecard() {
     // `unchecked` is reported separately rather than folded into the stable
     // count for the reason given on `SplitCheck::NotChecked`: an entry nobody
     // examined has not passed.
+    //
+    // The numbers come from the suite-wide tally (see `note_split`), not from a
+    // fold over `entries`. The fold undercounted: a benchmark that calls `run()`
+    // but never `record()` is not a scorecard entry, so its flag was printed on
+    // its own line and then contradicted by this summary. Counting at the
+    // measurement site closes that hole; the second line below reports how many
+    // measurements never reached the scorecard, because those are invisible to
+    // `bench-history.py` and therefore to regression detection — a coverage gap
+    // worth seeing rather than one worth hiding.
     {
-        let checked = entries
-            .iter()
-            .filter(|e| matches!(e.split, SplitCheck::Checked { .. }))
-            .count();
-        let unstable = entries.iter().filter(|e| e.split.is_unstable()).count();
-        let unchecked = entries.len().saturating_sub(checked);
-        let worst = entries
-            .iter()
-            .filter_map(|e| e.split.instability_pct())
-            .max()
-            .unwrap_or(0);
+        let checked = SPLIT_TALLY_CHECKED.load(Ordering::Relaxed);
+        let unstable = SPLIT_TALLY_UNSTABLE.load(Ordering::Relaxed);
+        let unchecked = SPLIT_TALLY_UNCHECKED.load(Ordering::Relaxed);
+        let worst = SPLIT_TALLY_WORST_PCT.load(Ordering::Relaxed);
         serial_println!(
-            "[bench] === Split-sample check: {} of {} checked entries unstable \
-             (worst spread {}%, gate {}% and {} cycles); {} entries not checked ===",
+            "[bench] === Split-sample check: {} of {} checked windows unstable \
+             (worst spread {}%, gate {}% and {} cycles); {} windows not checked ===",
             unstable,
             checked,
             worst,
@@ -1012,6 +1108,19 @@ fn print_scorecard() {
             SPLIT_UNSTABLE_ABS_CYCLES,
             unchecked
         );
+
+        let measured = checked.saturating_add(unchecked);
+        let recorded = entries.len() as u64;
+        if measured > recorded {
+            serial_println!(
+                "[bench] === Scorecard coverage: {} of {} measured windows reached the \
+                 scorecard; {} are print-only (no SCORE line, no history entry, so no \
+                 regression detection) ===",
+                recorded,
+                measured,
+                measured.saturating_sub(recorded)
+            );
+        }
     }
 
     // Two whole lines rather than a computed suffix: `format!` is not in scope
@@ -2471,8 +2580,14 @@ pub fn run_all() {
                 hits, misses, frame::zero_pool_count()
             );
             // The pool-warm path should be faster than the cold path
-            // (no 16 KiB memset inline).
-            let _ = result;
+            // (no 16 KiB memset inline).  Tracked rather than dropped: this
+            // used to be `let _ = result;`, which measured a real window and
+            // then threw the measurement away — no SCORE line, no history
+            // entry, and so no regression detection on a page-allocator fast
+            // path.  It also put the result outside the split tally until that
+            // moved to the measurement site, which is how a 74%-unstable window
+            // came to be contradicted by the suite summary in the same log.
+            track("page_alloc_zeroed_pool", &result);
         } else {
             serial_println!("[bench]   page_alloc_zeroed_pool: SKIP (zero pool not enabled)");
         }

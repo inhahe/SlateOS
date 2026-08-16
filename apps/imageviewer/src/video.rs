@@ -136,9 +136,8 @@ impl ContainerFormat {
             // WebM's DocType is "webm", Matroska's is "matroska".  We do a
             // simple byte scan over the first 64 bytes (the EBML header is
             // typically short).
-            let scan_len = data.len().min(64);
-            let haystack = &data[..scan_len];
-            if contains_subsequence(haystack, b"webm") {
+            let header = byteread::slice_at(data, 0, data.len().min(64)).unwrap_or(data);
+            if byteread::contains(header, b"webm") {
                 return Some(Self::WebM);
             }
             return Some(Self::Mkv);
@@ -146,23 +145,6 @@ impl ContainerFormat {
 
         None
     }
-}
-
-/// Helper: check whether `haystack` contains `needle` as a contiguous
-/// subsequence.
-fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    if haystack.len() < needle.len() {
-        return false;
-    }
-    for window in haystack.windows(needle.len()) {
-        if window == needle {
-            return true;
-        }
-    }
-    false
 }
 
 // ============================================================================
@@ -229,19 +211,8 @@ pub fn parse_avi_header(data: &[u8]) -> Result<AviHeader, VideoError> {
         let start = chunk_data_start
             .checked_add(offset)
             .ok_or_else(|| VideoError::ParseError("offset overflow".into()))?;
-        let end = start
-            .checked_add(4)
-            .ok_or_else(|| VideoError::ParseError("offset overflow".into()))?;
-        if end > data.len() {
-            return Err(VideoError::ParseError("avih chunk truncated".into()));
-        }
-        let bytes: [u8; 4] = [
-            data[start],
-            data[start + 1],
-            data[start + 2],
-            data[start + 3],
-        ];
-        Ok(u32::from_le_bytes(bytes))
+        byteread::u32_le_at(data, start)
+            .ok_or_else(|| VideoError::ParseError("avih chunk truncated".into()))
     };
 
     let microseconds_per_frame = read_u32(0)?;
@@ -249,28 +220,15 @@ pub fn parse_avi_header(data: &[u8]) -> Result<AviHeader, VideoError> {
     let width = read_u32(32)?;
     let height = read_u32(36)?;
 
-    // Try to find `strh` to extract the codec FourCC.
-    let codec_fourcc = if let Some(strh_pos) = find_chunk_id(data, b"strh") {
+    // Try to find `strh` to extract the codec FourCC.  A missing or truncated
+    // `strh` is not fatal: the FourCC only labels the codec in the metadata
+    // panel, so an all-zero one degrades to "unknown" rather than a parse
+    // failure, which is what the caller wants for a file it can still show.
+    let codec_fourcc = find_chunk_id(data, b"strh")
         // strh layout: fccType(4) + fccHandler(4) at start of chunk data.
-        let handler_start = strh_pos
-            .checked_add(8 + 4)
-            .ok_or_else(|| VideoError::ParseError("strh offset overflow".into()))?;
-        let handler_end = handler_start
-            .checked_add(4)
-            .ok_or_else(|| VideoError::ParseError("strh offset overflow".into()))?;
-        if handler_end <= data.len() {
-            [
-                data[handler_start],
-                data[handler_start + 1],
-                data[handler_start + 2],
-                data[handler_start + 3],
-            ]
-        } else {
-            [0; 4]
-        }
-    } else {
-        [0; 4]
-    };
+        .and_then(|strh_pos| strh_pos.checked_add(8 + 4))
+        .and_then(|handler_start| byteread::array_at::<4>(data, handler_start))
+        .unwrap_or([0; 4]);
 
     Ok(AviHeader {
         microseconds_per_frame,
@@ -282,16 +240,16 @@ pub fn parse_avi_header(data: &[u8]) -> Result<AviHeader, VideoError> {
 }
 
 /// Scan `data` for a 4-byte chunk ID and return its offset.
+///
+/// This is a flat scan rather than a walk of the RIFF chunk tree.  A walk
+/// would be stricter, but it would also have to trust every chunk length in
+/// the file to find the next chunk, and the two chunks we want (`avih`,
+/// `strh`) are always within the first few hundred bytes.  The cost is that a
+/// FourCC appearing inside chunk *payload* can be mistaken for a chunk header;
+/// the fields read afterwards are all bounded, so the worst case is wrong
+/// metadata for a hostile file, not a panic.
 fn find_chunk_id(data: &[u8], id: &[u8; 4]) -> Option<usize> {
-    if data.len() < 4 {
-        return None;
-    }
-    for i in 0..data.len() - 3 {
-        if &data[i..i + 4] == id {
-            return Some(i);
-        }
-    }
-    None
+    byteread::find(data, id)
 }
 
 // ============================================================================
@@ -330,39 +288,31 @@ pub struct Mp4Info {
 /// the data and calling `parse_mp4_boxes` on the payload.
 pub fn parse_mp4_boxes(data: &[u8]) -> Result<Vec<Mp4Box>, VideoError> {
     let mut boxes = Vec::new();
-    let mut pos: usize = 0;
+    let mut reader = byteread::Reader::new(data);
 
-    while pos + 8 <= data.len() {
-        let size_bytes: [u8; 4] = [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
-        let raw_size = u32::from_be_bytes(size_bytes) as u64;
-
-        let box_type: [u8; 4] = [data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]];
-
-        let (header_len, box_size) = if raw_size == 1 {
-            // 64-bit extended size
-            if pos + 16 > data.len() {
-                break;
-            }
-            let ext_bytes: [u8; 8] = [
-                data[pos + 8],
-                data[pos + 9],
-                data[pos + 10],
-                data[pos + 11],
-                data[pos + 12],
-                data[pos + 13],
-                data[pos + 14],
-                data[pos + 15],
-            ];
-            (16usize, u64::from_be_bytes(ext_bytes))
-        } else if raw_size == 0 {
-            // Box extends to end of data.
-            let remaining = (data.len() - pos) as u64;
-            (8usize, remaining)
-        } else {
-            (8usize, raw_size)
+    loop {
+        let pos = reader.position();
+        let (Some(raw_size), Some(box_type)) = (reader.u32_be(), reader.array::<4>()) else {
+            break;
         };
 
-        if box_size < header_len as u64 {
+        let (header_len, box_size) = if raw_size == 1 {
+            // 64-bit extended size.
+            let Some(ext) = reader.array::<8>() else {
+                break;
+            };
+            (16u64, u64::from_be_bytes(ext))
+        } else if raw_size == 0 {
+            // Box extends to end of data.
+            let Some(remaining) = data.len().checked_sub(pos) else {
+                break;
+            };
+            (8u64, remaining as u64)
+        } else {
+            (8u64, u64::from(raw_size))
+        };
+
+        if box_size < header_len {
             return Err(VideoError::ParseError("invalid MP4 box size".into()));
         }
 
@@ -372,10 +322,19 @@ pub fn parse_mp4_boxes(data: &[u8]) -> Result<Vec<Mp4Box>, VideoError> {
             size: box_size,
         });
 
-        let next_pos = pos.checked_add(box_size as usize);
-        match next_pos {
-            Some(np) if np > pos => pos = np,
-            _ => break,
+        // `box_size` is a 64-bit number read out of the file, so a crafted MP4
+        // can set it to u64::MAX. Seeking rather than adding is what keeps the
+        // next iteration inside the buffer: `seek` refuses a position past the
+        // end, so an absurd size ends the walk instead of moving `pos` to a
+        // value whose `pos + 8` overflows.
+        let Some(next) = usize::try_from(box_size)
+            .ok()
+            .and_then(|size| pos.checked_add(size))
+        else {
+            break;
+        };
+        if next <= pos || reader.seek(next).is_none() {
+            break;
         }
     }
 
@@ -393,19 +352,8 @@ pub fn parse_mp4_info(data: &[u8]) -> Result<Mp4Info, VideoError> {
     let major_brand = top_boxes
         .iter()
         .find(|b| &b.box_type == b"ftyp")
-        .and_then(|b| {
-            let start = b.offset as usize + 8;
-            if start + 4 <= data.len() {
-                Some([
-                    data[start],
-                    data[start + 1],
-                    data[start + 2],
-                    data[start + 3],
-                ])
-            } else {
-                None
-            }
-        })
+        .and_then(|b| usize::try_from(b.offset).ok()?.checked_add(8))
+        .and_then(|start| byteread::array_at::<4>(data, start))
         .unwrap_or([0; 4]);
 
     // Find moov box.
@@ -414,19 +362,8 @@ pub fn parse_mp4_info(data: &[u8]) -> Result<Mp4Info, VideoError> {
         .find(|b| &b.box_type == b"moov")
         .ok_or(VideoError::ParseError("moov box not found".into()))?;
 
-    let moov_start = (moov.offset as usize)
-        .checked_add(8)
-        .ok_or_else(|| VideoError::ParseError("moov offset overflow".into()))?;
-    let moov_end = (moov.offset as usize)
-        .checked_add(moov.size as usize)
-        .ok_or_else(|| VideoError::ParseError("moov size overflow".into()))?
-        .min(data.len());
-
-    if moov_start >= moov_end {
-        return Err(VideoError::ParseError("moov box empty".into()));
-    }
-
-    let moov_data = &data[moov_start..moov_end];
+    let moov_data =
+        box_payload(data, moov).ok_or(VideoError::ParseError("moov box empty".into()))?;
 
     // Parse mvhd for timescale and duration.
     let (timescale, duration_units) = parse_mvhd(moov_data)?;
@@ -444,24 +381,19 @@ pub fn parse_mp4_info(data: &[u8]) -> Result<Mp4Info, VideoError> {
     let mut audio_codec: Option<[u8; 4]> = None;
 
     for trak in moov_children.iter().filter(|b| &b.box_type == b"trak") {
-        let trak_start = (trak.offset as usize)
-            .checked_add(8)
-            .unwrap_or(moov_data.len());
-        let trak_end = (trak.offset as usize)
-            .checked_add(trak.size as usize)
-            .unwrap_or(moov_data.len())
-            .min(moov_data.len());
-        if trak_start >= trak_end {
+        let Some(trak_data) = box_payload(moov_data, trak) else {
             continue;
-        }
-        let trak_data = &moov_data[trak_start..trak_end];
+        };
 
         // Look for tkhd to get width/height.
         if let Some((w, h)) = parse_tkhd_dimensions(trak_data)
-            && w > 0 && h > 0 && width == 0 {
-                width = w;
-                height = h;
-            }
+            && w > 0
+            && h > 0
+            && width == 0
+        {
+            width = w;
+            height = h;
+        }
 
         // Recurse into mdia/minf/stbl/stsd for codec info.
         if let Some(codec) = extract_stsd_codec(trak_data) {
@@ -490,6 +422,35 @@ pub fn parse_mp4_info(data: &[u8]) -> Result<Mp4Info, VideoError> {
     })
 }
 
+/// The payload of `b` — everything after its 8-byte header — as a sub-slice of
+/// the buffer the box was parsed from.
+///
+/// `b.size` came out of the file, so the end is clamped to the parent rather
+/// than trusted.  `None` means the box is empty or starts past the end of its
+/// parent, which every caller reads as "this branch of the tree is not there".
+fn box_payload<'a>(parent: &'a [u8], b: &Mp4Box) -> Option<&'a [u8]> {
+    let offset = usize::try_from(b.offset).ok()?;
+    let start = offset.checked_add(8)?;
+    let end = usize::try_from(b.size)
+        .ok()
+        .and_then(|size| offset.checked_add(size))
+        .unwrap_or(parent.len())
+        .min(parent.len());
+    parent.get(start..end)
+}
+
+/// The payload of the first child box of `parent` with the given type.
+///
+/// MP4 metadata lives four levels down a tree of identically-shaped boxes, so
+/// this is the whole of the descent: `descend(descend(x, b"mdia")?, b"minf")`
+/// and so on.  Each step re-parses, and each step clamps to its own parent, so
+/// a lie about a size at one level cannot reach past the level above it.
+fn descend<'a>(parent: &'a [u8], box_type: &[u8; 4]) -> Option<&'a [u8]> {
+    let children = parse_mp4_boxes(parent).ok()?;
+    let child = children.iter().find(|b| &b.box_type == box_type)?;
+    box_payload(parent, child)
+}
+
 /// Parse the `mvhd` box to extract timescale and duration.
 fn parse_mvhd(moov_data: &[u8]) -> Result<(u32, u64), VideoError> {
     let children = parse_mp4_boxes(moov_data)?;
@@ -497,36 +458,23 @@ fn parse_mvhd(moov_data: &[u8]) -> Result<(u32, u64), VideoError> {
         .iter()
         .find(|b| &b.box_type == b"mvhd")
         .ok_or(VideoError::ParseError("mvhd box not found".into()))?;
+    let mvhd =
+        box_payload(moov_data, mvhd).ok_or(VideoError::ParseError("mvhd truncated".into()))?;
 
-    let start = (mvhd.offset as usize)
-        .checked_add(8)
-        .ok_or_else(|| VideoError::ParseError("mvhd offset overflow".into()))?;
+    let truncated = || VideoError::ParseError("mvhd truncated".into());
 
-    if start >= moov_data.len() {
-        return Err(VideoError::ParseError("mvhd truncated".into()));
-    }
-
-    let mvhd_data = &moov_data[start..];
-    if mvhd_data.is_empty() {
-        return Err(VideoError::ParseError("mvhd empty".into()));
-    }
-
-    let version = mvhd_data[0];
+    // A full box: version(1) + flags(3), then creation and modification times
+    // whose width the version selects, then timescale and duration.
+    let version = byteread::u8_at(mvhd, 0).ok_or_else(truncated)?;
     if version == 0 {
         // Version 0: 4 bytes each for create/modify dates, then timescale(4), duration(4)
-        if mvhd_data.len() < 4 + 4 + 4 + 4 + 4 {
-            return Err(VideoError::ParseError("mvhd v0 truncated".into()));
-        }
-        let timescale = read_be_u32(mvhd_data, 12)?;
-        let duration = read_be_u32(mvhd_data, 16)? as u64;
-        Ok((timescale, duration))
+        let timescale = byteread::u32_be_at(mvhd, 12).ok_or_else(truncated)?;
+        let duration = byteread::u32_be_at(mvhd, 16).ok_or_else(truncated)?;
+        Ok((timescale, u64::from(duration)))
     } else {
         // Version 1: 8 bytes each for create/modify dates, then timescale(4), duration(8)
-        if mvhd_data.len() < 4 + 8 + 8 + 4 + 8 {
-            return Err(VideoError::ParseError("mvhd v1 truncated".into()));
-        }
-        let timescale = read_be_u32(mvhd_data, 20)?;
-        let duration = read_be_u64(mvhd_data, 24)?;
+        let timescale = byteread::u32_be_at(mvhd, 20).ok_or_else(truncated)?;
+        let duration = byteread::u64_be_at(mvhd, 24).ok_or_else(truncated)?;
         Ok((timescale, duration))
     }
 }
@@ -534,81 +482,30 @@ fn parse_mvhd(moov_data: &[u8]) -> Result<(u32, u64), VideoError> {
 /// Parse the `tkhd` box inside a trak to get width and height.
 /// Width/height are stored as 16.16 fixed-point at specific offsets.
 fn parse_tkhd_dimensions(trak_data: &[u8]) -> Option<(u32, u32)> {
-    let children = parse_mp4_boxes(trak_data).ok()?;
-    let tkhd = children.iter().find(|b| &b.box_type == b"tkhd")?;
-    let start = (tkhd.offset as usize).checked_add(8)?;
-    if start >= trak_data.len() {
-        return None;
-    }
-    let d = &trak_data[start..];
-    let version = *d.first()?;
+    let tkhd = descend(trak_data, b"tkhd")?;
+    let version = byteread::u8_at(tkhd, 0)?;
 
-    // Width/height are at the very end of tkhd, as 16.16 fixed-point values.
-    // Version 0: total full-box size = 84 bytes of payload
+    // Width/height are the last two fields of tkhd, as 16.16 fixed-point.
+    // Version 0: total full-box payload = 84 bytes
     //   -> width at offset 76, height at offset 80
-    // Version 1: total full-box size = 96 bytes of payload
+    // Version 1: total full-box payload = 96 bytes
     //   -> width at offset 88, height at offset 92
     let (w_off, h_off) = if version == 0 { (76, 80) } else { (88, 92) };
-    let w_fixed = read_be_u32(d, w_off).ok()?;
-    let h_fixed = read_be_u32(d, h_off).ok()?;
+    let w_fixed = byteread::u32_be_at(tkhd, w_off)?;
+    let h_fixed = byteread::u32_be_at(tkhd, h_off)?;
     // 16.16 fixed-point: top 16 bits are the integer part.
     Some((w_fixed >> 16, h_fixed >> 16))
 }
 
 /// Descend through mdia -> minf -> stbl -> stsd to extract the codec FourCC.
 fn extract_stsd_codec(trak_data: &[u8]) -> Option<[u8; 4]> {
-    let trak_children = parse_mp4_boxes(trak_data).ok()?;
-    let mdia = trak_children.iter().find(|b| &b.box_type == b"mdia")?;
-    let mdia_start = (mdia.offset as usize).checked_add(8)?;
-    let mdia_end = (mdia.offset as usize)
-        .checked_add(mdia.size as usize)?
-        .min(trak_data.len());
-    if mdia_start >= mdia_end {
-        return None;
-    }
-    let mdia_data = &trak_data[mdia_start..mdia_end];
-
-    let mdia_children = parse_mp4_boxes(mdia_data).ok()?;
-    let minf = mdia_children.iter().find(|b| &b.box_type == b"minf")?;
-    let minf_start = (minf.offset as usize).checked_add(8)?;
-    let minf_end = (minf.offset as usize)
-        .checked_add(minf.size as usize)?
-        .min(mdia_data.len());
-    if minf_start >= minf_end {
-        return None;
-    }
-    let minf_data = &mdia_data[minf_start..minf_end];
-
-    let minf_children = parse_mp4_boxes(minf_data).ok()?;
-    let stbl = minf_children.iter().find(|b| &b.box_type == b"stbl")?;
-    let stbl_start = (stbl.offset as usize).checked_add(8)?;
-    let stbl_end = (stbl.offset as usize)
-        .checked_add(stbl.size as usize)?
-        .min(minf_data.len());
-    if stbl_start >= stbl_end {
-        return None;
-    }
-    let stbl_data = &minf_data[stbl_start..stbl_end];
-
-    let stbl_children = parse_mp4_boxes(stbl_data).ok()?;
-    let stsd = stbl_children.iter().find(|b| &b.box_type == b"stsd")?;
-    // stsd is a full box: 4 bytes version/flags + 4 bytes entry_count, then
-    // the first sample entry whose box type is the codec FourCC.
-    let stsd_payload_start = (stsd.offset as usize).checked_add(8 + 8)?;
-    if stsd_payload_start + 4 > stbl_data.len() {
-        return None;
-    }
-    // The sample entry begins here; its box type (at +4..+8) is the codec.
-    let entry_start = stsd_payload_start;
-    if entry_start + 8 > stbl_data.len() {
-        return None;
-    }
-    Some([
-        stbl_data[entry_start + 4],
-        stbl_data[entry_start + 5],
-        stbl_data[entry_start + 6],
-        stbl_data[entry_start + 7],
-    ])
+    let mdia = descend(trak_data, b"mdia")?;
+    let minf = descend(mdia, b"minf")?;
+    let stbl = descend(minf, b"stbl")?;
+    let stsd = descend(stbl, b"stsd")?;
+    // stsd is a full box: version/flags(4) + entry_count(4), then the first
+    // sample entry, whose own box type — 4 bytes past its size — is the codec.
+    byteread::array_at::<4>(stsd, 4 + 4 + 4)
 }
 
 // ============================================================================
@@ -654,139 +551,125 @@ pub fn parse_mkv_info(data: &[u8]) -> Result<MkvInfo, VideoError> {
     })
 }
 
-/// Scan for an EBML string element with the given (1- or 2-byte) element ID.
-fn extract_ebml_string(data: &[u8], element_id: u16) -> Option<String> {
-    // Encode the element ID as 2 bytes (big-endian) and scan.
-    let id_bytes = element_id.to_be_bytes();
-    let scan_limit = data.len().min(512);
-    for i in 0..scan_limit.saturating_sub(3) {
-        if data[i] == id_bytes[0] && data[i + 1] == id_bytes[1] {
-            // Next byte(s) is the VINT-encoded length.
-            let (len, len_size) = decode_ebml_vint(&data[i + 2..])?;
-            let start = i + 2 + len_size;
-            let end = start + len as usize;
-            if end <= data.len() {
-                return String::from_utf8(data[start..end].to_vec()).ok();
-            }
+/// Every EBML element in `data` whose ID bytes match `id` and whose ID starts
+/// within the first `limit` bytes, as the payload of each.
+///
+/// The IDs are matched as literal bytes rather than by walking the element
+/// tree.  This module reads Matroska well enough to fill in a metadata panel,
+/// not well enough to demux it, and a tree walk would have to parse the whole
+/// Segment to reach the two elements we want.  The cost is false positives —
+/// `0x86` is also an ordinary data byte — which is why this yields *every*
+/// match rather than the first, and why each caller re-checks what it decoded
+/// (a CodecID must start `V_`, a PixelWidth must be non-zero) instead of
+/// trusting the first hit.  It is also why a hit whose length VINT does not
+/// decode is skipped rather than ending the scan: that hit was not an element.
+struct EbmlScan<'a> {
+    data: &'a [u8],
+    id: &'a [u8],
+    /// One past the last offset at which an ID may *begin*.  The payload it
+    /// introduces may run past this, and is bounded by `data` instead.
+    limit: usize,
+    at: usize,
+}
+
+impl<'a> Iterator for EbmlScan<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<&'a [u8]> {
+        loop {
+            let window = byteread::slice_at(self.data, self.at, self.limit.checked_sub(self.at)?)?;
+            let id_at = self.at.checked_add(byteread::find(window, self.id)?)?;
+            // Resume one byte in, not one element on: the match may have been
+            // a coincidence inside another element's payload, and the real
+            // element can start anywhere after it.
+            self.at = id_at.checked_add(1)?;
+
+            let after_id = id_at.checked_add(self.id.len())?;
+            let Some((len, len_size)) = self.data.get(after_id..).and_then(decode_ebml_vint) else {
+                continue;
+            };
+            let Some(payload) = after_id
+                .checked_add(len_size)
+                .zip(usize::try_from(len).ok())
+                .and_then(|(start, len)| byteread::slice_at(self.data, start, len))
+            else {
+                continue;
+            };
+            return Some(payload);
         }
     }
-    None
+}
+
+/// Scan the first `limit` bytes of `data` for EBML elements with ID `id`.
+fn ebml_scan<'a>(data: &'a [u8], id: &'a [u8], limit: usize) -> EbmlScan<'a> {
+    EbmlScan {
+        data,
+        id,
+        limit: data.len().min(limit),
+        at: 0,
+    }
+}
+
+/// Scan for an EBML string element with the given 2-byte element ID.
+fn extract_ebml_string(data: &[u8], element_id: u16) -> Option<String> {
+    let id = element_id.to_be_bytes();
+    ebml_scan(data, &id, 512).find_map(|payload| String::from_utf8(payload.to_vec()).ok())
 }
 
 /// Extract duration in milliseconds from the Segment Info element.
 fn extract_ebml_duration(data: &[u8]) -> Option<u64> {
-    // TimecodeScale element ID: 0x2AD7B1 (3 bytes)
-    // Duration element ID: 0x4489 (2 bytes)
+    // TimecodeScale (ID 0x2AD7B1) is an unsigned integer of 1-8 bytes; a
+    // missing one means the Matroska default of one million nanoseconds, i.e.
+    // durations are expressed in milliseconds.
+    let timecode_scale = ebml_scan(data, &[0x2A, 0xD7, 0xB1], 4096)
+        .find_map(|payload| (payload.len() <= 8).then(|| read_ebml_uint(payload)))
+        .unwrap_or(1_000_000);
 
-    let scan_limit = data.len().min(4096);
-    let mut timecode_scale: u64 = 1_000_000; // default 1ms
-
-    // Look for TimecodeScale (0x2AD7B1).
-    for i in 0..scan_limit.saturating_sub(6) {
-        if data[i] == 0x2A && data[i + 1] == 0xD7 && data[i + 2] == 0xB1 {
-            let (len, len_size) = decode_ebml_vint(&data[i + 3..])?;
-            let start = i + 3 + len_size;
-            let end = start + len as usize;
-            if end <= data.len() && len <= 8 {
-                timecode_scale = read_ebml_uint(&data[start..end]);
-            }
-            break;
+    // Duration (ID 0x4489) is a float — 4 or 8 bytes — counted in
+    // TimecodeScale units, not in seconds.
+    let duration_units = ebml_scan(data, &[0x44, 0x89], 4096).find_map(|payload| {
+        match payload.len() {
+            4 => byteread::array_at::<4>(payload, 0).map(|b| f64::from(f32::from_be_bytes(b))),
+            8 => byteread::array_at::<8>(payload, 0).map(f64::from_be_bytes),
+            // Any other length is not a float, so this hit was not a Duration.
+            _ => None,
         }
-    }
+    })?;
 
-    // Look for Duration (0x4489) — a float (4 or 8 bytes).
-    for i in 0..scan_limit.saturating_sub(4) {
-        if data[i] == 0x44 && data[i + 1] == 0x89 {
-            let (len, len_size) = decode_ebml_vint(&data[i + 2..])?;
-            let start = i + 2 + len_size;
-            let end = start + len as usize;
-            if end <= data.len() {
-                let duration_ns = if len == 4 {
-                    let bytes: [u8; 4] = [
-                        data[start],
-                        data[start + 1],
-                        data[start + 2],
-                        data[start + 3],
-                    ];
-                    f32::from_be_bytes(bytes) as f64
-                } else if len == 8 {
-                    let bytes: [u8; 8] = [
-                        data[start],
-                        data[start + 1],
-                        data[start + 2],
-                        data[start + 3],
-                        data[start + 4],
-                        data[start + 5],
-                        data[start + 6],
-                        data[start + 7],
-                    ];
-                    f64::from_be_bytes(bytes)
-                } else {
-                    return None;
-                };
-                // Duration is in timecode_scale units.
-                let total_ns = duration_ns * timecode_scale as f64;
-                return Some((total_ns / 1_000_000.0) as u64);
-            }
-        }
-    }
-
-    None
+    let total_ns = duration_units * timecode_scale as f64;
+    Some((total_ns / 1_000_000.0) as u64)
 }
 
 /// Extract video track dimensions and codec ID from the EBML data.
 fn extract_ebml_video_track(data: &[u8]) -> (u32, u32, String) {
-    let scan_limit = data.len().min(8192);
-    let mut width = 0u32;
-    let mut height = 0u32;
-    let mut codec_id = String::new();
+    // CodecID (0x86) is an ASCII string; the video one is the first that
+    // starts `V_` (audio tracks use `A_`, subtitles `S_`).
+    let codec_id = ebml_scan(data, &[0x86], 8192)
+        .filter(|payload| payload.len() < 64)
+        .find_map(|payload| {
+            core::str::from_utf8(payload)
+                .ok()
+                .filter(|s| s.starts_with("V_"))
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
 
-    // CodecID element ID: 0x86 (1 byte)
-    for i in 0..scan_limit.saturating_sub(3) {
-        if data[i] == 0x86
-            && let Some((len, len_size)) = decode_ebml_vint(&data[i + 1..]) {
-                let start = i + 1 + len_size;
-                let end = start + len as usize;
-                if end <= data.len() && len < 64
-                    && let Ok(s) = core::str::from_utf8(&data[start..end])
-                    && (s.starts_with("V_") || s.starts_with("A_"))
-                    && codec_id.is_empty() && s.starts_with("V_") {
-                        codec_id = s.to_string();
-                    }
-            }
-    }
+    // PixelWidth (0xB0) and PixelHeight (0xBA) are unsigned integers of at
+    // most 4 bytes.  A zero is skipped rather than accepted: a byte-level scan
+    // finds these IDs inside other elements' payloads too, and a real video
+    // track never has a zero dimension.
+    let dimension = |id: &[u8]| -> u32 {
+        ebml_scan(data, id, 8192)
+            .find_map(|payload| {
+                (payload.len() <= 4)
+                    .then(|| read_ebml_uint(payload))
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|&v| v > 0)
+            })
+            .unwrap_or(0)
+    };
 
-    // PixelWidth element ID: 0xB0 (1 byte)
-    for i in 0..scan_limit.saturating_sub(3) {
-        if data[i] == 0xB0
-            && let Some((len, len_size)) = decode_ebml_vint(&data[i + 1..]) {
-                let start = i + 1 + len_size;
-                let end = start + len as usize;
-                if end <= data.len() && len <= 4 {
-                    width = read_ebml_uint(&data[start..end]) as u32;
-                    if width > 0 {
-                        break;
-                    }
-                }
-            }
-    }
-
-    // PixelHeight element ID: 0xBA (1 byte)
-    for i in 0..scan_limit.saturating_sub(3) {
-        if data[i] == 0xBA
-            && let Some((len, len_size)) = decode_ebml_vint(&data[i + 1..]) {
-                let start = i + 1 + len_size;
-                let end = start + len as usize;
-                if end <= data.len() && len <= 4 {
-                    height = read_ebml_uint(&data[start..end]) as u32;
-                    if height > 0 {
-                        break;
-                    }
-                }
-            }
-    }
-
-    (width, height, codec_id)
+    (dimension(&[0xB0]), dimension(&[0xBA]), codec_id)
 }
 
 /// Decode an EBML variable-length integer (VINT).
@@ -797,15 +680,20 @@ fn decode_ebml_vint(data: &[u8]) -> Option<(u64, usize)> {
         return None;
     }
 
+    // The count of leading zero bits gives the width; a VINT is at most 8
+    // bytes, and `first != 0` bounds `leading_zeros()` at 7, so `+ 1` cannot
+    // overflow and the width is in 1..=8.
     let len = first.leading_zeros() as usize + 1;
-    if len > 8 || data.len() < len {
-        return None;
-    }
+    let rest = data.get(1..len)?;
 
-    let mask = (1u8 << (8 - len)) - 1;
-    let mut value = (first & mask) as u64;
-    for byte in &data[1..len] {
-        value = (value << 8) | (*byte as u64);
+    // The width marker is the leading 1 bit and the zeroes before it; the
+    // value is what is left of the first byte. `checked_shr` rather than
+    // `(1 << (8 - len)) - 1` because a width of 8 leaves no value bits at all,
+    // and shifting a u8 by 8 is not a shift.
+    let mask = u8::MAX.checked_shr(len as u32).unwrap_or(0);
+    let mut value = u64::from(first & mask);
+    for byte in rest {
+        value = (value << 8) | u64::from(*byte);
     }
 
     Some((value, len))
@@ -820,43 +708,10 @@ fn read_ebml_uint(data: &[u8]) -> u64 {
     value
 }
 
-// ============================================================================
-// Binary reading helpers
-// ============================================================================
-
-fn read_be_u32(data: &[u8], offset: usize) -> Result<u32, VideoError> {
-    let end = offset
-        .checked_add(4)
-        .ok_or_else(|| VideoError::ParseError("offset overflow".into()))?;
-    if end > data.len() {
-        return Err(VideoError::ParseError("data truncated".into()));
-    }
-    Ok(u32::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ]))
-}
-
-fn read_be_u64(data: &[u8], offset: usize) -> Result<u64, VideoError> {
-    let end = offset
-        .checked_add(8)
-        .ok_or_else(|| VideoError::ParseError("offset overflow".into()))?;
-    if end > data.len() {
-        return Err(VideoError::ParseError("data truncated".into()));
-    }
-    Ok(u64::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-        data[offset + 4],
-        data[offset + 5],
-        data[offset + 6],
-        data[offset + 7],
-    ]))
-}
+// Binary reading — offsets, bounds and endianness — lives in `byteread`.
+// This module names the byte order at every call because it reads all three of
+// AVI (little-endian), MP4 (big-endian) and Matroska (big-endian, with
+// variable-width integers) in one file, so any default would be wrong here.
 
 // ============================================================================
 // Track / stream metadata
@@ -1483,12 +1338,7 @@ pub fn render_controls(
         PlayerState::Buffering => {
             let msg = "Buffering...";
             tree.push(RenderCommand::Text {
-                x: text::center_x(
-                    msg,
-                    area_x + area_w / 2.0,
-                    14.0,
-                    FontWeightHint::Bold,
-                ),
+                x: text::center_x(msg, area_x + area_w / 2.0, 14.0, FontWeightHint::Bold),
                 y: area_y + area_h / 2.0 - 8.0,
                 text: String::from(msg),
                 color: MOCHA_YELLOW,
@@ -1869,6 +1719,17 @@ pub fn execute_action(player: &mut VideoPlayer, action: VideoAction) -> bool {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     // -- Badge layout ------------------------------------------------------
@@ -2233,6 +2094,40 @@ mod tests {
 
         let result = parse_mp4_boxes(&data);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_box_that_claims_the_whole_address_space_ends_the_walk() {
+        // A size field of 1 means "the real size is the 64-bit number that
+        // follows", and that number is unconstrained. Set it to u64::MAX and
+        // the walk's next position is one past the end of the address space:
+        // the old code advanced to `usize::MAX` and then evaluated `pos + 8`
+        // for the loop condition, which panics on overflow in a debug build
+        // and indexes at `usize::MAX` in a release one. A 16-byte file is
+        // enough to trigger it, so any MP4 could do this.
+        let mut data = vec![0u8; 16];
+        data[0..4].copy_from_slice(&1u32.to_be_bytes());
+        data[4..8].copy_from_slice(b"ftyp");
+        data[8..16].copy_from_slice(&u64::MAX.to_be_bytes());
+
+        let boxes = parse_mp4_boxes(&data).expect("an absurd size is not a parse error");
+        assert_eq!(boxes.len(), 1, "the box itself is still reported");
+        assert_eq!(boxes[0].size, u64::MAX, "with the size the file claimed");
+    }
+
+    #[test]
+    fn a_box_whose_size_runs_past_the_end_stops_the_walk_rather_than_reading_on() {
+        // The size fits in a usize but not in the file. The walk must stop:
+        // there is nothing at that offset to parse.
+        let mut data = vec![0u8; 24];
+        data[0..4].copy_from_slice(&1_000_000u32.to_be_bytes());
+        data[4..8].copy_from_slice(b"ftyp");
+        data[16..20].copy_from_slice(&8u32.to_be_bytes());
+        data[20..24].copy_from_slice(b"mdat");
+
+        let boxes = parse_mp4_boxes(&data).expect("a size past the end is not a parse error");
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(&boxes[0].box_type, b"ftyp");
     }
 
     // -- Loop mode --------------------------------------------------------

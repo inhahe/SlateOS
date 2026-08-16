@@ -4494,6 +4494,7 @@ version = "0.1.0"
 name = "imageviewer"
 version = "0.1.0"
 dependencies = [
+ "byteread",
  "guitk",
 ]
 

@@ -6,6 +6,6 @@
 #   (run it with `python` on Windows, `python3` under WSL/Linux)
 version 1
 input  build.py sha256 eb4a98a18246bd59adf9da5960d3885c158496490e5ea44d02dfe1c66ffe76bf
-input  main.c sha256 dca369fb2285faf1059b35b7da9a3b8315bebe4b8b8b581ea0bf2648b6bb6002
-input  toolchain/sysroot/lib/libc.a sha256 4b14549d0295552e89b8c63a062a369f3e0fb5be55c439d70569dabc600789f0
-output ctest-jobctl.elf sha256 7aa00ceade51043673a1cde3fec6be3c3264661b026647129dbdb72704b7891b size 2627416
+input  main.c sha256 e27d1821c98f937ac33f1653a09ac0a56f536427ce6336bbb568a70f86b91371
+input  toolchain/sysroot/lib/libc.a sha256 5721b2c897d2276a6ab0a0c24086abcced310fa7bd8d385671b35f1e1e17e690
+output ctest-jobctl.elf sha256 67c58b1e96387181fb1540e848bf333367c5583544ea28aee475d567318fdd31 size 2578160

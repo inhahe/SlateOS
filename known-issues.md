@@ -617,18 +617,36 @@ artifacts, enumerate the set from the thing they have in common — here "links
 `libc.a`" — not from the directory that happened to hold them when the rule was
 written (`services/ctest-*`).
 
-### TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT. `waitid` cannot express process group 1, cannot honour `WNOWAIT`, and reports `si_uid` as 0 — all three because `SYS_PROCESS_WAIT_STATUS` is `waitpid`-shaped — LOGGED 2026-08-16 by lane B — ✅ KERNEL SIDE FIXED 2026-08-16 by lane A; libc side still open
+### TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT. `waitid` cannot express process group 1, cannot honour `WNOWAIT`, and reports `si_uid` as 0 — all three because `SYS_PROCESS_WAIT_STATUS` is `waitpid`-shaped — LOGGED 2026-08-16 by lane B — ✅ FIXED 2026-08-16 (kernel by lane A, libc by lane B)
 
-**Status: the kernel half is done** (2026-08-16, lane A). All three gaps — and
-the `si_utime`/`si_stime`/`rusage` fourth one below, whose premise turned out to
-be false — are now expressible through the syscall. The entry stays open because
-**libc has not been changed to use any of it yet**: `waitid` still returns
-`ENOSYS` for the group-1 case, still ignores `WNOWAIT`, and still reports
-`si_uid` as 0, because it is still passing the old three arguments. What to
-change on the libc side is spelled out in
-`requests/a-b-wait-syscall-grew-wpgid-wnowait-and-a-waitinfo-struct.md`; the
-kernel rationale is `design-decisions.md` §206. Close this entry when
-`posix/src/process.rs` consumes the new ABI.
+**Status: closed on both sides** (2026-08-16). All three gaps — and the
+`si_utime`/`si_stime`/`rusage` fourth one below, whose premise turned out to be
+false — are expressible through the syscall (lane A) *and* used by libc (lane
+B). Stays here rather than moving to `known-issues-resolved.md` until the fix
+has been on `main` through a full boot test.
+
+**What libc now does** (`posix/src/process.rs`): `waitpid`, `wait3`, `wait4` and
+`waitid` all funnel through one `wait_common`, which takes a
+`WaitTarget { Selector, Pgid }` rather than a signed integer — the same shape
+the kernel resolved to in §206, so the two cannot disagree about which child a
+selector names. `waitid(P_PGID, 1, …)` returns the kernel's `ECHILD`/success
+instead of `ENOSYS`; `WNOWAIT` maps to the kernel bit instead of being dropped;
+`si_uid`, `si_utime` and `si_stime` come from the `WaitInfo` out-parameter; and
+`wait3`/`wait4` write a genuine `rusage` from the same struct.
+
+**The `WINFO` gate is respected.** `wait_common` only sets it — and only then
+issues a five-argument syscall — when a `WaitInfo` was actually asked for. The
+three-argument path still goes through `syscall3`, which never writes `r10`/`r8`,
+so the kernel never reads registers this libc did not set. Lane A's first
+version read them unconditionally and broke `ctest-pgroup`, `ctest-jobctl` and
+`ctest-ctty` within one boot.
+
+**Units.** `WaitInfo` is microseconds and `siginfo_t.si_utime`/`si_stime` are
+USER_HZ ticks, deliberately. libc converts in exactly one place
+(`us_to_clock_t`); a second conversion site would be off by exactly 10×, which
+is the kind of error that survives review.
+
+Rationale: `design-decisions.md` §206 (kernel) and §319 (libc).
 
 **Correction to item 4 below ("there is no per-process CPU accounting").** That
 was already false when this entry was written. `pcb`'s `acct_*`/`child_*`
@@ -695,21 +713,125 @@ signalfd registration — so a process blocked in it could not be interrupted.
 `kernel/src/syscall/wait.rs` fixed it, and it is the clearest evidence for why
 one primitive beats three copies.
 
-Until libc catches up, the divergences remain documented on `waitid`'s doc
-comment, which is where someone debugging a `WNOWAIT` that reaped will actually
-look — and that comment now needs a line saying the kernel *can* do it.
+`waitid`'s doc comment now carries the closed list under "Three limitations that
+are gone as of 2026-08-16", which is where someone debugging a `WNOWAIT` that
+reaped will actually look, plus the two divergences from Linux that genuinely
+remain (`P_PIDFD` is `EINVAL`, and `si_utime`/`si_stime` have tick resolution
+even though the kernel knows microseconds — the field is `clock_t` and a ported
+binary expects ticks).
 
-**What *is* covered, so this entry is not mistaken for "waitid is untested."**
-Everything `waitid` can do is exercised on target by
-`services/ctest-jobctl/main.c` checks 100-111 (`CLD_STOPPED`/`CLD_CONTINUED`
-against a real kernel-encoded job-control event, plus the proof that observing
-one consumes it), 120-132 (`CLD_EXITED` with the exit *code* in `si_status`,
-`ECHILD` on re-wait, `CLD_KILLED`/`SIGKILL`), and 140-147 (argument
-validation). The fixture is the only place the `wstatus` → `siginfo_t` decoding
-is testable at all: `waitpid`'s syscall arm is compiled out for anything but
-`target_os = "none"`, so a host `waitid` returns `ENOSYS` before a status word
-exists to decode. The three gaps above are exactly the residue — the facts that
-do not survive the reap — and nothing there tests them because nothing can.
+**Coverage.** On target, `services/ctest-jobctl/main.c` checks 100-111
+(`CLD_STOPPED`/`CLD_CONTINUED` against a real kernel-encoded job-control event,
+plus the proof that observing one consumes it), 120-132 (`CLD_EXITED` with the
+exit *code* in `si_status`, `ECHILD` on re-wait, `CLD_KILLED`/`SIGKILL`),
+140-147 (argument validation) and — new with the fix — **150-187**: the
+`WaitInfo` fill including `uid` and the six counters, `WNOWAIT` peeking twice
+without reaping, and naming a process group including group 1. The fixture is
+the only place the `wstatus` → `siginfo_t` decoding is testable at all:
+`waitpid`'s syscall arm is compiled out for anything but `target_os = "none"`,
+so a host `waitid` returns `ENOSYS` before a status word exists to decode.
+
+Checks **157** and **169** are the two lane A asked lane B for by name, and they
+are the only tests in the tree that can exist anywhere else: they pass sizes
+libc by construction never passes (128 and 24 against a 72-byte struct) to prove
+the kernel zero-fills the tail and never writes past the caller's declared
+length. A kernel self-test task has no user address space, so it reaches the
+pure encoder but not `copy_to_user`, and truncation is a property of the copy.
+They reach the syscall raw rather than through a size-taking libc export,
+because such an export would be a permanent hole letting every other caller hand
+the kernel an arbitrary length for the sake of one test.
+
+### TD-POSIX-WAITID-CANNOT-SUPPRESS-EXIT-REPORTS. `waitid` without `WEXITED` still reports a child's exit, because the kernel primitive always does — LOGGED 2026-08-16 by lane B
+
+**In short:** POSIX's `waitid()` lets a caller say *which kinds* of news it
+wants about its children — "tell me if one exits", "tell me if one is
+suspended", "tell me if one resumes" — by setting flags. Ours honours the
+suspend and resume flags but cannot switch the *exit* one off: ask only about
+suspends, and an exit will still be reported. Nothing we ship asks for that
+combination, and the direction of the error is the safe one (a caller is told
+more than it asked, never less), but a ported program that relies on the
+filter will behave differently here than on Linux.
+
+**Where it lives.** `posix/src/process.rs::waitid_kernel_options` — the
+translation from `waitid`'s option word to the kernel's. `WSTOPPED`,
+`WCONTINUED` and `WNOWAIT` each have a kernel bit; `WEXITED` has none, because
+`SYS_PROCESS_WAIT_STATUS` reports a reapable exit unconditionally (that is what
+`waitpid` means) and the two job-control classes are the *additions* selected by
+`WUNTRACED`/`WCONTINUED`.
+
+**How it would show.** `waitid(P_PID, child, &info, WSTOPPED)` on a child that
+exits instead of stopping: Linux blocks (or returns `ECHILD` once the child is
+its last), ours returns the exit as `CLD_EXITED` — **and reaps it**, so the
+status is consumed by a call that did not ask for it. That last part is the
+reason this is worth an entry rather than a comment: a caller that intended to
+reap later has silently lost the exit status.
+
+Note the fixture's check 100 deliberately sets `WSTOPPED | WEXITED` together for
+exactly this reason — so a child that died instead of stopping is *reported*
+rather than leaving the parent parked. That works today by accident of this bug
+and by intent of the flags; it will keep working after a fix.
+
+**Proper fix** (kernel-side, so lane A's): a `WNOEXITED` option bit — or,
+better, invert it and make the primitive's exit reporting explicit under a bit
+that every existing caller already sets by construction, the way `WPGID` and
+`WINFO` were added without disturbing anyone. Not filed as a request yet: no
+caller in the tree needs it, and it is a strictly larger change to the wait
+primitive than the three that just landed. Promote it to `requests/` the first
+time a port actually depends on the filter — glibc's `posix_spawn` and
+`pthread_cancel` paths are the likeliest candidates.
+
+### TD-POSIX-NATIVE-GETRUSAGE-REPORTS-SYSTEM-WIDE-CPU. `getrusage()` on our own ABI returns the machine's total CPU time as if it were the caller's — LOGGED 2026-08-16 by lane B, filed to lane A
+
+**In short:** a program can ask the OS "how much CPU have I used?". On our own
+ABI it gets an answer, the answer looks entirely plausible, and it is **the
+whole machine's** CPU time rather than the asking program's. Every process gets
+the same number and that number only ever grows. There is no way for a caller
+to tell.
+
+**This is a false non-zero, and that is the point.** It is the sibling of the
+`clear_user_rusage` bug lane A just fixed, and the worse half: `wait4` reported
+zeros, which are visibly unsourced, whereas this reports a real measurement of
+something else. §314's rule — libc must not invent an answer it does not have —
+is aimed exactly here.
+
+**Where it lives.** `posix/src/resource.rs::getrusage`, the
+`target_os = "none"` arm. It fills `ru_utime` from `SYS_CPU_TIMES(0)` and
+`ru_stime` from `SYS_CPU_TIMES(1) + SYS_CPU_TIMES(2)`. `SYS_CPU_TIMES` (native
+59) takes a *field selector*, not a pid — it is the machine-wide aggregate. Note
+selector 0 is **system** time, so `ru_utime` is not even the aggregate *user*
+time; the two fields are mislabelled relative to each other as well as being
+the wrong scope. `ru_minflt`/`ru_majflt`/`ru_nvcsw`/`ru_nivcsw` and all of
+`RUSAGE_CHILDREN` are zero.
+
+**Why libc cannot fix it alone.** There is no native syscall reporting a
+process's own accounting. The counters exist (`pcb`'s `acct_*`/`child_*`,
+`thread::process_cpu_ticks`, `process_fault_counts`, `process_ctxsw_counts`) and
+the kernel already encodes the full 144-byte `struct rusage` from them in
+`kernel/src/syscall/linux.rs::sys_getrusage` (~13478) — but that encoder is
+registered only on the **Linux** ABI table, and `AbiMode` is per-process, so a
+program on our libc can never reach it. This is the same shape as
+`TD-POSIX-PROCESS-GROUPS-ARE-FAKE-FOR-NATIVE-ABI-PROGRAMS`: real kernel state,
+reachable from the ported ABI, invisible from our own, with a userspace
+approximation standing in.
+
+**Proper fix** — filed as
+`requests/b-a-native-getrusage-reports-system-wide-cpu-as-per-process.md`: a
+native `SYS_PROCESS_GET_RUSAGE` taking `who` plus the `(pointer, size)`
+extensible-struct convention `WaitInfo` established, wrapping the encoder that
+already exists. Lane B then fills the six sourceable fields exactly as
+`rusage_from_wait_info` already does for `wait4`, so the self and child paths
+agree by construction.
+
+**Not blocking.** Nothing in the tree reads `getrusage` for a decision; the
+callers are ports that are ahead of us (bash's `times` builtin, CPython's
+`resource` module). Filed now anyway because the kernel half is a registration
+around existing code, and because the failure is silent by construction — a
+wrong CPU time is never implausible.
+
+**Coverage when it lands** must be ring-3 (the host build stubs every syscall
+to `ENOSYS`), and the decisive checks are the two this bug cannot pass: two
+processes on the same machine must get **different** answers, and a process that
+has just burned CPU must get a **larger** answer than a moment before.
 
 ### TD-POSIX-TIMES-FLAKE. `posix::sys_times::tests::test_times_increments_each_call` fails intermittently under a full-workspace run — 2026-08-15 — ✅ FIXED 2026-08-15 by lane B (`posix/src/sys_times.rs`), and the triage found a second, worse bug underneath it
 

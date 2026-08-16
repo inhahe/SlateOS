@@ -792,7 +792,8 @@ fn waitid_target(idtype: i32, id: PidT) -> Option<WaitTarget> {
 /// `WEXITED` has no kernel bit because the primitive always reports exits.
 /// A `waitid` without `WEXITED` that sees only an exit therefore still
 /// reports it, which is the one place this wrapper is laxer than Linux;
-/// tracked in `todo.txt`.
+/// tracked in `known-issues.md` →
+/// `TD-POSIX-WAITID-CANNOT-SUPPRESS-EXIT-REPORTS`.
 ///
 /// `__WNOTHREAD`/`__WALL`/`__WCLONE` are accepted for Linux source
 /// compatibility and dropped: the kernel has no clone-vs-fork distinction to

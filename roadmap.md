@@ -527,7 +527,9 @@ Roadmap:
   §201); waiting in `deferred-questions.md` → D-Q2 until the first substantial
   C port. Everything not gated on that answer is already done (2026-08-16).
 - `[A]` TCP/IP stack kernel side + `SYS_NET_RAW_*` shim (line ~1044) — see joint task
-- `[A]` Later: NTFS read support, Btrfs/ZFS CoW, F2FS (line ~1041, §5.4)
+- ~~`[A]` NTFS **read** support~~ — **done 2026-08-16** (`kernel/src/fs/ntfs/`,
+  `design-decisions.md` §210). Write support intentionally deferred behind
+  `$LogFile`. Btrfs/ZFS CoW and F2FS remain open (line ~1041, §5.4).
 - `[A]` Port AMDGPU / Intel i915-xe drivers (lines ~4569–4571) — kernel-side DRM
 
 Known-issues (open, kernel-owned):
@@ -2008,7 +2010,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Cgroup Memory (fs::cgmem): Per-cgroup memory accounting with RSS/cache/swap breakdown, charge/uncharge, OOM kill tracking; `cgmem`/`cgm` kshell command; /proc/cgmem; 8 self-tests
   - [x] VM Fragmentation (fs::vmfrag): Memory fragmentation index per zone/order with compaction success tracking, timestamps; `vmfrag`/`vfrag` kshell command; /proc/vmfrag; 8 self-tests
   - [x] Pidfd (fs::pidfd): Process file descriptor monitoring with create/poll/signal/wait/close tracking per PID; `pidfd`/`pfd` kshell command; /proc/pidfd; 8 self-tests
-- [ ] `[A]` Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
+- [-] `[A]` Later: NTFS read support (**done 2026-08-16**, `fs::ntfs` — see §5.2),
+  Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)
 - [-] `[A]` TCP/IP stack (kernel-resident prototype, will move to userspace)
@@ -6147,7 +6150,21 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
 ### 5.2 Additional filesystems
 - [ ] `[A]` Port Btrfs (CoW, snapshots, checksums)
 - [ ] `[A]` Port F2FS (SSD optimization)
-- [ ] `[A]` NTFS read/write support
+- [-] `[A]` NTFS read/write support — **read side done (2026-08-16), write side
+  deliberately not started.** `kernel/src/fs/ntfs/`: boot sector (incl. the
+  signed power-of-two `clusters_per_mft_record`/`clusters_per_index_buffer`
+  encodings), update-sequence fixups for `FILE` and `INDX`, MFT records,
+  resident/non-resident attributes, variable-width sign-extended runlists with
+  sparse runs, `$ATTRIBUTE_LIST` extension-record merging, `$STANDARD_INFORMATION`,
+  `$FILE_NAME` with namespace handling (8.3 DOS aliases hidden), the `$I30`
+  directory B+ tree across both `$INDEX_ROOT` and `$INDEX_ALLOCATION`,
+  `$Volume` label/version, and the full `FileSystem` impl (readdir / read_file /
+  read_at / stat / lstat / metadata / statvfs / debug_stats) reporting
+  `read_only: true` and `0o444`/`0o555`. Compressed and encrypted `$DATA` are
+  `NotSupported`, never returned raw. Reads through a `SectorSource` trait so
+  the self-test drives the whole parser over a synthetic in-RAM volume on
+  **every** boot with no device attached (8 test groups). Write support stays
+  out until `$LogFile` journalling exists — see `design-decisions.md` §210.
 - [x] Queryable file metadata / indexed attributes (fs::queryable): BeOS BFS-inspired typed attribute store per design.txt lines 35-37 and 249; AttrValue (Text/Int/Bool/Bytes) with per-file attribute maps; relational query engine with CompareOp (Equal/NotEqual/LessThan/LessEqual/GreaterThan/GreaterEqual/Contains/StartsWith/EndsWith); QueryMode (All=AND/Any=OR); indexed queries via reverse index (attr_name → BTreeMap<value_key, Set<path>>); attribute schemas with category:name convention (Audio:*/Image:*/Document:*/Email:*/App:*); 27 built-in schemas; register_builtins(); create_index/drop_index; rename_path support; unique_values discovery; 65536 max files, 64 attrs/file, 1024 indexed attrs; `queryable`/`qattr` kshell command (set/get/rm/list/clear/query/index/schema/test/stats/reset); /proc/queryable; 7 self-tests
 - [x] Application-level atomic write transactions (Vfs::atomic_write, write-temp-sync-rename pattern, atomic_write_preserve for metadata, VFS self-test)
 

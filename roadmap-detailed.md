@@ -1207,7 +1207,7 @@ _When a program hits an **unhandled language-level exception** (our SEH-style mo
 #### Other Filesystems
 - [ ] FAT32 (USB drives, EFI System Partition — essential)
 - [ ] ISO 9660 (optical media)
-- [ ] Later: NTFS read/write support
+- [-] Later: NTFS read/write support — read side done 2026-08-16 (`kernel/src/fs/ntfs/`); write side deferred behind `$LogFile` journalling, `design-decisions.md` §210
 - [ ] Later: Btrfs port (CoW, snapshots, checksums)
 - [ ] Later: F2FS port (SSD optimization)
 
@@ -3241,7 +3241,7 @@ _Operator note (2026-06-14): a true VM-backed Linux environment, in the spirit o
 
 - [ ] Port Btrfs (CoW, snapshots, checksums)
 - [ ] Port F2FS (SSD optimization)
-- [ ] NTFS read/write support
+- [-] NTFS read/write support — read side done 2026-08-16 (`kernel/src/fs/ntfs/`: fixups, MFT records, runlists, `$ATTRIBUTE_LIST`, the `$I30` B+ tree, full `FileSystem` impl, self-test over a synthetic in-RAM volume); write side deferred behind `$LogFile`, `design-decisions.md` §210
 - [ ] Queryable file metadata / indexed attributes (BeOS BFS-inspired)
 
 ### 6.3 Additional Schedulers

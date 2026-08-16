@@ -51,7 +51,7 @@ const _COLOR_OVERLAY0: Color = Color::from_hex(0x6C7086);
 // Layout constants
 // ============================================================================
 
-const MAX_COLS: usize = 26;
+const MAX_COLS: usize = COLUMN_LETTERS.len();
 const MAX_ROWS: usize = 999;
 const DEFAULT_COL_WIDTH: f32 = 100.0;
 const DEFAULT_ROW_HEIGHT: f32 = 24.0;
@@ -72,6 +72,26 @@ const UNDO_STACK_LIMIT: usize = 200;
 const SCROLLBAR_WIDTH: f32 = 14.0;
 const SHEET_TAB_WIDTH: f32 = 90.0;
 
+/// Move a zero-based index by a signed delta, staying inside `0..limit`.
+///
+/// Written once, in `usize`, rather than twice as a round trip through `i32`.
+/// The round trip stated the same bound three ways — `col as i32`, `.max(0)`,
+/// `.min(MAX_COLS as i32 - 1)` — and each of the two axes wrote all three out,
+/// which is six statements of one rule.
+fn step_index(index: usize, delta: i32, limit: usize) -> usize {
+    let last = limit.saturating_sub(1);
+    // `unsigned_abs` rather than `-delta`, which panics in debug for
+    // `i32::MIN`; the two directions then differ only in which saturating
+    // operation they use, and neither can leave the range.
+    let magnitude = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+    let moved = if delta >= 0 {
+        index.saturating_add(magnitude)
+    } else {
+        index.saturating_sub(magnitude)
+    };
+    moved.min(last)
+}
+
 // ============================================================================
 // Cell address
 // ============================================================================
@@ -83,6 +103,17 @@ pub struct CellAddr {
     pub row: usize,
 }
 
+/// The column headings, in order, and the definition of how many there are.
+///
+/// [`CellAddr::col_letter`] and [`CellAddr::parse`] are inverses of one another,
+/// and they used to say so only by coincidence: one computed `b'A' + col` after
+/// testing `col < 26`, the other computed `col_char - b'A'` after testing
+/// `is_ascii_uppercase`, and `MAX_COLS` was a third statement of the same 26.
+/// Reading both directions out of this table is what makes them agree by
+/// construction, and it is why neither needs a bound of its own —
+/// `get`/`position` are the bound.
+const COLUMN_LETTERS: &[u8; 26] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
 impl CellAddr {
     /// Create a new cell address from zero-indexed column and row.
     pub fn new(col: usize, row: usize) -> Self {
@@ -90,50 +121,57 @@ impl CellAddr {
     }
 
     /// Convert column index (0-based) to letter string (A, B, ..., Z).
+    ///
+    /// Returns `"?"` for a column past the last one, which is what the headers
+    /// and the address box display rather than nothing at all.
     pub fn col_letter(col: usize) -> String {
-        if col < 26 {
-            let ch = b'A' + col as u8;
-            String::from(ch as char)
-        } else {
-            String::from("?")
-        }
+        COLUMN_LETTERS
+            .get(col)
+            .map_or_else(|| "?".to_owned(), |&byte| char::from(byte).to_string())
+    }
+
+    /// Convert row index (0-based) to the label the row header shows.
+    ///
+    /// Rows are stored zero-based and shown one-based, and that fact used to be
+    /// written out at both places that show one — here and in the row-header
+    /// renderer — as a bare `+ 1`. Saturating because [`CellAddr::new`] does not
+    /// bound its arguments: a row of `usize::MAX` would otherwise wrap the label
+    /// round to "0", which reads as a valid address that no cell has.
+    pub fn row_label(row: usize) -> String {
+        row.saturating_add(1).to_string()
     }
 
     /// Display string for this cell address, e.g. "A1", "B5".
     pub fn display(&self) -> String {
         let mut s = Self::col_letter(self.col);
-        s.push_str(&(self.row + 1).to_string());
+        s.push_str(&Self::row_label(self.row));
         s
     }
 
     /// Parse a cell address string like "A1", "Z999".
     /// Returns `None` if the string is not a valid cell reference.
     pub fn parse(s: &str) -> Option<Self> {
-        let s = s.trim();
-        if s.is_empty() {
-            return None;
-        }
-        let upper = s.to_ascii_uppercase();
-        let bytes = upper.as_bytes();
-        if bytes.is_empty() || !bytes[0].is_ascii_uppercase() {
-            return None;
-        }
-        let col_char = bytes[0];
-        if !col_char.is_ascii_uppercase() {
-            return None;
-        }
-        let col = (col_char - b'A') as usize;
-        let row_str = &upper[1..];
-        if row_str.is_empty() {
-            return None;
-        }
-        let row_num: usize = row_str.parse().ok()?;
+        let upper = s.trim().to_ascii_uppercase();
+        let mut chars = upper.chars();
+        // `Chars::as_str` hands back the untaken remainder, so the row digits
+        // are read without ever forming a byte offset into `upper`. The old
+        // code sliced `&upper[1..]`, which is only correct because the first
+        // character had already been established as ASCII -- a fact stated
+        // five lines earlier and nowhere near the slice.
+        let col_byte = u8::try_from(chars.next()?).ok()?;
+        // Looking the letter up *is* the range check: anything that is not a
+        // column heading is simply not in the table.
+        let col = COLUMN_LETTERS
+            .iter()
+            .position(|&letter| letter == col_byte)?;
+
+        let row_num: usize = chars.as_str().parse().ok()?;
         if row_num == 0 || row_num > MAX_ROWS {
             return None;
         }
         Some(Self {
             col,
-            row: row_num - 1,
+            row: row_num.saturating_sub(1),
         })
     }
 }
@@ -199,6 +237,14 @@ pub enum CellError {
     InvalidReference,
     InvalidFormula,
     CircularReference,
+    /// The formula nests deeper than the evaluator will recurse.
+    ///
+    /// Distinct from [`CellError::CircularReference`], which is what a genuine
+    /// cycle produces: cycles are detected exactly, by the path of addresses
+    /// being visited, so a depth failure is never one. It is a formula that is
+    /// merely too deeply nested, and saying so is more use to whoever wrote it
+    /// than pointing at a cycle that is not there.
+    TooDeep,
     ValueError,
     NameError,
 }
@@ -211,6 +257,7 @@ impl CellError {
             Self::InvalidReference => "#REF!",
             Self::InvalidFormula => "#ERROR!",
             Self::CircularReference => "#CIRC!",
+            Self::TooDeep => "#DEPTH!",
             Self::ValueError => "#VALUE!",
             Self::NameError => "#NAME?",
         }
@@ -235,21 +282,49 @@ pub enum NumberFormat {
     Currency(u8),
 }
 
+/// `n` as an integer, if it is one and the conversion loses nothing.
+///
+/// Two places asked this question, and both spelled it out as
+/// `n == n.floor() && n.abs() < 1e15`. That is the same rule stated twice, and
+/// the `1e15` was a hand-picked stand-in for "small enough that `as i64` will
+/// not saturate" — a connection neither copy made, and one that is off by three
+/// orders of magnitude from the real bound.
+fn whole_number(n: f64) -> Option<i64> {
+    // `f64 as i64` saturates rather than wrapping, and the saturated value at
+    // the positive end converts *back* to the same `f64` — so 2^63 would pass a
+    // round-trip test while printing as 2^63 - 1. The range is therefore tested
+    // here rather than inferred. 2^63 is the first `f64` with no `i64`; -2^63 is
+    // the last one that has. NaN and the infinities fail both comparisons.
+    const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
+    if !(n >= -TWO_POW_63 && n < TWO_POW_63) {
+        return None;
+    }
+    let candidate = n as i64;
+    // Exact equality is the question being asked, not an approximation of it:
+    // `n` either has a fractional part or it has not. An epsilon here would
+    // print 0.5 as 0.
+    #[expect(
+        clippy::float_cmp,
+        reason = "whether a value survives the round trip through i64 is an exact question"
+    )]
+    let is_whole = candidate as f64 == n;
+    is_whole.then_some(candidate)
+}
+
 impl NumberFormat {
     /// Format a number according to this format specification.
     pub fn format_number(&self, value: f64) -> String {
         match self {
-            Self::General => {
-                if value == value.floor() && value.abs() < 1e15 {
-                    format!("{}", value as i64)
-                } else {
+            Self::General => whole_number(value).map_or_else(
+                || {
                     // Remove trailing zeros from decimal representation
-                    let s = format!("{:.10}", value);
+                    let s = format!("{value:.10}");
                     let s = s.trim_end_matches('0');
                     let s = s.trim_end_matches('.');
                     s.to_string()
-                }
-            }
+                },
+                |int| int.to_string(),
+            ),
             Self::Decimal(places) => {
                 format!("{:.prec$}", value, prec = *places as usize)
             }
@@ -387,106 +462,164 @@ impl Default for Cell {
 // Cell range
 // ============================================================================
 
-/// A rectangular range of cells.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct CellRange {
-    pub start: CellAddr,
-    pub end: CellAddr,
+/// A module for one type, because privacy in Rust is per-module and this crate
+/// is a single one.
+///
+/// [`CellRange`]'s two corners are ordered — `start` is never past `end` on
+/// either axis — and that is what lets `col_count` and `row_count` be
+/// subtractions at all. The fields used to be `pub`, which made the
+/// normalization done by `CellRange::new` a piece of advice rather than a
+/// guarantee: any of this file's six thousand lines could assign a corner
+/// directly, and every count would then underflow to near `usize::MAX` — which
+/// is one `Vec::with_capacity` away from an abort.
+///
+/// Making the fields private inside the same module would have changed nothing,
+/// since a module can always see its own privates. The `mod` is the enforcement;
+/// the `pub` on the fields' accessors is just the interface.
+mod cell_range {
+    use super::CellAddr;
+
+    /// A rectangular range of cells, with `start` no greater than `end` on both
+    /// axes.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct CellRange {
+        start: CellAddr,
+        end: CellAddr,
+    }
+
+    impl CellRange {
+        /// Create a new range, normalizing so start <= end.
+        pub fn new(a: CellAddr, b: CellAddr) -> Self {
+            let start = CellAddr::new(a.col.min(b.col), a.row.min(b.row));
+            let end = CellAddr::new(a.col.max(b.col), a.row.max(b.row));
+            Self { start, end }
+        }
+
+        /// Create a single-cell range.
+        pub fn single(addr: CellAddr) -> Self {
+            Self {
+                start: addr,
+                end: addr,
+            }
+        }
+
+        /// The top-left corner. Never past [`CellRange::end`] on either axis.
+        pub fn start(&self) -> CellAddr {
+            self.start
+        }
+
+        /// The bottom-right corner. Never before [`CellRange::start`] on either axis.
+        pub fn end(&self) -> CellAddr {
+            self.end
+        }
+
+        /// Check if a cell address is within this range.
+        pub fn contains(&self, addr: CellAddr) -> bool {
+            addr.col >= self.start.col
+                && addr.col <= self.end.col
+                && addr.row >= self.start.row
+                && addr.row <= self.end.row
+        }
+
+        /// Number of columns in this range. At least one.
+        pub fn col_count(&self) -> usize {
+            // Sound because the corners are ordered and private; see the type docs.
+            self.end
+                .col
+                .saturating_sub(self.start.col)
+                .saturating_add(1)
+        }
+
+        /// Number of rows in this range. At least one.
+        pub fn row_count(&self) -> usize {
+            self.end
+                .row
+                .saturating_sub(self.start.row)
+                .saturating_add(1)
+        }
+
+        /// Total number of cells in this range.
+        ///
+        /// Saturating rather than wrapping: a range is at most `MAX_COLS` by
+        /// `MAX_ROWS`, so the product is under 26,000 and the saturation is
+        /// unreachable — but a count that silently wraps to a small number is a
+        /// worse thing for a caller sizing a buffer to receive than one that is
+        /// merely enormous.
+        pub fn cell_count(&self) -> usize {
+            self.col_count().saturating_mul(self.row_count())
+        }
+
+        /// Iterate over all cell addresses in this range (row-major order).
+        pub fn iter(&self) -> CellRangeIter {
+            CellRangeIter {
+                range: *self,
+                col: self.start.col,
+                row: self.start.row,
+            }
+        }
+
+        /// Display string like "A1:C5".
+        pub fn display(&self) -> String {
+            if self.start == self.end {
+                self.start.display()
+            } else {
+                format!("{}:{}", self.start.display(), self.end.display())
+            }
+        }
+
+        /// Parse a range string like "A1:C5" or a single cell "A1".
+        pub fn parse(s: &str) -> Option<Self> {
+            // `split_once` gives the two halves without either of them being a
+            // byte offset the caller has to keep in step with the other. The old
+            // form found `idx` and then sliced `&s[..idx]` and `&s[idx + 1..]`,
+            // which is the same offset used three ways.
+            match s.split_once(':') {
+                Some((left, right)) => {
+                    Some(Self::new(CellAddr::parse(left)?, CellAddr::parse(right)?))
+                }
+                None => Some(Self::single(CellAddr::parse(s)?)),
+            }
+        }
+    }
+
+    impl IntoIterator for &CellRange {
+        type Item = CellAddr;
+        type IntoIter = CellRangeIter;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.iter()
+        }
+    }
+
+    /// Iterator over cell addresses in a range.
+    pub struct CellRangeIter {
+        range: CellRange,
+        col: usize,
+        row: usize,
+    }
+
+    impl Iterator for CellRangeIter {
+        type Item = CellAddr;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.row > self.range.end.row {
+                return None;
+            }
+            let addr = CellAddr::new(self.col, self.row);
+            // Saturating: a cursor pinned at `usize::MAX` is past `end.col`, which
+            // is what the wrap below is testing for, so the iterator still
+            // terminates rather than cycling.
+            self.col = self.col.saturating_add(1);
+            if self.col > self.range.end.col {
+                self.col = self.range.start.col;
+                self.row = self.row.saturating_add(1);
+            }
+            Some(addr)
+        }
+    }
 }
 
-impl CellRange {
-    /// Create a new range, normalizing so start <= end.
-    pub fn new(a: CellAddr, b: CellAddr) -> Self {
-        let start = CellAddr::new(a.col.min(b.col), a.row.min(b.row));
-        let end = CellAddr::new(a.col.max(b.col), a.row.max(b.row));
-        Self { start, end }
-    }
-
-    /// Create a single-cell range.
-    pub fn single(addr: CellAddr) -> Self {
-        Self {
-            start: addr,
-            end: addr,
-        }
-    }
-
-    /// Check if a cell address is within this range.
-    pub fn contains(&self, addr: CellAddr) -> bool {
-        addr.col >= self.start.col
-            && addr.col <= self.end.col
-            && addr.row >= self.start.row
-            && addr.row <= self.end.row
-    }
-
-    /// Number of columns in this range.
-    pub fn col_count(&self) -> usize {
-        self.end.col - self.start.col + 1
-    }
-
-    /// Number of rows in this range.
-    pub fn row_count(&self) -> usize {
-        self.end.row - self.start.row + 1
-    }
-
-    /// Total number of cells in this range.
-    pub fn cell_count(&self) -> usize {
-        self.col_count() * self.row_count()
-    }
-
-    /// Iterate over all cell addresses in this range (row-major order).
-    pub fn iter(&self) -> CellRangeIter {
-        CellRangeIter {
-            range: *self,
-            col: self.start.col,
-            row: self.start.row,
-        }
-    }
-
-    /// Display string like "A1:C5".
-    pub fn display(&self) -> String {
-        if self.start == self.end {
-            self.start.display()
-        } else {
-            format!("{}:{}", self.start.display(), self.end.display())
-        }
-    }
-
-    /// Parse a range string like "A1:C5" or a single cell "A1".
-    pub fn parse(s: &str) -> Option<Self> {
-        if let Some(idx) = s.find(':') {
-            let left = CellAddr::parse(&s[..idx])?;
-            let right = CellAddr::parse(&s[idx + 1..])?;
-            Some(Self::new(left, right))
-        } else {
-            let addr = CellAddr::parse(s)?;
-            Some(Self::single(addr))
-        }
-    }
-}
-
-/// Iterator over cell addresses in a range.
-pub struct CellRangeIter {
-    range: CellRange,
-    col: usize,
-    row: usize,
-}
-
-impl Iterator for CellRangeIter {
-    type Item = CellAddr;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.row > self.range.end.row {
-            return None;
-        }
-        let addr = CellAddr::new(self.col, self.row);
-        self.col += 1;
-        if self.col > self.range.end.col {
-            self.col = self.range.start.col;
-            self.row += 1;
-        }
-        Some(addr)
-    }
-}
+pub use cell_range::{CellRange, CellRangeIter};
 
 // ============================================================================
 // Selection state
@@ -594,7 +727,14 @@ pub enum UndoAction {
         new_height: f32,
     },
     /// Sheet added.
-    AddSheet { sheet_idx: usize },
+    ///
+    /// Carries the sheet, like [`UndoAction::RemoveSheet`] does, so that redo
+    /// can put it back. Recording it at *add* time is right rather than
+    /// merely convenient: any edit made to the sheet afterwards is its own
+    /// action, and the undo stack is unwound in reverse, so by the time this
+    /// action's undo runs those edits have already been undone and the sheet is
+    /// once again the empty one recorded here.
+    AddSheet { sheet_idx: usize, sheet: Sheet },
     /// Sheet removed.
     RemoveSheet { sheet_idx: usize, sheet: Sheet },
 }
@@ -857,14 +997,19 @@ impl Sheet {
             })
             .collect();
 
-        // Apply sorted data
-        for (dest_offset, row_data) in all_row_data.iter().enumerate() {
-            let dest_row = start_row + dest_offset;
-            for (_, src_cell) in row_data {
-                let col_idx = row_data
-                    .iter()
-                    .position(|(_, c)| std::ptr::eq(c, src_cell))
-                    .unwrap_or(0);
+        // Apply sorted data.
+        //
+        // Zipping against `start_row..=end_row` rather than adding an enumerate
+        // offset to `start_row`: the rows written are by definition the rows
+        // read, and saying so with the same range object makes the two agree
+        // without an addition to bound.
+        for (dest_row, row_data) in (start_row..=end_row).zip(&all_row_data) {
+            // `enumerate` rather than recovering the column by searching
+            // `row_data` for a pointer equal to `src_cell`. The search returned
+            // the same number the loop already had, at quadratic cost — and its
+            // `.unwrap_or(0)` meant that a miss would silently write the cell to
+            // column A instead of failing.
+            for (col_idx, (_, src_cell)) in row_data.iter().enumerate() {
                 let dest_addr = CellAddr::new(col_idx, dest_row);
                 let old = self.get_cell(dest_addr);
                 if *src_cell != old {
@@ -955,103 +1100,128 @@ enum FormulaToken {
     Boolean(bool),
 }
 
+/// A cursor over a formula's characters.
+///
+/// Every read of the input goes through one of the four methods below, and each
+/// states its bound at the point of the read. The tokenizer used to carry a
+/// bare `pos` and restate the bound at each use — `if pos + 1 < length &&
+/// chars[pos + 1] == '='`, sixteen times — which is one bound written twice,
+/// once as a guard and once as an index, and in four places the guard was for a
+/// different offset than the index beside it.
+///
+/// Characters, not bytes: a formula is user-typed text and may contain any of
+/// it, so `String` byte offsets would be the wrong unit even where they did not
+/// panic.
+struct FormulaCursor {
+    chars: Vec<char>,
+    pos: usize,
+}
+
+impl FormulaCursor {
+    fn new(input: &str) -> Self {
+        Self {
+            chars: input.chars().collect(),
+            pos: 0,
+        }
+    }
+
+    /// The character under the cursor, or `None` at the end of the input.
+    fn peek(&self) -> Option<char> {
+        self.peek_at(0)
+    }
+
+    /// The character `offset` positions past the cursor.
+    fn peek_at(&self, offset: usize) -> Option<char> {
+        self.chars.get(self.pos.checked_add(offset)?).copied()
+    }
+
+    /// Move the cursor forward by `n`, stopping at the end of the input.
+    fn skip(&mut self, n: usize) {
+        self.pos = self.pos.saturating_add(n).min(self.chars.len());
+    }
+
+    /// Consume and return the run of characters satisfying `keep`.
+    fn take_while(&mut self, keep: impl Fn(char) -> bool) -> String {
+        let mut taken = String::new();
+        while let Some(ch) = self.peek() {
+            if !keep(ch) {
+                break;
+            }
+            taken.push(ch);
+            self.skip(1);
+        }
+        taken
+    }
+}
+
 /// Tokenize a formula string (without the leading '=').
 fn tokenize_formula(input: &str) -> Result<Vec<FormulaToken>, CellError> {
     let mut tokens = Vec::new();
-    let chars: Vec<char> = input.chars().collect();
-    let length = chars.len();
-    let mut pos = 0;
+    let mut cur = FormulaCursor::new(input);
 
-    while pos < length {
-        let ch = chars[pos];
+    while let Some(ch) = cur.peek() {
+        // Every arm is responsible for advancing past what it consumed. The
+        // single-character arms are gathered here so that "one character, one
+        // token" is stated once rather than as twelve `pos += 1`s.
+        let single = match ch {
+            ' ' | '\t' => Some(None),
+            '+' => Some(Some(FormulaToken::Plus)),
+            '-' => Some(Some(FormulaToken::Minus)),
+            '*' => Some(Some(FormulaToken::Multiply)),
+            '/' => Some(Some(FormulaToken::Divide)),
+            '(' => Some(Some(FormulaToken::LeftParen)),
+            ')' => Some(Some(FormulaToken::RightParen)),
+            ',' => Some(Some(FormulaToken::Comma)),
+            '&' => Some(Some(FormulaToken::Ampersand)),
+            '=' => Some(Some(FormulaToken::Equals)),
+            _ => None,
+        };
+        if let Some(token) = single {
+            cur.skip(1);
+            tokens.extend(token);
+            continue;
+        }
+
         match ch {
-            ' ' | '\t' => {
-                pos += 1;
-            }
-            '+' => {
-                tokens.push(FormulaToken::Plus);
-                pos += 1;
-            }
-            '-' => {
-                tokens.push(FormulaToken::Minus);
-                pos += 1;
-            }
-            '*' => {
-                tokens.push(FormulaToken::Multiply);
-                pos += 1;
-            }
-            '/' => {
-                tokens.push(FormulaToken::Divide);
-                pos += 1;
-            }
-            '(' => {
-                tokens.push(FormulaToken::LeftParen);
-                pos += 1;
-            }
-            ')' => {
-                tokens.push(FormulaToken::RightParen);
-                pos += 1;
-            }
-            ',' => {
-                tokens.push(FormulaToken::Comma);
-                pos += 1;
-            }
-            '&' => {
-                tokens.push(FormulaToken::Ampersand);
-                pos += 1;
-            }
-            '<' => {
-                if pos + 1 < length && chars[pos + 1] == '=' {
+            '<' => match cur.peek_at(1) {
+                Some('=') => {
                     tokens.push(FormulaToken::LessEq);
-                    pos += 2;
-                } else if pos + 1 < length && chars[pos + 1] == '>' {
-                    tokens.push(FormulaToken::NotEquals);
-                    pos += 2;
-                } else {
-                    tokens.push(FormulaToken::LessThan);
-                    pos += 1;
+                    cur.skip(2);
                 }
-            }
+                Some('>') => {
+                    tokens.push(FormulaToken::NotEquals);
+                    cur.skip(2);
+                }
+                _ => {
+                    tokens.push(FormulaToken::LessThan);
+                    cur.skip(1);
+                }
+            },
             '>' => {
-                if pos + 1 < length && chars[pos + 1] == '=' {
+                if cur.peek_at(1) == Some('=') {
                     tokens.push(FormulaToken::GreaterEq);
-                    pos += 2;
+                    cur.skip(2);
                 } else {
                     tokens.push(FormulaToken::GreaterThan);
-                    pos += 1;
+                    cur.skip(1);
                 }
-            }
-            '=' => {
-                tokens.push(FormulaToken::Equals);
-                pos += 1;
             }
             '"' => {
-                pos += 1;
-                let mut s = String::new();
-                while pos < length && chars[pos] != '"' {
-                    s.push(chars[pos]);
-                    pos += 1;
-                }
-                if pos < length {
-                    pos += 1;
-                } // skip closing quote
-                tokens.push(FormulaToken::StringLiteral(s));
+                cur.skip(1);
+                let literal = cur.take_while(|c| c != '"');
+                // An unterminated string literal ends at the end of the input
+                // rather than being an error, which is what a spreadsheet does
+                // while the user is still typing the closing quote.
+                cur.skip(1);
+                tokens.push(FormulaToken::StringLiteral(literal));
             }
             _ if ch.is_ascii_digit() || ch == '.' => {
-                let start = pos;
-                while pos < length && (chars[pos].is_ascii_digit() || chars[pos] == '.') {
-                    pos += 1;
-                }
-                let num_str: String = chars[start..pos].iter().collect();
+                let num_str = cur.take_while(|c| c.is_ascii_digit() || c == '.');
                 let val: f64 = num_str.parse().map_err(|_| CellError::InvalidFormula)?;
                 tokens.push(FormulaToken::Number(val));
             }
             _ if ch.is_ascii_alphabetic() => {
-                let start = pos;
-                while pos < length && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_') {
-                    pos += 1;
-                }
-                let word: String = chars[start..pos].iter().collect();
+                let word = cur.take_while(|c| c.is_ascii_alphanumeric() || c == '_');
                 let upper = word.to_ascii_uppercase();
 
                 // Check for boolean literals
@@ -1063,24 +1233,18 @@ fn tokenize_formula(input: &str) -> Result<Vec<FormulaToken>, CellError> {
                 // Check if this is a cell reference potentially followed by ':'
                 else if let Some(addr) = CellAddr::parse(&upper) {
                     // Check for range reference
-                    if pos < length && chars[pos] == ':' {
-                        pos += 1;
-                        let range_start = pos;
-                        while pos < length && (chars[pos].is_ascii_alphanumeric()) {
-                            pos += 1;
-                        }
-                        let end_word: String = chars[range_start..pos].iter().collect();
-                        if let Some(end_addr) = CellAddr::parse(&end_word) {
-                            tokens.push(FormulaToken::RangeRef(addr, end_addr));
-                        } else {
-                            return Err(CellError::InvalidReference);
-                        }
+                    if cur.peek() == Some(':') {
+                        cur.skip(1);
+                        let end_word = cur.take_while(|c| c.is_ascii_alphanumeric());
+                        let end_addr =
+                            CellAddr::parse(&end_word).ok_or(CellError::InvalidReference)?;
+                        tokens.push(FormulaToken::RangeRef(addr, end_addr));
                     } else {
                         tokens.push(FormulaToken::CellRef(addr));
                     }
                 }
                 // Check if followed by '(' — function call
-                else if pos < length && chars[pos] == '(' {
+                else if cur.peek() == Some('(') {
                     tokens.push(FormulaToken::FuncName(upper));
                 } else {
                     return Err(CellError::NameError);
@@ -1099,6 +1263,14 @@ fn tokenize_formula(input: &str) -> Result<Vec<FormulaToken>, CellError> {
 // ============================================================================
 
 /// Recursive-descent parser context for formula evaluation.
+/// How deep the formula evaluator will recurse before giving up.
+///
+/// One budget covers both parenthesis nesting and chains of referring cells —
+/// see [`FormulaEvaluator::parse_comparison`]. A hundred is far more than any
+/// document a person writes and far less than the stack can take, which is the
+/// right side of both errors to be on.
+const MAX_EVAL_DEPTH: usize = 100;
+
 pub struct FormulaEvaluator<'a> {
     tokens: Vec<FormulaToken>,
     pos: usize,
@@ -1145,8 +1317,43 @@ impl<'a> FormulaEvaluator<'a> {
         Ok(CellValue::Text(result))
     }
 
-    /// Parse comparison expressions (=, <>, <, >, <=, >=).
+    /// Parse a sub-expression one level deeper, refusing to go past
+    /// [`MAX_EVAL_DEPTH`].
+    ///
+    /// **Every** recursive step in this evaluator passes through here, because
+    /// every one of them re-enters the grammar at `parse_comparison`: a
+    /// parenthesised group, each argument of a function call, and following a
+    /// cell reference into the formula of the cell it names.
+    ///
+    /// It did not used to. The counter was incremented only in
+    /// [`FormulaEvaluator::resolve_cell`], so nothing at all bounded the
+    /// parenthesis case — `=((((((…1…))))))` recursed once per parenthesis
+    /// until the stack ran out. The tokens come from a cell's text, whose
+    /// length is the document's to choose, and a stack overflow is not a
+    /// `CellError` the caller can render in the cell: it takes the process out,
+    /// losing the whole workbook.
+    ///
+    /// The budget is shared between the two kinds of nesting rather than
+    /// counted separately, because it stands for one thing — the depth of the
+    /// Rust stack — and it does not care which grammar production put a frame
+    /// there.
     fn parse_comparison(&mut self) -> Result<CellValue, CellError> {
+        let restore = self.eval_depth;
+        let next = restore.checked_add(1).ok_or(CellError::TooDeep)?;
+        if next > MAX_EVAL_DEPTH {
+            return Err(CellError::TooDeep);
+        }
+        self.eval_depth = next;
+        let result = self.parse_comparison_inner();
+        // Not `-= 1`: restoring the saved value is correct even if the body
+        // left the counter somewhere unexpected, and there is no subtraction to
+        // justify.
+        self.eval_depth = restore;
+        result
+    }
+
+    /// Parse comparison expressions (=, <>, <, >, <=, >=).
+    fn parse_comparison_inner(&mut self) -> Result<CellValue, CellError> {
         let left = self.parse_addition()?;
         match self.peek().cloned() {
             Some(FormulaToken::Equals) => {
@@ -1291,30 +1498,33 @@ impl<'a> FormulaEvaluator<'a> {
         if self.visited.contains(&addr) {
             return Err(CellError::CircularReference);
         }
-        if self.eval_depth > 100 {
-            return Err(CellError::CircularReference);
-        }
         let cell = self.sheet.get_cell(addr);
-        if cell.is_formula() {
-            // Recursively evaluate
-            self.visited.push(addr);
-            self.eval_depth += 1;
-            let formula_text = &cell.raw_input[1..];
-            let sub_tokens = tokenize_formula(formula_text)?;
-            let mut sub_eval = FormulaEvaluator {
-                tokens: sub_tokens,
-                pos: 0,
-                sheet: self.sheet,
-                eval_depth: self.eval_depth,
-                visited: self.visited.clone(),
-            };
-            let result = sub_eval.evaluate();
-            self.eval_depth -= 1;
-            let _ = self.visited.pop();
-            result
-        } else {
-            Ok(cell.value.clone())
-        }
+        // `strip_prefix` rather than `&raw_input[1..]`: the slice was only ever
+        // correct because `is_formula` had just established that byte 0 is `=`,
+        // which is the bound stated in one statement and used in another. This
+        // states it once, and the `else` branch is then the same "not a
+        // formula" case the `if` was already testing for.
+        let Some(formula_text) = cell.raw_input.strip_prefix('=') else {
+            return Ok(cell.value.clone());
+        };
+        // Depth is counted in `parse_comparison`, which the sub-evaluator will
+        // enter; this seeds it with the depth already spent so that a chain of
+        // referring cells and a nest of parentheses draw on one budget.
+        // Tokenize before pushing: `?` here would otherwise leave `addr` on the
+        // visited path forever, and every later reference to it in this
+        // evaluation would report a cycle that does not exist.
+        let sub_tokens = tokenize_formula(formula_text)?;
+        self.visited.push(addr);
+        let mut sub_eval = FormulaEvaluator {
+            tokens: sub_tokens,
+            pos: 0,
+            sheet: self.sheet,
+            eval_depth: self.eval_depth,
+            visited: self.visited.clone(),
+        };
+        let result = sub_eval.evaluate();
+        let _ = self.visited.pop();
+        result
     }
 
     /// Collect numeric values from a range for aggregate functions.
@@ -1451,13 +1661,18 @@ impl<'a> FormulaEvaluator<'a> {
                 Some(FormulaToken::RangeRef(start, end)) => {
                     self.advance();
                     let vals = self.collect_range_values(start, end)?;
-                    count += vals.iter().filter(|v| !v.is_empty()).count();
+                    // Saturating: a range is at most `MAX_COLS * MAX_ROWS`
+                    // cells, so the sum cannot approach `usize::MAX` — but a
+                    // count that wraps to a small number is worse than one that
+                    // stops climbing, because only the second is obviously wrong
+                    // to whoever reads the cell.
+                    count = count.saturating_add(vals.iter().filter(|v| !v.is_empty()).count());
                 }
                 Some(FormulaToken::RightParen) => break,
                 _ => {
                     let val = self.parse_comparison()?;
                     if !val.is_empty() {
-                        count += 1;
+                        count = count.saturating_add(1);
                     }
                 }
             }
@@ -1518,11 +1733,14 @@ impl<'a> FormulaEvaluator<'a> {
         self.tokens.get(self.pos)
     }
 
-    /// Advance to the next token.
+    /// Advance to the next token, stopping at the end.
+    ///
+    /// The clamp is what makes [`FormulaEvaluator::peek`] a plain `get`: the
+    /// cursor is never further than one past the last token, so it is either a
+    /// valid index or the end, and never some third thing a caller has to test
+    /// for.
     fn advance(&mut self) {
-        if self.pos < self.tokens.len() {
-            self.pos += 1;
-        }
+        self.pos = self.pos.saturating_add(1).min(self.tokens.len());
     }
 
     /// Expect a specific token, consuming it if matched.
@@ -1549,11 +1767,7 @@ pub fn value_to_string(val: &CellValue) -> String {
         CellValue::Empty => String::new(),
         CellValue::Text(s) => s.clone(),
         CellValue::Number(n) => {
-            if *n == n.floor() && n.abs() < 1e15 {
-                format!("{}", *n as i64)
-            } else {
-                format!("{}", n)
-            }
+            whole_number(*n).map_or_else(|| format!("{n}"), |int| int.to_string())
         }
         CellValue::Boolean(b) => {
             if *b {
@@ -1636,37 +1850,54 @@ pub fn recalculate_sheet(sheet: &mut Sheet) {
 // Auto-fill logic
 // ============================================================================
 
+/// Fill position `index` by repeating `values` cyclically.
+///
+/// This is the answer whenever the source is not an arithmetic series — which
+/// includes a single value and any text — and it used to be written out three
+/// separate times, each as an `index % values.len()` followed by an index into
+/// `values`. `checked_rem` folds the "there is something to repeat" test into
+/// the operation that needs it, so the empty case cannot be forgotten at one of
+/// the three sites.
+fn repeat_pattern(values: &[CellValue], index: usize) -> CellValue {
+    index
+        .checked_rem(values.len())
+        .and_then(|slot| values.get(slot))
+        .cloned()
+        .unwrap_or(CellValue::Empty)
+}
+
 /// Detect a numeric series and produce the next value.
 pub fn auto_fill_next(values: &[CellValue], index: usize) -> CellValue {
-    if values.is_empty() {
-        return CellValue::Empty;
-    }
-    if values.len() == 1 {
-        return values[0].clone();
+    // A series needs every value to be a number, and needs at least two of them
+    // to have a step at all. Collecting into `Option<Vec<_>>` makes "all of them
+    // are numbers" the same statement as "here they are", rather than a
+    // separate `all(is_some)` pass followed by an `unwrap_or(0.0)` that would
+    // quietly substitute a zero if the two ever disagreed.
+    let Some(numbers) = values
+        .iter()
+        .map(CellValue::as_number)
+        .collect::<Option<Vec<f64>>>()
+    else {
+        return repeat_pattern(values, index);
+    };
+    let (Some(&first), Some(&second), Some(&last)) =
+        (numbers.first(), numbers.get(1), numbers.last())
+    else {
+        return repeat_pattern(values, index);
+    };
+
+    let step = second - first;
+    let is_arithmetic = numbers.windows(2).all(|pair| match pair {
+        [a, b] => (b - a - step).abs() < 1e-10,
+        // `windows(2)` yields nothing else; a series of one is not a series.
+        _ => false,
+    });
+    if !is_arithmetic {
+        return repeat_pattern(values, index);
     }
 
-    // Try to detect a numeric series
-    let nums: Vec<Option<f64>> = values.iter().map(|v| v.as_number()).collect();
-    if nums.iter().all(|n| n.is_some()) {
-        let numbers: Vec<f64> = nums.iter().map(|n| n.unwrap_or(0.0)).collect();
-        if numbers.len() >= 2 {
-            let diff = numbers[1] - numbers[0];
-            let is_arithmetic = numbers
-                .windows(2)
-                .all(|w| (w[1] - w[0] - diff).abs() < 1e-10);
-            if is_arithmetic {
-                let last = numbers[numbers.len() - 1];
-                return CellValue::Number(last + diff * (index as f64 + 1.0));
-            }
-        }
-        // Default: repeat pattern
-        let pattern_idx = index % values.len();
-        return values[pattern_idx].clone();
-    }
-
-    // For text: repeat pattern
-    let pattern_idx = index % values.len();
-    values[pattern_idx].clone()
+    let steps_ahead = index as f64 + 1.0;
+    CellValue::Number(last + step * steps_ahead)
 }
 
 // ============================================================================
@@ -1722,34 +1953,42 @@ impl FindReplace {
         }
     }
 
+    /// The result the cursor is on, or `None` if there are no results.
+    ///
+    /// `current_result` is an index into `results`, and "it is always in range"
+    /// used to be a convention kept by five methods rather than a property of
+    /// the pair — each of them tested `results.is_empty()` and then indexed,
+    /// which is only sound because of what the *other four* do. Reading through
+    /// one `get` makes the out-of-range case an answer instead of a panic.
+    pub fn current(&self) -> Option<CellAddr> {
+        self.results.get(self.current_result).copied()
+    }
+
     /// Move to the next search result.
     pub fn next_result(&mut self) -> Option<CellAddr> {
-        if self.results.is_empty() {
-            return None;
-        }
-        self.current_result = (self.current_result + 1) % self.results.len();
-        Some(self.results[self.current_result])
+        let count = self.results.len();
+        // `checked_rem` is the emptiness test: there is no next result in a
+        // list of none, and no remainder modulo zero.
+        self.current_result = self.current_result.saturating_add(1).checked_rem(count)?;
+        self.current()
     }
 
     /// Move to the previous search result.
     pub fn prev_result(&mut self) -> Option<CellAddr> {
-        if self.results.is_empty() {
-            return None;
-        }
-        if self.current_result == 0 {
-            self.current_result = self.results.len() - 1;
-        } else {
-            self.current_result -= 1;
-        }
-        Some(self.results[self.current_result])
+        let last = self.results.len().checked_sub(1)?;
+        self.current_result = self
+            .current_result
+            .checked_sub(1)
+            // Wrapping past the start lands on the last result, and clamping
+            // to `last` also repairs a cursor that was somehow already past
+            // the end rather than carrying it forward.
+            .map_or(last, |prev| prev.min(last));
+        self.current()
     }
 
     /// Replace current match and advance.
     pub fn replace_current(&mut self, sheet: &mut Sheet) -> Option<(CellAddr, Cell, Cell)> {
-        if self.results.is_empty() {
-            return None;
-        }
-        let addr = self.results[self.current_result];
+        let addr = self.current()?;
         let cell = sheet.get_cell(addr);
         let old_text = if cell.is_formula() {
             cell.raw_input.clone()
@@ -1765,9 +2004,15 @@ impl FindReplace {
 
         let old = sheet.set_cell_input(addr, &new_text);
         let new_cell = sheet.get_cell(addr);
-        // Remove this address from results
+        // The cell no longer matches, so it leaves the result list. `current()`
+        // above is what establishes that this index is in range.
         self.results.remove(self.current_result);
-        if !self.results.is_empty() && self.current_result >= self.results.len() {
+        // Keep the cursor on a real result: taking out the last one wraps to
+        // the front. The old form only did this when the list was non-empty,
+        // so emptying it left the cursor pointing past the end -- which the
+        // next `results[current_result]` would have panicked on had any of the
+        // other methods forgotten its own emptiness check.
+        if self.current_result >= self.results.len() {
             self.current_result = 0;
         }
         Some((addr, old, new_cell))
@@ -1834,13 +2079,130 @@ fn case_insensitive_replace(text: &str, search: &str, replacement: &str) -> Stri
 // Interaction modes
 // ============================================================================
 
+/// A module for one type, because privacy in Rust is per-module and this crate
+/// is a single one — the same reason [`cell_range`] is one.
+mod edit_buffer {
+    /// The text being typed into a cell, and where the caret sits in it.
+    ///
+    /// **The caret is counted in characters**, and having somewhere to write
+    /// that down is the entire reason this type exists. It used to be a bare
+    /// `usize` beside a `String` in an enum variant, and the code around it did
+    /// not agree on what the number meant: insertion converted it through
+    /// `char_indices().nth(n)`, which is characters, while `Backspace`,
+    /// `Delete`, `Right` and `End` all used it as a byte offset into the same
+    /// string. For ASCII those are the same number, which is why it worked at
+    /// all, and why the disagreement stayed invisible until a cell held a
+    /// character that is not one byte.
+    ///
+    /// The consequence was not cosmetic. `String::remove` takes a byte offset
+    /// and *panics* if it is not on a character boundary. Typing `é` then `a`
+    /// into a cell, pressing Home, Right, Delete took the whole application
+    /// down — losing the workbook, not the cell. The two entry points into
+    /// editing did not even agree with each other: one seeded the caret with
+    /// `text.len()` (bytes) and the other with `1` (characters).
+    ///
+    /// Every method here keeps the caret in `0..=chars().count()`, and
+    /// `byte_of` is the one place the conversion to bytes happens.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct EditBuffer {
+        text: String,
+        caret: usize,
+    }
+
+    impl EditBuffer {
+        /// A buffer holding `text`, with the caret after its last character.
+        pub fn at_end(text: String) -> Self {
+            let caret = text.chars().count();
+            Self { text, caret }
+        }
+
+        /// The text typed so far.
+        pub fn text(&self) -> &str {
+            &self.text
+        }
+
+        /// The caret position, in characters from the start.
+        pub fn caret(&self) -> usize {
+            self.caret
+        }
+
+        /// The byte offset of the `n`th character, or the end of the string if
+        /// there is no such character.
+        ///
+        /// The single place a character index becomes a byte index, and so the
+        /// single place that conversion can be got wrong.
+        fn byte_of(&self, char_index: usize) -> usize {
+            self.text
+                .char_indices()
+                .nth(char_index)
+                .map_or(self.text.len(), |(byte, _)| byte)
+        }
+
+        fn char_count(&self) -> usize {
+            self.text.chars().count()
+        }
+
+        /// Insert a character at the caret and step over it.
+        pub fn insert(&mut self, ch: char) {
+            let at = self.byte_of(self.caret);
+            self.text.insert(at, ch);
+            self.caret = self.caret.saturating_add(1);
+        }
+
+        /// Delete the character before the caret. Does nothing at the start.
+        pub fn backspace(&mut self) {
+            // `checked_sub` failing *is* the "caret is at the start" case, so
+            // the guard and the arithmetic are one statement rather than two
+            // that have to agree.
+            let Some(previous) = self.caret.checked_sub(1) else {
+                return;
+            };
+            let at = self.byte_of(previous);
+            if at < self.text.len() {
+                let _ = self.text.remove(at);
+                self.caret = previous;
+            }
+        }
+
+        /// Delete the character at the caret. Does nothing at the end.
+        pub fn delete(&mut self) {
+            let at = self.byte_of(self.caret);
+            if at < self.text.len() {
+                let _ = self.text.remove(at);
+            }
+        }
+
+        /// Move the caret one character left, stopping at the start.
+        pub fn move_left(&mut self) {
+            self.caret = self.caret.saturating_sub(1);
+        }
+
+        /// Move the caret one character right, stopping at the end.
+        pub fn move_right(&mut self) {
+            self.caret = self.caret.saturating_add(1).min(self.char_count());
+        }
+
+        /// Move the caret before the first character.
+        pub fn move_home(&mut self) {
+            self.caret = 0;
+        }
+
+        /// Move the caret after the last character.
+        pub fn move_end(&mut self) {
+            self.caret = self.char_count();
+        }
+    }
+}
+
+pub use edit_buffer::EditBuffer;
+
 /// Current interaction mode for the spreadsheet.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InteractionMode {
     /// Normal cell navigation and selection.
     Normal,
     /// User is editing a cell (typing into formula bar or cell).
-    Editing { text: String, cursor_pos: usize },
+    Editing { buffer: EditBuffer },
     /// User is dragging to select a range.
     RangeSelect { anchor: CellAddr },
     /// User is resizing a column.
@@ -1910,15 +2272,160 @@ impl ScrollPosition {
 }
 
 // ============================================================================
+// The workbook: a list of sheets that is never empty
+// ============================================================================
+
+/// The workbook's sheets, together with which one is active.
+///
+/// `active_sheet()` hands back a `&Sheet` rather than an `Option<&Sheet>`,
+/// because all eighty of its callers want a sheet and there is nothing useful
+/// for a renderer or an edit handler to do with `None`. That is only sound if
+/// the list cannot be empty — and it used to be a `Vec` whose non-emptiness was
+/// maintained by four separate methods and *asserted* by `&self.sheets[0]`,
+/// under a comment reading "this should never happen, but handle gracefully".
+/// Indexing a possibly-empty `Vec` is not handling anything gracefully; it is
+/// the panic the fallback was written to avoid, one line further down.
+///
+/// Keeping the first sheet in a field of its own makes the guarantee
+/// structural. There is no sequence of adds, removes, undos and redos that can
+/// produce a workbook with no sheets, because nothing in this type's API can
+/// take `head` away — and the "you may not remove the last sheet" rule is now
+/// stated once, in [`SheetBook::remove`], rather than in `remove_active_sheet`
+/// and *not* in the undo path, which was the actual state of affairs.
+pub struct SheetBook {
+    /// The sheet that always exists; sheet 0.
+    head: Sheet,
+    /// The remaining sheets, in order after `head`.
+    tail: Vec<Sheet>,
+    /// Index of the active sheet. Every mutator keeps this inside `0..len()`.
+    active: usize,
+}
+
+impl SheetBook {
+    /// A workbook holding a single sheet, which is the active one.
+    pub fn new(first: Sheet) -> Self {
+        Self {
+            head: first,
+            tail: Vec::new(),
+            active: 0,
+        }
+    }
+
+    /// Number of sheets. Never zero.
+    pub fn len(&self) -> usize {
+        self.tail.len().saturating_add(1)
+    }
+
+    /// Always `false` — see this type's documentation.
+    ///
+    /// Present because a `len` without an `is_empty` is a lint, and answering
+    /// the question honestly says more than suppressing it would.
+    pub const fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// The sheet at `index`, or `None` if there is none.
+    ///
+    /// `checked_sub(1)` failing *is* the "this is sheet zero" case, so the two
+    /// branches are the two halves of the representation rather than a bound
+    /// test followed by an index.
+    pub fn get(&self, index: usize) -> Option<&Sheet> {
+        match index.checked_sub(1) {
+            None => Some(&self.head),
+            Some(rest) => self.tail.get(rest),
+        }
+    }
+
+    /// The sheet at `index`, mutably, or `None` if there is none.
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut Sheet> {
+        match index.checked_sub(1) {
+            None => Some(&mut self.head),
+            Some(rest) => self.tail.get_mut(rest),
+        }
+    }
+
+    /// Index of the active sheet.
+    pub fn active_index(&self) -> usize {
+        self.active
+    }
+
+    /// Make `index` active. An index naming no sheet is ignored.
+    pub fn set_active(&mut self, index: usize) {
+        if index < self.len() {
+            self.active = index;
+        }
+    }
+
+    /// The active sheet.
+    pub fn active(&self) -> &Sheet {
+        self.get(self.active).unwrap_or(&self.head)
+    }
+
+    /// The active sheet, mutably.
+    pub fn active_mut(&mut self) -> &mut Sheet {
+        match self.active.checked_sub(1) {
+            None => &mut self.head,
+            // The fallback cannot be reached while `active` is in range, which
+            // every mutator here keeps it. It is written out anyway so that a
+            // future mutator which forgets shows the wrong sheet rather than
+            // stopping the program.
+            Some(rest) => self.tail.get_mut(rest).unwrap_or(&mut self.head),
+        }
+    }
+
+    /// Append `sheet` and make it active, returning its index.
+    pub fn push(&mut self, sheet: Sheet) -> usize {
+        self.tail.push(sheet);
+        self.active = self.tail.len();
+        self.active
+    }
+
+    /// Remove the sheet at `index`.
+    ///
+    /// Returns `None` — changing nothing — if `index` names no sheet, or if
+    /// removing it would leave the workbook with none. This is the only place
+    /// that rule is enforced, and the only place it needs to be.
+    pub fn remove(&mut self, index: usize) -> Option<Sheet> {
+        if index >= self.len() || self.tail.is_empty() {
+            return None;
+        }
+        let removed = match index.checked_sub(1) {
+            // Removing sheet 0 promotes the next sheet into its place, which
+            // is why this is only allowed when there *is* a next sheet.
+            None => core::mem::replace(&mut self.head, self.tail.remove(0)),
+            Some(rest) => self.tail.remove(rest),
+        };
+        self.active = self.active.min(self.len().saturating_sub(1));
+        Some(removed)
+    }
+
+    /// Insert `sheet` at `index` (clamped to the end) and make it active.
+    pub fn insert(&mut self, index: usize, sheet: Sheet) {
+        let index = index.min(self.len());
+        match index.checked_sub(1) {
+            None => {
+                let displaced = core::mem::replace(&mut self.head, sheet);
+                self.tail.insert(0, displaced);
+            }
+            Some(rest) => self.tail.insert(rest.min(self.tail.len()), sheet),
+        }
+        self.active = index;
+    }
+
+    /// Every sheet, in order.
+    pub fn iter(&self) -> impl Iterator<Item = &Sheet> {
+        core::iter::once(&self.head).chain(self.tail.iter())
+    }
+}
+
+// ============================================================================
 // Spreadsheet application state
 // ============================================================================
 
 /// The main spreadsheet application state.
 pub struct SpreadsheetApp {
-    /// All worksheets.
-    pub sheets: Vec<Sheet>,
-    /// Index of the currently active sheet.
-    pub active_sheet: usize,
+    /// All worksheets, and which one is active.
+    pub sheets: SheetBook,
     /// Current cell selection.
     pub selection: Selection,
     /// Current interaction mode.
@@ -1949,8 +2456,7 @@ impl SpreadsheetApp {
     /// Create a new spreadsheet application with a single sheet.
     pub fn new(width: f32, height: f32) -> Self {
         Self {
-            sheets: vec![Sheet::new("Sheet1")],
-            active_sheet: 0,
+            sheets: SheetBook::new(Sheet::new("Sheet1")),
             selection: Selection::default(),
             mode: InteractionMode::Normal,
             clipboard: None,
@@ -1968,25 +2474,17 @@ impl SpreadsheetApp {
 
     /// Get a reference to the currently active sheet.
     pub fn active_sheet(&self) -> &Sheet {
-        self.sheets.get(self.active_sheet).unwrap_or_else(|| {
-            // This should never happen, but handle gracefully
-            &self.sheets[0]
-        })
+        self.sheets.active()
     }
 
     /// Get a mutable reference to the currently active sheet.
     pub fn active_sheet_mut(&mut self) -> &mut Sheet {
-        let idx = if self.active_sheet < self.sheets.len() {
-            self.active_sheet
-        } else {
-            0
-        };
-        &mut self.sheets[idx]
+        self.sheets.active_mut()
     }
 
     /// Set the active cell input, recording undo, and recalculate.
     pub fn set_cell_input(&mut self, addr: CellAddr, input: &str) {
-        let sheet_idx = self.active_sheet;
+        let sheet_idx = self.sheets.active_index();
         let old_cell = self.active_sheet_mut().set_cell_input(addr, input);
         let new_cell = self.active_sheet().get_cell(addr);
         self.undo_manager.push_action(UndoAction::CellEdit {
@@ -2006,14 +2504,15 @@ impl SpreadsheetApp {
         } else {
             cell.display_text()
         };
-        let cursor_pos = text.len();
-        self.mode = InteractionMode::Editing { text, cursor_pos };
+        self.mode = InteractionMode::Editing {
+            buffer: EditBuffer::at_end(text),
+        };
     }
 
     /// Confirm cell edit and return to normal mode.
     pub fn confirm_edit(&mut self) {
-        if let InteractionMode::Editing { text, .. } = &self.mode {
-            let text = text.clone();
+        if let InteractionMode::Editing { buffer } = &self.mode {
+            let text = buffer.text().to_owned();
             let addr = self.selection.active;
             self.set_cell_input(addr, &text);
             self.mode = InteractionMode::Normal;
@@ -2027,7 +2526,7 @@ impl SpreadsheetApp {
 
     /// Delete the contents of all selected cells.
     pub fn delete_selection(&mut self) {
-        let sheet_idx = self.active_sheet;
+        let sheet_idx = self.sheets.active_index();
         let mut changes = Vec::new();
         let ranges = self.selection.ranges.clone();
         for range in &ranges {
@@ -2052,11 +2551,16 @@ impl SpreadsheetApp {
     /// Copy selected cells to clipboard.
     pub fn copy_selection(&mut self) {
         let range = self.selection.primary_range();
+        let origin = range.start();
         let mut cells = HashMap::new();
         for addr in range.iter() {
             let cell = self.active_sheet().get_cell(addr);
-            let rel_col = addr.col - range.start.col;
-            let rel_row = addr.row - range.start.row;
+            // Saturating rather than `-`: the iterator only yields addresses at
+            // or after `start`, so the difference cannot be negative -- but that
+            // is a fact about `CellRangeIter`, stated here in the one form the
+            // compiler will keep true if the iterator is ever changed.
+            let rel_col = addr.col.saturating_sub(origin.col);
+            let rel_row = addr.row.saturating_sub(origin.row);
             cells.insert((rel_col, rel_row), cell);
         }
         self.clipboard = Some(ClipboardData {
@@ -2082,15 +2586,21 @@ impl SpreadsheetApp {
             None => return,
         };
         let dest = self.selection.active;
-        let sheet_idx = self.active_sheet;
+        let sheet_idx = self.sheets.active_index();
         let mut changes = Vec::new();
 
         for (&(rel_col, rel_row), src_cell) in &clip.cells {
-            let target_col = dest.col + rel_col;
-            let target_row = dest.row + rel_row;
-            if target_col >= MAX_COLS || target_row >= MAX_ROWS {
+            // A destination off the sheet is skipped — and an offset that would
+            // wrap is off the sheet too, so `checked_add` and the bound live in
+            // one expression. Written as `dest.col + rel_col` followed by a
+            // separate `>= MAX_COLS`, a wrap would land back near column A and
+            // pass the very test meant to reject it.
+            let Some(target_col) = dest.col.checked_add(rel_col).filter(|c| *c < MAX_COLS) else {
                 continue;
-            }
+            };
+            let Some(target_row) = dest.row.checked_add(rel_row).filter(|r| *r < MAX_ROWS) else {
+                continue;
+            };
             let target_addr = CellAddr::new(target_col, target_row);
             let old = self.active_sheet().get_cell(target_addr);
             let new_cell = src_cell.clone();
@@ -2169,19 +2679,25 @@ impl SpreadsheetApp {
                     }
                 }
             }
-            UndoAction::AddSheet { sheet_idx } => {
-                if is_undo && *sheet_idx < self.sheets.len() {
+            // Both sheet actions are their own inverse in the other direction,
+            // and both used to implement only the undo half -- `is_undo &&` on
+            // one, `if is_undo` on the other -- so redoing either did nothing
+            // at all. Adding a sheet, undoing, then redoing left the sheet
+            // gone; removing one, undoing, then redoing left it present. Each
+            // is now written as one `if`, so a direction cannot be dropped
+            // without the other becoming visibly wrong.
+            UndoAction::AddSheet { sheet_idx, sheet } => {
+                if is_undo {
                     self.sheets.remove(*sheet_idx);
-                    if self.active_sheet >= self.sheets.len() && !self.sheets.is_empty() {
-                        self.active_sheet = self.sheets.len() - 1;
-                    }
+                } else {
+                    self.sheets.insert(*sheet_idx, sheet.clone());
                 }
             }
             UndoAction::RemoveSheet { sheet_idx, sheet } => {
                 if is_undo {
-                    let idx = (*sheet_idx).min(self.sheets.len());
-                    self.sheets.insert(idx, sheet.clone());
-                    self.active_sheet = idx;
+                    self.sheets.insert(*sheet_idx, sheet.clone());
+                } else {
+                    self.sheets.remove(*sheet_idx);
                 }
             }
         }
@@ -2190,37 +2706,39 @@ impl SpreadsheetApp {
     /// Add a new sheet.
     pub fn add_sheet(&mut self) {
         let idx = self.sheets.len();
-        let name = format!("Sheet{}", idx + 1);
-        self.sheets.push(Sheet::new(&name));
-        self.active_sheet = idx;
-        self.undo_manager
-            .push_action(UndoAction::AddSheet { sheet_idx: idx });
+        let sheet = Sheet::new(&format!("Sheet{}", idx.saturating_add(1)));
+        self.sheets.push(sheet.clone());
+        self.undo_manager.push_action(UndoAction::AddSheet {
+            sheet_idx: idx,
+            sheet,
+        });
     }
 
     /// Remove the active sheet (if more than one sheet exists).
+    ///
+    /// The "more than one" test lives in [`SheetBook::remove`], which declines
+    /// rather than emptying the workbook — so the `let ... else` here is the
+    /// same rule, read from the one place that states it, instead of a second
+    /// copy of it that the undo path did not have.
     pub fn remove_active_sheet(&mut self) {
-        if self.sheets.len() <= 1 {
+        let idx = self.sheets.active_index();
+        let Some(sheet) = self.sheets.remove(idx) else {
             return;
-        }
-        let idx = self.active_sheet;
-        let sheet = self.sheets.remove(idx);
+        };
         self.undo_manager.push_action(UndoAction::RemoveSheet {
             sheet_idx: idx,
             sheet,
         });
-        if self.active_sheet >= self.sheets.len() {
-            self.active_sheet = self.sheets.len() - 1;
-        }
     }
 
     /// Sort the active sheet by the selected column.
     pub fn sort_column(&mut self, direction: SortDirection) {
         let col = self.selection.active.col;
         let range = self.selection.primary_range();
-        let start_row = range.start.row;
-        let end_row = range.end.row;
+        let start_row = range.start().row;
+        let end_row = range.end().row;
         let ascending = direction == SortDirection::Ascending;
-        let sheet_idx = self.active_sheet;
+        let sheet_idx = self.sheets.active_index();
 
         let changes = self
             .active_sheet_mut()
@@ -2234,13 +2752,13 @@ impl SpreadsheetApp {
 
     /// Auto-fill from a source range to a target range.
     pub fn auto_fill(&mut self, source: CellRange, target_end: CellAddr) {
-        let target = CellRange::new(source.start, target_end);
-        let sheet_idx = self.active_sheet;
+        let target = CellRange::new(source.start(), target_end);
+        let sheet_idx = self.sheets.active_index();
         let mut changes = Vec::new();
 
         // Collect source values per column
-        for col in source.start.col..=source.end.col {
-            let source_vals: Vec<CellValue> = (source.start.row..=source.end.row)
+        for col in source.start().col..=source.end().col {
+            let source_vals: Vec<CellValue> = (source.start().row..=source.end().row)
                 .map(|r| {
                     self.active_sheet()
                         .get_cell(CellAddr::new(col, r))
@@ -2249,10 +2767,15 @@ impl SpreadsheetApp {
                 })
                 .collect();
 
-            let fill_start = source.end.row + 1;
-            let fill_end = target.end.row;
-            for row in fill_start..=fill_end {
-                let idx = row - fill_start;
+            // The row below the source block. Saturating so that a source range
+            // ending at `usize::MAX` yields an empty fill rather than wrapping to
+            // row zero and overwriting the top of the sheet.
+            let fill_start = source.end().row.saturating_add(1);
+            let fill_end = target.end().row;
+            // `enumerate` rather than `row - fill_start`: the pattern index and
+            // the row it fills come off the same iterator, so they cannot drift
+            // apart, and there is no subtraction to justify.
+            for (idx, row) in (fill_start..=fill_end).enumerate() {
                 let new_val = auto_fill_next(&source_vals, idx);
                 let addr = CellAddr::new(col, row);
                 let input = value_to_string(&new_val);
@@ -2271,7 +2794,7 @@ impl SpreadsheetApp {
 
     /// Toggle bold formatting for the selected cells.
     pub fn toggle_bold(&mut self) {
-        let sheet_idx = self.active_sheet;
+        let sheet_idx = self.sheets.active_index();
         let mut changes = Vec::new();
         let current_bold = self
             .active_sheet()
@@ -2299,7 +2822,7 @@ impl SpreadsheetApp {
 
     /// Toggle italic formatting for the selected cells.
     pub fn toggle_italic(&mut self) {
-        let sheet_idx = self.active_sheet;
+        let sheet_idx = self.sheets.active_index();
         let mut changes = Vec::new();
         let current_italic = self
             .active_sheet()
@@ -2327,7 +2850,7 @@ impl SpreadsheetApp {
 
     /// Set alignment for the selected cells.
     pub fn set_alignment(&mut self, alignment: Alignment) {
-        let sheet_idx = self.active_sheet;
+        let sheet_idx = self.sheets.active_index();
         let mut changes = Vec::new();
 
         let ranges = self.selection.ranges.clone();
@@ -2349,7 +2872,7 @@ impl SpreadsheetApp {
 
     /// Set number format for the selected cells.
     pub fn set_number_format(&mut self, format: NumberFormat) {
-        let sheet_idx = self.active_sheet;
+        let sheet_idx = self.sheets.active_index();
         let mut changes = Vec::new();
 
         let ranges = self.selection.ranges.clone();
@@ -2371,7 +2894,7 @@ impl SpreadsheetApp {
 
     /// Toggle borders on selected cells.
     pub fn toggle_borders(&mut self) {
-        let sheet_idx = self.active_sheet;
+        let sheet_idx = self.sheets.active_index();
         let mut changes = Vec::new();
         let current_borders = self
             .active_sheet()
@@ -2418,12 +2941,8 @@ impl SpreadsheetApp {
 
     /// Navigate the active cell in a given direction.
     pub fn navigate(&mut self, d_col: i32, d_row: i32) {
-        let new_col = (self.selection.active.col as i32 + d_col)
-            .max(0)
-            .min(MAX_COLS as i32 - 1) as usize;
-        let new_row = (self.selection.active.row as i32 + d_row)
-            .max(0)
-            .min(MAX_ROWS as i32 - 1) as usize;
+        let new_col = step_index(self.selection.active.col, d_col, MAX_COLS);
+        let new_row = step_index(self.selection.active.row, d_row, MAX_ROWS);
         let new_addr = CellAddr::new(new_col, new_row);
         self.selection = Selection::single(new_addr);
         self.ensure_cell_visible(new_addr);
@@ -2515,12 +3034,8 @@ impl SpreadsheetApp {
         }
 
         // Handle editing mode
-        if let InteractionMode::Editing {
-            ref mut text,
-            ref mut cursor_pos,
-        } = self.mode
-        {
-            return handle_editing_key(text, cursor_pos, event);
+        if let InteractionMode::Editing { ref mut buffer } = self.mode {
+            return handle_editing_key(buffer, event);
         }
 
         // Ctrl shortcuts
@@ -2640,8 +3155,7 @@ impl SpreadsheetApp {
                     && !ch.is_control()
                 {
                     self.mode = InteractionMode::Editing {
-                        text: String::from(ch),
-                        cursor_pos: 1,
+                        buffer: EditBuffer::at_end(String::from(ch)),
                     };
                     return EventResult::Consumed;
                 }
@@ -2659,9 +3173,10 @@ impl SpreadsheetApp {
                 EventResult::Consumed
             }
             Key::Enter => {
-                let idx = self.active_sheet;
-                let sheet = &self.sheets[idx.min(self.sheets.len().saturating_sub(1))];
-                self.find_replace.find_all(sheet);
+                // The clamp that used to be written here -- `idx.min(len - 1)`
+                // -- was guarding against an active index past the end, which
+                // `SheetBook` no longer permits.
+                self.find_replace.find_all(self.sheets.active());
                 if let Some(addr) = self.find_replace.next_result() {
                     self.selection = Selection::single(addr);
                     self.ensure_cell_visible(addr);
@@ -2719,7 +3234,7 @@ impl SpreadsheetApp {
             let tab_x = x;
             let tab_idx = (tab_x / SHEET_TAB_WIDTH) as usize;
             if tab_idx < self.sheets.len() {
-                self.active_sheet = tab_idx;
+                self.sheets.set_active(tab_idx);
                 self.selection = Selection::default();
             } else if tab_idx == self.sheets.len() {
                 // "+" button to add sheet
@@ -2826,7 +3341,7 @@ impl SpreadsheetApp {
                 let new_width = self.active_sheet().col_width(col);
                 if (new_width - original_width).abs() > 0.5 {
                     self.undo_manager.push_action(UndoAction::ColResize {
-                        sheet_idx: self.active_sheet,
+                        sheet_idx: self.sheets.active_index(),
                         col,
                         old_width: original_width,
                         new_width,
@@ -2845,7 +3360,7 @@ impl SpreadsheetApp {
                 let new_height = self.active_sheet().row_height(row);
                 if (new_height - original_height).abs() > 0.5 {
                     self.undo_manager.push_action(UndoAction::RowResize {
-                        sheet_idx: self.active_sheet,
+                        sheet_idx: self.sheets.active_index(),
                         row,
                         old_height: original_height,
                         new_height,
@@ -2907,8 +3422,8 @@ impl SpreadsheetApp {
             }
             InteractionMode::AutoFill { anchor_range, .. } => {
                 let (col, row) = self.cell_at_position(x, y);
-                let end =
-                    CellAddr::new(col.max(anchor_range.end.col), row.max(anchor_range.end.row));
+                let anchor_end = anchor_range.end();
+                let end = CellAddr::new(col.max(anchor_end.col), row.max(anchor_end.row));
                 self.mode = InteractionMode::AutoFill {
                     anchor_range,
                     current_end: end,
@@ -3267,8 +3782,8 @@ impl SpreadsheetApp {
             corner_radii: CornerRadii::all(3.0),
         });
 
-        let formula_text = if let InteractionMode::Editing { ref text, .. } = self.mode {
-            text.clone()
+        let formula_text = if let InteractionMode::Editing { ref buffer } = self.mode {
+            buffer.text().to_owned()
         } else {
             let cell = self.active_sheet().get_cell(self.selection.active);
             if cell.is_formula() {
@@ -3347,7 +3862,7 @@ impl SpreadsheetApp {
                 .selection
                 .ranges
                 .iter()
-                .any(|r| col >= r.start.col && col <= r.end.col);
+                .any(|r| col >= r.start().col && col <= r.end().col);
 
             let bg = if is_selected {
                 COLOR_SURFACE1
@@ -3459,7 +3974,7 @@ impl SpreadsheetApp {
                 .selection
                 .ranges
                 .iter()
-                .any(|r| row >= r.start.row && row <= r.end.row);
+                .any(|r| row >= r.start().row && row <= r.end().row);
             let header_bg = if is_row_selected {
                 COLOR_SURFACE1
             } else {
@@ -3474,7 +3989,7 @@ impl SpreadsheetApp {
                 corner_radii: CornerRadii::ZERO,
             });
 
-            let row_label = (row + 1).to_string();
+            let row_label = CellAddr::row_label(row);
             let text_color = if is_row_selected {
                 COLOR_BLUE
             } else {
@@ -3611,8 +4126,8 @@ impl SpreadsheetApp {
 
                 // Cell text
                 let display_text = if is_active {
-                    if let InteractionMode::Editing { ref text, .. } = self.mode {
-                        text.clone()
+                    if let InteractionMode::Editing { ref buffer } = self.mode {
+                        buffer.text().to_owned()
                     } else {
                         cell.display_text()
                     }
@@ -3671,22 +4186,34 @@ impl SpreadsheetApp {
             }
         }
 
+        // Where a rectangle of cells lands on screen, in pixels.
+        //
+        // Written once rather than the three times it was: the active-cell
+        // outline, each selection outline and the auto-fill preview all need
+        // exactly this, and the frozen-pane subtraction is the kind of detail
+        // that drifts between copies without anything noticing.
+        let range_rect = |range: CellRange| -> (f32, f32, f32, f32) {
+            let (start, end) = (range.start(), range.end());
+            let x = ROW_HEADER_WIDTH + sheet.col_x_offset(start.col)
+                - if start.col >= frozen_cols {
+                    self.scroll.x
+                } else {
+                    0.0
+                };
+            let y = y_start + sheet.row_y_offset(start.row)
+                - if start.row >= frozen_rows {
+                    self.scroll.y
+                } else {
+                    0.0
+                };
+            let w: f32 = (start.col..=end.col).map(|c| sheet.col_width(c)).sum();
+            let h: f32 = (start.row..=end.row).map(|r| sheet.row_height(r)).sum();
+            (x, y, w, h)
+        };
+
         // Active cell outline
         let active = self.selection.active;
-        let active_x = ROW_HEADER_WIDTH + sheet.col_x_offset(active.col)
-            - if active.col >= frozen_cols {
-                self.scroll.x
-            } else {
-                0.0
-            };
-        let active_y = y_start + sheet.row_y_offset(active.row)
-            - if active.row >= frozen_rows {
-                self.scroll.y
-            } else {
-                0.0
-            };
-        let active_w = sheet.col_width(active.col);
-        let active_h = sheet.row_height(active.row);
+        let (active_x, active_y, active_w, active_h) = range_rect(CellRange::single(active));
 
         cmds.push(RenderCommand::StrokeRect {
             x: active_x,
@@ -3712,24 +4239,7 @@ impl SpreadsheetApp {
         // Selection range highlight outline (for multi-cell selection)
         for range in &self.selection.ranges {
             if range.cell_count() > 1 {
-                let rx = ROW_HEADER_WIDTH + sheet.col_x_offset(range.start.col)
-                    - if range.start.col >= frozen_cols {
-                        self.scroll.x
-                    } else {
-                        0.0
-                    };
-                let ry = y_start + sheet.row_y_offset(range.start.row)
-                    - if range.start.row >= frozen_rows {
-                        self.scroll.y
-                    } else {
-                        0.0
-                    };
-                let rw: f32 = (range.start.col..=range.end.col)
-                    .map(|c| sheet.col_width(c))
-                    .sum();
-                let rh: f32 = (range.start.row..=range.end.row)
-                    .map(|r| sheet.row_height(r))
-                    .sum();
+                let (rx, ry, rw, rh) = range_rect(*range);
 
                 cmds.push(RenderCommand::StrokeRect {
                     x: rx,
@@ -3749,25 +4259,8 @@ impl SpreadsheetApp {
             current_end,
         } = &self.mode
         {
-            let range = CellRange::new(anchor_range.start, *current_end);
-            let rx = ROW_HEADER_WIDTH + sheet.col_x_offset(range.start.col)
-                - if range.start.col >= frozen_cols {
-                    self.scroll.x
-                } else {
-                    0.0
-                };
-            let ry = y_start + sheet.row_y_offset(range.start.row)
-                - if range.start.row >= frozen_rows {
-                    self.scroll.y
-                } else {
-                    0.0
-                };
-            let rw: f32 = (range.start.col..=range.end.col)
-                .map(|c| sheet.col_width(c))
-                .sum();
-            let rh: f32 = (range.start.row..=range.end.row)
-                .map(|r| sheet.row_height(r))
-                .sum();
+            let range = CellRange::new(anchor_range.start(), *current_end);
+            let (rx, ry, rw, rh) = range_rect(range);
 
             cmds.push(RenderCommand::StrokeRect {
                 x: rx,
@@ -3822,7 +4315,7 @@ impl SpreadsheetApp {
 
         let mut tx = 4.0;
         for (idx, sheet) in self.sheets.iter().enumerate() {
-            let is_active = idx == self.active_sheet;
+            let is_active = idx == self.sheets.active_index();
             let bg = if is_active { COLOR_BASE } else { COLOR_MANTLE };
             let fg = if is_active {
                 COLOR_BLUE
@@ -4184,42 +4677,30 @@ impl SpreadsheetApp {
 }
 
 /// Handle keyboard input in editing mode. Returns Consumed if handled.
-fn handle_editing_key(text: &mut String, cursor_pos: &mut usize, event: &KeyEvent) -> EventResult {
+fn handle_editing_key(buffer: &mut EditBuffer, event: &KeyEvent) -> EventResult {
     match event.key {
         Key::Backspace => {
-            if *cursor_pos > 0 {
-                let remove_idx = *cursor_pos - 1;
-                if remove_idx < text.len() {
-                    text.remove(remove_idx);
-                    *cursor_pos -= 1;
-                }
-            }
+            buffer.backspace();
             EventResult::Consumed
         }
         Key::Delete => {
-            if *cursor_pos < text.len() {
-                text.remove(*cursor_pos);
-            }
+            buffer.delete();
             EventResult::Consumed
         }
         Key::Left => {
-            if *cursor_pos > 0 {
-                *cursor_pos -= 1;
-            }
+            buffer.move_left();
             EventResult::Consumed
         }
         Key::Right => {
-            if *cursor_pos < text.len() {
-                *cursor_pos += 1;
-            }
+            buffer.move_right();
             EventResult::Consumed
         }
         Key::Home => {
-            *cursor_pos = 0;
+            buffer.move_home();
             EventResult::Consumed
         }
         Key::End => {
-            *cursor_pos = text.len();
+            buffer.move_end();
             EventResult::Consumed
         }
         Key::Enter | Key::Tab | Key::Escape => {
@@ -4230,13 +4711,7 @@ fn handle_editing_key(text: &mut String, cursor_pos: &mut usize, event: &KeyEven
             if let Some(ch) = event.text
                 && !ch.is_control()
             {
-                let byte_pos = text
-                    .char_indices()
-                    .nth(*cursor_pos)
-                    .map(|(i, _)| i)
-                    .unwrap_or(text.len());
-                text.insert(byte_pos, ch);
-                *cursor_pos += 1;
+                buffer.insert(ch);
                 return EventResult::Consumed;
             }
             EventResult::Ignored
@@ -4294,7 +4769,21 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not. Nor is
+    // exact float comparison a hazard in a test that asserts a *computed*
+    // layout offset equals the constant it was built from: an epsilon there
+    // would weaken the assertion rather than strengthen it.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     // -- text measurement --
@@ -4526,16 +5015,16 @@ mod tests {
     #[test]
     fn test_range_single() {
         let r = CellRange::single(CellAddr::new(2, 3));
-        assert_eq!(r.start, CellAddr::new(2, 3));
-        assert_eq!(r.end, CellAddr::new(2, 3));
+        assert_eq!(r.start(), CellAddr::new(2, 3));
+        assert_eq!(r.end(), CellAddr::new(2, 3));
         assert_eq!(r.cell_count(), 1);
     }
 
     #[test]
     fn test_range_normalizes() {
         let r = CellRange::new(CellAddr::new(3, 5), CellAddr::new(1, 2));
-        assert_eq!(r.start, CellAddr::new(1, 2));
-        assert_eq!(r.end, CellAddr::new(3, 5));
+        assert_eq!(r.start(), CellAddr::new(1, 2));
+        assert_eq!(r.end(), CellAddr::new(3, 5));
     }
 
     #[test]
@@ -4588,15 +5077,15 @@ mod tests {
     #[test]
     fn test_range_parse_single() {
         let r = CellRange::parse("B3").unwrap();
-        assert_eq!(r.start, CellAddr::new(1, 2));
-        assert_eq!(r.end, CellAddr::new(1, 2));
+        assert_eq!(r.start(), CellAddr::new(1, 2));
+        assert_eq!(r.end(), CellAddr::new(1, 2));
     }
 
     #[test]
     fn test_range_parse_multi() {
         let r = CellRange::parse("A1:C5").unwrap();
-        assert_eq!(r.start, CellAddr::new(0, 0));
-        assert_eq!(r.end, CellAddr::new(2, 4));
+        assert_eq!(r.start(), CellAddr::new(0, 0));
+        assert_eq!(r.end(), CellAddr::new(2, 4));
     }
 
     #[test]
@@ -5094,6 +5583,90 @@ mod tests {
         assert!(matches!(val, CellValue::Empty));
     }
 
+    /// A formula nested deeper than the evaluator will go reports an error
+    /// rather than overflowing the stack.
+    ///
+    /// Before the depth guard covered the grammar, only *cell-reference*
+    /// recursion was counted, so this recursed once per parenthesis until the
+    /// process died — and a stack overflow is not something the caller can
+    /// render in a cell: it takes the workbook down with it. 50,000 is far past
+    /// any real formula and far past the depth that actually overflows.
+    #[test]
+    fn a_deeply_nested_formula_reports_an_error_instead_of_overflowing() {
+        let sheet = Sheet::new("Test");
+        let depth = 50_000;
+        let formula = format!("={}1{}", "(".repeat(depth), ")".repeat(depth));
+        assert_eq!(
+            evaluate_formula(&formula, &sheet),
+            CellValue::Error(CellError::TooDeep)
+        );
+    }
+
+    /// The same, reached through function arguments rather than parentheses.
+    #[test]
+    fn deeply_nested_function_calls_report_an_error() {
+        let sheet = Sheet::new("Test");
+        let depth = 20_000;
+        let formula = format!("={}1{}", "ABS(".repeat(depth), ")".repeat(depth));
+        assert_eq!(
+            evaluate_formula(&formula, &sheet),
+            CellValue::Error(CellError::TooDeep)
+        );
+    }
+
+    /// Nesting a person would actually write still evaluates.
+    ///
+    /// The guard is worth nothing if it fires on real formulas, so this pins
+    /// the other side of it.
+    #[test]
+    fn ordinary_nesting_still_evaluates() {
+        let sheet = Sheet::new("Test");
+        let formula = format!("={}1+1{}", "(".repeat(20), ")".repeat(20));
+        assert_eq!(evaluate_formula(&formula, &sheet), CellValue::Number(2.0));
+    }
+
+    /// A chain of cells that refer to one another still resolves, and a chain
+    /// longer than the budget reports depth rather than a cycle.
+    ///
+    /// Cycles are detected exactly, by the path of addresses being visited, so
+    /// a depth failure is never one — which is why it gets its own error.
+    #[test]
+    fn a_chain_of_referring_cells_resolves_until_the_budget_runs_out() {
+        let mut sheet = Sheet::new("Test");
+        sheet.set_cell_input(CellAddr::new(0, 0), "1");
+        // A1 = 1, A2 = A1 + 1, A3 = A2 + 1, ...
+        for row in 1..MAX_ROWS {
+            let previous = CellAddr::new(0, row.saturating_sub(1)).display();
+            sheet.set_cell_input(CellAddr::new(0, row), &format!("={previous}+1"));
+        }
+        recalculate_sheet(&mut sheet);
+        assert_eq!(
+            sheet.get_cell(CellAddr::new(0, 9)).value,
+            CellValue::Number(10.0),
+            "a ten-deep chain is well inside the budget"
+        );
+        assert_eq!(
+            sheet
+                .get_cell(CellAddr::new(0, MAX_ROWS.saturating_sub(1)))
+                .value,
+            CellValue::Error(CellError::TooDeep),
+            "a 999-deep chain is not, and says so without claiming a cycle"
+        );
+    }
+
+    /// A real cycle still reports as one.
+    #[test]
+    fn a_two_cell_cycle_is_reported_as_a_cycle_not_as_depth() {
+        let mut sheet = Sheet::new("Test");
+        sheet.set_cell_input(CellAddr::new(0, 0), "=A2");
+        sheet.set_cell_input(CellAddr::new(0, 1), "=A1");
+        recalculate_sheet(&mut sheet);
+        assert_eq!(
+            sheet.get_cell(CellAddr::new(0, 0)).value,
+            CellValue::Error(CellError::CircularReference)
+        );
+    }
+
     #[test]
     fn test_eval_unknown_function() {
         let sheet = Sheet::new("Test");
@@ -5295,7 +5868,10 @@ mod tests {
     /// than resumed inside.
     #[test]
     fn a_needle_that_grows_when_folded_is_skipped_whole() {
-        assert_eq!(case_insensitive_replace("x\u{130}y", "i\u{307}", "I"), "xIy");
+        assert_eq!(
+            case_insensitive_replace("x\u{130}y", "i\u{307}", "I"),
+            "xIy"
+        );
     }
 
     /// Replacements do not overlap: `aa` occurs twice in `aaaa`.
@@ -5326,8 +5902,8 @@ mod tests {
     fn test_selection_primary_range() {
         let sel = Selection::single(CellAddr::new(3, 4));
         let r = sel.primary_range();
-        assert_eq!(r.start, CellAddr::new(3, 4));
-        assert_eq!(r.end, CellAddr::new(3, 4));
+        assert_eq!(r.start(), CellAddr::new(3, 4));
+        assert_eq!(r.end(), CellAddr::new(3, 4));
     }
 
     // -- UndoManager tests --
@@ -5410,7 +5986,7 @@ mod tests {
     fn test_app_new() {
         let app = SpreadsheetApp::new(1280.0, 800.0);
         assert_eq!(app.sheets.len(), 1);
-        assert_eq!(app.active_sheet, 0);
+        assert_eq!(app.sheets.active_index(), 0);
     }
 
     #[test]
@@ -5498,7 +6074,7 @@ mod tests {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.add_sheet();
         assert_eq!(app.sheets.len(), 2);
-        assert_eq!(app.active_sheet, 1);
+        assert_eq!(app.sheets.active_index(), 1);
     }
 
     #[test]
@@ -5514,6 +6090,91 @@ mod tests {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.remove_active_sheet();
         assert_eq!(app.sheets.len(), 1);
+    }
+
+    #[test]
+    fn redoing_an_added_sheet_brings_it_back() {
+        // Both sheet actions used to implement only their undo half, so this
+        // sequence lost the sheet: redo was a no-op and the user had no way to
+        // get it back short of adding a fresh one.
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.add_sheet();
+        assert_eq!(app.sheets.len(), 2);
+
+        app.undo();
+        assert_eq!(app.sheets.len(), 1, "undo must remove the added sheet");
+
+        app.redo();
+        assert_eq!(app.sheets.len(), 2, "redo must put the added sheet back");
+        assert_eq!(
+            app.sheets.get(1).map(|s| s.name.clone()).as_deref(),
+            Some("Sheet2")
+        );
+    }
+
+    #[test]
+    fn redoing_a_removed_sheet_removes_it_again() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.add_sheet();
+        app.remove_active_sheet();
+        assert_eq!(app.sheets.len(), 1);
+
+        app.undo();
+        assert_eq!(app.sheets.len(), 2, "undo must restore the removed sheet");
+
+        app.redo();
+        assert_eq!(app.sheets.len(), 1, "redo must remove it again");
+    }
+
+    #[test]
+    fn a_workbook_always_has_at_least_one_sheet() {
+        // The rule used to live in `remove_active_sheet` only. The undo path
+        // removed a sheet with nothing but a `sheet_idx < len` test, so it was
+        // one code path away from a workbook with no sheets at all -- which
+        // `active_sheet()` would then have answered by indexing `sheets[0]`,
+        // in a branch commented "this should never happen".
+        let mut book = SheetBook::new(Sheet::new("Only"));
+        assert_eq!(book.len(), 1);
+        assert!(
+            book.remove(0).is_none(),
+            "the last sheet may not be removed"
+        );
+        assert_eq!(book.len(), 1);
+        assert_eq!(book.active().name, "Only");
+
+        // And no sequence of removals can get past that floor.
+        book.push(Sheet::new("Second"));
+        book.push(Sheet::new("Third"));
+        for index in [2, 1, 0, 0, 0, 5] {
+            book.remove(index);
+            // Not `len() >= 1`: `SheetBook::is_empty` is a constant `false`, so
+            // the usual rewrite of that comparison would assert nothing at all.
+            // Asking for sheet 0 is the same claim made in a form that can fail.
+            assert!(book.get(0).is_some(), "a workbook always has a sheet 0");
+            assert!(book.active_index() < book.len());
+        }
+        assert_eq!(book.len(), 1);
+    }
+
+    #[test]
+    fn removing_the_first_sheet_promotes_the_next_one() {
+        // Sheet 0 lives in its own field, so removing it is the one case that
+        // is not a `Vec::remove` -- worth pinning separately.
+        let mut book = SheetBook::new(Sheet::new("First"));
+        book.push(Sheet::new("Second"));
+        book.push(Sheet::new("Third"));
+
+        assert_eq!(book.remove(0).map(|s| s.name), Some("First".to_owned()));
+        assert_eq!(book.len(), 2);
+        assert_eq!(book.get(0).map(|s| s.name.as_str()), Some("Second"));
+        assert_eq!(book.get(1).map(|s| s.name.as_str()), Some("Third"));
+        assert_eq!(book.get(2).map(|s| s.name.as_str()), None);
+
+        // Inserting at 0 must displace the head rather than overwrite it.
+        book.insert(0, Sheet::new("Zeroth"));
+        let names: Vec<&str> = book.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Zeroth", "Second", "Third"]);
+        assert_eq!(book.active_index(), 0);
     }
 
     #[test]
@@ -5633,8 +6294,7 @@ mod tests {
     fn test_app_confirm_edit() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.mode = InteractionMode::Editing {
-            text: "99".to_string(),
-            cursor_pos: 2,
+            buffer: EditBuffer::at_end("99".to_string()),
         };
         app.selection = Selection::single(CellAddr::new(0, 0));
         app.confirm_edit();
@@ -5649,8 +6309,7 @@ mod tests {
     fn test_app_cancel_edit() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.mode = InteractionMode::Editing {
-            text: "99".to_string(),
-            cursor_pos: 2,
+            buffer: EditBuffer::at_end("99".to_string()),
         };
         app.cancel_edit();
         assert!(matches!(app.mode, InteractionMode::Normal));
@@ -5797,105 +6456,135 @@ mod tests {
 
     // -- handle_editing_key tests --
 
-    #[test]
-    fn test_editing_backspace() {
-        let mut text = "abc".to_string();
-        let mut cursor = 3;
-        let ev = KeyEvent {
-            key: Key::Backspace,
+    /// A buffer holding `text` with the caret `caret` characters from the start.
+    ///
+    /// Built by walking the caret rather than by setting a field, because the
+    /// field is private on purpose: a test that could place the caret at an
+    /// arbitrary number would be able to construct the very state the type
+    /// exists to rule out, and would then be testing something the program
+    /// cannot reach.
+    fn editing(text: &str, caret: usize) -> EditBuffer {
+        let mut buffer = EditBuffer::at_end(text.to_owned());
+        buffer.move_home();
+        for _ in 0..caret {
+            buffer.move_right();
+        }
+        buffer
+    }
+
+    fn key(key: Key, text: Option<char>) -> KeyEvent {
+        KeyEvent {
+            key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
-        };
-        handle_editing_key(&mut text, &mut cursor, &ev);
-        assert_eq!(text, "ab");
-        assert_eq!(cursor, 2);
+            text,
+        }
+    }
+
+    #[test]
+    fn test_editing_backspace() {
+        let mut buffer = editing("abc", 3);
+        handle_editing_key(&mut buffer, &key(Key::Backspace, None));
+        assert_eq!(buffer.text(), "ab");
+        assert_eq!(buffer.caret(), 2);
     }
 
     #[test]
     fn test_editing_delete() {
-        let mut text = "abc".to_string();
-        let mut cursor = 0;
-        let ev = KeyEvent {
-            key: Key::Delete,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: None,
-        };
-        handle_editing_key(&mut text, &mut cursor, &ev);
-        assert_eq!(text, "bc");
-        assert_eq!(cursor, 0);
+        let mut buffer = editing("abc", 0);
+        handle_editing_key(&mut buffer, &key(Key::Delete, None));
+        assert_eq!(buffer.text(), "bc");
+        assert_eq!(buffer.caret(), 0);
     }
 
     #[test]
     fn test_editing_type_char() {
-        let mut text = "ab".to_string();
-        let mut cursor = 2;
-        let ev = KeyEvent {
-            key: Key::C,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: Some('c'),
-        };
-        handle_editing_key(&mut text, &mut cursor, &ev);
-        assert_eq!(text, "abc");
-        assert_eq!(cursor, 3);
+        let mut buffer = editing("ab", 2);
+        handle_editing_key(&mut buffer, &key(Key::C, Some('c')));
+        assert_eq!(buffer.text(), "abc");
+        assert_eq!(buffer.caret(), 3);
     }
 
     #[test]
     fn test_editing_left_arrow() {
-        let mut text = "abc".to_string();
-        let mut cursor = 2;
-        let ev = KeyEvent {
-            key: Key::Left,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: None,
-        };
-        handle_editing_key(&mut text, &mut cursor, &ev);
-        assert_eq!(cursor, 1);
+        let mut buffer = editing("abc", 2);
+        handle_editing_key(&mut buffer, &key(Key::Left, None));
+        assert_eq!(buffer.caret(), 1);
     }
 
     #[test]
     fn test_editing_right_arrow() {
-        let mut text = "abc".to_string();
-        let mut cursor = 1;
-        let ev = KeyEvent {
-            key: Key::Right,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: None,
-        };
-        handle_editing_key(&mut text, &mut cursor, &ev);
-        assert_eq!(cursor, 2);
+        let mut buffer = editing("abc", 1);
+        handle_editing_key(&mut buffer, &key(Key::Right, None));
+        assert_eq!(buffer.caret(), 2);
     }
 
     #[test]
     fn test_editing_home() {
-        let mut text = "abc".to_string();
-        let mut cursor = 2;
-        let ev = KeyEvent {
-            key: Key::Home,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: None,
-        };
-        handle_editing_key(&mut text, &mut cursor, &ev);
-        assert_eq!(cursor, 0);
+        let mut buffer = editing("abc", 2);
+        handle_editing_key(&mut buffer, &key(Key::Home, None));
+        assert_eq!(buffer.caret(), 0);
     }
 
     #[test]
     fn test_editing_end() {
-        let mut text = "abc".to_string();
-        let mut cursor = 0;
-        let ev = KeyEvent {
-            key: Key::End,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: None,
-        };
-        handle_editing_key(&mut text, &mut cursor, &ev);
-        assert_eq!(cursor, 3);
+        let mut buffer = editing("abc", 0);
+        handle_editing_key(&mut buffer, &key(Key::End, None));
+        assert_eq!(buffer.caret(), 3);
+    }
+
+    /// The exact keystrokes that used to abort the process.
+    ///
+    /// `String::remove` panics when handed a byte offset that is not on a
+    /// character boundary. With the caret counted in characters and the removal
+    /// done in bytes, `Home`, `Right`, `Delete` on a cell beginning with a
+    /// two-byte character handed it byte 1, which is inside that character.
+    #[test]
+    fn deleting_after_a_multi_byte_character_does_not_panic() {
+        // "\u{e9}a" -- e-acute is two bytes in UTF-8, so character 1 is byte 2.
+        let mut buffer = editing("\u{e9}a", 0);
+        handle_editing_key(&mut buffer, &key(Key::Right, None));
+        handle_editing_key(&mut buffer, &key(Key::Delete, None));
+        assert_eq!(buffer.text(), "\u{e9}");
+        assert_eq!(buffer.caret(), 1);
+    }
+
+    /// The same defect reached through `Backspace` rather than `Delete`.
+    #[test]
+    fn backspacing_over_a_multi_byte_character_does_not_panic() {
+        let mut buffer = EditBuffer::at_end("\u{e9}a".to_owned());
+        handle_editing_key(&mut buffer, &key(Key::Backspace, None));
+        assert_eq!(buffer.text(), "\u{e9}");
+        handle_editing_key(&mut buffer, &key(Key::Backspace, None));
+        assert_eq!(buffer.text(), "");
+        assert_eq!(buffer.caret(), 0);
+    }
+
+    /// Typing before a multi-byte character inserts before it, not inside it.
+    ///
+    /// The caret is a character count, so `Home` puts it at character 0 whatever
+    /// the first character's width; the byte offset is derived from it in one
+    /// place rather than assumed to be the same number.
+    #[test]
+    fn typing_at_the_start_of_multi_byte_text_inserts_before_it() {
+        let mut buffer = editing("\u{4e2d}\u{6587}", 0);
+        handle_editing_key(&mut buffer, &key(Key::X, Some('x')));
+        assert_eq!(buffer.text(), "x\u{4e2d}\u{6587}");
+        assert_eq!(buffer.caret(), 1);
+    }
+
+    /// `End` lands after the last character, not after the last byte.
+    ///
+    /// The two entry points into editing used to disagree about this: one seeded
+    /// the caret with `text.len()`, which is a byte count, and the other with
+    /// `1` after a single character was typed.
+    #[test]
+    fn end_counts_characters_not_bytes() {
+        let mut buffer = editing("\u{4e2d}\u{6587}", 0);
+        handle_editing_key(&mut buffer, &key(Key::End, None));
+        assert_eq!(buffer.caret(), 2, "two characters, six bytes");
+        handle_editing_key(&mut buffer, &key(Key::Right, None));
+        assert_eq!(buffer.caret(), 2, "the caret must not run past the text");
     }
 
     // -- values_equal tests --

@@ -111,10 +111,34 @@ def mark_ranges():
     return out
 
 
+def spacing_mark_ranges():
+    """Characters of general category `Mc` or `Me`, as ranges.
+
+    The *other* two thirds of `M*`, kept apart from `mark_ranges` because the
+    two answer different questions and only one of them is about advance
+    width. This one is HarfBuzz's `HB_UNICODE_GENERAL_CATEGORY_IS_MARK`, minus
+    the `Mn` the other table already holds, and the Universal Shaping Engine
+    is what needs it: its cluster machine drops a ZWNJ whose next visible
+    glyph is *any* kind of mark, spacing ones included, so a ZWNJ before a
+    Devanagari matra must not reach the machine. Asking `mark_ranges` there
+    would let it through and cut the cluster in the wrong place.
+    """
+    out = []
+    for cp in range(0x110000):
+        if unicodedata.category(chr(cp)) not in ("Mc", "Me"):
+            continue
+        if out and out[-1][1] == cp - 1:
+            out[-1][1] = cp
+        else:
+            out.append([cp, cp])
+    return out
+
+
 def main():
     pairs, singletons = canonical_pairs_and_singletons()
     ranges = combining_ranges()
     marks = mark_ranges()
+    spacing = spacing_mark_ranges()
 
     # Which of the pairs actually recompose. Asking the UCD directly, rather
     # than reading CompositionExclusions.txt, catches all four reasons a pair
@@ -214,6 +238,23 @@ def main():
             w(
                 "    "
                 + " ".join(f"(0x{lo:04X}, 0x{hi:04X})," for lo, hi in marks[i : i + 4])
+                + "\n"
+            )
+        w("];\n\n")
+
+        w("/// Characters of general category `Mc` or `Me` as sorted, disjoint\n")
+        w("/// ranges: `(first, last)`.\n")
+        w("///\n")
+        w("/// Deliberately *not* merged into [`MARKS`]: that table decides which\n")
+        w("/// glyphs take no advance, and a spacing combining mark takes one. This\n")
+        w("/// one exists for the single caller that wants the whole of `M*` —\n")
+        w("/// the Universal Shaping Engine's cluster machine, which drops a ZWNJ\n")
+        w("/// standing before any mark whatsoever.\n")
+        w(f"pub(crate) static SPACING_MARKS: [(u32, u32); {len(spacing)}] = [\n")
+        for i in range(0, len(spacing), 4):
+            w(
+                "    "
+                + " ".join(f"(0x{lo:04X}, 0x{hi:04X})," for lo, hi in spacing[i : i + 4])
                 + "\n"
             )
         w("];\n")

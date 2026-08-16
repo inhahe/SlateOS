@@ -5,13 +5,16 @@
 //! uses. Do not edit: run the script instead, where the grammar
 //! is written out and explained.
 
-use crate::universal::Cluster;
+use crate::universal::{Category, Cluster};
 
 /// State 0 is dead — nothing leaves it — and state 1 is the
 /// start. A row is indexed by
 /// [`Category`](crate::universal::Category) cast to `usize`, so
-/// the enum's variant order is part of this table.
-pub(crate) static TRANSITIONS: [[u8; 44]; 110] = [
+/// the enum's variant order is part of this table. The width is
+/// written as `Category::COUNT` rather than as a literal so that
+/// a category added to the enum without regenerating this file
+/// fails to compile instead of silently mis-indexing every row.
+pub(crate) static TRANSITIONS: [[u8; Category::COUNT]; 110] = [
     [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     [2, 3, 4, 5, 6, 7, 8, 9, 10, 6, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 7, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 31, 35, 6, 36, 6, 37, 6, 6, 38],
     [0, 0, 0, 0, 0, 39, 40, 0, 41, 0, 0, 42, 43, 44, 45, 46, 47, 48, 49, 50, 39, 51, 52, 53, 54, 55, 56, 57, 58, 59, 0, 60, 61, 62, 63, 60, 0, 0, 0, 0, 64, 0, 0, 63],

@@ -57,7 +57,7 @@ use alloc::vec::Vec;
 
 use crate::khmer;
 use crate::norm_tables::{
-    CCC, COMBINES_BACKWARD, MARKS, NO_COMPOSE, PAIRS, PAIRS_BY_PARTS, SINGLETONS,
+    CCC, COMBINES_BACKWARD, MARKS, NO_COMPOSE, PAIRS, PAIRS_BY_PARTS, SINGLETONS, SPACING_MARKS,
 };
 use crate::thai;
 
@@ -199,6 +199,31 @@ pub(crate) fn is_mark(ch: char) -> bool {
     let cp = ch as u32;
     let i = MARKS.partition_point(|&(_, hi)| hi < cp);
     MARKS.get(i).is_some_and(|&(lo, _)| cp >= lo)
+}
+
+/// Whether `ch` is a combining mark of *any* kind — general category `Mn`,
+/// `Mc` or `Me`.
+///
+/// HarfBuzz's `HB_UNICODE_GENERAL_CATEGORY_IS_MARK`, and a different question
+/// from [`is_mark`] in exactly the way that matters: this one counts the
+/// *spacing* combining marks, the Devanagari and Balinese matras that occupy
+/// width. That makes it the wrong predicate for zeroing an advance and the
+/// right one for asking "is the next thing a mark?", which is what the
+/// Universal Shaping Engine's cluster machine asks before it drops a ZWNJ.
+/// See [`universal::clusters`](crate::universal::clusters).
+///
+/// Two searches rather than one merged table, because merging them would mean
+/// [`is_mark`] — which runs once per character of every string ever shaped —
+/// either searched a table with the wrong answers in it or gained a second
+/// check of its own. This is the caller that is rare.
+#[must_use]
+pub(crate) fn is_any_mark(ch: char) -> bool {
+    if is_mark(ch) {
+        return true;
+    }
+    let cp = ch as u32;
+    let i = SPACING_MARKS.partition_point(|&(_, hi)| hi < cp);
+    SPACING_MARKS.get(i).is_some_and(|&(lo, _)| cp >= lo)
 }
 
 /// The characters that exist to instruct the shaper and are never drawn.

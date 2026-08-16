@@ -47,7 +47,7 @@ use alloc::vec::Vec;
 
 use crate::bidi::{self, Class};
 use crate::gsub::{ALL_FEATURES, Staging, SubGlyph, Substitutions, feature_bit, feature_bits};
-use crate::indic::{Category, Position, Syllable, syllables};
+use crate::indic::{Category, Char, Position, Syllable, syllables};
 use crate::lang::Lang;
 use crate::script::ScriptTags;
 use crate::syllabic;
@@ -1733,7 +1733,12 @@ fn insert_dotted_circles(glyphs: &mut Vec<SubGlyph>, dotted: Option<u16>) {
     syllabic::insert_dotted_circles(
         glyphs,
         dotted,
-        Category::DottedCircle,
+        |g| {
+            g.indic = Char {
+                category: Category::DottedCircle,
+                position: Position::End,
+            };
+        },
         |stamp| Syllable::from_code(stamp) == Syllable::Broken,
         |g| g.indic.category == Category::Repha,
     );

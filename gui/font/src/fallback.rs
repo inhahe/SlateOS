@@ -105,7 +105,7 @@ use class::{
 /// Matched on the *preferred* tag only, which is half the question: the script
 /// picks a complex shaper and the *face* may then call it off. See
 /// [`shaped_as_default`].
-static COMPLEX_SCRIPTS: [[u8; 4]; 101] = [
+pub(crate) static COMPLEX_SCRIPTS: [[u8; 4]; 101] = [
     *b"adlm", *b"ahom", *b"bali", *b"batk", *b"berf", *b"bhks", *b"bng2", *b"brah", *b"bugi",
     *b"buhd", *b"cakm", *b"cham", *b"chrs", *b"cpmn", *b"dev2", *b"diak", *b"dogr", *b"dupl",
     *b"egyp", *b"elym", *b"gara", *b"gjr2", *b"gong", *b"gonm", *b"gran", *b"gukh", *b"gur2",
@@ -254,9 +254,10 @@ pub(crate) enum Zeroing {
 /// eleven that differ, and [`shaped_as_default`] for `simple`, which puts ten
 /// of those eleven back.
 ///
-/// [`Zeroing::BeforeGpos`] is Myanmar's alone here, and it is transcribed
-/// rather than measured: of HarfBuzz's nine shapers only Myanmar and USE set
-/// `HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY`, and USE is not written yet.
+/// [`Zeroing::BeforeGpos`] belongs to Myanmar and to the Universal Shaping
+/// Engine's eighty-eight scripts, and it is transcribed rather than measured:
+/// of HarfBuzz's nine shapers exactly those two set
+/// `HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY`.
 /// The distinction is invisible in a face whose marks are all zero-width in
 /// `hmtx` and decisive in one whose are not: `mmrtext.ttf` classes U+103C
 /// (medial ra, the hook drawn under and around the consonant) as a `GDEF`
@@ -271,6 +272,11 @@ pub(crate) fn zeroes_mark_advances(tags: Option<ScriptTags>, simple: bool) -> Ze
     match tags {
         Some(tags) if NO_ZERO_WIDTH_MARKS.binary_search(&tags.preferred).is_ok() => Zeroing::Never,
         Some(tags) if tags.preferred == *b"mym2" => Zeroing::BeforeGpos,
+        // Asked of `universal` rather than transcribed into a list here, so
+        // that the set of scripts the engine shapes and the set whose marks it
+        // zeroes early cannot drift apart: they are the same set by
+        // construction, because they are the same array.
+        Some(_) if crate::universal::shapes(tags) => Zeroing::BeforeGpos,
         _ => Zeroing::AfterGpos,
     }
 }

@@ -85,29 +85,23 @@ const BONUS_SPAWN_CHANCE: u64 = 5;
 
 // ── LCG random number generator ────────────────────────────────────
 /// Simple linear congruential generator. Parameters from Numerical Recipes.
-struct Lcg {
-    state: u64,
-}
-
-impl Lcg {
-    const fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    /// Returns a value in `0..bound` (exclusive upper bound).
-    fn next_bounded(&mut self, bound: usize) -> usize {
-        let val = self.next_u64();
-        (val % bound as u64) as usize
-    }
-}
+// From `randrange`, not a local LCG. The local one placed food with
+// `state % GRID_ROWS` and then `state % GRID_COLS`, two *consecutive* draws
+// with the grid 20 x 20. Twenty is even, `x % 20` preserves the parity of `x`,
+// and the low bit of a modulus-2^64 LCG alternates 0,1,0,1 on every draw -- so
+// the row and the column always had opposite parity and `row + col` was always
+// odd. That alone put food on one colour of the checkerboard.
+//
+// Twenty is also 4 x 5, so `row % 4` is `state % 4`, whose period is four
+// draws; taking every second draw for the row leaves it just two of the four
+// residues. Measured before the fix, over 4000 placements:
+//
+//   * `row % 4` was only ever 0 or 2, `col % 4` only ever 1 or 3, and the pair
+//     only ever (0, 3) or (2, 1);
+//   * so the food could reach exactly **50 of the 400 cells** -- an eighth of
+//     the board, in a fixed diagonal lattice. The other 350 never held food in
+//     any game at any seed.
+use randrange::Rng;
 
 // ── Direction ───────────────────────────────────────────────────────
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -280,7 +274,7 @@ struct SnakeApp {
     /// Accumulated time in ms (for tick scheduling).
     accumulated_ms: u64,
     /// RNG state.
-    rng: Lcg,
+    rng: Rng,
     /// Pulsing animation counter (for food rendering).
     pulse_counter: u32,
 }
@@ -314,7 +308,7 @@ impl SnakeApp {
             ticks_since_food: 0,
             total_ticks: 0,
             accumulated_ms: 0,
-            rng: Lcg::new(seed),
+            rng: Rng::new(seed),
             pulse_counter: 0,
         };
         app.init_snake();
@@ -372,8 +366,8 @@ impl SnakeApp {
     /// Find a random cell not occupied by the snake.
     fn random_empty_cell(&mut self) -> Pos {
         loop {
-            let row = self.rng.next_bounded(GRID_ROWS) as i32;
-            let col = self.rng.next_bounded(GRID_COLS) as i32;
+            let row = self.rng.below(GRID_ROWS) as i32;
+            let col = self.rng.below(GRID_COLS) as i32;
             let pos = Pos::new(row, col);
             if !self.snake.contains(&pos) {
                 return pos;
@@ -384,8 +378,8 @@ impl SnakeApp {
     /// Find a random empty cell that is also not at `exclude_pos`.
     fn random_empty_cell_excluding(&mut self, exclude_pos: Pos) -> Pos {
         loop {
-            let row = self.rng.next_bounded(GRID_ROWS) as i32;
-            let col = self.rng.next_bounded(GRID_COLS) as i32;
+            let row = self.rng.below(GRID_ROWS) as i32;
+            let col = self.rng.below(GRID_COLS) as i32;
             let pos = Pos::new(row, col);
             if !self.snake.contains(&pos) && pos != exclude_pos {
                 return pos;
@@ -566,8 +560,9 @@ impl SnakeApp {
         self.spawn_food();
 
         // Maybe spawn bonus food.
-        let chance = self.rng.next_u64() % BONUS_SPAWN_CHANCE;
-        if chance == 0 && self.bonus_food.is_none() {
+        // `chance` was `next_u64() % 5` -- an odd bound, so it was never
+        // degenerate, but it reads better as what it means.
+        if self.rng.chance(1, BONUS_SPAWN_CHANCE) && self.bonus_food.is_none() {
             self.spawn_bonus_food();
         }
     }
@@ -2157,30 +2152,53 @@ mod tests {
 
     // ── LCG RNG ─────────────────────────────────────────────────────
 
+    // Three LCG tests lived here -- deterministic, different seeds, bounded in
+    // range -- and are deleted rather than ported. All three are `randrange`'s
+    // properties and are tested there, and none could have seen what was
+    // wrong: the broken draw was uniform over 0..20 taken on its own. The
+    // defect was entirely in the relationship between the row draw and the
+    // column draw that followed it. These ask about the cell.
+
     #[test]
-    fn test_lcg_deterministic() {
-        let mut rng1 = Lcg::new(42);
-        let mut rng2 = Lcg::new(42);
-        for _ in 0..10 {
-            assert_eq!(rng1.next_u64(), rng2.next_u64());
+    fn food_can_land_anywhere_on_the_board() {
+        // The old draw reached exactly 50 of the 400 cells: `row + col` was
+        // always odd, and `row % 4` was pinned to {0, 2} against `col % 4` in
+        // {1, 3}. Ask for real coverage rather than for a specific cell, so
+        // the test says "the board is reachable" rather than pinning a layout.
+        let mut app = SnakeApp::with_seed(42);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..20_000 {
+            let pos = app.random_empty_cell();
+            seen.insert((pos.row, pos.col));
         }
+        assert!(
+            seen.len() > 380,
+            "food reached only {} of the {} cells",
+            seen.len(),
+            GRID_ROWS * GRID_COLS
+        );
     }
 
     #[test]
-    fn test_lcg_different_seeds_differ() {
-        let mut rng1 = Lcg::new(1);
-        let mut rng2 = Lcg::new(2);
-        // Very unlikely to be equal.
-        assert_ne!(rng1.next_u64(), rng2.next_u64());
-    }
-
-    #[test]
-    fn test_lcg_bounded() {
-        let mut rng = Lcg::new(42);
-        for _ in 0..100 {
-            let val = rng.next_bounded(20);
-            assert!(val < 20);
+    fn food_is_not_confined_to_one_colour_of_the_checkerboard() {
+        // `row + col` was always odd, because the row and column came from
+        // consecutive draws with an even bound. Both parities must occur, and
+        // neither may dominate.
+        let mut app = SnakeApp::with_seed(7);
+        let mut odd = 0_u32;
+        const PLACEMENTS: u32 = 4000;
+        for _ in 0..PLACEMENTS {
+            let pos = app.random_empty_cell();
+            if (pos.row + pos.col) % 2 != 0 {
+                odd += 1;
+            }
         }
+        let share = f64::from(odd) / f64::from(PLACEMENTS);
+        assert!(
+            (share - 0.5).abs() < 0.05,
+            "{:.1}% of placements had an odd row + col, not about half",
+            share * 100.0
+        );
     }
 
     // ── Tick timing ─────────────────────────────────────────────────

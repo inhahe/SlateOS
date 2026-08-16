@@ -247,6 +247,75 @@ impl Rect {
 
         Rect::new(x1, y1, (x2 - x1) as u32, (y2 - y1) as u32)
     }
+
+    /// The part of `self` not covered by `other`, as up to four **disjoint**
+    /// rectangles (top band, bottom band, then left and right of the overlap).
+    ///
+    /// Disjointness is the property the occlusion cull depends on, not merely a
+    /// nicety: a window is redrawn once per surviving fragment, so a pixel
+    /// appearing in two fragments would be painted twice — invisible for an
+    /// opaque fill and wrong for a translucent one (the shadow would darken
+    /// where fragments met). Cutting bands full-width first and only then
+    /// splitting the middle row guarantees no pixel is emitted twice.
+    ///
+    /// Returns `self` unchanged when the two do not overlap, and nothing at all
+    /// when `other` covers `self` entirely.
+    pub fn subtract(&self, other: &Rect) -> Vec<Rect> {
+        let Some(i) = self.intersect(other) else {
+            return vec![*self];
+        };
+        let mut out = Vec::with_capacity(4);
+        let (sx0, sy0) = (self.x, self.y);
+        let sx1 = self.x.saturating_add(self.width as i32);
+        let sy1 = self.y.saturating_add(self.height as i32);
+        let (ix0, iy0) = (i.x, i.y);
+        let ix1 = i.x.saturating_add(i.width as i32);
+        let iy1 = i.y.saturating_add(i.height as i32);
+
+        if iy0 > sy0 {
+            out.push(Rect::new(sx0, sy0, self.width, (iy0 - sy0) as u32));
+        }
+        if sy1 > iy1 {
+            out.push(Rect::new(sx0, iy1, self.width, (sy1 - iy1) as u32));
+        }
+        let mid_h = (iy1 - iy0) as u32;
+        if mid_h > 0 {
+            if ix0 > sx0 {
+                out.push(Rect::new(sx0, iy0, (ix0 - sx0) as u32, mid_h));
+            }
+            if sx1 > ix1 {
+                out.push(Rect::new(ix1, iy0, (sx1 - ix1) as u32, mid_h));
+            }
+        }
+        out
+    }
+}
+
+/// Subtract every rectangle in `occluders` from `base`, yielding a disjoint
+/// cover of the part of `base` that survives.
+///
+/// Returns `None` when the result would exceed `max_parts` fragments. That is a
+/// deliberate bail-out rather than a failure: each fragment costs one full
+/// replay of a window's command list, so past a handful of them the cull is
+/// buying fewer pixels than the replays cost. The caller then draws the window
+/// unclipped, which is always correct — the cull is an optimization, and it is
+/// allowed to decline.
+fn subtract_region(base: Rect, occluders: &[Rect], max_parts: usize) -> Option<Vec<Rect>> {
+    let mut parts = vec![base];
+    for occ in occluders {
+        let mut next = Vec::with_capacity(parts.len());
+        for p in &parts {
+            next.extend(p.subtract(occ));
+        }
+        if next.len() > max_parts {
+            return None;
+        }
+        parts = next;
+        if parts.is_empty() {
+            break;
+        }
+    }
+    Some(parts)
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +578,17 @@ pub struct Framebuffer {
     back: Vec<u32>,
     /// Front buffer (currently being displayed).
     front: Vec<u32>,
+    /// Screen-space rectangle every drawing primitive is confined to, or `None`
+    /// for the whole framebuffer.
+    ///
+    /// This is the occlusion cull's enforcement point (BENCH-COMPOSITOR-SLOW).
+    /// It lives on the framebuffer rather than in `RenderEngine`'s clip stack
+    /// because a window is painted by three routes that do not share that stack
+    /// — the render engine's commands, the decoration helpers, and the
+    /// shared-buffer blit — and a cull that only one of them honoured would
+    /// silently let a hidden window's decorations through. Every primitive that
+    /// writes a pixel intersects with this, so there is one place to be right.
+    frame_clip: Option<Rect>,
 }
 
 impl Framebuffer {
@@ -527,7 +607,55 @@ impl Framebuffer {
             height,
             back: vec![0xFF_00_00_00; size], // Opaque black
             front: vec![0xFF_00_00_00; size],
+            frame_clip: None,
         })
+    }
+
+    /// Confine every subsequent drawing primitive to `clip` (screen space).
+    ///
+    /// `None` restores the whole framebuffer. The background clear
+    /// ([`clear`](Self::clear) / [`clear_except`](Self::clear_except)) is
+    /// deliberately *not* clipped: it runs once per frame before any window and
+    /// has its own, separate cull.
+    fn set_frame_clip(&mut self, clip: Option<Rect>) {
+        self.frame_clip = clip;
+    }
+
+    /// Resolve the horizontal span `[x_start, x_end)` of row `y` against the
+    /// framebuffer bounds and the active [`frame_clip`](Self::frame_clip).
+    ///
+    /// Returns `None` when the row is outside either, which is the whole of the
+    /// occlusion cull's saving in the row primitives.
+    #[inline]
+    fn clip_span(&self, y: u32, x_start: u32, x_end: u32) -> Option<(u32, u32)> {
+        if y >= self.height || x_end <= x_start {
+            return None;
+        }
+        let (mut lo, mut hi) = (x_start, x_end.min(self.width));
+        if let Some(c) = self.frame_clip.as_ref() {
+            let cy0 = c.y.max(0) as u32;
+            let cy1 = c.y.saturating_add(c.height as i32).max(0) as u32;
+            if y < cy0 || y >= cy1 {
+                return None;
+            }
+            let cx0 = c.x.max(0) as u32;
+            let cx1 = c.x.saturating_add(c.width as i32).max(0) as u32;
+            lo = lo.max(cx0);
+            hi = hi.min(cx1);
+        }
+        if hi <= lo { None } else { Some((lo, hi)) }
+    }
+
+    /// Whether the single pixel (`x`, `y`) is inside the bounds and the clip.
+    #[inline]
+    fn clip_allows(&self, x: u32, y: u32) -> bool {
+        if x >= self.width || y >= self.height {
+            return false;
+        }
+        match self.frame_clip.as_ref() {
+            Some(c) => c.contains(x as i32, y as i32),
+            None => true,
+        }
     }
 
     /// Swap front and back buffers.
@@ -710,7 +838,7 @@ impl Framebuffer {
     /// Set a pixel in the back buffer (bounds-checked).
     #[inline]
     pub fn set_pixel(&mut self, x: u32, y: u32, color: u32) {
-        if x < self.width && y < self.height {
+        if self.clip_allows(x, y) {
             let idx = y as usize * self.width as usize + x as usize;
             if let Some(pixel) = self.back.get_mut(idx) {
                 *pixel = color;
@@ -732,7 +860,7 @@ impl Framebuffer {
     /// Blend a pixel with alpha onto the back buffer at the given position.
     #[inline]
     pub fn blend_pixel(&mut self, x: u32, y: u32, src_color: u32, window_opacity: f32) {
-        if x >= self.width || y >= self.height {
+        if !self.clip_allows(x, y) {
             return;
         }
 
@@ -804,7 +932,16 @@ impl Framebuffer {
         if count == 0 {
             return;
         }
-        let row_off = y as usize * self.width as usize + dst_x;
+        // Narrow the destination span to the occlusion clip, then walk the
+        // source forward by however much the left edge moved, so the two stay
+        // in step (a clip that trimmed only the destination would smear the
+        // source sideways).
+        let Some((x_lo, x_hi)) = self.clip_span(y, dst_x as u32, (dst_x + count) as u32) else {
+            return;
+        };
+        let src_off = src_off + (x_lo as usize - dst_x);
+        let count = (x_hi - x_lo) as usize;
+        let row_off = y as usize * self.width as usize + x_lo as usize;
         if let (Some(dst), Some(s)) = (
             self.back.get_mut(row_off..row_off + count),
             src.get(src_off..src_off + count),
@@ -836,8 +973,20 @@ impl Framebuffer {
         let height = self.height;
         // Work proportional to the visible pixel count; reuse the fill heuristic.
         let workers = Self::fill_worker_count(rows as usize * cols as usize);
+        let clip = self.frame_clip;
         if workers <= 1 {
-            Self::blit_opaque_band(&mut self.back, 0, height, width, buf, win_x, win_y, cols, rows);
+            Self::blit_opaque_band(
+                &mut self.back,
+                0,
+                height,
+                width,
+                buf,
+                win_x,
+                win_y,
+                cols,
+                rows,
+                clip,
+            );
             return;
         }
         let rows_per_band = height.div_ceil(workers as u32);
@@ -848,7 +997,7 @@ impl Framebuffer {
                 let band_rows = (chunk.len() / width as usize) as u32;
                 s.spawn(move || {
                     Self::blit_opaque_band(
-                        chunk, by0, band_rows, width, buf, win_x, win_y, cols, rows,
+                        chunk, by0, band_rows, width, buf, win_x, win_y, cols, rows, clip,
                     );
                 });
             }
@@ -876,9 +1025,20 @@ impl Framebuffer {
         win_y: i32,
         cols: u32,
         rows: u32,
+        clip: Option<Rect>,
     ) {
         let width_usize = fb_width as usize;
         let band_end = by0.saturating_add(band_rows);
+        // Resolve the occlusion clip to half-open pixel bounds once, rather than
+        // per row: it is the same rectangle for every row of the blit.
+        let clip_bounds = clip.map(|c| {
+            (
+                c.x.max(0) as u32,
+                c.x.saturating_add(c.width as i32).max(0) as u32,
+                c.y.max(0) as u32,
+                c.y.saturating_add(c.height as i32).max(0) as u32,
+            )
+        });
         for r in 0..rows {
             let sy = win_y.saturating_add(r as i32);
             if sy < 0 {
@@ -916,6 +1076,26 @@ impl Framebuffer {
             if count == 0 {
                 continue;
             }
+            // Same narrowing as `copy_row`: trim the destination to the clip and
+            // walk the source forward by the amount the left edge moved.
+            let (src_off, dst_x, count) = match clip_bounds {
+                None => (src_off, dst_x, count),
+                Some((cx0, cx1, cy0, cy1)) => {
+                    if sy < cy0 || sy >= cy1 {
+                        continue;
+                    }
+                    let lo = (dst_x as u32).max(cx0);
+                    let hi = ((dst_x + count) as u32).min(cx1);
+                    if hi <= lo {
+                        continue;
+                    }
+                    (
+                        src_off + (lo as usize - dst_x),
+                        lo as usize,
+                        (hi - lo) as usize,
+                    )
+                }
+            };
             let row_off = (sy - by0) as usize * width_usize + dst_x;
             if let (Some(dst), Some(s)) = (
                 band.get_mut(row_off..row_off + count),
@@ -939,15 +1119,11 @@ impl Framebuffer {
     /// (window backgrounds, decorations) no longer pay per-pixel float alpha cost.
     #[inline]
     fn fill_row_solid(&mut self, y: u32, x_start: u32, x_end: u32, color: u32) {
-        if y >= self.height || x_end <= x_start {
+        let Some((x_lo, x_hi)) = self.clip_span(y, x_start, x_end) else {
             return;
-        }
-        let x_hi = x_end.min(self.width);
-        if x_hi <= x_start {
-            return;
-        }
+        };
         let row_base = y as usize * self.width as usize;
-        let lo = row_base + x_start as usize;
+        let lo = row_base + x_lo as usize;
         let hi = row_base + x_hi as usize;
         if let Some(span) = self.back.get_mut(lo..hi) {
             span.fill(color | 0xFF_00_00_00);
@@ -962,13 +1138,9 @@ impl Framebuffer {
     /// channel blend runs per pixel. Caller guarantees `0 < src_a < 255`.
     #[inline]
     fn blend_row(&mut self, y: u32, x_start: u32, x_end: u32, src_color: u32, src_a: u32) {
-        if y >= self.height || x_end <= x_start {
+        let Some((x_lo, x_hi)) = self.clip_span(y, x_start, x_end) else {
             return;
-        }
-        let x_hi = x_end.min(self.width);
-        if x_hi <= x_start {
-            return;
-        }
+        };
         let inv_a = 255 - src_a;
         let src_r = (src_color >> 16) & 0xFF;
         let src_g = (src_color >> 8) & 0xFF;
@@ -977,7 +1149,7 @@ impl Framebuffer {
         let sg = src_g * src_a;
         let sb = src_b * src_a;
         let row_base = y as usize * self.width as usize;
-        let lo = row_base + x_start as usize;
+        let lo = row_base + x_lo as usize;
         let hi = row_base + x_hi as usize;
         if let Some(span) = self.back.get_mut(lo..hi) {
             for pixel in span {
@@ -2140,6 +2312,14 @@ pub struct Compositor {
     pending_notifications: VecDeque<EventNotification>,
     /// Whether a full recomposite is needed (e.g., after display resize).
     full_recomposite: bool,
+    /// Whether [`render_all_windows`](Self::render_all_windows) may skip the
+    /// parts of a window that windows above it opaquely cover.
+    ///
+    /// Always on in production. It exists as a switch so a test can composite
+    /// the same scene with and without the cull and compare the framebuffers
+    /// pixel for pixel — an optimization that changes the image is a bug, and
+    /// the only way to say so is to have the unculled image to compare against.
+    occlusion_cull: bool,
     /// How the last presented frame was produced (composited vs direct scanout).
     scanout: Scanout,
     /// Active remote draw-command stream sessions, keyed by stream id. Each
@@ -2179,6 +2359,7 @@ impl Compositor {
             theme: DecorationTheme::default(),
             pending_notifications: VecDeque::new(),
             full_recomposite: true,
+            occlusion_cull: true,
             scanout: Scanout::Composited,
             stream_sessions: BTreeMap::new(),
             next_stream_id: 1,
@@ -3105,31 +3286,63 @@ impl Compositor {
     /// background under them must still be cleared. Being conservative here only
     /// costs a little extra (correct) overdraw, never correctness.
     fn opaque_cover_rects(&self) -> Vec<Rect> {
-        let mut rects = Vec::new();
-        for win in &self.windows {
-            if !win.visible || win.minimized || win.opacity < 1.0 {
-                continue;
+        self.windows
+            .iter()
+            .filter_map(Self::window_opaque_cover)
+            .collect()
+    }
+
+    /// The screen-space rectangle this one window is guaranteed to overwrite
+    /// with fully opaque pixels, if any.
+    ///
+    /// Shared by the background-clear cull ([`opaque_cover_rects`](Self::opaque_cover_rects))
+    /// and the inter-window cull in [`render_all_windows`](Self::render_all_windows),
+    /// so the two can never disagree about what counts as opaque — a window
+    /// treated as an occluder by one and not the other would leave a hole.
+    fn window_opaque_cover(win: &Window) -> Option<Rect> {
+        if !win.visible || win.minimized || win.opacity < 1.0 {
+            return None;
+        }
+        if let Some(buf) = win.buffer.as_ref() {
+            // Opaque shared buffer: covers min(buffer, client) from the client
+            // origin.
+            if !buf.is_opaque() {
+                return None;
             }
-            if let Some(buf) = win.buffer.as_ref() {
-                // Opaque shared buffer: covers min(buffer, client) from the
-                // client origin.
-                if buf.is_opaque() {
-                    let cols = buf.width().min(win.width);
-                    let rows = buf.height().min(win.height);
-                    if cols > 0 && rows > 0 {
-                        rects.push(Rect::new(win.x, win.y, cols, rows));
-                    }
-                }
-            } else if Self::first_command_covers_client(
+            let cols = buf.width().min(win.width);
+            let rows = buf.height().min(win.height);
+            (cols > 0 && rows > 0).then(|| Rect::new(win.x, win.y, cols, rows))
+        } else {
+            Self::first_command_covers_client(
                 &win.render_tree.commands,
                 win.width,
                 win.height,
                 win.opacity,
-            ) {
-                rects.push(Rect::new(win.x, win.y, win.width, win.height));
-            }
+            )
+            .then(|| Rect::new(win.x, win.y, win.width, win.height))
         }
-        rects
+    }
+
+    /// The screen-space rectangle a window can paint into, decorations included.
+    ///
+    /// Deliberately conservative — it is the *outer* bound of the shadow, so it
+    /// over-covers rather than under-covers. Under-covering would clip a
+    /// decoration off; over-covering only leaves a few culled pixels on the
+    /// table. Mirrors the geometry in [`render_shadow`](Self::render_shadow),
+    /// which expands by one pixel per shadow layer from a base already inset by
+    /// the border and title bar.
+    fn window_drawn_extent(win: &Window) -> Rect {
+        let pad = BORDER_WIDTH + SHADOW_SIZE + 3;
+        let x = win.x.saturating_sub(pad as i32);
+        let y = win
+            .y
+            .saturating_sub((TITLE_BAR_HEIGHT + BORDER_WIDTH + SHADOW_SIZE + 3) as i32);
+        Rect::new(
+            x,
+            y,
+            win.width + pad * 2,
+            win.height + TITLE_BAR_HEIGHT + BORDER_WIDTH * 2 + SHADOW_SIZE * 2 + 6,
+        )
     }
 
     /// Benchmark/test hook: perform one full recomposite and buffer swap
@@ -3150,11 +3363,105 @@ impl Compositor {
         self.framebuffer.swap();
     }
 
-    /// Render all visible windows from bottom to top z-order.
+    /// Benchmark hook: one full recomposite, reporting the two phases apart.
+    ///
+    /// Returns `(background_clear_ns, window_render_ns)`. Same sequence as
+    /// [`bench_full_composite`](Self::bench_full_composite) — it exists because
+    /// the aggregate frame time cannot say which half to optimize, and the two
+    /// halves have completely different fixes (memory bandwidth vs. overdraw).
+    #[doc(hidden)]
+    pub fn bench_full_composite_phases(&mut self) -> (u64, u64) {
+        self.full_recomposite = true;
+        let covered = self.opaque_cover_rects();
+        let t0 = std::time::Instant::now();
+        self.framebuffer
+            .clear_except(self.theme.desktop_background, &covered);
+        let clear_ns = t0.elapsed().as_nanos() as u64;
+        let t1 = std::time::Instant::now();
+        self.render_all_windows();
+        let windows_ns = t1.elapsed().as_nanos() as u64;
+        self.full_recomposite = false;
+        self.damage.clear();
+        self.framebuffer.swap();
+        (clear_ns, windows_ns)
+    }
+
+    /// Render all visible windows from bottom to top z-order, skipping the
+    /// parts of each that windows above it will opaquely cover.
+    ///
+    /// OPT (BENCH-COMPOSITOR-SLOW): windows are painted back-to-front, so
+    /// without this every pixel of every window is drawn even when a window
+    /// above overwrites it a moment later. On the 4K benchmark's 16-window
+    /// cascade each window is ~72% covered by its immediate successor alone,
+    /// and window rendering was 11.1 ms of the 12.5 ms frame — so the hidden
+    /// pixels, not the visible ones, were the bulk of the work.
+    ///
+    /// For each window this subtracts the opaque covers of every window above
+    /// it from that window's drawn extent, and redraws it once per surviving
+    /// fragment under [`Framebuffer::frame_clip`]. A window with nothing left
+    /// is skipped outright. Correctness rests on two things: the occluders are
+    /// only regions *provably* repainted opaquely later
+    /// ([`window_opaque_cover`](Self::window_opaque_cover)), and the fragments
+    /// are disjoint ([`Rect::subtract`]), so no pixel is painted twice.
     fn render_all_windows(&mut self) {
+        /// Past this many fragments the per-fragment replay of a window's
+        /// command list costs more than the pixels it saves.
+        const MAX_FRAGMENTS: usize = 4;
+
         let z_stack_copy: Vec<WindowId> = self.z_stack.clone();
-        for &window_id in &z_stack_copy {
-            self.render_window(window_id);
+
+        if !self.occlusion_cull {
+            for &window_id in &z_stack_copy {
+                self.render_window(window_id);
+            }
+            return;
+        }
+
+        // Opaque cover per z-position, so window k can look at k+1.. without
+        // re-deriving them for every window (O(n^2) predicate evaluations, and
+        // `first_command_covers_client` walks a command list).
+        let covers: Vec<Option<Rect>> = z_stack_copy
+            .iter()
+            .map(|&id| self.window_ref(id).and_then(Self::window_opaque_cover))
+            .collect();
+
+        for (idx, &window_id) in z_stack_copy.iter().enumerate() {
+            let Some(win) = self.window_ref(window_id) else {
+                continue;
+            };
+            if !win.visible || win.minimized {
+                continue;
+            }
+            let extent = Self::window_drawn_extent(win);
+
+            // Only occluders that actually meet this window matter; the rest
+            // would just cost a subtraction that returns the input unchanged.
+            let occluders: Vec<Rect> = covers
+                .iter()
+                .skip(idx + 1)
+                .flatten()
+                .filter(|c| c.intersect(&extent).is_some())
+                .copied()
+                .collect();
+
+            if occluders.is_empty() {
+                self.render_window(window_id);
+                continue;
+            }
+
+            match subtract_region(extent, &occluders, MAX_FRAGMENTS) {
+                // Wholly hidden — the cheapest outcome there is.
+                Some(parts) if parts.is_empty() => {}
+                Some(parts) => {
+                    for part in parts {
+                        self.framebuffer.set_frame_clip(Some(part));
+                        self.render_window(window_id);
+                    }
+                    self.framebuffer.set_frame_clip(None);
+                }
+                // Too fragmented to be worth it: draw it whole, as before.
+                None => self.render_window(window_id),
+            }
         }
     }
 
@@ -4588,6 +4895,19 @@ mod tests {
              target<{TARGET_MS}ms => {verdict}  (target judged on release+hardware)"
         );
 
+        // Phase split: the aggregate cannot say which half to optimize.
+        let (mut cmin, mut wmin) = (u64::MAX, u64::MAX);
+        for _ in 0..ITERS {
+            let (c, w) = comp.bench_full_composite_phases();
+            cmin = cmin.min(c);
+            wmin = wmin.min(w);
+        }
+        println!(
+            "[compositor-bench] phases (min): background_clear={:.3}ms window_render={:.3}ms",
+            cmin as f64 / 1_000_000.0,
+            wmin as f64 / 1_000_000.0
+        );
+
         // Catastrophic-regression guard only (see doc): the current baseline
         // is ~16ms (still over the 2ms target, tracked separately); a mean past
         // 80ms (~5x the baseline, and worse than the pre-optimization ~50ms)
@@ -4595,6 +4915,167 @@ mod tests {
         assert!(
             mean_ms < 80.0,
             "compositor 4K recomposite mean {mean_ms:.3}ms is a catastrophic regression (>80ms)"
+        );
+    }
+
+    /// Sum of the areas of a rect list, as a `u64` so it cannot overflow.
+    fn total_area(rects: &[Rect]) -> u64 {
+        rects
+            .iter()
+            .map(|r| r.width as u64 * r.height as u64)
+            .sum()
+    }
+
+    /// Every pixel of `outer` that is in exactly one of `parts`, brute-forced.
+    ///
+    /// Deliberately naive: it is the independent oracle the fast rectangle
+    /// algebra is checked against, so it must not share any of its reasoning.
+    fn coverage_count(outer: Rect, parts: &[Rect], px: i32, py: i32) -> usize {
+        let _ = outer;
+        parts.iter().filter(|r| r.contains(px, py)).count()
+    }
+
+    #[test]
+    fn subtract_yields_disjoint_parts_that_miss_exactly_the_occluder() {
+        let base = Rect::new(-3, -2, 20, 14);
+        // A cut from every direction, plus the degenerate ones.
+        let occluders = [
+            Rect::new(0, 0, 5, 5),      // interior-ish corner
+            Rect::new(5, 3, 4, 4),      // strictly interior -> 4 parts
+            Rect::new(-100, -100, 1, 1),// disjoint
+            Rect::new(-50, -50, 200, 200), // covers everything
+            Rect::new(-3, -2, 20, 3),   // full-width band at the top
+            Rect::new(10, -2, 7, 14),   // full-height band at the right
+        ];
+        for occ in occluders {
+            let parts = base.subtract(&occ);
+            // Exhaustive over the base rect and a one-pixel margin, so a part
+            // that strayed outside would be caught too.
+            for py in (base.y - 1)..(base.y + base.height as i32 + 1) {
+                for px in (base.x - 1)..(base.x + base.width as i32 + 1) {
+                    let want = usize::from(base.contains(px, py) && !occ.contains(px, py));
+                    let got = coverage_count(base, &parts, px, py);
+                    assert_eq!(
+                        got, want,
+                        "occluder {occ:?} at ({px},{py}): covered {got} times, wanted {want}"
+                    );
+                }
+            }
+            // Areas must add up exactly — the check that catches a part that is
+            // disjoint and yet still the wrong size.
+            let want_area = base.width as u64 * base.height as u64
+                - base.intersect(&occ).map_or(0, |i| i.width as u64 * i.height as u64);
+            assert_eq!(total_area(&parts), want_area, "area after subtracting {occ:?}");
+        }
+    }
+
+    #[test]
+    fn subtract_region_declines_rather_than_fragmenting_without_bound() {
+        let base = Rect::new(0, 0, 100, 100);
+        // Three strictly-interior holes cannot be expressed in four rects.
+        let many = [
+            Rect::new(10, 10, 5, 5),
+            Rect::new(30, 30, 5, 5),
+            Rect::new(50, 50, 5, 5),
+        ];
+        assert!(
+            subtract_region(base, &many, 4).is_none(),
+            "should decline rather than return a huge fragment list"
+        );
+        // A single full-width band stays cheap, and is not declined.
+        let band = [Rect::new(0, 0, 100, 40)];
+        let parts = subtract_region(base, &band, 4).expect("one band is one part");
+        assert_eq!(parts, vec![Rect::new(0, 40, 100, 60)]);
+        // Fully covered is an empty region, not a decline.
+        let all = [Rect::new(-1, -1, 200, 200)];
+        assert_eq!(subtract_region(base, &all, 4), Some(vec![]));
+    }
+
+    /// The property the whole occlusion cull rests on: it must not change a
+    /// single pixel of the composited image.
+    #[test]
+    fn occlusion_cull_composites_the_same_pixels_as_drawing_every_window() {
+        // Small enough to compare exhaustively, cascaded like the 4K benchmark
+        // so windows really do occlude one another.
+        const W: u32 = 900;
+        const H: u32 = 700;
+
+        let build = |cull: bool| {
+            let mut comp = Compositor::new(W, H, 60).expect("compositor");
+            comp.occlusion_cull = cull;
+            for i in 0..6usize {
+                let (ww, wh) = (380u32, 260u32);
+                let id = comp.create_window(format!("W{i}"), ww, wh, i as u64 + 1);
+                let step = i as i32;
+                comp.move_window(id, 40 + step * 90, 60 + step * 70)
+                    .expect("move_window");
+                // Window 3 is deliberately translucent: a translucent window is
+                // neither an occluder nor safely double-drawable, so it is the
+                // one that would expose a non-disjoint fragmentation.
+                if i == 3 {
+                    comp.set_opacity(id, 0.5).expect("opacity");
+                }
+                comp.submit_render(
+                    id,
+                    vec![
+                        RenderCommand::FillRect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: ww as f32,
+                            height: wh as f32,
+                            color: Color::rgba(30, 34, 40, 255),
+                            corner_radii: CornerRadii::ZERO,
+                        },
+                        RenderCommand::FillRect {
+                            x: 15.0,
+                            y: 15.0,
+                            width: (ww - 30) as f32,
+                            height: 50.0,
+                            color: Color::rgba(60, 120, 200, 255),
+                            corner_radii: CornerRadii::ZERO,
+                        },
+                        RenderCommand::Text {
+                            x: 20.0,
+                            y: 25.0,
+                            text: format!("Panel {i}"),
+                            color: Color::WHITE,
+                            font_size: 16.0,
+                            font_weight: FontWeightHint::Bold,
+                            max_width: None,
+                            overflow: TextOverflow::Clip,
+                        },
+                    ],
+                )
+                .expect("submit_render");
+            }
+            comp.bench_full_composite();
+            comp.framebuffer.front_buffer().to_vec()
+        };
+
+        let culled = build(true);
+        let reference = build(false);
+        assert_eq!(culled.len(), reference.len(), "framebuffer sizes differ");
+
+        let diffs: Vec<usize> = culled
+            .iter()
+            .zip(reference.iter())
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| i)
+            .take(8)
+            .collect();
+        assert!(
+            diffs.is_empty(),
+            "occlusion cull changed {} pixel(s); first few at (x,y): {:?}",
+            culled
+                .iter()
+                .zip(reference.iter())
+                .filter(|(a, b)| a != b)
+                .count(),
+            diffs
+                .iter()
+                .map(|i| (i % W as usize, i / W as usize))
+                .collect::<Vec<_>>()
         );
     }
 

@@ -56,32 +56,27 @@ const HEADER_FONT_SIZE: f32 = 18.0;
 const CELL_FONT_SIZE: f32 = 16.0;
 const TITLE_FONT_SIZE: f32 = 14.0;
 
-// ── LCG random number generator ────────────────────────────────────
-/// Simple linear congruential generator. Parameters from Numerical Recipes.
-struct Lcg {
-    state: u64,
-}
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        // LCG constants from Numerical Recipes
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    /// Returns a value in `0..bound` (exclusive upper bound).
-    fn next_bounded(&mut self, bound: usize) -> usize {
-        let val = self.next_u64();
-        (val % bound as u64) as usize
-    }
-}
+// ────────── Randomness ──────────
+//
+// From `randrange`, not a local LCG. The local one picked a mine's cell with
+// `state % total_cells`, and on a modulus-2^64 generator the low bits of the
+// state are themselves an LCG of the same shape with a much shorter period:
+// the low n bits repeat every 2^n draws.
+//
+// Intermediate is 16 x 16, so `total_cells` was exactly 256 and the draw was
+// the low 8 bits. Measured before the fix:
+//
+//   * the 256 successive draws were a *permutation* of all 256 cells, and
+//     every seed's stream was a rotation of the same one -- so a board was
+//     just a window into one fixed cycle;
+//   * 5000 seeds produced **252** distinct mine layouts, out of the
+//     C(256, 40) ~ 10^45 that exist;
+//   * `restart` advances the seed by one, so the 257th new game replayed the
+//     first board exactly.
+//
+// Beginner (81 cells) and Expert (480) were spared, because neither bound is a
+// power of two -- which is exactly why this survived so long.
+use randrange::Rng;
 
 // ── Difficulty presets ──────────────────────────────────────────────
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -259,7 +254,7 @@ impl MinesweeperApp {
     /// Place mines randomly, avoiding the first-click cell and its neighbors.
     /// This ensures the first click is always safe and reveals a region.
     fn place_mines(&mut self, safe_row: usize, safe_col: usize) {
-        let mut rng = Lcg::new(self.rng_seed);
+        let mut rng = Rng::new(self.rng_seed);
 
         // Collect the safe zone: the clicked cell + its neighbors.
         let mut safe_zone = vec![(safe_row, safe_col)];
@@ -269,7 +264,7 @@ impl MinesweeperApp {
         let mut placed = 0;
 
         while placed < self.total_mines {
-            let idx = rng.next_bounded(total);
+            let idx = rng.below(total);
             let r = idx / self.cols;
             let c = idx % self.cols;
 
@@ -1703,48 +1698,61 @@ mod tests {
         assert!((app.window_width() - expected).abs() < 0.01);
     }
 
-    // ── LCG tests ───────────────────────────────────────────────────
+    // ────────── Mine layout ──────────
+    //
+    // These replace four tests that asked whether the generator was
+    // deterministic, whether two seeds differ, whether a bounded draw stays in
+    // range, and whether ten buckets each get some hits. All four are
+    // `randrange`'s properties and are tested there -- and the fourth is the
+    // exact shape of test that cannot see this defect. The old draw on an
+    // Intermediate board visited all 256 cells in 256 draws, so its
+    // distribution was not merely acceptable but *perfect*. Only the order was
+    // fixed, and the order is the board.
 
-    #[test]
-    fn test_lcg_deterministic() {
-        let mut a = Lcg::new(42);
-        let mut b = Lcg::new(42);
-        for _ in 0..100 {
-            assert_eq!(a.next_u64(), b.next_u64());
-        }
+    /// The mines of an Intermediate board, first-clicked at the same cell.
+    fn intermediate_layout(seed: u64) -> Vec<usize> {
+        let mut app = MinesweeperApp::with_seed(Difficulty::Intermediate, seed);
+        app.reveal(8, 8);
+        app.cells
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| cell.is_mine)
+            .map(|(idx, _)| idx)
+            .collect()
     }
 
     #[test]
-    fn test_lcg_different_seeds_differ() {
-        let mut a = Lcg::new(1);
-        let mut b = Lcg::new(2);
-        assert_ne!(a.next_u64(), b.next_u64());
+    fn intermediate_boards_are_not_drawn_from_a_short_list() {
+        // 16 x 16 = 256 cells, a power of two, which is what made the old draw
+        // degenerate: 5000 seeds produced 252 distinct layouts out of the
+        // C(256, 40) ~ 10^45 that exist.
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0..1000 {
+            seen.insert(intermediate_layout(seed));
+        }
+        assert!(
+            seen.len() > 990,
+            "1000 seeds produced only {} distinct Intermediate layouts",
+            seen.len()
+        );
     }
 
     #[test]
-    fn test_lcg_bounded_in_range() {
-        let mut rng = Lcg::new(42);
-        for _ in 0..1000 {
-            let v = rng.next_bounded(10);
-            assert!(v < 10);
-        }
-    }
-
-    #[test]
-    fn test_lcg_bounded_distribution() {
-        // Rough check: each bucket should get some hits in 10000 draws
-        let mut rng = Lcg::new(42);
-        let mut counts = [0u32; 10];
-        for _ in 0..10_000 {
-            let v = rng.next_bounded(10);
-            counts[v] += 1;
-        }
-        for (i, &c) in counts.iter().enumerate() {
-            assert!(
-                c > 500,
-                "Bucket {i} only got {c} hits — distribution seems broken"
-            );
-        }
+    fn restarting_does_not_cycle_back_to_an_earlier_board() {
+        // `restart` advances the seed by one. The old draw depended on the
+        // seed only through its low 8 bits on an Intermediate board, so the
+        // 257th new game replayed the first one exactly.
+        let first = intermediate_layout(7);
+        assert_ne!(
+            first,
+            intermediate_layout(7 + 256),
+            "seed 7 and seed 263 gave the same board"
+        );
+        assert_ne!(
+            first,
+            intermediate_layout(7 + 512),
+            "seed 7 and seed 519 gave the same board"
+        );
     }
 
     // ── Difficulty labels ───────────────────────────────────────────

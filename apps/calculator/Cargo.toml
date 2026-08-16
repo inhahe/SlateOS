@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Calculator — graphical scientific calculator"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

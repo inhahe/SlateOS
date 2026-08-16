@@ -912,6 +912,73 @@ pub extern "C" fn ttyname(fd: i32) -> *const u8 {
     }
 }
 
+/// Thread-safe `ttyname`: write the terminal's name into a caller buffer.
+///
+/// Returns 0 on success or a **positive errno** — `ttyname_r` is one of the
+/// handful of POSIX functions that report through the return value rather
+/// than `errno`, and unlike our [`ptsname_r`] (which follows the local
+/// `-1`/`errno` convention for consistency with its neighbours) this one
+/// must not, because callers propagate the return value straight into an
+/// errno slot.  CPython's `os.ttyname` does exactly that.
+///
+/// Errors, in the order glibc's `__ttyname_r`
+/// (`sysdeps/unix/sysv/linux/ttyname_r.c`) produces them:
+///
+/// 1. `EINVAL` — `buf` is NULL.  glibc checks this first, before touching
+///    `fd`, because it has nowhere to put an answer even if the descriptor
+///    turns out to be perfect.
+/// 2. `EBADF`  — `fd` is not open.
+/// 3. `ENOTTY` — `fd` is open but is not a terminal.
+/// 4. `ERANGE` — the name does not fit in `buflen`.  glibc reports this
+///    *after* identifying the terminal, so a bad `fd` outranks a small
+///    buffer: a caller growing its buffer in a loop must not be sent round
+///    again for a descriptor that will never work.
+///
+/// The name written is whatever [`ttyname`] returns, so the two cannot come
+/// to disagree about what this system calls its terminal.
+///
+/// One of the thirteen symbols that stopped CPython 3.12 linking against our
+/// libc; see `scripts/cpython-spike/README.md`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ttyname_r(fd: i32, buf: *mut u8, buflen: usize) -> i32 {
+    if buf.is_null() {
+        return errno::EINVAL;
+    }
+    // Reuse `ttyname`'s verdict rather than re-deriving it: it sets errno to
+    // EBADF or ENOTTY on the way out, and duplicating that decision here is
+    // exactly how the two functions would come to disagree about which
+    // descriptors are terminals.
+    errno::set_errno(0);
+    let name = ttyname(fd);
+    if name.is_null() {
+        let e = errno::get_errno();
+        // `ttyname` sets errno on every failure path; the fallback exists
+        // only so that a future edit which forgets to cannot turn a failure
+        // into a silent success.
+        return if e == 0 { errno::ENOTTY } else { e };
+    }
+
+    // SAFETY: `ttyname` returned a non-null pointer to a NUL-terminated
+    // static string.
+    let len = unsafe { crate::string::strlen(name) };
+    // Room for the name *and* its terminator — POSIX requires `buflen` to
+    // account for the NUL, and glibc's check is `len + 1 > buflen`.
+    if len.wrapping_add(1) > buflen {
+        return errno::ERANGE;
+    }
+    let mut i: usize = 0;
+    while i <= len {
+        // SAFETY: `i <= len`, and `buf` was just confirmed to hold at least
+        // `len + 1` bytes; the source is NUL-terminated at `len`, so the
+        // final iteration copies the terminator.
+        unsafe {
+            *buf.add(i) = *name.add(i);
+        }
+        i = i.wrapping_add(1);
+    }
+    0
+}
+
 /// Return the pathname of the controlling terminal.
 ///
 /// If `s` is non-null, the path is copied there (must have room for
@@ -1629,6 +1696,87 @@ mod tests {
         let fd = fdtable::alloc_fd(HandleKind::Pipe, 50).unwrap();
         assert!(ttyname(fd).is_null());
         let _ = fdtable::close_fd(fd);
+    }
+
+    // -- ttyname_r tests --
+    //
+    // Note the return convention: `ttyname_r` reports a *positive errno*,
+    // not -1.  Every assertion below is written against that, because a
+    // regression to the -1 convention would otherwise read as "some
+    // nonzero failure" and pass.
+
+    #[test]
+    fn test_ttyname_r_console_writes_the_same_name_as_ttyname() {
+        ensure_std_fds();
+        let mut buf = [0xAAu8; 32];
+        assert_eq!(ttyname_r(0, buf.as_mut_ptr(), buf.len()), 0);
+        let len = unsafe { crate::string::strlen(buf.as_ptr()) };
+        assert_eq!(&buf[..len], b"/dev/console");
+        // NUL-terminated, and nothing written past the terminator.
+        assert_eq!(buf[len], 0);
+        assert_eq!(buf[len + 1], 0xAA);
+    }
+
+    /// A NULL buffer is EINVAL and outranks the descriptor: glibc checks
+    /// it first because it has nowhere to put an answer even for a
+    /// perfect fd.  Note this is the opposite precedence from our
+    /// `ptsname_r`, which follows glibc's `__ptsname_r` — the two glibc
+    /// functions genuinely differ, and so do we.
+    #[test]
+    fn test_ttyname_r_null_buf_is_einval_even_for_a_good_fd() {
+        ensure_std_fds();
+        assert_eq!(ttyname_r(0, core::ptr::null_mut(), 32), errno::EINVAL);
+        assert_eq!(ttyname_r(-1, core::ptr::null_mut(), 32), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ttyname_r_bad_fd_is_ebadf() {
+        let mut buf = [0u8; 32];
+        assert_eq!(ttyname_r(-1, buf.as_mut_ptr(), buf.len()), errno::EBADF);
+    }
+
+    #[test]
+    fn test_ttyname_r_non_terminal_is_enotty() {
+        let fd = fdtable::alloc_fd(HandleKind::Pipe, 51).unwrap();
+        let mut buf = [0u8; 32];
+        assert_eq!(ttyname_r(fd, buf.as_mut_ptr(), buf.len()), errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    /// A buffer too small for the name *and its terminator* is ERANGE,
+    /// and nothing is written — a caller growing its buffer in a loop
+    /// must not read a truncated name as if it were complete.
+    /// `/dev/console` is 12 bytes, so 12 is one short and 13 is exact.
+    #[test]
+    fn test_ttyname_r_small_buffer_is_erange_and_writes_nothing() {
+        ensure_std_fds();
+        let mut buf = [0xAAu8; 32];
+        assert_eq!(ttyname_r(0, buf.as_mut_ptr(), 12), errno::ERANGE);
+        assert!(buf.iter().all(|&b| b == 0xAA), "ERANGE must not write");
+
+        assert_eq!(ttyname_r(0, buf.as_mut_ptr(), 13), 0);
+        let len = unsafe { crate::string::strlen(buf.as_ptr()) };
+        assert_eq!(&buf[..len], b"/dev/console");
+    }
+
+    /// A zero-length buffer cannot hold even the terminator.  Guarded
+    /// separately because `len + 1 > 0` is exactly the arithmetic most
+    /// likely to be got wrong.
+    #[test]
+    fn test_ttyname_r_zero_length_buffer_is_erange() {
+        ensure_std_fds();
+        let mut buf = [0xAAu8; 4];
+        assert_eq!(ttyname_r(0, buf.as_mut_ptr(), 0), errno::ERANGE);
+        assert!(buf.iter().all(|&b| b == 0xAA));
+    }
+
+    /// The bad-fd verdict outranks the too-small-buffer one: a caller
+    /// that keeps growing its buffer must be told the descriptor is
+    /// hopeless rather than sent round the loop forever.
+    #[test]
+    fn test_ttyname_r_bad_fd_outranks_erange() {
+        let mut buf = [0u8; 1];
+        assert_eq!(ttyname_r(-1, buf.as_mut_ptr(), 1), errno::EBADF);
     }
 
     // -- tcsetattr action constant validation --

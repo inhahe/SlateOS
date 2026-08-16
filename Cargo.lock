@@ -2941,6 +2941,7 @@ name = "explorer"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "textfind",
 ]
 
 [[package]]
@@ -4050,6 +4051,7 @@ name = "guitk"
 version = "0.1.0"
 dependencies = [
  "osfont",
+ "textfind",
  "textfmt",
 ]
 
@@ -10535,6 +10537,10 @@ dependencies = [
 
 [[package]]
 name = "texlive-cli"
+version = "0.1.0"
+
+[[package]]
+name = "textfind"
 version = "0.1.0"
 
 [[package]]

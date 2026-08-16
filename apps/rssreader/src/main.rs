@@ -29,6 +29,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textfind;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -1379,7 +1380,6 @@ pub struct DiscoveredFeed {
 /// Scan HTML content for <link> tags that reference RSS/Atom feeds.
 pub fn discover_feeds(html: &str) -> Vec<DiscoveredFeed> {
     let mut results = Vec::new();
-    let lower = html.to_lowercase();
 
     // Look for <link rel="alternate" type="application/rss+xml" ...>
     // and <link rel="alternate" type="application/atom+xml" ...>
@@ -1388,19 +1388,31 @@ pub fn discover_feeds(html: &str) -> Vec<DiscoveredFeed> {
         ("application/atom+xml", "Atom"),
     ];
 
-    // Simple regex-free scanner for <link> tags
+    // Simple regex-free scanner for <link> tags.
+    //
+    // The scan runs over `html` itself. It used to run over
+    // `html.to_lowercase()` and then slice `html` with the copy's offsets —
+    // and this is page text off the network, so a single `İ` (U+0130: two
+    // bytes, three when folded) anywhere before a `<link>` shifted every
+    // later offset and `&html[abs_start..tag_end]` sliced inside a character,
+    // panicking. `textfind` reports offsets into the string it was handed.
     let mut pos = 0;
-    while let Some(link_start) = lower[pos..].find("<link") {
-        let abs_start = pos + link_start;
-        let tag_end = match lower[abs_start..].find('>') {
-            Some(end) => abs_start + end + 1,
+    while let Some((abs_start, _)) =
+        textfind::find_from(html, "<link", pos, textfind::Case::Insensitive)
+    {
+        // `>` is ASCII, and a UTF-8 continuation byte is never equal to an
+        // ASCII one, so searching the real text for it lands on a boundary.
+        let tag_end = match html.get(abs_start..).and_then(|rest| rest.find('>')) {
+            Some(end) => abs_start.saturating_add(end).saturating_add(1),
             None => break,
         };
-        let tag_content = &html[abs_start..tag_end];
+        let Some(tag_content) = html.get(abs_start..tag_end) else {
+            break;
+        };
 
         // Check if it's a feed link
         for &(mime_type, label) in &feed_types {
-            if tag_content.to_lowercase().contains(mime_type)
+            if textfind::contains(tag_content, mime_type, textfind::Case::Insensitive)
                 && let Some(href) = extract_attribute(tag_content, "href")
             {
                 let title =
@@ -1421,11 +1433,13 @@ pub fn discover_feeds(html: &str) -> Vec<DiscoveredFeed> {
 
 /// Extract the value of an HTML attribute from a tag string.
 fn extract_attribute(tag: &str, attr_name: &str) -> Option<String> {
-    let lower = tag.to_lowercase();
+    // `value_start` is where the match *ends* in `tag` itself. Taking it from
+    // a lowercased copy, and adding the unfolded needle's length to it, both
+    // put it in the wrong place the moment the tag holds a character that
+    // changes length when folded — and `&tag[value_start..]` then panics.
     let search = format!("{attr_name}=");
-    let attr_pos = lower.find(&search)?;
-    let value_start = attr_pos + search.len();
-    let rest = &tag[value_start..];
+    let (_, value_start) = textfind::find_from(tag, &search, 0, textfind::Case::Insensitive)?;
+    let rest = tag.get(value_start..)?;
 
     let rest_trimmed = rest.trim_start();
     if let Some(inner) = rest_trimmed.strip_prefix('"') {
@@ -1793,21 +1807,22 @@ pub fn search_articles(articles: &[Article], query: &str) -> Vec<SearchResult> {
         return Vec::new();
     }
 
-    let query_lower = query.to_lowercase();
+    // Folding each field into a fresh `String` per article allocated three
+    // times per article and then handed the *folded* query on to
+    // `extract_snippet`, whose offsets are used against the *unfolded* body.
+    // `textfind` compares folded forms as it walks, so the query stays the
+    // query and the offsets stay offsets into the article.
+    let case = textfind::Case::Insensitive;
     let mut results = Vec::new();
 
     for article in articles {
-        let title_lower = article.title.to_lowercase();
-        let content_lower = article.display_content().to_lowercase();
-        let author_lower = article.author.to_lowercase();
-
-        let title_match = title_lower.contains(&query_lower);
-        let content_match = content_lower.contains(&query_lower);
-        let author_match = author_lower.contains(&query_lower);
+        let title_match = textfind::contains(&article.title, query, case);
+        let content_match = textfind::contains(article.display_content(), query, case);
+        let author_match = textfind::contains(&article.author, query, case);
 
         if title_match || content_match || author_match {
             let snippet = if content_match {
-                extract_snippet(article.display_content(), &query_lower, 80)
+                extract_snippet(article.display_content(), query, 80)
             } else if title_match {
                 article.title.clone()
             } else {
@@ -1828,25 +1843,50 @@ pub fn search_articles(articles: &[Article], query: &str) -> Vec<SearchResult> {
     results
 }
 
-/// Extract a snippet of text around a search match.
+/// Extract a snippet of `text` around the first case-insensitive occurrence
+/// of `query`, with up to `context_chars` characters of context on each side.
+///
+/// Both halves of that sentence used to be wrong. The match was located in
+/// `text.to_lowercase()` and its offset used to slice `text`; the two drift
+/// apart at the first character whose folded form is a different length (`İ`
+/// U+0130 is two bytes and folds to three). And `context_chars` was then
+/// added to and subtracted from a *byte* offset, so on any text that is not
+/// pure ASCII the window edges landed inside a character. Either one panics
+/// in `&text[start..end]` — on an article body, which is arbitrary text off
+/// the network.
 fn extract_snippet(text: &str, query: &str, context_chars: usize) -> String {
-    let lower = text.to_lowercase();
-    if let Some(pos) = lower.find(query) {
-        let start = pos.saturating_sub(context_chars);
-        let end = (pos + query.len() + context_chars).min(text.len());
-        let mut snippet = String::new();
-        if start > 0 {
-            snippet.push_str("...");
-        }
-        snippet.push_str(&text[start..end]);
-        if end < text.len() {
-            snippet.push_str("...");
-        }
-        snippet
-    } else {
-        // Shouldn't happen if the caller verified the match, but be safe
-        text.chars().take(context_chars * 2).collect()
+    let Some((start, end)) = textfind::find_from(text, query, 0, textfind::Case::Insensitive)
+    else {
+        // Shouldn't happen if the caller verified the match, but be safe.
+        return text.chars().take(context_chars.saturating_mul(2)).collect();
+    };
+
+    // Walk out `context_chars` *characters* each way, which lands on a
+    // character boundary by construction.
+    let before = text.get(..start).unwrap_or("");
+    let head = before
+        .char_indices()
+        .rev()
+        .take(context_chars)
+        .last()
+        .map_or(before.len(), |(i, _)| i);
+    let after = text.get(end..).unwrap_or("");
+    let tail = end.saturating_add(
+        after
+            .char_indices()
+            .nth(context_chars)
+            .map_or(after.len(), |(i, _)| i),
+    );
+
+    let mut snippet = String::new();
+    if head > 0 {
+        snippet.push_str("...");
     }
+    snippet.push_str(text.get(head..tail).unwrap_or(""));
+    if tail < text.len() {
+        snippet.push_str("...");
+    }
+    snippet
 }
 
 // ============================================================================
@@ -2107,10 +2147,12 @@ impl RssReaderApp {
                 if self.search_query.is_empty() {
                     return true;
                 }
-                let q = self.search_query.to_lowercase();
-                a.title.to_lowercase().contains(&q)
-                    || a.author.to_lowercase().contains(&q)
-                    || a.display_content().to_lowercase().contains(&q)
+                // Three `String` allocations per article per frame, and each
+                // one folded the *whole* field to answer a yes/no question.
+                let case = textfind::Case::Insensitive;
+                textfind::contains(&a.title, &self.search_query, case)
+                    || textfind::contains(&a.author, &self.search_query, case)
+                    || textfind::contains(a.display_content(), &self.search_query, case)
             })
             .map(|(i, _)| i)
             .collect();
@@ -4885,6 +4927,68 @@ mod tests {
         let text = "fox jumps over the lazy dog";
         let snippet = extract_snippet(text, "fox", 5);
         assert!(snippet.starts_with("fox"));
+    }
+
+    /// A snippet window is measured in characters and lands on character
+    /// boundaries. `context_chars` used to be added to and subtracted from a
+    /// *byte* offset, so on non-ASCII text — i.e. on much of the world's
+    /// feeds — `&text[start..end]` sliced inside a character and panicked.
+    #[test]
+    fn a_snippet_window_lands_on_character_boundaries() {
+        let text = "\u{e9}\u{e9}\u{e9}\u{e9}fox\u{e9}\u{e9}\u{e9}\u{e9}";
+        let snippet = extract_snippet(text, "fox", 3);
+        assert_eq!(snippet, "...\u{e9}\u{e9}\u{e9}fox\u{e9}\u{e9}\u{e9}...");
+    }
+
+    /// A snippet is positioned by where the match is in the article, not by
+    /// where it is in a lowercased copy of the article. Turkish `İ` (U+0130)
+    /// is two bytes and folds to three.
+    #[test]
+    fn a_snippet_is_positioned_by_the_article_not_a_folded_copy() {
+        let text = "\u{130}\u{130}\u{130}fox tail";
+        let snippet = extract_snippet(text, "FOX", 2);
+        assert_eq!(snippet, "...\u{130}\u{130}fox t...");
+    }
+
+    /// Search hands `extract_snippet` the query the user typed, not a folded
+    /// copy of it — the two used to be different strings, and only one of
+    /// them was ever looked for in the *unfolded* body.
+    #[test]
+    fn a_search_snippet_survives_an_upper_case_query() {
+        let mut article = Article::new(1, 1, "Title");
+        article.content = "a \u{130} b needle c".to_string();
+        let results = search_articles(&[article], "NEEDLE");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].content_match);
+        assert!(results[0].snippet.contains("needle"));
+    }
+
+    /// Feed discovery scans the page it was given. A page containing a
+    /// character that changes length when folded used to shift every later
+    /// offset, so the extracted `<link>` tag was cut at the wrong byte — or,
+    /// if that byte was inside a character, the scan panicked.
+    #[test]
+    fn feed_discovery_scans_the_page_it_was_given() {
+        let html = concat!(
+            "<html><head><title>\u{130}\u{130}\u{130}</title>",
+            r#"<LINK rel="alternate" TYPE="application/rss+xml" title="Feed" href="/f.xml">"#,
+            "</head></html>"
+        );
+        let found = discover_feeds(html);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].url, "/f.xml");
+        assert_eq!(found[0].title, "Feed");
+        assert_eq!(found[0].feed_type, "RSS");
+    }
+
+    /// An attribute value starts where its `name=` ends in the tag itself.
+    #[test]
+    fn an_attribute_value_is_read_from_the_tag_itself() {
+        // The `İ` before the attribute is what used to shift the offset: it
+        // is two bytes in the tag and three in the lowercased copy that was
+        // searched, so `&tag[value_start..]` started one byte late.
+        let tag = "<link title=\"\u{130}\u{130}\" HREF='/y.xml'>";
+        assert_eq!(extract_attribute(tag, "href").as_deref(), Some("/y.xml"));
     }
 
     // -----------------------------------------------------------------------

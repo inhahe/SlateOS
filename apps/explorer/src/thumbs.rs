@@ -77,12 +77,173 @@ pub struct Thumbnail {
 impl Thumbnail {
     /// Total number of pixels.
     fn pixel_count(&self) -> usize {
-        self.width as usize * self.height as usize
+        (self.width as usize).saturating_mul(self.height as usize)
     }
 
     /// Returns `true` if the pixel buffer is consistent with the dimensions.
     fn is_valid(&self) -> bool {
-        self.pixels.len() == self.pixel_count() * 4
+        self.pixels.len() == self.pixel_count().saturating_mul(4)
+    }
+}
+
+// ============================================================================
+// Canvas
+// ============================================================================
+
+/// A width × height ARGB pixel buffer with bounds-checked drawing primitives.
+///
+/// Every thumbnail in this module used to be drawn into a bare `Vec<u8>` by
+/// computing a byte index by hand and writing four consecutive elements:
+///
+/// ```text
+/// let idx = (y as usize * size as usize + x as usize) * 4;
+/// pixels[idx] = c.a;  pixels[idx + 1] = c.r;  …
+/// ```
+///
+/// That restates the buffer's shape — width, height, four bytes per pixel,
+/// row-major — at every write site instead of once, and it produced 115 index
+/// expressions in this file alone. Each was in bounds only because of a bound
+/// proved somewhere else: that `fit_dimensions` never returns more than its
+/// cap, that a margin subtracted from a size does not underflow it, that the
+/// `size` passed alongside a `&mut [u8]` really does describe it. Three of
+/// those proofs were wrong (see the module's history in `known-issues.md`).
+///
+/// `Canvas` states the shape once, in one place, and every primitive on it
+/// **clips** rather than panicking: a rectangle drawn off the edge is drawn as
+/// much of it as fits. That is what the drawing code wanted in every case —
+/// several sites were already hand-rolling a `break` to get it — and it means
+/// a wrong coordinate is a cosmetic defect rather than a crash in a thumbnail
+/// generated from a file the user merely *looked at* in a directory listing.
+#[derive(Clone, Debug)]
+pub struct Canvas {
+    width: u32,
+    height: u32,
+    /// Exactly `width * height * 4` bytes, ARGB, row-major. Private, and the
+    /// only constructors preserve it, so this is an invariant and not a hope.
+    px: Vec<u8>,
+}
+
+impl Canvas {
+    /// A fully transparent canvas.
+    ///
+    /// Dimensions whose pixel buffer would not fit in memory are clamped to
+    /// empty rather than aborting the process: the width and height reaching
+    /// here come from image headers, which is to say from a file the user did
+    /// not write.
+    fn new(width: u32, height: u32) -> Self {
+        let len = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4));
+        match len {
+            Some(len) => Self {
+                width,
+                height,
+                px: vec![0u8; len],
+            },
+            None => Self {
+                width: 0,
+                height: 0,
+                px: Vec::new(),
+            },
+        }
+    }
+
+    /// A canvas filled with a single colour.
+    fn filled(width: u32, height: u32, color: Color) -> Self {
+        let mut canvas = Self::new(width, height);
+        canvas.fill(color);
+        canvas
+    }
+
+    /// Wrap an existing ARGB buffer, rejecting one that does not match.
+    ///
+    /// This is the only way pixel data from outside enters a `Canvas`, so the
+    /// length invariant holds for buffers read off disk too.
+    fn from_argb(width: u32, height: u32, px: Vec<u8>) -> Option<Self> {
+        let len = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?;
+        (px.len() == len).then_some(Self { width, height, px })
+    }
+
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Byte offset of the pixel at `(x, y)`, or `None` if it is off-canvas.
+    fn offset(&self, x: u32, y: u32) -> Option<usize> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        (y as usize)
+            .checked_mul(self.width as usize)?
+            .checked_add(x as usize)?
+            .checked_mul(4)
+    }
+
+    /// Read a pixel. `None` if `(x, y)` is off-canvas.
+    fn get(&self, x: u32, y: u32) -> Option<Color> {
+        let i = self.offset(x, y)?;
+        let p = self.px.get(i..i.checked_add(4)?)?;
+        match p {
+            [a, r, g, b] => Some(Color::rgba(*r, *g, *b, *a)),
+            _ => None,
+        }
+    }
+
+    /// Write a pixel. Off-canvas coordinates are ignored.
+    fn set(&mut self, x: u32, y: u32, color: Color) {
+        let Some(i) = self.offset(x, y) else { return };
+        let Some(p) = i.checked_add(4).and_then(|e| self.px.get_mut(i..e)) else {
+            return;
+        };
+        if let [a, r, g, b] = p {
+            *a = color.a;
+            *r = color.r;
+            *g = color.g;
+            *b = color.b;
+        }
+    }
+
+    /// Fill the whole canvas with one colour.
+    fn fill(&mut self, color: Color) {
+        for p in self.px.chunks_exact_mut(4) {
+            if let [a, r, g, b] = p {
+                *a = color.a;
+                *r = color.r;
+                *g = color.g;
+                *b = color.b;
+            }
+        }
+    }
+
+    /// Fill the rectangle at `(x, y)` of size `w × h`, clipped to the canvas.
+    fn fill_rect(&mut self, x: u32, y: u32, w: u32, h: u32, color: Color) {
+        let x_end = x.saturating_add(w).min(self.width);
+        let y_end = y.saturating_add(h).min(self.height);
+        for py in y..y_end {
+            for px in x..x_end {
+                self.set(px, py, color);
+            }
+        }
+    }
+
+    /// Turn the canvas into a `Thumbnail`.
+    ///
+    /// `Thumbnail::is_valid` is true of the result by construction — the field
+    /// combination it checks for cannot be assembled any other way.
+    fn into_thumbnail(self, source_path: &Path, source_mtime: u64) -> Thumbnail {
+        Thumbnail {
+            width: self.width,
+            height: self.height,
+            pixels: self.px,
+            source_path: source_path.to_path_buf(),
+            source_mtime,
+        }
     }
 }
 
@@ -239,26 +400,32 @@ struct ImageDimensions {
 /// Read a little-endian u32 from a byte slice at `offset`.
 /// Returns `None` if out of bounds.
 fn read_le_u32(data: &[u8], offset: usize) -> Option<u32> {
-    data.get(offset..offset + 4)
-        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    Some(u32::from_le_bytes(read_array(data, offset)?))
 }
 
 /// Read a big-endian u32 from a byte slice at `offset`.
 fn read_be_u32(data: &[u8], offset: usize) -> Option<u32> {
-    data.get(offset..offset + 4)
-        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    Some(u32::from_be_bytes(read_array(data, offset)?))
 }
 
 /// Read a big-endian u16 from a byte slice at `offset`.
 fn read_be_u16(data: &[u8], offset: usize) -> Option<u16> {
-    data.get(offset..offset + 2)
-        .map(|b| u16::from_be_bytes([b[0], b[1]]))
+    Some(u16::from_be_bytes(read_array(data, offset)?))
 }
 
 /// Read a little-endian u16 from a byte slice at `offset`.
 fn read_le_u16(data: &[u8], offset: usize) -> Option<u16> {
-    data.get(offset..offset + 2)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+    Some(u16::from_le_bytes(read_array(data, offset)?))
+}
+
+/// Read `N` bytes at `offset`, or `None` if they are not all present.
+///
+/// `offset + N` is computed with `checked_add` because `offset` comes from an
+/// image header: a header claiming an offset near `usize::MAX` would otherwise
+/// wrap to a small number and read the wrong bytes rather than declining.
+fn read_array<const N: usize>(data: &[u8], offset: usize) -> Option<[u8; N]> {
+    let end = offset.checked_add(N)?;
+    data.get(offset..end)?.try_into().ok()
 }
 
 /// Parse BMP header to extract dimensions.
@@ -396,53 +563,38 @@ fn parse_image_dimensions(data: &[u8]) -> Option<ImageDimensions> {
 // Image downscaling
 // ============================================================================
 
-/// Downscale ARGB pixel data using a box filter.
+/// Downscale a canvas using a box filter.
 ///
-/// `src` is row-major ARGB (4 bytes per pixel).  The output is sized to fit
-/// within `target_size x target_size` while preserving aspect ratio.  If the
-/// source is already smaller than the target, the original pixels are returned
-/// unscaled.
-fn box_filter_downscale(
-    src: &[u8],
-    src_w: u32,
-    src_h: u32,
-    target_size: u32,
-) -> (Vec<u8>, u32, u32) {
+/// The output is sized to fit within `target_size x target_size` while
+/// preserving aspect ratio.  If the source is already smaller than the target
+/// it is returned unscaled.
+fn box_filter_downscale(src: &Canvas, target_size: u32) -> Canvas {
+    let (src_w, src_h) = (src.width(), src.height());
     if src_w == 0 || src_h == 0 || target_size == 0 {
-        return (Vec::new(), 0, 0);
+        return Canvas::new(0, 0);
     }
 
     // Compute output dimensions preserving aspect ratio.
     let (dst_w, dst_h) = fit_dimensions(src_w, src_h, target_size);
 
     if dst_w >= src_w && dst_h >= src_h {
-        // Source fits within target; return a copy.
-        return (src.to_vec(), src_w, src_h);
+        // Source fits within target; return it unscaled.
+        return src.clone();
     }
 
-    let expected_len = (src_w as usize) * (src_h as usize) * 4;
-    if src.len() < expected_len {
-        // Incomplete pixel data — return a blank thumbnail.
-        return (
-            vec![0u8; (dst_w as usize) * (dst_h as usize) * 4],
-            dst_w,
-            dst_h,
-        );
-    }
-
-    let mut dst = vec![0u8; (dst_w as usize) * (dst_h as usize) * 4];
+    let mut dst = Canvas::new(dst_w, dst_h);
 
     for dy in 0..dst_h {
         for dx in 0..dst_w {
             // Source region that maps to this destination pixel.
-            let sx0 = (dx as u64 * src_w as u64 / dst_w as u64) as u32;
-            let sy0 = (dy as u64 * src_h as u64 / dst_h as u64) as u32;
-            let sx1 = ((dx as u64 + 1) * src_w as u64)
-                .div_ceil(dst_w as u64)
-                .min(src_w as u64) as u32;
-            let sy1 = ((dy as u64 + 1) * src_h as u64)
-                .div_ceil(dst_h as u64)
-                .min(src_h as u64) as u32;
+            let sx0 = (u64::from(dx) * u64::from(src_w) / u64::from(dst_w)) as u32;
+            let sy0 = (u64::from(dy) * u64::from(src_h) / u64::from(dst_h)) as u32;
+            let sx1 = (u64::from(dx).saturating_add(1) * u64::from(src_w))
+                .div_ceil(u64::from(dst_w))
+                .min(u64::from(src_w)) as u32;
+            let sy1 = (u64::from(dy).saturating_add(1) * u64::from(src_h))
+                .div_ceil(u64::from(dst_h))
+                .min(u64::from(src_h)) as u32;
 
             let mut r_acc: u64 = 0;
             let mut g_acc: u64 = 0;
@@ -452,13 +604,16 @@ fn box_filter_downscale(
 
             for sy in sy0..sy1 {
                 for sx in sx0..sx1 {
-                    let idx = (sy as usize * src_w as usize + sx as usize) * 4;
-                    // ARGB order: [A, R, G, B]
-                    a_acc += src[idx] as u64;
-                    r_acc += src[idx + 1] as u64;
-                    g_acc += src[idx + 2] as u64;
-                    b_acc += src[idx + 3] as u64;
-                    count += 1;
+                    // A pixel outside the source contributes nothing rather
+                    // than panicking; with a `Canvas` source there are none,
+                    // but the averaging is written not to depend on that.
+                    if let Some(c) = src.get(sx, sy) {
+                        a_acc = a_acc.saturating_add(u64::from(c.a));
+                        r_acc = r_acc.saturating_add(u64::from(c.r));
+                        g_acc = g_acc.saturating_add(u64::from(c.g));
+                        b_acc = b_acc.saturating_add(u64::from(c.b));
+                        count = count.saturating_add(1);
+                    }
                 }
             }
 
@@ -467,16 +622,21 @@ fn box_filter_downscale(
             // four redundant Option unwraps under the same `count > 0` proof.
             #[allow(clippy::manual_checked_ops)]
             if count > 0 {
-                let dst_idx = (dy as usize * dst_w as usize + dx as usize) * 4;
-                dst[dst_idx] = (a_acc / count) as u8;
-                dst[dst_idx + 1] = (r_acc / count) as u8;
-                dst[dst_idx + 2] = (g_acc / count) as u8;
-                dst[dst_idx + 3] = (b_acc / count) as u8;
+                dst.set(
+                    dx,
+                    dy,
+                    Color::rgba(
+                        (r_acc / count) as u8,
+                        (g_acc / count) as u8,
+                        (b_acc / count) as u8,
+                        (a_acc / count) as u8,
+                    ),
+                );
             }
         }
     }
 
-    (dst, dst_w, dst_h)
+    dst
 }
 
 /// Compute output dimensions that fit within `max_size` while preserving
@@ -631,9 +791,7 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
     };
 
     // For BMP we can attempt to read raw pixel data (uncompressed 32-bit).
-    if header.len() >= 2
-        && header[0] == b'B'
-        && header[1] == b'M'
+    if header.starts_with(b"BM")
         && let Some(thumb) = try_bmp_thumbnail(path, dims, config, mtime)
     {
         return thumb;
@@ -643,30 +801,17 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
     // don't have a full decoder.  The swatch color is derived from the format.
     let (tw, th) = fit_dimensions(dims.width, dims.height, config.size);
     let size = config.size;
-    let mut pixels = vec![0u8; (size as usize) * (size as usize) * 4];
+    let mut canvas = Canvas::new(size, size);
 
-    // Center the swatch within the thumbnail area.
-    let off_x = (size - tw) / 2;
-    let off_y = (size - th) / 2;
-    let accent = ThumbCategory::Image.accent_color();
+    // Centre the swatch within the thumbnail area. `fit_dimensions` caps both
+    // returned dimensions at `size`, so these subtractions do not underflow —
+    // but they are written saturating rather than relying on a proof that
+    // lives in another function.
+    let off_x = size.saturating_sub(tw) / 2;
+    let off_y = size.saturating_sub(th) / 2;
+    canvas.fill_rect(off_x, off_y, tw, th, ThumbCategory::Image.accent_color());
 
-    for y in off_y..off_y + th {
-        for x in off_x..off_x + tw {
-            let idx = (y as usize * size as usize + x as usize) * 4;
-            pixels[idx] = accent.a;
-            pixels[idx + 1] = accent.r;
-            pixels[idx + 2] = accent.g;
-            pixels[idx + 3] = accent.b;
-        }
-    }
-
-    Thumbnail {
-        width: size,
-        height: size,
-        pixels,
-        source_path: path.to_path_buf(),
-        source_mtime: mtime,
-    }
+    canvas.into_thumbnail(path, mtime)
 }
 
 /// Attempt to create a real thumbnail from an uncompressed 32-bit BMP.
@@ -690,9 +835,19 @@ fn try_bmp_thumbnail(
         return None;
     }
 
+    // Every size below is derived from the file's own header, so all of this
+    // arithmetic is on attacker-chosen numbers: computed with `checked_*`, a
+    // header that overflows a `usize` declines the thumbnail. Computed with
+    // `*`, it wraps to a small number that then passes the length check below
+    // while describing a buffer that is not there.
     let bpp = bits_per_pixel as usize / 8;
-    let row_size = (dims.width as usize * bpp).div_ceil(4) * 4; // rows padded to 4 bytes
-    let expected_data = offset + row_size * dims.height as usize;
+    let row_size = (dims.width as usize)
+        .checked_mul(bpp)?
+        .div_ceil(4)
+        .checked_mul(4)?; // rows padded to 4 bytes
+    let expected_data = row_size
+        .checked_mul(dims.height as usize)?
+        .checked_add(offset)?;
     if data.len() < expected_data {
         return None;
     }
@@ -702,42 +857,30 @@ fn try_bmp_thumbnail(
     let height_raw = read_le_u32(&data, 22)? as i32;
     let bottom_up = height_raw > 0;
 
-    let mut argb = vec![0u8; dims.width as usize * dims.height as usize * 4];
-    for y in 0..dims.height as usize {
+    let mut canvas = Canvas::new(dims.width, dims.height);
+    for y in 0..dims.height {
         let src_y = if bottom_up {
-            dims.height as usize - 1 - y
+            dims.height.saturating_sub(1).saturating_sub(y)
         } else {
             y
         };
-        let row_start = offset + src_y * row_size;
-        for x in 0..dims.width as usize {
-            let src_idx = row_start + x * bpp;
-            let dst_idx = (y * dims.width as usize + x) * 4;
+        let row_start = (src_y as usize)
+            .checked_mul(row_size)?
+            .checked_add(offset)?;
+        for x in 0..dims.width {
+            let src_idx = (x as usize).checked_mul(bpp)?.checked_add(row_start)?;
             // BMP pixel order is BGR(A).
-            let b_val = *data.get(src_idx)?;
-            let g_val = *data.get(src_idx + 1)?;
-            let r_val = *data.get(src_idx + 2)?;
-            let a_val = if bpp == 4 {
-                *data.get(src_idx + 3)?
-            } else {
-                255
+            let px = data.get(src_idx..src_idx.checked_add(bpp)?)?;
+            let (&b_val, &g_val, &r_val) = match px {
+                [b, g, r, ..] => (b, g, r),
+                _ => return None,
             };
-            argb[dst_idx] = a_val;
-            argb[dst_idx + 1] = r_val;
-            argb[dst_idx + 2] = g_val;
-            argb[dst_idx + 3] = b_val;
+            let a_val = if bpp == 4 { *px.get(3)? } else { u8::MAX };
+            canvas.set(x, y, Color::rgba(r_val, g_val, b_val, a_val));
         }
     }
 
-    let (scaled, sw, sh) = box_filter_downscale(&argb, dims.width, dims.height, config.size);
-
-    Some(Thumbnail {
-        width: sw,
-        height: sh,
-        pixels: scaled,
-        source_path: path.to_path_buf(),
-        source_mtime: mtime,
-    })
+    Some(box_filter_downscale(&canvas, config.size).into_thumbnail(path, mtime))
 }
 
 /// Generate a text-preview thumbnail for source/text files.
@@ -751,16 +894,7 @@ fn generate_text_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Thu
     };
 
     let size = config.size;
-    let mut pixels = vec![0u8; (size as usize) * (size as usize) * 4];
-
-    // Fill background.
-    let bg = config.bg_color;
-    for i in 0..(size as usize * size as usize) {
-        pixels[i * 4] = bg.a;
-        pixels[i * 4 + 1] = bg.r;
-        pixels[i * 4 + 2] = bg.g;
-        pixels[i * 4 + 3] = bg.b;
-    }
+    let mut canvas = Canvas::filled(size, size, config.bg_color);
 
     // Draw each line as a thin horizontal bar (minimap style).
     let line_height = 5u32;
@@ -768,39 +902,34 @@ fn generate_text_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Thu
     let margin = 6u32;
     let text_col = config.text_color;
 
+    // `margin` is a constant but `size` is `ThumbConfig::size`, which callers
+    // set. Every `size - margin` here used to be a plain subtraction, so a
+    // configured size below 6 wrapped it to about four billion: the two guards
+    // that were supposed to stop the drawing at the right-hand margin both
+    // became vacuously true, and the write ran off the end of the buffer. The
+    // bar is now positioned inside `content`, which is empty when the margins
+    // do not fit, and drawn through a clipping `fill_rect` besides.
+    let content = size.saturating_sub(margin.saturating_mul(2));
+    let right_edge = size.saturating_sub(margin);
+
     for (i, line) in lines.iter().enumerate() {
-        let y = margin + i as u32 * (line_height + line_gap);
-        if y + line_height >= size - margin {
+        let y =
+            margin.saturating_add((i as u32).saturating_mul(line_height.saturating_add(line_gap)));
+        if y.saturating_add(line_height) >= right_edge {
             break;
         }
         // Line width proportional to character count, capped at thumbnail width.
-        let max_chars = ((size - 2 * margin) / 2) as usize;
-        let bar_len = line.len().min(max_chars) as u32 * 2;
+        let max_chars = (content / 2) as usize;
+        let bar_len = (line.len().min(max_chars) as u32).saturating_mul(2);
         if bar_len == 0 {
             continue;
         }
+        let bar_len = bar_len.min(right_edge.saturating_sub(margin));
 
-        for py in y..y + line_height.min(3) {
-            for px in margin..margin + bar_len {
-                if px >= size - margin {
-                    break;
-                }
-                let idx = (py as usize * size as usize + px as usize) * 4;
-                pixels[idx] = text_col.a;
-                pixels[idx + 1] = text_col.r;
-                pixels[idx + 2] = text_col.g;
-                pixels[idx + 3] = text_col.b;
-            }
-        }
+        canvas.fill_rect(margin, y, bar_len, line_height.min(3), text_col);
     }
 
-    Thumbnail {
-        width: size,
-        height: size,
-        pixels,
-        source_path: path.to_path_buf(),
-        source_mtime: mtime,
-    }
+    canvas.into_thumbnail(path, mtime)
 }
 
 /// Generate a folder thumbnail showing a contents indicator.
@@ -809,17 +938,8 @@ fn generate_text_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Thu
 /// the first 4 child entries on a folder-colored background.
 fn generate_folder_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Thumbnail {
     let size = config.size;
-    let mut pixels = vec![0u8; (size as usize) * (size as usize) * 4];
-
     let folder_color = ThumbCategory::Folder.accent_color();
-
-    // Fill with folder color.
-    for i in 0..(size as usize * size as usize) {
-        pixels[i * 4] = folder_color.a;
-        pixels[i * 4 + 1] = folder_color.r;
-        pixels[i * 4 + 2] = folder_color.g;
-        pixels[i * 4 + 3] = folder_color.b;
-    }
+    let mut canvas = Canvas::filled(size, size, folder_color);
 
     // Draw a darker "tab" at the top-left (classic folder shape).
     let tab_w = size / 3;
@@ -829,15 +949,7 @@ fn generate_folder_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> T
         folder_color.g.saturating_sub(40),
         folder_color.b.saturating_sub(40),
     );
-    for y in 0..tab_h {
-        for x in 0..tab_w {
-            let idx = (y as usize * size as usize + x as usize) * 4;
-            pixels[idx] = darker.a;
-            pixels[idx + 1] = darker.r;
-            pixels[idx + 2] = darker.g;
-            pixels[idx + 3] = darker.b;
-        }
-    }
+    canvas.fill_rect(0, 0, tab_w, tab_h, darker);
 
     // Read up to 4 child entries and draw mini-icons in a 2x2 grid.
     if let Ok(entries) = fs::read_dir(path) {
@@ -848,13 +960,14 @@ fn generate_folder_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> T
 
         let cell = size / 4;
         let grid_x = size / 4;
-        let grid_y = size / 4 + tab_h;
+        let grid_y = (size / 4).saturating_add(tab_h);
 
         for (i, entry) in children.iter().enumerate() {
             let col = (i % 2) as u32;
             let row = (i / 2) as u32;
-            let cx = grid_x + col * (cell + 4);
-            let cy = grid_y + row * (cell + 4);
+            let step = cell.saturating_add(4);
+            let cx = grid_x.saturating_add(col.saturating_mul(step));
+            let cy = grid_y.saturating_add(row.saturating_mul(step));
 
             let cat = if entry.path().is_dir() {
                 ThumbCategory::Folder
@@ -867,35 +980,16 @@ fn generate_folder_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> T
                     .to_lowercase();
                 ThumbCategory::from_extension(&ext)
             };
-            let icon_color = cat.accent_color();
-
-            // Draw a small filled rectangle for this child item.
+            // Draw a small filled rectangle for this child item. The grid runs
+            // off the right and bottom edges for every `size` (the rightmost
+            // column starts at `3/4 · size + 4`); `fill_rect` clips it, which
+            // is what the hand-written `break` on each axis was doing.
             let rect_size = cell.min(20);
-            for py in cy..cy + rect_size {
-                if py >= size {
-                    break;
-                }
-                for px in cx..cx + rect_size {
-                    if px >= size {
-                        break;
-                    }
-                    let idx = (py as usize * size as usize + px as usize) * 4;
-                    pixels[idx] = icon_color.a;
-                    pixels[idx + 1] = icon_color.r;
-                    pixels[idx + 2] = icon_color.g;
-                    pixels[idx + 3] = icon_color.b;
-                }
-            }
+            canvas.fill_rect(cx, cy, rect_size, rect_size, cat.accent_color());
         }
     }
 
-    Thumbnail {
-        width: size,
-        height: size,
-        pixels,
-        source_path: path.to_path_buf(),
-        source_mtime: mtime,
-    }
+    canvas.into_thumbnail(path, mtime)
 }
 
 /// Generate a PDF placeholder thumbnail.
@@ -904,57 +998,31 @@ fn generate_folder_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> T
 /// (would require a full PDF parser); this is a recognizable placeholder.
 fn generate_pdf_placeholder(path: &Path, config: &ThumbConfig, mtime: u64) -> Thumbnail {
     let size = config.size;
-    let mut pixels = vec![0u8; (size as usize) * (size as usize) * 4];
-
     let red = ThumbCategory::Pdf.accent_color();
     let white = Color::WHITE;
 
-    // Fill background white.
-    for i in 0..(size as usize * size as usize) {
-        pixels[i * 4] = white.a;
-        pixels[i * 4 + 1] = white.r;
-        pixels[i * 4 + 2] = white.g;
-        pixels[i * 4 + 3] = white.b;
-    }
+    let mut canvas = Canvas::filled(size, size, white);
 
     // Draw a red document rectangle (inset from edges).
     let margin = size / 8;
-    for y in margin..size - margin {
-        for x in margin..size - margin {
-            let idx = (y as usize * size as usize + x as usize) * 4;
-            pixels[idx] = red.a;
-            pixels[idx + 1] = red.r;
-            pixels[idx + 2] = red.g;
-            pixels[idx + 3] = red.b;
-        }
-    }
+    let inner = size.saturating_sub(margin.saturating_mul(2));
+    canvas.fill_rect(margin, margin, inner, inner, red);
 
     // Draw a white "dog ear" triangle in the top-right corner of the document.
     let ear_size = size / 6;
-    let ear_x_start = size - margin - ear_size;
-    let ear_y_end = margin + ear_size;
+    let right_edge = size.saturating_sub(margin);
+    let ear_x_start = right_edge.saturating_sub(ear_size);
+    let ear_y_end = margin.saturating_add(ear_size);
     for y in margin..ear_y_end {
-        let row_offset = y - margin;
-        let x_start = ear_x_start + row_offset;
-        for x in x_start..size - margin {
-            let idx = (y as usize * size as usize + x as usize) * 4;
-            pixels[idx] = white.a;
-            pixels[idx + 1] = white.r;
-            pixels[idx + 2] = white.g;
-            pixels[idx + 3] = white.b;
-        }
+        let row_offset = y.saturating_sub(margin);
+        let x_start = ear_x_start.saturating_add(row_offset);
+        canvas.fill_rect(x_start, y, right_edge.saturating_sub(x_start), 1, white);
     }
 
     // Draw "PDF" text as white pixels in the center region (simple block font).
-    draw_block_text(&mut pixels, size, "PDF", white, size / 3, size / 2);
+    draw_block_text(&mut canvas, "PDF", white, size / 3, size / 2);
 
-    Thumbnail {
-        width: size,
-        height: size,
-        pixels,
-        source_path: path.to_path_buf(),
-        source_mtime: mtime,
-    }
+    canvas.into_thumbnail(path, mtime)
 }
 
 /// Generate a default/placeholder thumbnail for a category.
@@ -968,44 +1036,28 @@ fn generate_default_thumbnail(
     mtime: u64,
 ) -> Thumbnail {
     let size = config.size;
-    let mut pixels = vec![0u8; (size as usize) * (size as usize) * 4];
-
     let accent = category.accent_color();
-    let bg = config.bg_color;
+    let mut canvas = Canvas::filled(size, size, config.bg_color);
 
-    // Fill background.
-    for i in 0..(size as usize * size as usize) {
-        pixels[i * 4] = bg.a;
-        pixels[i * 4 + 1] = bg.r;
-        pixels[i * 4 + 2] = bg.g;
-        pixels[i * 4 + 3] = bg.b;
-    }
-
-    // Draw centered accent-colored circle.
-    let cx = size / 2;
-    let cy = size / 2;
-    let radius = size / 3;
+    // Draw centered accent-colored circle. Distances are compared in `i64`:
+    // `radius` is `size / 3` and `size` is caller-supplied, so squaring it in
+    // `i32` overflows for a thumbnail wider than about 92 000 pixels.
+    let cx = i64::from(size / 2);
+    let cy = i64::from(size / 2);
+    let radius = i64::from(size / 3);
+    let r2 = radius.saturating_mul(radius);
     for y in 0..size {
         for x in 0..size {
-            let dx = x as i32 - cx as i32;
-            let dy = y as i32 - cy as i32;
-            if (dx * dx + dy * dy) <= (radius * radius) as i32 {
-                let idx = (y as usize * size as usize + x as usize) * 4;
-                pixels[idx] = accent.a;
-                pixels[idx + 1] = accent.r;
-                pixels[idx + 2] = accent.g;
-                pixels[idx + 3] = accent.b;
+            let dx = i64::from(x).saturating_sub(cx);
+            let dy = i64::from(y).saturating_sub(cy);
+            let d2 = dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy));
+            if d2 <= r2 {
+                canvas.set(x, y, accent);
             }
         }
     }
 
-    Thumbnail {
-        width: size,
-        height: size,
-        pixels,
-        source_path: path.to_path_buf(),
-        source_mtime: mtime,
-    }
+    canvas.into_thumbnail(path, mtime)
 }
 
 // ============================================================================
@@ -1064,46 +1116,39 @@ fn glyph_bitmap(ch: char) -> [u8; 7] {
     }
 }
 
-/// Draw a string using the block font into ARGB pixel data.
+/// Draw a string using the block font onto a canvas.
 ///
-/// `pixels` is a square buffer of `size x size` pixels (4 bytes per pixel,
-/// ARGB order).  The text is drawn starting at pixel position `(x, y)` with
-/// a 2x scale factor for visibility on thumbnail-sized images.
-fn draw_block_text(pixels: &mut [u8], size: u32, text: &str, color: Color, x: u32, y: u32) {
-    let scale = 2u32;
-    let glyph_w = 5 * scale;
-    let glyph_h = 7 * scale;
-    let spacing = scale;
+/// The text is centred on `(x, y)` and drawn at a 2x scale factor for
+/// visibility on thumbnail-sized images. Anything falling outside the canvas
+/// is clipped.
+///
+/// This took a `&mut [u8]` and a separate `size` describing it, which is two
+/// arguments that have to agree and a panic if they ever did not; the canvas
+/// carries its own dimensions, so there is nothing left to disagree.
+fn draw_block_text(canvas: &mut Canvas, text: &str, color: Color, x: u32, y: u32) {
+    const SCALE: u32 = 2;
+    const GLYPH_W: u32 = 5 * SCALE;
+    const GLYPH_H: u32 = 7 * SCALE;
+    const ADVANCE: u32 = GLYPH_W + SCALE;
 
-    let total_w = text.len() as u32 * (glyph_w + spacing);
-    // Center horizontally around the given x.
+    let total_w = (text.chars().count() as u32).saturating_mul(ADVANCE);
+    // Centre horizontally and vertically around the given point.
     let start_x = x.saturating_sub(total_w / 2);
-    // Center vertically around the given y.
-    let start_y = y.saturating_sub(glyph_h / 2);
+    let start_y = y.saturating_sub(GLYPH_H / 2);
 
     for (ci, ch) in text.chars().enumerate() {
         let bitmap = glyph_bitmap(ch);
-        let char_x = start_x + ci as u32 * (glyph_w + spacing);
+        let char_x = start_x.saturating_add((ci as u32).saturating_mul(ADVANCE));
 
-        for row in 0..7u32 {
-            let bits = bitmap[row as usize];
+        for (row, bits) in bitmap.iter().enumerate() {
             for col in 0..5u32 {
-                if bits & (1 << (4 - col)) != 0 {
-                    // Draw a scale x scale block.
-                    for sy in 0..scale {
-                        for sx in 0..scale {
-                            let px = char_x + col * scale + sx;
-                            let py = start_y + row * scale + sy;
-                            if px < size && py < size {
-                                let idx = (py as usize * size as usize + px as usize) * 4;
-                                pixels[idx] = color.a;
-                                pixels[idx + 1] = color.r;
-                                pixels[idx + 2] = color.g;
-                                pixels[idx + 3] = color.b;
-                            }
-                        }
-                    }
+                // Bit 4 is the leftmost column of the 5-wide glyph.
+                if bits & (1 << (4 - col)) == 0 {
+                    continue;
                 }
+                let px = char_x.saturating_add(col.saturating_mul(SCALE));
+                let py = start_y.saturating_add((row as u32).saturating_mul(SCALE));
+                canvas.fill_rect(px, py, SCALE, SCALE, color);
             }
         }
     }
@@ -1239,24 +1284,16 @@ impl DiskCache {
         let data = fs::read(&file_path).ok()?;
 
         // Format: [width: 4 LE][height: 4 LE][ARGB pixel data...]
-        if data.len() < 8 {
-            return None;
-        }
-        let width = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        let height = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-        let pixel_data = &data[8..];
-        let expected = width as usize * height as usize * 4;
-        if pixel_data.len() != expected {
-            return None;
-        }
-
-        Some(Thumbnail {
-            width,
-            height,
-            pixels: pixel_data.to_vec(),
-            source_path: path.to_path_buf(),
-            source_mtime: mtime,
-        })
+        //
+        // The header is the cache file's own claim about its contents, and the
+        // cache directory is a plain directory in the user's home — nothing
+        // stops a file there from claiming dimensions its pixel data does not
+        // match. `Canvas::from_argb` is the check, and it is the same one every
+        // other route into a `Canvas` goes through.
+        let width = u32::from_le_bytes(read_array(&data, 0)?);
+        let height = u32::from_le_bytes(read_array(&data, 4)?);
+        let pixel_data = data.get(8..)?;
+        Some(Canvas::from_argb(width, height, pixel_data.to_vec())?.into_thumbnail(path, mtime))
     }
 
     /// Save a thumbnail to the disk cache.
@@ -1523,6 +1560,16 @@ fn simple_hash(path: &Path, mtime: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic
+    )]
+
     use super::*;
     use std::io::Write;
 
@@ -1740,49 +1787,36 @@ mod tests {
 
     #[test]
     fn box_filter_downscale_basic() {
-        // Create a simple 4x4 ARGB image (all red).
-        let w = 4u32;
-        let h = 4u32;
-        let mut src = vec![0u8; (w * h * 4) as usize];
-        for i in 0..(w * h) as usize {
-            src[i * 4] = 255; // A
-            src[i * 4 + 1] = 255; // R
-            src[i * 4 + 2] = 0; // G
-            src[i * 4 + 3] = 0; // B
-        }
+        let red = Color::rgba(255, 0, 0, 255);
+        let src = Canvas::filled(4, 4, red);
 
-        let (dst, dw, dh) = box_filter_downscale(&src, w, h, 2);
-        assert_eq!(dw, 2);
-        assert_eq!(dh, 2);
-        assert_eq!(dst.len(), (2 * 2 * 4) as usize);
+        let dst = box_filter_downscale(&src, 2);
+        assert_eq!(dst.width(), 2);
+        assert_eq!(dst.height(), 2);
 
         // Every pixel should still be red (uniform source).
-        for i in 0..(dw * dh) as usize {
-            assert_eq!(dst[i * 4], 255, "alpha");
-            assert_eq!(dst[i * 4 + 1], 255, "red");
-            assert_eq!(dst[i * 4 + 2], 0, "green");
-            assert_eq!(dst[i * 4 + 3], 0, "blue");
+        for y in 0..dst.height() {
+            for x in 0..dst.width() {
+                assert_eq!(dst.get(x, y), Some(red));
+            }
         }
     }
 
     #[test]
     fn box_filter_downscale_empty() {
-        let (dst, w, h) = box_filter_downscale(&[], 0, 0, 128);
-        assert!(dst.is_empty());
-        assert_eq!(w, 0);
-        assert_eq!(h, 0);
+        let dst = box_filter_downscale(&Canvas::new(0, 0), 128);
+        assert_eq!(dst.width(), 0);
+        assert_eq!(dst.height(), 0);
     }
 
     #[test]
     fn box_filter_no_downscale_when_smaller() {
-        let w = 10u32;
-        let h = 10u32;
-        let src = vec![128u8; (w * h * 4) as usize];
-        let (dst, dw, dh) = box_filter_downscale(&src, w, h, 128);
+        let src = Canvas::filled(10, 10, Color::rgba(128, 128, 128, 128));
+        let dst = box_filter_downscale(&src, 128);
         // Source already fits; should return original.
-        assert_eq!(dw, w);
-        assert_eq!(dh, h);
-        assert_eq!(dst, src);
+        assert_eq!(dst.width(), 10);
+        assert_eq!(dst.height(), 10);
+        assert_eq!(dst.get(5, 5), src.get(5, 5));
     }
 
     // -- Image header parsing -----------------------------------------------
@@ -2036,12 +2070,15 @@ mod tests {
 
     #[test]
     fn draw_block_text_does_not_panic() {
-        let size = 64u32;
-        let mut pixels = vec![0u8; (size * size * 4) as usize];
+        let mut canvas = Canvas::new(64, 64);
         // Should not panic even with text near edges.
-        draw_block_text(&mut pixels, size, "PDF", Color::WHITE, 32, 32);
-        draw_block_text(&mut pixels, size, "123", Color::WHITE, 0, 0);
-        draw_block_text(&mut pixels, size, "999", Color::WHITE, 63, 63);
+        draw_block_text(&mut canvas, "PDF", Color::WHITE, 32, 32);
+        draw_block_text(&mut canvas, "123", Color::WHITE, 0, 0);
+        draw_block_text(&mut canvas, "999", Color::WHITE, 63, 63);
+        // Nor when the canvas is smaller than a single glyph.
+        let mut tiny = Canvas::new(3, 3);
+        draw_block_text(&mut tiny, "PDF", Color::WHITE, 1, 1);
+        assert_eq!(tiny.width(), 3);
     }
 
     // -- Thumbnail validity -------------------------------------------------

@@ -14,3 +14,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "installer"
 path = "src/main.rs"
+
+[lints]
+workspace = true

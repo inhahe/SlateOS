@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS System Information — hardware and OS information explorer"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

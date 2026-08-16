@@ -358,6 +358,58 @@ fn online_cpu_count() -> usize {
     }
 }
 
+/// Count the set bits in a CPU set — the out-of-line half of `CPU_COUNT`.
+///
+/// `CPU_COUNT(set)` is a macro, and both glibc and musl expand it to a call
+/// to this function rather than inlining a popcount loop, because in the
+/// `CPU_ALLOC` (dynamically sized) form the set size is a runtime quantity.
+/// A program that only ever writes `CPU_COUNT(&mask)` therefore ends up with
+/// an undefined reference to `__sched_cpucount`, which is exactly how
+/// CPython 3.12 reached it (`os.sched_getaffinity`,
+/// `Modules/posixmodule.c:8167`) — one of the 13 symbols that stopped it
+/// linking against our libc.  See `scripts/cpython-spike/README.md`.
+///
+/// # ABI
+///
+/// The signature is glibc's `int __sched_cpucount(size_t setsize, const
+/// cpu_set_t *setp)` — note the **size first**, unlike almost every other
+/// function in this file — and `setsize` is in *bytes*, not CPUs.
+///
+/// # Behaviour
+///
+/// Counts over `setsize` bytes, which may be smaller **or larger** than
+/// [`CpuSetT`]: `CPU_ALLOC(n)` for large `n` produces exactly such an
+/// oversized object, and clamping to our fixed 128 bytes would silently
+/// under-report it.  The set is therefore walked as bytes rather than
+/// through `CpuSetT`, so no alignment beyond 1 is assumed and exactly
+/// `setsize` bytes are read.
+///
+/// glibc has no NULL check and faults.  Returning 0 here is not a
+/// substitute for that diagnosis, but it is the truthful count — a NULL
+/// set has no bits — and the caller has an empty affinity mask either way,
+/// which is a bug it must already be prepared to notice.  This function has
+/// no errno convention to report through.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __sched_cpucount(setsize: usize, setp: *const CpuSetT) -> i32 {
+    if setp.is_null() || setsize == 0 {
+        return 0;
+    }
+    let bytes = setp.cast::<u8>();
+    let mut count: u32 = 0;
+    let mut i: usize = 0;
+    while i < setsize {
+        // SAFETY: `setp` is non-null and the caller states the object is at
+        // least `setsize` bytes long (glibc's contract for this function);
+        // `i` is strictly less than `setsize` on every iteration.
+        let b = unsafe { *bytes.add(i) };
+        count = count.wrapping_add(b.count_ones());
+        i = i.wrapping_add(1);
+    }
+    // A set cannot hold more CPUs than `i32::MAX`; the fallback is for the
+    // type system, not for a reachable case.
+    i32::try_from(count).unwrap_or(i32::MAX)
+}
+
 /// Get the CPU affinity mask for a process.
 ///
 /// Populates `mask` with bits 0..N set, where N is the number of online CPUs
@@ -678,6 +730,67 @@ pub extern "C" fn getcpu(cpu: *mut u32, node: *mut u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- __sched_cpucount (the out-of-line CPU_COUNT) --
+
+    #[test]
+    fn test_cpucount_counts_every_set_bit() {
+        let mut set = CpuSetT { bits: [0; 16] };
+        assert_eq!(__sched_cpucount(size_of::<CpuSetT>(), &raw const set), 0);
+
+        set.bits[0] = 0b1011; // CPUs 0, 1, 3
+        assert_eq!(__sched_cpucount(size_of::<CpuSetT>(), &raw const set), 3);
+
+        // A bit in the last word must be counted too — an implementation
+        // that walked only the first u64 would pass the case above.
+        set.bits[15] = 1 << 63; // CPU 1023, the highest CPU_SETSIZE allows
+        assert_eq!(__sched_cpucount(size_of::<CpuSetT>(), &raw const set), 4);
+
+        let full = CpuSetT { bits: [u64::MAX; 16] };
+        assert_eq!(
+            __sched_cpucount(size_of::<CpuSetT>(), &raw const full),
+            i32::try_from(CPU_SETSIZE).expect("CPU_SETSIZE fits in i32")
+        );
+    }
+
+    /// `setsize` is a byte count and bounds the walk, so a caller passing a
+    /// prefix of the set must see only that prefix counted.  This is what
+    /// makes the function safe to call on a `CPU_ALLOC`ed object of a size
+    /// we know nothing about.
+    #[test]
+    fn test_cpucount_honours_setsize() {
+        let mut set = CpuSetT { bits: [0; 16] };
+        set.bits[0] = u64::MAX; // 64 bits in the first 8 bytes
+        set.bits[1] = u64::MAX; // 64 more in the next 8
+        assert_eq!(__sched_cpucount(8, &raw const set), 64);
+        assert_eq!(__sched_cpucount(16, &raw const set), 128);
+        assert_eq!(__sched_cpucount(0, &raw const set), 0);
+    }
+
+    #[test]
+    fn test_cpucount_null_set_is_empty_not_a_fault() {
+        assert_eq!(__sched_cpucount(size_of::<CpuSetT>(), core::ptr::null()), 0);
+    }
+
+    /// The realistic caller: count what `sched_getaffinity` just produced.
+    /// This is CPython's `os.sched_getaffinity` in miniature, and it ties
+    /// the two functions together — if either changed its notion of how
+    /// many CPUs are online, this would disagree.
+    #[test]
+    fn test_cpucount_agrees_with_sched_getaffinity() {
+        let mut set = CpuSetT { bits: [0xffff_ffff_ffff_ffff; 16] };
+        assert_eq!(
+            sched_getaffinity(0, size_of::<CpuSetT>(), &raw mut set),
+            0,
+            "sched_getaffinity(0) must succeed for the calling process"
+        );
+        let n = __sched_cpucount(size_of::<CpuSetT>(), &raw const set);
+        assert!(n >= 1, "at least one CPU must be online, got {n}");
+        assert!(
+            n <= i32::try_from(CPU_SETSIZE).expect("fits"),
+            "more CPUs reported than the set can hold: {n}"
+        );
+    }
 
     // -- Policy constants match Linux --
 

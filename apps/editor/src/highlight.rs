@@ -247,20 +247,143 @@ fn push_token(tokens: &mut Vec<StyledToken>, start: usize, end: usize, kind: Tok
     }
 }
 
-/// Advance `i` past the current byte and return the new position.
+/// Advance `i` past the whole UTF-8 character starting there.
+///
+/// The `.min(bytes.len())` is defensive, not a bug fix, and the distinction
+/// is worth stating because `scan_string` right below carries the *same*
+/// clamp for a bug that is live. It cannot trigger on today's callers: every
+/// one of them derives `bytes` from a `&str`, so a lead byte always has its
+/// continuation bytes present and the unclamped sum never exceeds the length.
+/// It is here because the signature promises less than the callers deliver —
+/// this takes `&[u8]`, where a truncated sequence is representable — and
+/// because returning a past-the-end offset is not a benign error here:
+/// callers use the result as a token boundary, which panics when the renderer
+/// slices it. Removing the clamp breaks no test; that is the point.
 fn advance(bytes: &[u8], i: usize) -> usize {
-    i + 1 + bytes.get(i).map_or(0, |b| match b {
-        0x00..=0x7F => 0,
+    let extra = at(bytes, i).map_or(0, |b| match b {
         0xC0..=0xDF => 1,
         0xE0..=0xEF => 2,
         0xF0..=0xFF => 3,
         _ => 0,
-    })
+    });
+    i.saturating_add(1).saturating_add(extra).min(bytes.len())
 }
 
 /// Check if `bytes[i..]` starts with the given ASCII slice.
 fn starts_with_at(bytes: &[u8], i: usize, needle: &[u8]) -> bool {
-    bytes.get(i..i + needle.len()) == Some(needle)
+    bytes.get(i..i.saturating_add(needle.len())) == Some(needle)
+}
+
+/// The byte at `i`, or `None` at or past the end of the line.
+///
+/// Every scanner in this file is a loop of the shape "while the byte here is
+/// X, advance". Written as `i < bytes.len() && bytes[i] == X` that states the
+/// bound *twice* — once in the guard and once again, invisibly, inside the
+/// index — and the two can drift apart when the loop body later changes how
+/// far `i` moves. `at(bytes, i).is_some_and(...)` states it once, in the only
+/// place that can be wrong, and the compiler stops us writing the second one.
+fn at(bytes: &[u8], i: usize) -> Option<u8> {
+    bytes.get(i).copied()
+}
+
+/// True when the bytes at `i` and `i + 1` are exactly `first` then `second`.
+///
+/// Two-byte lookahead (`/*`, `*/`, `//`, `->`, `==`) is the most common test
+/// here, and the hand-written form has to get both the `i + 1 < len` guard and
+/// the two indices right every time. Naming it removes thirty-odd chances to
+/// get one of them wrong.
+fn is_pair(bytes: &[u8], i: usize, first: u8, second: u8) -> bool {
+    at(bytes, i) == Some(first) && at(bytes, i.saturating_add(1)) == Some(second)
+}
+
+/// Find the offset just past the next unescaped `needle` at or after `i`.
+///
+/// `None` means the line ends before the delimiter appears — which for a
+/// multi-line string is not an error but the normal case, and is what tells
+/// the caller to record a `HighlightState::MultiLineString` and colour the
+/// rest of the line as string.
+///
+/// The callers previously each inlined a `while i + 2 < len` loop with the
+/// delimiter's length baked into the bound as a literal `2` — correct only
+/// for a three-byte needle, and correct there only by coincidence.
+fn scan_to_delimiter(bytes: &[u8], mut i: usize, needle: &[u8]) -> Option<usize> {
+    while i < bytes.len() {
+        if at(bytes, i) == Some(b'\\') {
+            i = i.saturating_add(2);
+            continue;
+        }
+        if starts_with_at(bytes, i, needle) {
+            return Some(i.saturating_add(needle.len()).min(bytes.len()));
+        }
+        i = i.saturating_add(1);
+    }
+    None
+}
+
+/// Offset just past the next `needle` at or after `from`, or the end of the
+/// line if there isn't one.
+///
+/// This is Markdown's inline-span rule. Spans are highlighted optimistically:
+/// a `**` with no closing `**` colours the rest of the line rather than
+/// nothing, because while the user is still typing the span there is no
+/// closing marker yet. Inline code and italic already behaved that way; bold
+/// did not — its `while i + 1 < len` stopped one byte short, so `**abc`
+/// bolded `**ab` and left `c` plain, which is neither of the two defensible
+/// answers.
+///
+/// Unlike `scan_to_delimiter` this does *not* skip backslash escapes, which
+/// preserves the existing behaviour exactly; Markdown escaping is a separate
+/// question from where a span ends.
+fn close_or_end(bytes: &[u8], from: usize, needle: &[u8]) -> usize {
+    find_close(bytes, from, needle).unwrap_or(bytes.len())
+}
+
+/// As `close_or_end`, but distinguishing "closed at the very end of the line"
+/// from "never closed".
+///
+/// Markdown's link syntax needs the distinction and the optimistic version
+/// cannot express it: `[text](url)` is a link only once `](` has been seen,
+/// and `](` occurring as the last two bytes returns the same offset as not
+/// occurring at all.
+fn find_close(bytes: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    let mut i = from;
+    while i < bytes.len() {
+        if starts_with_at(bytes, i, needle) {
+            return Some(i.saturating_add(needle.len()).min(bytes.len()));
+        }
+        i = i.saturating_add(1);
+    }
+    None
+}
+
+/// Recognise a triple-quote delimiter (`"""` or `'''`) at `i`.
+///
+/// Returns the delimiter both as the byte string to search for and as the
+/// `StringDelimiter` to record in `HighlightState`, so the two cannot be
+/// paired up wrongly at a call site.
+fn triple_at(bytes: &[u8], i: usize) -> Option<(&'static [u8], StringDelimiter)> {
+    if starts_with_at(bytes, i, b"\"\"\"") {
+        Some((b"\"\"\"", StringDelimiter::TripleDouble))
+    } else if starts_with_at(bytes, i, b"'''") {
+        Some((b"'''", StringDelimiter::TripleSingle))
+    } else {
+        None
+    }
+}
+
+/// Count consecutive `#` starting at `i`, stopping at `max`.
+///
+/// This is the Rust raw-string terminator test: `r##"…"##` ends at the first
+/// `"` followed by exactly as many `#` as opened it. Both the resume-from-the
+/// -line-above arm and the open-it-here arm need it, and both previously
+/// inlined the same three-clause loop whose bound, index and counter all had
+/// to agree.
+fn count_hashes(bytes: &[u8], i: usize, max: usize) -> usize {
+    let mut h = 0;
+    while h < max && at(bytes, i.saturating_add(h)) == Some(b'#') {
+        h = h.saturating_add(1);
+    }
+    h
 }
 
 /// Check whether `word` is in the given sorted keyword list.
@@ -276,82 +399,70 @@ fn is_ident_byte(b: u8) -> bool {
 /// Scan an identifier/word starting at `i` and return (end_offset, word).
 fn scan_word(bytes: &[u8], i: usize) -> (usize, &str) {
     let mut end = i;
-    while end < bytes.len() && is_ident_byte(bytes[end]) {
-        end += 1;
+    while at(bytes, end).is_some_and(is_ident_byte) {
+        end = end.saturating_add(1);
     }
-    // Safety: we only accepted ASCII bytes, so this is valid UTF-8.
-    let word = std::str::from_utf8(&bytes[i..end]).unwrap_or("");
+    // We only accepted ASCII bytes, so this is valid UTF-8; the `unwrap_or`
+    // is unreachable rather than a fallback.
+    let word = bytes
+        .get(i..end)
+        .and_then(|w| std::str::from_utf8(w).ok())
+        .unwrap_or("");
     (end, word)
 }
 
 /// Scan a number literal (int or float, with optional 0x/0o/0b prefix).
 fn scan_number(bytes: &[u8], i: usize) -> usize {
+    /// Advance `end` over every byte matching `accept`.
+    fn take_while(bytes: &[u8], end: &mut usize, accept: impl Fn(u8) -> bool) {
+        while at(bytes, *end).is_some_and(&accept) {
+            *end = end.saturating_add(1);
+        }
+    }
+
     let mut end = i;
-    // Hex/oct/bin prefix
-    if end + 1 < bytes.len() && bytes[end] == b'0' {
-        match bytes.get(end + 1) {
-            Some(b'x' | b'X') => {
-                end += 2;
-                while end < bytes.len()
-                    && (bytes[end].is_ascii_hexdigit() || bytes[end] == b'_')
-                {
-                    end += 1;
-                }
-                return end;
-            }
-            Some(b'o' | b'O') => {
-                end += 2;
-                while end < bytes.len()
-                    && (bytes[end].is_ascii_digit() || bytes[end] == b'_')
-                {
-                    end += 1;
-                }
-                return end;
-            }
-            Some(b'b' | b'B') => {
-                end += 2;
-                while end < bytes.len()
-                    && (bytes[end] == b'0' || bytes[end] == b'1' || bytes[end] == b'_')
-                {
-                    end += 1;
-                }
-                return end;
-            }
-            _ => {}
+    // Hex/oct/bin prefix. `radix_digit` is the acceptor for whichever base the
+    // second byte named; picking it here keeps the three arms from being three
+    // near-identical loops that can drift.
+    if at(bytes, end) == Some(b'0') {
+        let radix_digit: Option<fn(u8) -> bool> = match at(bytes, end.saturating_add(1)) {
+            Some(b'x' | b'X') => Some(|b: u8| b.is_ascii_hexdigit() || b == b'_'),
+            Some(b'o' | b'O') => Some(|b: u8| b.is_ascii_digit() || b == b'_'),
+            Some(b'b' | b'B') => Some(|b: u8| matches!(b, b'0' | b'1' | b'_')),
+            _ => None,
+        };
+        if let Some(accept) = radix_digit {
+            end = end.saturating_add(2);
+            take_while(bytes, &mut end, accept);
+            return end;
         }
     }
     // Decimal digits
-    while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'_') {
-        end += 1;
-    }
-    // Decimal point + fraction
-    if end < bytes.len() && bytes[end] == b'.' {
-        let after_dot = end + 1;
-        if after_dot < bytes.len() && bytes[after_dot].is_ascii_digit() {
+    take_while(bytes, &mut end, |b| b.is_ascii_digit() || b == b'_');
+    // Decimal point + fraction. The point only belongs to the number if a
+    // digit follows it, so `1..2` stays a range and `1.` stays an integer.
+    if at(bytes, end) == Some(b'.') {
+        let after_dot = end.saturating_add(1);
+        if at(bytes, after_dot).is_some_and(|b| b.is_ascii_digit()) {
             end = after_dot;
-            while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'_') {
-                end += 1;
-            }
+            take_while(bytes, &mut end, |b| b.is_ascii_digit() || b == b'_');
         }
     }
-    // Exponent
-    if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
-        let mut exp = end + 1;
-        if exp < bytes.len() && (bytes[exp] == b'+' || bytes[exp] == b'-') {
-            exp += 1;
+    // Exponent — likewise only consumed if it is actually followed by digits,
+    // so the `e` in `1e` stays a type suffix.
+    if at(bytes, end).is_some_and(|b| b == b'e' || b == b'E') {
+        let mut exp = end.saturating_add(1);
+        if at(bytes, exp).is_some_and(|b| b == b'+' || b == b'-') {
+            exp = exp.saturating_add(1);
         }
-        if exp < bytes.len() && bytes[exp].is_ascii_digit() {
+        if at(bytes, exp).is_some_and(|b| b.is_ascii_digit()) {
             end = exp;
-            while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'_') {
-                end += 1;
-            }
+            take_while(bytes, &mut end, |b| b.is_ascii_digit() || b == b'_');
         }
     }
     // Type suffix (u8, i32, f64, usize, ...)
-    if end < bytes.len() && bytes[end].is_ascii_alphabetic() {
-        while end < bytes.len() && bytes[end].is_ascii_alphanumeric() {
-            end += 1;
-        }
+    if at(bytes, end).is_some_and(|b| b.is_ascii_alphabetic()) {
+        take_while(bytes, &mut end, |b| b.is_ascii_alphanumeric());
     }
     end
 }
@@ -360,18 +471,55 @@ fn scan_number(bytes: &[u8], i: usize) -> usize {
 /// quote character).  Returns the end offset (past the closing quote).
 /// Handles `\"` escapes inside the string.
 fn scan_string(bytes: &[u8], i: usize, quote: u8) -> usize {
-    let mut end = i + 1; // skip the opening quote
-    while end < bytes.len() {
-        if bytes[end] == b'\\' {
-            end += 2; // skip escaped character
-        } else if bytes[end] == quote {
-            end += 1; // include closing quote
-            return end;
+    let mut end = i.saturating_add(1); // skip the opening quote
+    while let Some(b) = at(bytes, end) {
+        if b == b'\\' {
+            // Skip the escaped character — but a backslash in the *last* byte
+            // of the line escapes nothing, so clamp rather than stepping to
+            // `len + 1`. Every caller feeds this straight into `push_token`,
+            // and a token whose `end` exceeds the line panics the moment the
+            // renderer slices it. Clamping here fixes it for all ten callers.
+            end = end.saturating_add(2).min(bytes.len());
+        } else if b == quote {
+            return end.saturating_add(1); // include closing quote
         } else {
-            end += 1;
+            end = end.saturating_add(1);
         }
     }
     end // unterminated — extends to end of line
+}
+
+/// Scan forward through a `/* … */` block comment already known to be open.
+///
+/// `i` is the first byte *inside* the comment (past the opening `/*` for a
+/// comment that starts on this line; `0` for one resumed from the line
+/// above). `depth` is how many `/*` are currently open, always ≥ 1 on entry.
+/// Returns the offset just past where the comment ended and the depth still
+/// open there — a returned depth of `0` means it closed on this line, and any
+/// other value is what belongs in `HighlightState::BlockComment`.
+///
+/// `nested` distinguishes Rust, where `/* /* */ */` is one comment, from C,
+/// JavaScript and CSS, where the first `*/` closes it whatever came before.
+/// Passing `false` makes an inner `/*` ordinary comment text.
+///
+/// This existed as six near-copies — an open-it-here and a resume-from-above
+/// arm in each of three tokenizers — which is six places for the `i + 1 < len`
+/// guard and the two-byte step to disagree.
+fn scan_block_comment(bytes: &[u8], mut i: usize, mut depth: usize, nested: bool) -> (usize, usize) {
+    while depth > 0 {
+        if nested && is_pair(bytes, i, b'/', b'*') {
+            depth = depth.saturating_add(1);
+            i = i.saturating_add(2);
+        } else if is_pair(bytes, i, b'*', b'/') {
+            depth = depth.saturating_sub(1);
+            i = i.saturating_add(2);
+        } else if i < bytes.len() {
+            i = i.saturating_add(1);
+        } else {
+            break; // ran off the end with the comment still open
+        }
+    }
+    (i.min(bytes.len()), depth)
 }
 
 const OPERATOR_BYTES: &[u8] = b"+-*/%=!<>&|^~?@";
@@ -413,26 +561,14 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
     // Continue multi-line state from previous line.
     match state {
         HighlightState::BlockComment { depth } => {
-            let start = 0;
-            while i + 1 < len {
-                if bytes[i] == b'/' && bytes[i + 1] == b'*' {
-                    *depth += 1;
-                    i += 2;
-                } else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                    *depth -= 1;
-                    i += 2;
-                    if *depth == 0 {
-                        push_token(&mut tokens, start, i, Token::Comment);
-                        *state = HighlightState::Normal;
-                        break;
-                    }
-                } else {
-                    i += 1;
-                }
-            }
-            if *state != HighlightState::Normal {
-                // Still inside block comment — consume the rest of the line.
-                push_token(&mut tokens, start, len, Token::Comment);
+            let (end, remaining) = scan_block_comment(bytes, i, *depth, true);
+            i = end;
+            push_token(&mut tokens, 0, i, Token::Comment);
+            if remaining == 0 {
+                *state = HighlightState::Normal;
+            } else {
+                // Still inside the comment — it consumed the whole line.
+                *depth = remaining;
                 return tokens;
             }
         }
@@ -440,61 +576,37 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
             delimiter: StringDelimiter::RustRaw { hashes },
         } => {
             let needed = *hashes;
-            let start = 0;
-            while i < len {
-                if bytes[i] == b'"' {
-                    let mut h = 0;
-                    while i + 1 + h < len && bytes[i + 1 + h] == b'#' && h < needed {
-                        h += 1;
-                    }
-                    if h == needed {
-                        i += 1 + needed;
-                        push_token(&mut tokens, start, i, Token::String);
-                        *state = HighlightState::Normal;
-                        break;
-                    }
+            while let Some(b) = at(bytes, i) {
+                if b == b'"' && count_hashes(bytes, i.saturating_add(1), needed) == needed {
+                    i = i.saturating_add(1).saturating_add(needed).min(len);
+                    push_token(&mut tokens, 0, i, Token::String);
+                    *state = HighlightState::Normal;
+                    break;
                 }
-                i += 1;
+                i = i.saturating_add(1);
             }
             if *state != HighlightState::Normal {
-                push_token(&mut tokens, start, len, Token::String);
+                push_token(&mut tokens, 0, len, Token::String);
                 return tokens;
             }
         }
         _ => {}
     }
 
-    while i < len {
-        let b = bytes[i];
+    while let Some(b) = at(bytes, i) {
 
         // Line comment
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+        if is_pair(bytes, i, b'/', b'/') {
             push_token(&mut tokens, i, len, Token::Comment);
             return tokens;
         }
 
         // Block comment
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+        if is_pair(bytes, i, b'/', b'*') {
             let start = i;
-            let mut depth: usize = 1;
-            i += 2;
-            while i + 1 < len {
-                if bytes[i] == b'/' && bytes[i + 1] == b'*' {
-                    depth += 1;
-                    i += 2;
-                } else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                    depth -= 1;
-                    i += 2;
-                    if depth == 0 {
-                        break;
-                    }
-                } else {
-                    i += 1;
-                }
-            }
+            let (end, depth) = scan_block_comment(bytes, i.saturating_add(2), 1, true);
+            i = end;
             if depth > 0 {
-                // Consume last byte if we stopped due to `i + 1 >= len`.
-                i = len;
                 *state = HighlightState::BlockComment { depth };
             }
             push_token(&mut tokens, start, i, Token::Comment);
@@ -502,58 +614,59 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         }
 
         // Attribute: `#[...]` or `#![...]`
-        if b == b'#' && i + 1 < len && (bytes[i + 1] == b'[' || (bytes[i + 1] == b'!' && i + 2 < len && bytes[i + 2] == b'[')) {
+        if b == b'#'
+            && (is_pair(bytes, i, b'#', b'[')
+                || (is_pair(bytes, i, b'#', b'!')
+                    && at(bytes, i.saturating_add(2)) == Some(b'[')))
+        {
             let start = i;
-            // Find matching `]`
+            // Find the matching `]`. The scan starts on the `#`, and the
+            // guard above guarantees a `[` within two bytes of it, so the
+            // depth is raised before it can be lowered; `saturating_sub`
+            // records that rather than relying on the reader to re-derive it.
             let mut bracket_depth = 0usize;
-            while i < len {
-                if bytes[i] == b'[' {
-                    bracket_depth += 1;
-                } else if bytes[i] == b']' {
-                    bracket_depth -= 1;
+            while let Some(c) = at(bytes, i) {
+                if c == b'[' {
+                    bracket_depth = bracket_depth.saturating_add(1);
+                } else if c == b']' {
+                    bracket_depth = bracket_depth.saturating_sub(1);
                     if bracket_depth == 0 {
-                        i += 1;
+                        i = i.saturating_add(1);
                         break;
                     }
                 }
-                i += 1;
+                i = i.saturating_add(1);
             }
             push_token(&mut tokens, start, i, Token::Attribute);
             continue;
         }
 
         // Raw string: r"...", r#"..."#, r##"..."##, etc.
-        if b == b'r' && i + 1 < len && (bytes[i + 1] == b'"' || bytes[i + 1] == b'#') {
+        if b == b'r' && at(bytes, i.saturating_add(1)).is_some_and(|c| c == b'"' || c == b'#') {
             let start = i;
-            let mut hashes = 0usize;
-            let mut j = i + 1;
-            while j < len && bytes[j] == b'#' {
-                hashes += 1;
-                j += 1;
-            }
-            if j < len && bytes[j] == b'"' {
+            // `usize::MAX` because the *opening* run of hashes has no bound —
+            // it is what defines how many the closing run needs.
+            let hashes = count_hashes(bytes, i.saturating_add(1), usize::MAX);
+            let mut j = i.saturating_add(1).saturating_add(hashes);
+            if at(bytes, j) == Some(b'"') {
                 // It's a raw string.
-                j += 1; // past opening quote
+                j = j.saturating_add(1); // past opening quote
                 loop {
-                    if j >= len {
-                        // Multi-line raw string.
+                    let Some(c) = at(bytes, j) else {
+                        // Ran off the end: this raw string spans lines.
                         *state = HighlightState::MultiLineString {
                             delimiter: StringDelimiter::RustRaw { hashes },
                         };
                         push_token(&mut tokens, start, len, Token::String);
                         return tokens;
+                    };
+                    if c == b'"'
+                        && count_hashes(bytes, j.saturating_add(1), hashes) == hashes
+                    {
+                        j = j.saturating_add(1).saturating_add(hashes).min(len);
+                        break;
                     }
-                    if bytes[j] == b'"' {
-                        let mut h = 0;
-                        while j + 1 + h < len && bytes[j + 1 + h] == b'#' && h < hashes {
-                            h += 1;
-                        }
-                        if h == hashes {
-                            j += 1 + hashes;
-                            break;
-                        }
-                    }
-                    j += 1;
+                    j = j.saturating_add(1);
                 }
                 push_token(&mut tokens, start, j, Token::String);
                 i = j;
@@ -568,16 +681,16 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
             // Char literal `'a'` — but NOT lifetime `'a` followed by ident without closing quote on same token.
             if b == b'\'' {
                 // Check if this looks like a lifetime: `'ident` not followed by `'`.
-                let mut j = i + 1;
-                if j < len && (bytes[j].is_ascii_alphabetic() || bytes[j] == b'_') {
+                let mut j = i.saturating_add(1);
+                if at(bytes, j).is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') {
                     // Could be a char literal like 'a' or a lifetime like 'a.
                     let mut k = j;
-                    while k < len && is_ident_byte(bytes[k]) {
-                        k += 1;
+                    while at(bytes, k).is_some_and(is_ident_byte) {
+                        k = k.saturating_add(1);
                     }
-                    if k < len && bytes[k] == b'\'' {
+                    if at(bytes, k) == Some(b'\'') {
                         // Char literal.
-                        i = k + 1;
+                        i = k.saturating_add(1);
                         push_token(&mut tokens, start, i, Token::String);
                         continue;
                     }
@@ -587,21 +700,21 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
                     continue;
                 }
                 // Escaped char literal: '\n', '\\'
-                if j < len && bytes[j] == b'\\' {
-                    j += 1; // skip escape marker
+                if at(bytes, j) == Some(b'\\') {
+                    j = j.saturating_add(1); // skip escape marker
                     if j < len {
-                        j += 1; // skip escaped char
+                        j = j.saturating_add(1); // skip escaped char
                     }
-                    if j < len && bytes[j] == b'\'' {
-                        j += 1;
+                    if at(bytes, j) == Some(b'\'') {
+                        j = j.saturating_add(1);
                     }
                     push_token(&mut tokens, start, j, Token::String);
                     i = j;
                     continue;
                 }
                 // Single char: 'x'
-                if j + 1 < len && bytes[j + 1] == b'\'' {
-                    i = j + 2;
+                if at(bytes, j.saturating_add(1)) == Some(b'\'') {
+                    i = j.saturating_add(2);
                     push_token(&mut tokens, start, i, Token::String);
                     continue;
                 }
@@ -618,7 +731,10 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         }
 
         // Number
-        if b.is_ascii_digit() || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
+        if b.is_ascii_digit()
+                || (b == b'.'
+                    && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+            {
             let start = i;
             let end = scan_number(bytes, i);
             push_token(&mut tokens, start, end, Token::Number);
@@ -631,7 +747,7 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
             let start = i;
             let (end, word) = scan_word(bytes, i);
             // Macro invocation: word followed by `!`
-            if end < len && bytes[end] == b'!' && !word.is_empty() {
+            if at(bytes, end) == Some(b'!') && !word.is_empty() {
                 let kind = Token::Macro;
                 push_token(&mut tokens, start, end + 1, kind);
                 i = end + 1;
@@ -641,7 +757,7 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
                 Token::Keyword
             } else if is_keyword(word, RUST_TYPES) {
                 Token::Type
-            } else if end < len && bytes[end] == b'(' {
+            } else if at(bytes, end) == Some(b'(') {
                 Token::Function
             } else if word.starts_with(|c: char| c.is_ascii_uppercase()) {
                 Token::Type
@@ -656,8 +772,8 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         // Operators
         if is_operator_byte(b) {
             let start = i;
-            while i < len && is_operator_byte(bytes[i]) {
-                i += 1;
+            while at(bytes, i).is_some_and(is_operator_byte) {
+                i = i.saturating_add(1);
             }
             push_token(&mut tokens, start, i, Token::Operator);
             continue;
@@ -704,7 +820,6 @@ fn highlight_python(line: &str, state: &mut HighlightState) -> Vec<StyledToken> 
     let bytes = line.as_bytes();
     let len = bytes.len();
     let mut tokens = Vec::new();
-    let mut i = 0;
 
     // Continue multi-line string from previous line.
     if let HighlightState::MultiLineString { delimiter } = state {
@@ -716,24 +831,15 @@ fn highlight_python(line: &str, state: &mut HighlightState) -> Vec<StyledToken> 
                 return highlight_python_normal(line, 0, &mut tokens, state);
             }
         };
-        let start = 0;
-        while i + 2 < len {
-            if bytes[i] == b'\\' {
-                i += 2;
-                continue;
-            }
-            if starts_with_at(bytes, i, needle) {
-                i += 3;
-                push_token(&mut tokens, start, i, Token::String);
-                *state = HighlightState::Normal;
-                // Continue highlighting the rest of the line.
-                highlight_python_normal(line, i, &mut tokens, state);
-                return tokens;
-            }
-            i += 1;
+        if let Some(end) = scan_to_delimiter(bytes, 0, needle) {
+            push_token(&mut tokens, 0, end, Token::String);
+            *state = HighlightState::Normal;
+            // Continue highlighting the rest of the line.
+            highlight_python_normal(line, end, &mut tokens, state);
+            return tokens;
         }
         // Didn't find closing — rest of line is string.
-        push_token(&mut tokens, start, len, Token::String);
+        push_token(&mut tokens, 0, len, Token::String);
         return tokens;
     }
 
@@ -751,8 +857,7 @@ fn highlight_python_normal(
     let len = bytes.len();
     let mut i = start_offset;
 
-    while i < len {
-        let b = bytes[i];
+    while let Some(b) = at(bytes, i) {
 
         // Comment
         if b == b'#' {
@@ -764,77 +869,54 @@ fn highlight_python_normal(
         if b == b'@' {
             let start = i;
             i += 1;
-            while i < len && (is_ident_byte(bytes[i]) || bytes[i] == b'.') {
-                i += 1;
+            while at(bytes, i).is_some_and(|c| is_ident_byte(c) || c == b'.') {
+                i = i.saturating_add(1);
             }
             push_token(tokens, start, i, Token::Attribute);
             continue;
         }
 
         // Triple-quoted string (must check before single-quoted)
-        if (b == b'"' || b == b'\'') && i + 2 < len && bytes[i + 1] == b && bytes[i + 2] == b {
-            // Check for f-string prefix
-            let actual_start = if i > start_offset {
-                let prev = bytes[i - 1];
-                if prev == b'f' || prev == b'F' || prev == b'b' || prev == b'B'
-                    || prev == b'r' || prev == b'R'
-                {
-                    // Rewrite the previous token if it was a plain single-char ident.
-                    if let Some(last) = tokens.last() {
-                        if last.end == i && last.start == i - 1 {
-                            let prev_start = last.start;
-                            tokens.pop();
-                            prev_start
-                        } else {
-                            i
-                        }
-                    } else {
-                        i
+        if let Some((needle, delimiter)) = triple_at(bytes, i) {
+            // An `f`/`b`/`r` prefix immediately before the quote belongs to
+            // the string, not to the identifier the scanner already emitted
+            // for it — so take that token back and start the string there.
+            let prefixed = i > start_offset
+                && at(bytes, i.saturating_sub(1)).is_some_and(|prev| {
+                    matches!(prev, b'f' | b'F' | b'b' | b'B' | b'r' | b'R')
+                });
+            let actual_start = if prefixed {
+                match tokens.last() {
+                    Some(last)
+                        if last.end == i && last.start == i.saturating_sub(1) =>
+                    {
+                        let prev_start = last.start;
+                        tokens.pop();
+                        prev_start
                     }
-                } else {
-                    i
+                    _ => i,
                 }
             } else {
                 i
             };
-            let delimiter = if b == b'"' {
-                StringDelimiter::TripleDouble
-            } else {
-                StringDelimiter::TripleSingle
-            };
-            let needle: &[u8] = if b == b'"' { b"\"\"\"" } else { b"'''" };
-            i += 3; // past opening triple quote
-            loop {
-                if i + 2 >= len {
-                    // Multi-line string — extends to next line.
-                    *state = HighlightState::MultiLineString {
-                        delimiter,
-                    };
-                    push_token(tokens, actual_start, len, Token::String);
-                    return Vec::new();
-                }
-                if bytes[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if starts_with_at(bytes, i, needle) {
-                    i += 3;
-                    break;
-                }
-                i += 1;
+            if let Some(end) = scan_to_delimiter(bytes, i.saturating_add(3), needle) {
+                push_token(tokens, actual_start, end, Token::String);
+                i = end;
+                continue;
             }
-            push_token(tokens, actual_start, i, Token::String);
-            continue;
+            // Unterminated — the string carries onto the next line.
+            *state = HighlightState::MultiLineString { delimiter };
+            push_token(tokens, actual_start, len, Token::String);
+            return Vec::new();
         }
 
         // f-string / b-string / r-string prefix before quote
-        if (b == b'f' || b == b'F' || b == b'b' || b == b'B' || b == b'r' || b == b'R')
-            && i + 1 < len
-            && (bytes[i + 1] == b'"' || bytes[i + 1] == b'\'')
+        if matches!(b, b'f' | b'F' | b'b' | b'B' | b'r' | b'R')
+            && let Some(quote) = at(bytes, i.saturating_add(1))
+            && (quote == b'"' || quote == b'\'')
         {
             let start = i;
-            i += 1; // skip prefix
-            let quote = bytes[i];
+            i = i.saturating_add(1); // skip prefix
             let end = scan_string(bytes, i, quote);
             push_token(tokens, start, end, Token::String);
             i = end;
@@ -851,7 +933,10 @@ fn highlight_python_normal(
         }
 
         // Number
-        if b.is_ascii_digit() || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
+        if b.is_ascii_digit()
+                || (b == b'.'
+                    && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+            {
             let start = i;
             let end = scan_number(bytes, i);
             push_token(tokens, start, end, Token::Number);
@@ -867,7 +952,7 @@ fn highlight_python_normal(
                 Token::Keyword
             } else if is_keyword(word, PYTHON_BUILTINS) {
                 Token::Builtin
-            } else if end < len && bytes[end] == b'(' {
+            } else if at(bytes, end) == Some(b'(') {
                 Token::Function
             } else {
                 Token::Plain
@@ -880,8 +965,8 @@ fn highlight_python_normal(
         // Operators
         if is_operator_byte(b) {
             let start = i;
-            while i < len && is_operator_byte(bytes[i]) {
-                i += 1;
+            while at(bytes, i).is_some_and(is_operator_byte) {
+                i = i.saturating_add(1);
             }
             push_token(tokens, start, i, Token::Operator);
             continue;
@@ -932,60 +1017,50 @@ fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
 
     // Continue block comment from previous line.
     if let HighlightState::BlockComment { .. } = state {
-        let start = 0;
-        while i + 1 < len {
-            if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                i += 2;
-                push_token(&mut tokens, start, i, Token::Comment);
-                *state = HighlightState::Normal;
-                break;
-            }
-            i += 1;
-        }
-        if *state != HighlightState::Normal {
-            push_token(&mut tokens, start, len, Token::Comment);
+        // C comments do not nest: the first `*/` closes it, so `nested` is
+        // false and the depth is only ever 1 or 0.
+        let (end, depth) = scan_block_comment(bytes, i, 1, false);
+        i = end;
+        push_token(&mut tokens, 0, i, Token::Comment);
+        if depth == 0 {
+            *state = HighlightState::Normal;
+        } else {
             return tokens;
         }
     }
 
     // Preprocessor directive — if first non-whitespace is `#`.
     // Only check when we haven't already consumed a block comment prefix.
-    if i == 0 {
-        let trimmed_start = bytes.iter().position(|&b| b != b' ' && b != b'\t');
-        if let Some(ts) = trimmed_start
-            && bytes[ts] == b'#' {
-                push_token(&mut tokens, 0, len, Token::Preprocessor);
-                return tokens;
-            }
+    if i == 0
+        && bytes
+            .iter()
+            .find(|&&b| b != b' ' && b != b'\t')
+            .is_some_and(|&b| b == b'#')
+    {
+        push_token(&mut tokens, 0, len, Token::Preprocessor);
+        return tokens;
     }
 
-    while i < len {
-        let b = bytes[i];
+    while let Some(b) = at(bytes, i) {
 
         // Line comment
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+        if is_pair(bytes, i, b'/', b'/') {
             push_token(&mut tokens, i, len, Token::Comment);
             return tokens;
         }
 
-        // Block comment
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+        // Block comment. The old form here decided whether the comment had
+        // closed by reading the two bytes *behind* the cursor, which is both
+        // hard to read and one `i >= 2` guard away from a panic; the helper
+        // returns the answer directly.
+        if is_pair(bytes, i, b'/', b'*') {
             let start = i;
-            i += 2;
-            while i + 1 < len {
-                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                    i += 2;
-                    push_token(&mut tokens, start, i, Token::Comment);
-                    break;
-                }
-                i += 1;
-            }
-            // Check if comment was closed.
-            if i + 1 >= len && !(i >= 2 && bytes[i - 2] == b'*' && bytes[i - 1] == b'/') {
-                i = len;
+            let (end, depth) = scan_block_comment(bytes, i.saturating_add(2), 1, false);
+            i = end;
+            if depth > 0 {
                 *state = HighlightState::BlockComment { depth: 1 };
-                push_token(&mut tokens, start, len, Token::Comment);
             }
+            push_token(&mut tokens, start, i, Token::Comment);
             continue;
         }
 
@@ -999,7 +1074,10 @@ fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         }
 
         // Number
-        if b.is_ascii_digit() || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
+        if b.is_ascii_digit()
+                || (b == b'.'
+                    && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+            {
             let start = i;
             let end = scan_number(bytes, i);
             push_token(&mut tokens, start, end, Token::Number);
@@ -1015,7 +1093,7 @@ fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
                 Token::Keyword
             } else if is_keyword(word, C_TYPES) {
                 Token::Type
-            } else if end < len && bytes[end] == b'(' {
+            } else if at(bytes, end) == Some(b'(') {
                 Token::Function
             } else if word.chars().all(|c| c.is_ascii_uppercase() || c == b'_' as char) && word.len() > 1 {
                 // ALL_CAPS identifiers are usually macros/constants in C.
@@ -1031,8 +1109,8 @@ fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         // Operators
         if is_operator_byte(b) {
             let start = i;
-            while i < len && is_operator_byte(bytes[i]) {
-                i += 1;
+            while at(bytes, i).is_some_and(is_operator_byte) {
+                i = i.saturating_add(1);
             }
             push_token(&mut tokens, start, i, Token::Operator);
             continue;
@@ -1083,71 +1161,57 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
 
     // Continue block comment from previous line.
     if let HighlightState::BlockComment { .. } = state {
-        let start = 0;
-        while i + 1 < len {
-            if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                i += 2;
-                push_token(&mut tokens, start, i, Token::Comment);
-                *state = HighlightState::Normal;
-                break;
-            }
-            i += 1;
-        }
-        if *state != HighlightState::Normal {
-            push_token(&mut tokens, start, len, Token::Comment);
+        // JavaScript comments do not nest, so `nested` is false.
+        let (end, depth) = scan_block_comment(bytes, i, 1, false);
+        i = end;
+        push_token(&mut tokens, 0, i, Token::Comment);
+        if depth == 0 {
+            *state = HighlightState::Normal;
+        } else {
             return tokens;
         }
     }
 
-    // Continue template literal from previous line.
+    // Continue template literal from previous line. This is `scan_string`'s
+    // loop with the opening quote already consumed on an earlier line, so it
+    // is spelled the same way — including clamping the escape step, since a
+    // line ending in `\` inside a template literal has the same overshoot.
     if let HighlightState::MultiLineString {
         delimiter: StringDelimiter::Backtick,
     } = state
     {
-        let start = 0;
-        while i < len {
-            if bytes[i] == b'\\' {
-                i += 2;
-                continue;
-            }
-            if bytes[i] == b'`' {
-                i += 1;
-                push_token(&mut tokens, start, i, Token::String);
+        while let Some(b) = at(bytes, i) {
+            if b == b'\\' {
+                i = i.saturating_add(2).min(len);
+            } else if b == b'`' {
+                i = i.saturating_add(1);
+                push_token(&mut tokens, 0, i, Token::String);
                 *state = HighlightState::Normal;
                 break;
+            } else {
+                i = i.saturating_add(1);
             }
-            i += 1;
         }
         if *state != HighlightState::Normal {
-            push_token(&mut tokens, start, len, Token::String);
+            push_token(&mut tokens, 0, len, Token::String);
             return tokens;
         }
     }
 
-    while i < len {
-        let b = bytes[i];
+    while let Some(b) = at(bytes, i) {
 
         // Line comment
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+        if is_pair(bytes, i, b'/', b'/') {
             push_token(&mut tokens, i, len, Token::Comment);
             return tokens;
         }
 
         // Block comment
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+        if is_pair(bytes, i, b'/', b'*') {
             let start = i;
-            i += 2;
-            let mut closed = false;
-            while i + 1 < len {
-                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                    i += 2;
-                    closed = true;
-                    break;
-                }
-                i += 1;
-            }
-            if !closed {
-                i = len;
+            let (end, depth) = scan_block_comment(bytes, i.saturating_add(2), 1, false);
+            i = end;
+            if depth > 0 {
                 *state = HighlightState::BlockComment { depth: 1 };
             }
             push_token(&mut tokens, start, i, Token::Comment);
@@ -1157,20 +1221,14 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
         // Template literal
         if b == b'`' {
             let start = i;
-            i += 1;
-            while i < len {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if bytes[i] == b'`' {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-            // Check if it closed.
-            if i <= len && i > start + 1 && bytes[i - 1] == b'`' {
+            // The old form decided whether the literal had closed by reading
+            // the byte *behind* the cursor, and needed an `i <= len` guard to
+            // do it — because the escape step could leave `i` at `len + 1`,
+            // where `bytes[i - 1]` is `bytes[len]`. `scan_to_delimiter`
+            // answers the question directly, and its `None` is precisely the
+            // "runs onto the next line" case.
+            if let Some(end) = scan_to_delimiter(bytes, i.saturating_add(1), b"`") {
+                i = end;
                 push_token(&mut tokens, start, i, Token::String);
             } else {
                 *state = HighlightState::MultiLineString {
@@ -1183,38 +1241,37 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
         }
 
         // Regex literal — simple heuristic: `/` after `=`, `(`, `,`, `[`, `!`, `&`, `|`, `:`, `;`, `{`, `}`, `return`, newline start
-        if b == b'/' && i + 1 < len && bytes[i + 1] != b'/' && bytes[i + 1] != b'*' {
-            let is_regex = if i == 0 {
-                true
-            } else {
-                let prev_non_ws = bytes[..i]
-                    .iter()
-                    .rposition(|&c| c != b' ' && c != b'\t');
-                match prev_non_ws {
-                    Some(p) => matches!(
-                        bytes[p],
-                        b'=' | b'(' | b',' | b'[' | b'!' | b'&' | b'|' | b':' | b';' | b'{' | b'}'
-                    ),
-                    None => true,
-                }
+        if b == b'/'
+            && at(bytes, i.saturating_add(1)).is_some_and(|c| c != b'/' && c != b'*')
+        {
+            // Whether a `/` opens a regex or divides depends on what came
+            // before it. Anything that cannot end an expression — an
+            // operator, an opening bracket, a separator — means the `/` must
+            // start something rather than continue it.
+            let is_regex = match bytes
+                .get(..i)
+                .and_then(|before| before.iter().rposition(|&c| c != b' ' && c != b'\t'))
+                .and_then(|p| at(bytes, p))
+            {
+                Some(prev) => matches!(
+                    prev,
+                    b'=' | b'(' | b',' | b'[' | b'!' | b'&' | b'|' | b':' | b';' | b'{' | b'}'
+                ),
+                // Nothing but whitespace before it, so there is no expression
+                // for it to divide.
+                None => true,
             };
             if is_regex {
                 let start = i;
-                i += 1;
-                while i < len {
-                    if bytes[i] == b'\\' {
-                        i += 2;
-                        continue;
-                    }
-                    if bytes[i] == b'/' {
-                        i += 1;
-                        // Regex flags
-                        while i < len && bytes[i].is_ascii_alphabetic() {
-                            i += 1;
-                        }
-                        break;
-                    }
-                    i += 1;
+                // A regex body escapes with backslashes exactly as a string
+                // does, so the same scanner serves — and the same clamp
+                // matters: the old loop stepped `i += 2` past a trailing
+                // backslash and pushed a token ending at `len + 1`, which
+                // panics the renderer the moment it slices the line.
+                i = scan_to_delimiter(bytes, i.saturating_add(1), b"/").unwrap_or(len);
+                // Regex flags (`/re/gi`) belong to the literal.
+                while at(bytes, i).is_some_and(|c| c.is_ascii_alphabetic()) {
+                    i = i.saturating_add(1);
                 }
                 push_token(&mut tokens, start, i, Token::String);
                 continue;
@@ -1231,7 +1288,10 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
         }
 
         // Number
-        if b.is_ascii_digit() || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
+        if b.is_ascii_digit()
+                || (b == b'.'
+                    && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+            {
             let start = i;
             let end = scan_number(bytes, i);
             push_token(&mut tokens, start, end, Token::Number);
@@ -1242,15 +1302,18 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
         // Identifier
         if b.is_ascii_alphabetic() || b == b'_' || b == b'$' {
             let start = i;
-            while i < len && (is_ident_byte(bytes[i]) || bytes[i] == b'$') {
-                i += 1;
+            while at(bytes, i).is_some_and(|c| is_ident_byte(c) || c == b'$') {
+                i = i.saturating_add(1);
             }
-            let word = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            let word = bytes
+                .get(start..i)
+                .and_then(|w| std::str::from_utf8(w).ok())
+                .unwrap_or("");
             let kind = if is_keyword(word, JS_KEYWORDS) {
                 Token::Keyword
             } else if is_keyword(word, JS_BUILTINS) {
                 Token::Builtin
-            } else if i < len && bytes[i] == b'(' {
+            } else if at(bytes, i) == Some(b'(') {
                 Token::Function
             } else {
                 Token::Plain
@@ -1262,8 +1325,8 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
         // Operators
         if is_operator_byte(b) {
             let start = i;
-            while i < len && is_operator_byte(bytes[i]) {
-                i += 1;
+            while at(bytes, i).is_some_and(is_operator_byte) {
+                i = i.saturating_add(1);
             }
             push_token(&mut tokens, start, i, Token::Operator);
             continue;
@@ -1291,14 +1354,12 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
 fn highlight_json(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
     let _ = state; // JSON has no multi-line constructs we need to track.
     let bytes = line.as_bytes();
-    let len = bytes.len();
     let mut tokens = Vec::new();
     let mut i = 0;
 
     // Track whether the next string is a key (true) or value (false).
     // A string is a key if it's followed (ignoring whitespace) by `:`.
-    while i < len {
-        let b = bytes[i];
+    while let Some(b) = at(bytes, i) {
 
         // String
         if b == b'"' {
@@ -1306,10 +1367,10 @@ fn highlight_json(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
             let end = scan_string(bytes, i, b'"');
             // Look ahead for `:` to decide key vs value.
             let mut j = end;
-            while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
-                j += 1;
+            while at(bytes, j).is_some_and(|c| c == b' ' || c == b'\t') {
+                j = j.saturating_add(1);
             }
-            let kind = if j < len && bytes[j] == b':' {
+            let kind = if at(bytes, j) == Some(b':') {
                 Token::Function // Use Function colour for keys (blue).
             } else {
                 Token::String
@@ -1320,10 +1381,10 @@ fn highlight_json(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         }
 
         // Number
-        if b.is_ascii_digit() || b == b'-' || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
+        if b.is_ascii_digit() || b == b'-' || (b == b'.' && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit())) {
             // For `-`, only treat as number start if followed by digit.
             if b == b'-' {
-                if i + 1 < len && bytes[i + 1].is_ascii_digit() {
+                if at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()) {
                     let start = i;
                     i += 1; // skip minus
                     let end = scan_number(bytes, i);
@@ -1383,15 +1444,35 @@ fn highlight_json(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
 // ============================================================================
 
 fn highlight_toml(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
-    let _ = state;
     let bytes = line.as_bytes();
     let len = bytes.len();
     let mut tokens = Vec::new();
     let mut i = 0;
 
+    // Continue a multi-line string from the previous line. Before this arm
+    // existed, `highlight_toml` did `let _ = state;` and dropped the carry
+    // entirely, so the second and later lines of a `"""…"""` were tokenized
+    // as if they were keys and values.
+    if let HighlightState::MultiLineString { delimiter } = state {
+        let needle: &[u8] = match delimiter {
+            StringDelimiter::TripleSingle => b"'''",
+            // TOML has no backtick or raw-string form; anything else is a
+            // stale state from another language and ends here.
+            _ => b"\"\"\"",
+        };
+        if let Some(end) = scan_to_delimiter(bytes, 0, needle) {
+            push_token(&mut tokens, 0, end, Token::String);
+            *state = HighlightState::Normal;
+            i = end;
+        } else {
+            push_token(&mut tokens, 0, len, Token::String);
+            return tokens;
+        }
+    }
+
     // Skip leading whitespace.
-    while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
-        i += 1;
+    while at(bytes, i).is_some_and(|c| c == b' ' || c == b'\t') {
+        i = i.saturating_add(1);
     }
     if i > 0 {
         push_token(&mut tokens, 0, i, Token::Plain);
@@ -1402,13 +1483,13 @@ fn highlight_toml(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
     }
 
     // Comment line
-    if bytes[i] == b'#' {
+    if at(bytes, i) == Some(b'#') {
         push_token(&mut tokens, i, len, Token::Comment);
         return tokens;
     }
 
     // Section header: `[section]` or `[[array]]`
-    if bytes[i] == b'[' {
+    if at(bytes, i) == Some(b'[') {
         push_token(&mut tokens, i, len, Token::Attribute);
         return tokens;
     }
@@ -1416,61 +1497,51 @@ fn highlight_toml(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
     // Key = value
     // Scan key (everything up to `=`).
     let key_start = i;
-    while i < len && bytes[i] != b'=' && bytes[i] != b'#' {
-        i += 1;
+    while at(bytes, i).is_some_and(|c| c != b'=' && c != b'#') {
+        i = i.saturating_add(1);
     }
-    if i < len && bytes[i] == b'=' {
+    if at(bytes, i) == Some(b'=') {
         // Key
         push_token(&mut tokens, key_start, i, Token::Function);
         // Equals sign
-        push_token(&mut tokens, i, i + 1, Token::Operator);
-        i += 1;
+        push_token(&mut tokens, i, i.saturating_add(1), Token::Operator);
+        i = i.saturating_add(1);
 
         // Value — highlight strings, numbers, booleans.
-        while i < len {
-            let b = bytes[i];
+        while let Some(b) = at(bytes, i) {
 
             if b == b'#' {
                 push_token(&mut tokens, i, len, Token::Comment);
                 return tokens;
             }
 
-            if b == b'"' {
-                // Triple-quoted string
-                if i + 2 < len && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
-                    let start = i;
-                    i += 3;
-                    while i + 2 < len {
-                        if bytes[i] == b'"' && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
-                            i += 3;
-                            push_token(&mut tokens, start, i, Token::String);
-                            break;
-                        }
-                        i += 1;
-                    }
-                    if i > start {
-                        push_token(&mut tokens, start, i.min(len), Token::String);
-                    }
+            // Multi-line strings: `"""…"""` (basic) and `'''…'''` (literal).
+            // Both are ordinary TOML — `description = """…"""` spanning lines
+            // is in half the Cargo.toml files in this tree.
+            if let Some((needle, delimiter)) = triple_at(bytes, i) {
+                let start = i;
+                if let Some(end) = scan_to_delimiter(bytes, i.saturating_add(3), needle) {
+                    push_token(&mut tokens, start, end, Token::String);
+                    i = end;
                     continue;
                 }
-                let start = i;
-                let end = scan_string(bytes, i, b'"');
-                push_token(&mut tokens, start, end, Token::String);
-                i = end;
-                continue;
+                // Unclosed: the string runs onto the next line.
+                *state = HighlightState::MultiLineString { delimiter };
+                push_token(&mut tokens, start, len, Token::String);
+                return tokens;
             }
 
-            if b == b'\'' {
+            if b == b'"' || b == b'\'' {
                 let start = i;
-                let end = scan_string(bytes, i, b'\'');
+                let end = scan_string(bytes, i, b);
                 push_token(&mut tokens, start, end, Token::String);
                 i = end;
                 continue;
             }
 
             if b.is_ascii_digit()
-                || (b == b'-' && i + 1 < len && bytes[i + 1].is_ascii_digit())
-                || (b == b'+' && i + 1 < len && bytes[i + 1].is_ascii_digit())
+                || (b == b'-' && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+                || (b == b'+' && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
             {
                 let start = i;
                 if b == b'-' || b == b'+' {
@@ -1544,61 +1615,46 @@ fn highlight_markdown(line: &str, state: &mut HighlightState) -> Vec<StyledToken
     let mut i = 0;
 
     // Heading: lines starting with `#`
-    if bytes[0] == b'#' {
+    if at(bytes, 0) == Some(b'#') {
         push_token(&mut tokens, 0, len, Token::Heading);
         return tokens;
     }
 
     // Unordered list marker
-    if len >= 2
-        && (bytes[0] == b'-' || bytes[0] == b'*' || bytes[0] == b'+')
-        && bytes[1] == b' '
+    if at(bytes, 0).is_some_and(|c| matches!(c, b'-' | b'*' | b'+')) && at(bytes, 1) == Some(b' ')
     {
         push_token(&mut tokens, 0, 2, Token::Keyword);
         i = 2;
     }
 
     // Ordered list marker: `1. `, `12. ` etc.
-    if bytes[0].is_ascii_digit() {
+    if at(bytes, 0).is_some_and(|c| c.is_ascii_digit()) {
         let mut j = 0;
-        while j < len && bytes[j].is_ascii_digit() {
-            j += 1;
+        while at(bytes, j).is_some_and(|c| c.is_ascii_digit()) {
+            j = j.saturating_add(1);
         }
-        if j < len && bytes[j] == b'.' && j + 1 < len && bytes[j + 1] == b' ' {
-            push_token(&mut tokens, 0, j + 2, Token::Keyword);
-            i = j + 2;
+        if at(bytes, j) == Some(b'.') && at(bytes, j.saturating_add(1)) == Some(b' ') {
+            let after = j.saturating_add(2);
+            push_token(&mut tokens, 0, after, Token::Keyword);
+            i = after;
         }
     }
 
     // Inline formatting
-    while i < len {
-        let b = bytes[i];
+    while let Some(b) = at(bytes, i) {
 
         // Inline code: `...`
         if b == b'`' {
             let start = i;
-            i += 1;
-            while i < len && bytes[i] != b'`' {
-                i += 1;
-            }
-            if i < len {
-                i += 1; // include closing backtick
-            }
+            i = close_or_end(bytes, i.saturating_add(1), b"`");
             push_token(&mut tokens, start, i, Token::CodeBlock);
             continue;
         }
 
         // Bold: **...**
-        if b == b'*' && i + 1 < len && bytes[i + 1] == b'*' {
+        if is_pair(bytes, i, b'*', b'*') {
             let start = i;
-            i += 2;
-            while i + 1 < len {
-                if bytes[i] == b'*' && bytes[i + 1] == b'*' {
-                    i += 2;
-                    break;
-                }
-                i += 1;
-            }
+            i = close_or_end(bytes, i.saturating_add(2), b"**");
             push_token(&mut tokens, start, i, Token::Bold);
             continue;
         }
@@ -1606,13 +1662,7 @@ fn highlight_markdown(line: &str, state: &mut HighlightState) -> Vec<StyledToken
         // Italic: *...*
         if b == b'*' {
             let start = i;
-            i += 1;
-            while i < len && bytes[i] != b'*' {
-                i += 1;
-            }
-            if i < len {
-                i += 1;
-            }
+            i = close_or_end(bytes, i.saturating_add(1), b"*");
             push_token(&mut tokens, start, i, Token::Italic);
             continue;
         }
@@ -1620,27 +1670,14 @@ fn highlight_markdown(line: &str, state: &mut HighlightState) -> Vec<StyledToken
         // Link: [text](url)
         if b == b'[' {
             let start = i;
-            i += 1;
-            // Find `](`
-            let mut found_bracket = false;
-            while i < len {
-                if bytes[i] == b']' && i + 1 < len && bytes[i + 1] == b'(' {
-                    found_bracket = true;
-                    i += 2;
-                    // Find closing `)`
-                    while i < len && bytes[i] != b')' {
-                        i += 1;
-                    }
-                    if i < len {
-                        i += 1;
-                    }
-                    break;
-                }
-                i += 1;
-            }
-            if found_bracket {
+            // A link is only a link once `](` has been seen; until then the
+            // `[` could equally be a stray bracket, so the two halves are
+            // found separately rather than with one scan.
+            if let Some(after_bracket) = find_close(bytes, i.saturating_add(1), b"](") {
+                i = close_or_end(bytes, after_bracket, b")");
                 push_token(&mut tokens, start, i, Token::Link);
             } else {
+                i = len;
                 push_token(&mut tokens, start, i, Token::Plain);
             }
             continue;
@@ -1678,8 +1715,7 @@ fn highlight_shell(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
     let mut tokens = Vec::new();
     let mut i = 0;
 
-    while i < len {
-        let b = bytes[i];
+    while let Some(b) = at(bytes, i) {
 
         // Comment (but not inside a string)
         if b == b'#' {
@@ -1690,37 +1726,36 @@ fn highlight_shell(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         // Variable: $VAR, ${VAR}, $0-$9, $$, $?, $!, $@, $*
         if b == b'$' {
             let start = i;
-            i += 1;
-            if i < len {
-                if bytes[i] == b'{' {
-                    // ${VAR}
-                    i += 1;
-                    while i < len && bytes[i] != b'}' {
-                        i += 1;
-                    }
-                    if i < len {
-                        i += 1; // include `}`
-                    }
-                } else if bytes[i] == b'(' {
-                    // $(command) — treat as variable.
-                    i += 1;
-                    let mut paren_depth = 1u32;
-                    while i < len && paren_depth > 0 {
-                        if bytes[i] == b'(' {
-                            paren_depth += 1;
-                        } else if bytes[i] == b')' {
-                            paren_depth -= 1;
-                        }
-                        i += 1;
-                    }
-                } else if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
-                    while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                        i += 1;
-                    }
-                } else {
-                    // Special variables: $$, $?, $!, $@, $*, $#
-                    i += 1;
+            i = i.saturating_add(1);
+            match at(bytes, i) {
+                // ${VAR} — runs to the closing brace, or to the end of the
+                // line if the user has not typed it yet.
+                Some(b'{') => {
+                    i = close_or_end(bytes, i.saturating_add(1), b"}");
                 }
+                // $(command) — treat as one variable, matching nested parens.
+                Some(b'(') => {
+                    i = i.saturating_add(1);
+                    let mut paren_depth = 1_u32;
+                    while paren_depth > 0 {
+                        match at(bytes, i) {
+                            Some(b'(') => paren_depth = paren_depth.saturating_add(1),
+                            Some(b')') => paren_depth = paren_depth.saturating_sub(1),
+                            Some(_) => {}
+                            None => break,
+                        }
+                        i = i.saturating_add(1);
+                    }
+                }
+                Some(c) if c.is_ascii_alphanumeric() || c == b'_' => {
+                    while at(bytes, i).is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') {
+                        i = i.saturating_add(1);
+                    }
+                }
+                // Special variables: $$, $?, $!, $@, $*, $#
+                Some(_) => i = i.saturating_add(1),
+                // A bare `$` at the end of the line.
+                None => {}
             }
             push_token(&mut tokens, start, i, Token::Variable);
             continue;
@@ -1756,10 +1791,11 @@ fn highlight_shell(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         // Pipe, redirect, background
         if b == b'|' || b == b'>' || b == b'<' || b == b'&' {
             let start = i;
-            // Handle `||`, `&&`, `>>`, `<<`, `|&`
-            i += 1;
-            if i < len && (bytes[i] == bytes[i - 1] || bytes[i] == b'&') {
-                i += 1;
+            // Handle `||`, `&&`, `>>`, `<<`, `|&`. `b` is the byte at `start`,
+            // so the doubling test needs no backwards read.
+            i = i.saturating_add(1);
+            if at(bytes, i).is_some_and(|c| c == b || c == b'&') {
+                i = i.saturating_add(1);
             }
             push_token(&mut tokens, start, i, Token::Operator);
             continue;
@@ -1776,10 +1812,13 @@ fn highlight_shell(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         if b.is_ascii_alphabetic() || b == b'_' {
             let start = i;
             // Shell identifiers can include `-` in command names.
-            while i < len && (is_ident_byte(bytes[i]) || bytes[i] == b'-') {
-                i += 1;
+            while at(bytes, i).is_some_and(|c| is_ident_byte(c) || c == b'-') {
+                i = i.saturating_add(1);
             }
-            let word = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            let word = bytes
+                .get(start..i)
+                .and_then(|w| std::str::from_utf8(w).ok())
+                .unwrap_or("");
             let kind = if is_keyword(word, SHELL_KEYWORDS) {
                 Token::Keyword
             } else if is_keyword(word, SHELL_BUILTINS) {
@@ -1819,6 +1858,11 @@ fn highlight_shell(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     /// Helper: highlight a line and collect (kind, text) pairs.
@@ -1902,6 +1946,234 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 17, "only {checked} lines checked");
+    }
+
+    /// Every language, so a new one cannot be added without being swept by
+    /// the truncation test below.
+    const ALL_LANGUAGES: &[Language] = &[
+        Language::Plain,
+        Language::Rust,
+        Language::C,
+        Language::Python,
+        Language::JavaScript,
+        Language::Html,
+        Language::Css,
+        Language::Shell,
+        Language::Toml,
+        Language::Yaml,
+        Language::Json,
+        Language::Markdown,
+    ];
+
+    #[test]
+    fn no_tokenizer_runs_off_the_end_of_a_truncated_line() {
+        // Regression: `scan_string` stepped two bytes past a backslash without
+        // checking that there was a second byte to step over, so a line ending
+        // in `\` produced a token whose `end` was `line.len() + 1`. Nothing
+        // clamped it in any of the ten call sites, so the first `line[..end]`
+        // in the renderer panicked. `advance` had the identical bug for a
+        // multi-byte character truncated by the end of the line.
+        //
+        // A line ending mid-construct is not exotic — it is what the buffer
+        // holds for the whole time the user is typing the construct.
+        let endings = [
+            "\\",       // dangling escape
+            "\"\\",     // open string, dangling escape
+            "'\\",      // open char, dangling escape
+            "\"",       // unterminated string
+            "/*",       // unterminated block comment
+            "/",        // half an operator or comment
+            "0x",       // radix prefix with no digits
+            "1e",       // exponent with no digits
+            "1.",       // decimal point with no fraction
+            "r#\"",     // unterminated Rust raw string
+            "`",        // unterminated JS template literal
+            "`\\",      // open JS template literal, dangling escape
+            "/\\",      // open JS regex literal, dangling escape
+            "/ab\\",    // open JS regex literal with a body, dangling escape
+            "<",        // unterminated HTML tag
+            "&",        // unterminated HTML entity
+            "$",        // shell expansion with no name
+        ];
+        // Prefixes put the ending somewhere other than offset 0, and the
+        // non-ASCII ones also exercise `advance`'s truncation clamp.
+        let prefixes = ["", "let x = ", "日本語", "😀", "a\u{300}"];
+        // Fresh state, and again resuming from each multi-line state, since
+        // those re-enter the scanners mid-construct — which is the case the
+        // per-line state memo actually replays on every keystroke.
+        let states = [
+            HighlightState::Normal,
+            HighlightState::BlockComment { depth: 1 },
+            HighlightState::MultiLineString {
+                delimiter: StringDelimiter::TripleDouble,
+            },
+            HighlightState::MultiLineString {
+                delimiter: StringDelimiter::TripleSingle,
+            },
+            HighlightState::MultiLineString {
+                delimiter: StringDelimiter::Backtick,
+            },
+            HighlightState::MultiLineString {
+                delimiter: StringDelimiter::RustRaw { hashes: 1 },
+            },
+            HighlightState::CodeFence,
+        ];
+
+        let mut checked = 0_usize;
+        for &lang in ALL_LANGUAGES {
+            for prefix in prefixes {
+                for ending in endings {
+                    let line = format!("{prefix}{ending}");
+                    for state in &states {
+                        let mut state = state.clone();
+                        let toks = highlight_line(&line, lang, &mut state);
+                        for t in &toks {
+                            assert!(
+                                t.start <= t.end && t.end <= line.len(),
+                                "{lang:?}: token {}..{} out of bounds for {line:?} \
+                                 (len {})",
+                                t.start,
+                                t.end,
+                                line.len()
+                            );
+                            assert!(
+                                line.is_char_boundary(t.start)
+                                    && line.is_char_boundary(t.end),
+                                "{lang:?}: token {}..{} splits a character in \
+                                 {line:?}",
+                                t.start,
+                                t.end
+                            );
+                            // The slice itself — the operation that panicked.
+                            let _ = &line[t.start..t.end];
+                        }
+                        checked = checked.saturating_add(1);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            checked,
+            ALL_LANGUAGES.len() * prefixes.len() * endings.len() * states.len(),
+            "sweep did not cover every combination"
+        );
+    }
+
+    #[test]
+    fn a_closed_toml_triple_quoted_string_is_one_token_not_two() {
+        // Regression: the branch pushed the token once on finding the closing
+        // `"""` and then again on the way out, so every single-line `"""…"""`
+        // was drawn twice, one draw exactly on top of the other.
+        let line = "k = \"\"\"abc\"\"\"";
+        let strings: Vec<_> = tokens_of(line, Language::Toml)
+            .into_iter()
+            .filter(|(kind, _)| *kind == Token::String)
+            .collect();
+        assert_eq!(
+            strings,
+            vec![(Token::String, "\"\"\"abc\"\"\"".to_string())],
+            "expected exactly one String token"
+        );
+    }
+
+    #[test]
+    fn a_toml_multi_line_string_carries_to_the_following_lines() {
+        // Regression: `highlight_toml` began `let _ = state;`, so it neither
+        // set nor read the multi-line carry. An unterminated `"""` coloured
+        // four bytes and stopped, and the following lines were tokenized as
+        // though they were `key = value` pairs.
+        let mut state = HighlightState::Normal;
+
+        let open = "description = \"\"\"first";
+        let toks = highlight_line(open, Language::Toml, &mut state);
+        assert_eq!(
+            state,
+            HighlightState::MultiLineString {
+                delimiter: StringDelimiter::TripleDouble
+            },
+            "opening ``\"\"\"`` should carry to the next line"
+        );
+        let last = toks.last().expect("expected a token");
+        assert_eq!(
+            (last.kind, last.end),
+            (Token::String, open.len()),
+            "the string should run to the end of the line"
+        );
+
+        // A middle line is entirely string, and does not close the state.
+        let middle = "  key = not actually a key";
+        let toks = highlight_line(middle, Language::Toml, &mut state);
+        assert_eq!(
+            toks.iter().map(|t| t.kind).collect::<Vec<_>>(),
+            vec![Token::String],
+            "a line inside the string is one String token and nothing else"
+        );
+        assert!(matches!(state, HighlightState::MultiLineString { .. }));
+
+        // The closing line ends the string and resumes normal tokenizing.
+        let close = "last\"\"\" # trailing comment";
+        let toks = highlight_line(close, Language::Toml, &mut state);
+        assert_eq!(state, HighlightState::Normal, "``\"\"\"`` should close it");
+        assert_eq!(
+            toks.first().map(|t| (t.kind, t.end)),
+            Some((Token::String, 7)),
+            "the string should end just past the closing delimiter"
+        );
+
+        // `'''` is the literal form and carries the same way.
+        let mut state = HighlightState::Normal;
+        highlight_line("k = '''open", Language::Toml, &mut state);
+        assert_eq!(
+            state,
+            HighlightState::MultiLineString {
+                delimiter: StringDelimiter::TripleSingle
+            }
+        );
+    }
+
+    #[test]
+    fn an_unclosed_markdown_span_colours_the_rest_of_the_line() {
+        // All four inline spans are highlighted optimistically: while the
+        // user is still typing one there is no closing marker yet, so the
+        // alternative is for the text to flicker uncoloured as it is typed.
+        //
+        // Regression: bold alone stopped one byte short of the end, because
+        // its scan was `while i + 1 < len` and nothing extended it after the
+        // loop. `**abc` bolded `**ab` and left `c` plain — not the
+        // colour-it-all answer and not the colour-none answer either.
+        for (line, kind, text) in [
+            ("**abc", Token::Bold, "**abc"),
+            ("*abc", Token::Italic, "*abc"),
+            ("`abc", Token::CodeBlock, "`abc"),
+            ("[abc", Token::Plain, "[abc"),
+        ] {
+            let toks = tokens_of(line, Language::Markdown);
+            assert!(
+                toks.contains(&(kind, text.to_string())),
+                "{line:?}: expected {kind:?} {text:?}, got {toks:?}"
+            );
+        }
+
+        // And the closed forms still stop at the closing marker.
+        for (line, kind, text) in [
+            ("**a** tail", Token::Bold, "**a**"),
+            ("*a* tail", Token::Italic, "*a*"),
+            ("`a` tail", Token::CodeBlock, "`a`"),
+            ("[a](u) tail", Token::Link, "[a](u)"),
+        ] {
+            let toks = tokens_of(line, Language::Markdown);
+            assert!(
+                toks.contains(&(kind, text.to_string())),
+                "{line:?}: expected {kind:?} {text:?}, got {toks:?}"
+            );
+        }
+
+        // A `[` with no `](` is not a link, however much text follows.
+        let toks = tokens_of("[not a link) at all", Language::Markdown);
+        assert!(
+            !toks.iter().any(|(k, _)| *k == Token::Link),
+            "expected no Link token, got {toks:?}"
+        );
     }
 
     #[test]

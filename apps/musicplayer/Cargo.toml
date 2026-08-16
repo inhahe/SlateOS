@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Music Player — audio playback with playlist management"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

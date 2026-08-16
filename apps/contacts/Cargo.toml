@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Contacts — address book and contact manager"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

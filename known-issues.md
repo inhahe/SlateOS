@@ -69,6 +69,11 @@ acted on; it wants a `requests/c-b-…` once there is a concrete proposal.
 
 ## Almost no `apps/` crate opts into the workspace lints (lane C)
 
+**Status: PARTIALLY FIXED 2026-08-16** (lane C) — the opt-in has landed
+tree-wide; the warning backlog it exposed is what remains open. See
+"What the measurement actually found" at the end of this entry; the original
+report follows first.
+
 **Status: OPEN 2026-08-15** (lane C). Noticed while checking whether
 `clippy::arithmetic_side_effects` applied to a fix in `apps/kanban`. It does
 not — because `apps/kanban/Cargo.toml` has no `[lints] workspace = true`.
@@ -89,6 +94,436 @@ crate by crate, fixing each crate's fallout as it goes, rather than as one
 tree-wide commit that has to be reverted the moment anything is red. Worth
 doing: a lint that is configured but not applied is worse than no lint, because
 the workspace config reads as though the guarantee is in force.
+
+### What the measurement actually found (2026-08-16)
+
+The paragraph above guessed that `clippy::all = deny` would break crates, and
+prescribed a crate-by-crate rollout on that basis. **The guess was wrong, and
+it was wrong in the direction that mattered.** Rather than assume, the opt-in
+was added to all 124 crates at once *as a measurement* and the whole tree run:
+
+```
+CARGO_TARGET_DIR=target-hl cargo clippy --keep-going --message-format=short \
+    -p <all 141 apps packages> --target x86_64-pc-windows-gnu
+```
+
+Result: **5174 findings, 0 errors, in 120 of the 141 packages.** Nothing goes
+red. Two independent reasons:
+
+- Almost every finding is one of the four `warn`-level correctness lints
+  `CLAUDE.md` asks for, not a `clippy::all` lint. The explicit
+  `arithmetic_side_effects = "warn"` / `indexing_slicing = "warn"` in the
+  workspace config *overrides* the group's `deny`, so those never error.
+- `grep -rn 'D warnings|deny(warnings)|Dwarnings' scripts/ .cargo/ Cargo.toml`
+  is empty. No build, script, or CI path in this tree turns warnings into
+  errors, so a warning backlog cannot break anyone.
+
+So the opt-in landed as **one tree-wide commit** after all. The crate-by-crate
+advice was mitigating a risk that does not exist, at the cost of 124 commits
+and of leaving the lints unenforced for however long that took.
+
+What remains open is the backlog itself:
+
+| Finding | Count |
+|---|---:|
+| `arithmetic_side_effects` ("arithmetic … unexpected side-effects") | 3161 |
+| `indexing_slicing` — "indexing may panic" | 1796 |
+| `indexing_slicing` — "slicing may panic" | 123 |
+| `expect_used` on an `Option` | 8 |
+| assorted `pedantic`/style (Debug formatting, manual `String::new`, …) | 86 |
+
+Worst crates: `editor` 500, `markdowneditor` 348, `explorer` 264, `paint` 234,
+`backup` 198, `imageviewer` 193, `indexer` 149, `connect4` 123, `rssreader`
+117, `spreadsheet` 106. Twenty-one packages are already clean, and
+`contacts`, `simon`, `diskcleanup`, `pomodoro` and `radio` have exactly one
+finding each.
+
+The 1919 `indexing_slicing` findings are the ones worth attacking first: that
+is precisely the lint class that would have caught the eighteen byte/character
+sites recorded above at the moment they were written. `arithmetic_side_effects`
+is the larger pile but the lower yield — most of its 3161 hits are loop
+counters and layout arithmetic on values that cannot overflow, and rewriting
+those to `checked_*` buys correctness theatre rather than correctness. Take
+`indexing_slicing` to zero first; then judge `arithmetic_side_effects` on
+whether a per-crate `allow` with a justification beats 3161 mechanical edits.
+
+### Sweep progress: `editor` 500 → 80, `indexing_slicing` 0 (2026-08-16)
+
+The worst crate is done. `apps/editor` went from ~200 `indexing_slicing`
+findings to **0** (total warnings 500 → 80, all of them
+`arithmetic_side_effects`); tests 108 → 119, all passing. Commits `a0dcac89a`
+(`highlight.rs`) and `64998fde2` (`main.rs`, `syntree.rs`).
+
+**The sweep was not cosmetic — it found four reachable bugs**, listed
+separately below. That is the answer to "is this lint class worth the effort":
+one crate's worth of it turned up four defects that no existing test caught,
+in code that had been reviewed and shipped. The remaining worst crates are
+`markdowneditor` 348, `explorer` 264, `paint` 234, `backup` 198,
+`imageviewer` 193, `indexer` 149.
+
+Three patterns did most of the work and should be reused:
+
+- **`i < len && bytes[i]` states the bound twice**, and the two drift. Replace
+  with an `Option`-returning accessor (`at`, `starts_with_at`,
+  `scan_to_delimiter`) so the bound is stated once, in one place.
+- **A `Vec` plus an index is an invariant expressed as a convention.**
+  `documents: Vec<Document>` + `active_tab: usize` became a `Tabs` type whose
+  first document is a plain field, so "there is always a document open" is
+  what the type says rather than what five call sites assumed.
+- **A stale index handed back across a rebuild is the real hazard**, not the
+  in-bounds access. `SyntaxTree::node`, `Document::line` and
+  `Document::replace_in_line` all now return `Option`/`bool` rather than
+  trusting an index a caller has held since before the last edit.
+
+Test modules carry `#![allow(clippy::indexing_slicing, clippy::unwrap_used,
+clippy::panic)]` — a test that indexes out of range should fail loudly and
+point at the line that did it.
+
+### Sweep progress: `markdowneditor` 348 → 40, `indexing_slicing` 0 (2026-08-16)
+
+Second worst crate done, and the same three patterns did the work again.
+`apps/markdowneditor` went from 38 `indexing_slicing` findings to **0** (total
+warnings 348 → 40, all `arithmetic_side_effects`); tests 192 → 199. Commit
+`2a5c23082`. Two more reachable bugs fell out of it, recorded below.
+
+The tab pattern was fixed **structurally rather than a second time**. Rather
+than repeat the editor's `Tabs` fix in markdowneditor's `documents:
+Vec<Document>` + `active_doc: usize`, the editor's local `Tabs` was
+generalised to `guitk::tabs::Tabs<T>` and the local copy deleted, so both
+editors — and the next app with a tab bar — share one type whose first element
+is a plain field. Non-emptiness is now a property of the type, not a
+convention eight index expressions relied on. `Tabs<T>` has 8 tests of its own
+and a doctest; guitk 701 → 709.
+
+### `textfind`: the fold-then-index defect family, swept tree-wide (2026-08-16)
+
+The editor's bugs 2, 3 and 4 above are not an editor problem — they are what
+*every* hand-written case-insensitive search in this tree looked like. A sweep
+found six more instances across five apps, all fixed in commit `59b097746` by
+routing them through `guitk::textfind`, which folds incrementally while
+walking the real string and therefore only ever returns offsets into it:
+
+| App | Site |
+|---|---|
+| `ebook` | `find_all_matches` |
+| `pdfviewer` | `PdfDocument::search` |
+| `spreadsheet` | `case_insensitive_replace`, `SearchState::find_all` |
+| `filediff` | `SearchState::search` |
+| `rssreader` | `extract_snippet`, `search_articles`, `discover_feeds`, `extract_attribute`, `filtered_article_indices` |
+
+Every one of them had all three defects: offsets taken from a `to_lowercase()`
+copy, a match length taken from the needle rather than from what matched, and
+a scan resuming one byte past each match's *start* so matches overlapped. Each
+now has a regression test, and each test was verified by reverting the fix and
+watching it fail.
+
+**The lesson for future work: a case-insensitive search written by hand is
+wrong.** `to_lowercase()` is not length-preserving (Turkish `İ` U+0130 is two
+bytes and folds to three), so the copy's offsets and the original's diverge at
+the first such character, and the divergence ends in a slice inside a
+character — a panic. Call `textfind`; do not write the loop.
+
+This was a targeted pass at one defect family, not a full sweep of those five
+crates; their remaining `indexing_slicing` counts are `rssreader` 93,
+`spreadsheet` 42, `filediff` 17, `ebook` 16, `pdfviewer` 13.
+
+### Sweep progress: `explorer` 264 → 55, `indexing_slicing` 0 (2026-08-16)
+
+Third worst crate done. `apps/explorer` went from 125 `indexing_slicing`
+findings to **0** and 264 total warnings to 55; every `unwrap_used`,
+`expect_used`, `float_cmp` and `duration_suboptimal_units` finding is gone too.
+Tests 181 → 187, plus 5 new in `textfind` (12 → 17). Six reachable bugs fell
+out of it, recorded below.
+
+Pattern 2 — *a `Vec` plus an index is an invariant expressed as a convention* —
+did the bulk of the work again, in its most extreme form yet. `thumbs.rs` held
+a `Vec<u8>` of ARGB pixels alongside a `width` and `height`, and **115 index
+expressions** each independently restated the relationship between the three.
+Three of those 115 proofs were wrong. Replacing the triple with a `Canvas` type
+whose `set`/`fill_rect` clip and whose `get` returns `Option` took all 115 to
+zero and made the three bugs unwritable rather than merely fixed.
+
+A consequence worth naming: `Thumbnail::is_valid()` existed but was never
+called at construction, so an invalid thumbnail could be built and only fail
+later. `Canvas::into_thumbnail` is now the only way to build one, and it cannot
+build an invalid one, so the check is a property of the type.
+
+The 55 that remain are all `arithmetic_side_effects`, and every one was read:
+each is guarded by a proof stated within a few lines (a `count > 0` before a
+division, a `len == 0` early return before `len - 1`, a `.take(16)` bounding a
+shift). None is reachable. Whether that lint earns its keep tree-wide — it is
+3161 findings — is still open; see the note under `editor` above.
+
+### `textfind::compare` — the fourth member of the fold-then-index family (2026-08-16)
+
+The `textfind` sweep above covered *searching* case-insensitively. Sorting
+case-insensitively is the same mistake with the same cause, and the sweep found
+it in `explorer`. `textfind` gained `compare(a, b, case) -> Ordering`, which
+folds lazily with `char::to_lowercase` and stops at the first differing
+character.
+
+The hand-written spelling it replaces, `a.to_lowercase().cmp(&b.to_lowercase())`,
+is wrong in a way the search bugs are not — it does not panic, it is merely
+ruinous: a comparison is what a sort calls `n log n` times, so ordering a
+directory of ten thousand names allocates a quarter of a million strings to
+answer a question that needs none. It also lets a list that is *filtered* by
+`textfind::contains` and *sorted* by hand disagree with itself about which
+names are the same.
+
+`compare` returns `Equal` for two different strings that fold alike
+(`README`/`readme`, `İ`/`i` + U+0307), which is the right answer to the
+question asked but means it must be tie-broken with `a.cmp(b)` before it backs
+an `Ord` impl — otherwise `cmp` and `==` disagree, which is exactly the bug
+found in `explorer` below. That requirement is documented on the function.
+
+## Two more reachable bugs in `apps/markdowneditor`, found by the lint sweep (lane C)
+
+**Status: FIXED 2026-08-16** (lane C), commit `2a5c23082`. Neither was caught
+by any existing test; both now have one.
+
+**1. Undo of a heading duplicated the line instead of removing the prefix.**
+`insert_heading` inserts `"## "` at column 0, then recorded the undo as a
+`Delete` of the *old* line text. Undo therefore re-inserted the whole line in
+front of itself: pressing the H2 toolbar button on `Title` and then Ctrl+Z
+gave `Title## Title`, not `Title`. Proved reachable by reverting the fix and
+watching the new test fail with exactly that string. Fixed by recording what
+actually happened — an `Insert` of the prefix at column 0.
+
+**2. Rendering past the end of a shrunken document indexed off the end.**
+`render_editor`'s visible-line loop indexed `doc.lines[scroll_line + i]` and
+broke on reaching the end, so the bound was stated twice and the two could
+drift: a `scroll_line` left over from before a document shrank under the
+viewport indexed past the end on the first iteration, before the break could
+run. Replaced with `.skip(scroll_line).take(visible_lines)`, which states the
+bound once and draws nothing rather than panicking.
+
+## A hang in `apps/spreadsheet`'s find-and-replace (lane C)
+
+**Status: FIXED 2026-08-16** (lane C), commit `59b097746`. Found by the same
+sweep. `case_insensitive_replace` looped `while let Some(pos) = hay[at..]
+.find(needle)`, and an **empty** needle matches at every position without
+consuming anything, so `at` never advanced and the loop appended the
+replacement string to a `String` until the process ran out of memory. Reaching
+it took one keystroke: open Replace, leave Find empty, type a replacement,
+press the button. `textfind::matches` yields nothing for an empty needle, so
+the rewritten loop terminates immediately; pinned by
+`an_empty_needle_replaces_nothing`.
+
+## A byte-measured "character" window in `apps/rssreader` (lane C)
+
+**Status: FIXED 2026-08-16** (lane C), commit `59b097746`. `extract_snippet`
+takes a `context_chars` argument and its doc described a window in characters,
+but it computed the window with `saturating_sub`/`+` on **byte** offsets. For
+a non-ASCII article the snippet was therefore both the wrong length (up to 4×
+short) and cut at an arbitrary byte, which the subsequent `&text[head..tail]`
+slice panicked on whenever the cut landed inside a character. Rewritten to
+walk `char_indices` outwards from the match, so the window is in the unit it
+claims. Pinned by `a_snippet_window_lands_on_character_boundaries`.
+
+## Six reachable bugs in `apps/explorer`, found by the lint sweep (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). None was caught by any existing test;
+all six now have one, and each test was verified by reverting the fix and
+watching it fail. Five come from `thumbs.rs`'s pixel buffer, one from the
+column sort order.
+
+**1. A sort that put every non-ASCII filename ahead of every ASCII one.**
+`ColumnValue::sort_key` packed a text value into an `i128` as its first sixteen
+lowercased bytes, shifting the leading byte left by 120 — into bit 127, the
+sign bit. Any name whose first byte is `>= 0x80` — which is *every* name that
+does not begin with an ASCII character — therefore produced a **negative** key
+and sorted ahead of every ASCII name. In a folder mixing `alpha`, `zulu` and
+`éclair`, `éclair` came first, ordered by nothing the user could see.
+
+**2. The same sort violated `Ord`'s contract, so its behaviour was undefined.**
+That key stopped after sixteen bytes, so two names sharing a sixteen-byte
+prefix compared `Equal` while the derived `PartialEq` called them different.
+`Ord` requires `cmp` to return `Equal` exactly when `==` does; a comparator
+that breaks it makes `sort_by` free to produce *any* permutation, not merely a
+wrong one. Both are fixed by comparing the strings directly —
+`textfind::compare(a, b, Insensitive).then_with(|| a.cmp(b))` — which is also
+cheaper, since it stops at the first differing character instead of walking
+sixteen bytes and allocating a lowercased copy of the whole name. A NaN
+`Percentage` had the same contract problem for the same reason (derived
+`PartialEq` on `f32` makes NaN unequal to itself); `f32::total_cmp` gives it a
+defined place instead.
+
+Note what is *not* fixed: ordering is now by Unicode scalar value after case
+folding, so `éclair` sorts after `zulu` rather than between `alpha` and `zulu`.
+See `TD-EXPLORER-SORT-IS-CODEPOINT-NOT-COLLATION` below.
+
+**3. A configured thumbnail size below 6 made a text thumbnail write past the
+buffer.** `generate_text_thumbnail` computed `size - margin * 2` on `u32` with
+`margin = 3`. At `size = 5` that wraps to ~4 billion, which made both of the
+loop's bounds checks vacuously true, and every subsequent row was written at an
+offset computed from a width the buffer does not have. `ThumbConfig::size` is a
+plain public field, so reaching it needs no malformed input at all — just a
+caller that asks for a tiny thumbnail. Now `saturating_sub` throughout, and the
+writes go through `Canvas::fill_rect`, which clips.
+
+**4. BMP header arithmetic ran unchecked on attacker-chosen numbers.**
+`try_bmp_thumbnail` multiplied and added width, height, bits-per-pixel and the
+pixel-data offset — all read straight out of the file — to compute row strides
+and source indices. A crafted `.bmp` in a browsed directory overflows those and
+lands the index anywhere. Every one is now `checked_mul`/`checked_add` and the
+pixel read is a `data.get(range)?`, so a malformed file yields no thumbnail
+rather than a panic or a wild read.
+
+**5. `draw_block_text` took a size argument that had to agree with the
+buffer's, and nothing checked.** It received `&mut Vec<u8>` and a `size`, and
+computed every offset from `size`. Two arguments that must agree is a
+precondition no signature states; passing a buffer and the wrong size wrote out
+of range. It now takes `&mut Canvas`, which carries its own dimensions, so the
+pair cannot disagree.
+
+**6. A circle-distance test overflowed `i32` above ~92 000 pixels.**
+`generate_default_thumbnail` compared `dx*dx + dy*dy` in `i32`. Promoted to
+`i64`. Not reachable at any size a display would ask for, but it was a wrong
+proof sitting next to five that were reachable, which is the argument for
+fixing the class rather than the instances.
+
+## TD-EXPLORER-SORT-IS-CODEPOINT-NOT-COLLATION
+
+**Status: OPEN 2026-08-16** (lane C). `apps/explorer/src/columns.rs`,
+`impl Ord for ColumnValue`.
+
+Sorting a text column folds case and then compares Unicode scalar values. That
+is well-defined, consistent, and agrees with `textfind`'s idea of equality — but
+it is not the order a reader of the language expects. `éclair` sorts after
+`zulu`, because U+00E9 is greater than `z`; a French speaker expects it between
+`alpha` and `zulu`. Every script that is not ASCII is affected, and names that
+differ only by an accent are separated rather than adjacent.
+
+**Why it is not fixed here.** Correct placement is the Unicode Collation
+Algorithm, which is a data table (DUCET, ~30 000 entries) plus a
+locale-tailoring layer, not an algorithm one writes from memory. The tree has
+no Unicode data of any kind today. Doing it properly means deciding first
+whether the OS ships collation data at all, and if so whether it is
+locale-tailored or root-only — which is a design question, not a bug fix.
+
+**The proper fix**, when the prerequisite exists: a `textfmt::collate` (or a
+`textcollate` crate) carrying DUCET primary/secondary/tertiary weights, with
+`textfind::compare` delegating to it and keeping its current behaviour as the
+documented fallback when no table is loaded. Every caller then improves at
+once, since `compare` is the single place case-insensitive ordering is decided.
+
+**What it costs while open:** a mis-ordered file list for non-ASCII names.
+Nothing is unsafe and nothing is blocked; the sort is total and stable, just
+not idiomatic for the locale.
+
+## TD-EXPLORER-UNREADABLE-RECYCLE-ENTRY
+
+**Status: OPEN 2026-08-16** (lane C). `apps/explorer/src/fileops.rs`,
+`RecycleBin::list`.
+
+The recycle-bin listing skips any entry whose `meta.txt` will not parse, rather
+than failing the whole listing. That is the right trade — one corrupt metadata
+file must not make every *other* recycled file unrestorable — but it has a cost
+that is currently invisible: the damaged entry does not appear in the UI at
+all, so the file is still on disk, still occupying space, and the user has no
+way to see it or to empty it.
+
+**The proper fix** is to surface it rather than swallow it: return the
+unparseable entries alongside the good ones as a distinct variant (id and
+on-disk size known, original path unknown), which the UI lists as "unknown
+item" with delete available and restore greyed out. That needs a UI decision
+about how such a row reads, which is why it is written down rather than done in
+the sweep commit.
+
+**What it costs while open:** a corrupt entry is undeletable through the UI and
+its space is unaccounted for. It cannot cause data loss — the file itself is
+untouched — and a corrupt `meta.txt` requires the disk or another process to
+have damaged it, so this is rare rather than routine.
+
+## Two lanes merging up at once race in the shared `os` worktree (lane C)
+
+**Status: OPEN 2026-08-16** (lane C). Observed, not theorised: a routine
+`git merge lane-c` in `D:\visual studio projects\os` printed `Updating
+239fd95f7..dc9a2caa9` alongside git's "a git process may have crashed in this
+repository earlier" lock error, and when it settled `HEAD` was at `41d86dee2`
+— *lane B's* merge, which had been running in the same directory at the same
+moment. Neither merge's result survived intact.
+
+`CLAUDE.md` gives every lane its own worktree precisely so that one lane's
+`git checkout` cannot move another's `HEAD`, and then routes all three lanes
+back through **one shared checkout** — `os` — for the merge-up step. That
+reintroduces exactly the hazard the worktrees removed, just narrowed to the
+window in which a merge runs. There is a lock that serialises QEMU; there is
+none for this.
+
+**The mitigation is available today and needs no lock, so prefer it:** merging
+up does not require a working tree at all when the merge is a fast-forward,
+which it is whenever you have already merged `origin/main` into your lane
+(which the same rules require you to do first). From your *own* worktree:
+
+```bash
+git fetch origin
+git merge origin/main          # resolve here, in your own tree, and test
+git push origin lane-c         # publish the lane
+git push origin lane-c:main    # fast-forward main; no shared checkout touched
+```
+
+This is strictly safer than the documented route: the merge and its conflict
+resolution happen in the tree you already have exclusive use of and have just
+run the tests in, and the step that touches `main` is a server-side
+fast-forward that cannot interleave with another lane's — if a lane pushed in
+between, the push is simply rejected as non-fast-forward and you merge again.
+`main` still only ever advances to a commit whose tests were run.
+
+**What the proper fix looks like:** amend `CLAUDE.md`'s "When You Finish a
+Task" step 11 to prescribe the fast-forward push instead of a merge performed
+in `os`, leaving `os` as a read-only integration *checkout* for inspecting
+`main`. That file is operator-owned — this needs an explicit instruction
+before it can be edited, so it is written up here rather than done. Until
+then, any lane that does use `os` should treat it as exclusive and check
+`git -C os status` first.
+
+## Four reachable panics/corruptions in `apps/editor`, found by the lint sweep (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). All four were found by working through
+`clippy::indexing_slicing` in `apps/editor` and checking each site for a *real*
+panic rather than silencing it. None was caught by any existing test; each now
+has one.
+
+**1. JS regex literal emitted a token past the end of the line.** In
+`highlight.rs`, the regex-literal scanner stepped `i += 2` over a backslash
+escape without checking that the second byte existed, so a line ending in
+`/\` produced a token ending at `len + 1`. The renderer slices the line by
+token range, so this panicked the editor — taking every unsaved buffer in
+every other tab with it — on a keystroke. Proved reachable by reverting the
+fix and watching the highlighter sweep test fail with `JavaScript: token 0..3
+out of bounds for "/\" (len 2)`. Fixed by routing the scan through
+`scan_to_delimiter`, which clamps. Covered by the sweep test, now 12 languages
+× 5 prefixes × 17 line-endings × 7 entry states = 7140 cases.
+
+**2. Find reported overlapping matches.** `FindState::find_all` resumed the
+search one byte into the match it had just recorded, so `"aaaa"` reported
+three occurrences of `"aa"`. Two consequences: the match count shown to the
+user was wrong, and `replace_all` then rewrote overlapping ranges one after
+another, shredding the line. The one-byte step also landed *inside* a
+multi-byte character, where the old `search_line[start..]` panicked outright.
+Fixed by resuming past the match end.
+
+**3. Find computed offsets against a string that is not the one being
+edited.** The case-insensitive path searched a `to_lowercase()` copy of the
+line and used the offsets it found to index the *real* line. `to_lowercase`
+is not length-preserving — Turkish `İ` (U+0130) folds to two characters,
+three bytes, from two — so past the first such character every offset is
+wrong. The editor selected, or replaced, the wrong bytes; a span past the end
+of the line reached `String::replace_range`, which panics. Fixed with
+`folded_match_end`, which folds *incrementally* while walking the real line,
+so every offset it returns is an offset into the line the user is looking at,
+and returns the match's real end (which can differ in length from the needle,
+for the same reason).
+
+**4. Replace trusted ranges recorded against a different document.**
+Find/replace records `(line, start, end)` against whichever document was
+searched, and nothing stopped a caller handing a different document to
+`replace_all`, or editing the buffer between the search and the replace.
+`String::replace_range` panics on an out-of-range span *and* on one that
+splits a character. Fixed by making `Document::replace_in_line` validate the
+line index, the ordering, the end bound and both char boundaries, returning
+`false` rather than panicking.
 
 ## `apps/editor`'s syntax highlighter is complete, tested, and not connected (lane C)
 
@@ -22131,6 +22566,59 @@ descriptors underneath it. Left as tech debt: changing it to leak instead
 would trade a rare wrong-packet for a permanent queue drain on a flaky device,
 and neither is right without the reset path.
 
+## TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER
+
+**Status: OPEN 2026-08-16** (lane C). Blocked on an operator decision, filed as
+`open-questions.md` -> **C-Q2**. Do not "fix" this without an answer there: the
+two candidate behaviours are both correct, and shipping one silently makes the
+question harder to ask.
+
+**What.** Left/Right arrow keys move the caret by one position in *logical*
+order -- the order the characters are stored and read -- in every text widget in
+the tree. On a line that mixes left-to-right and right-to-left text ("I said
+<HEBREW WORD> to him"), logical order is not screen order, so pressing Right can
+move the caret visibly *leftwards*, and pressing it repeatedly makes the caret
+jump back and forth across the width of the right-to-left word rather than
+stepping across it.
+
+This is not a bug in the sense that it produces a wrong result -- the caret is
+always at a real, correct text position, and typing there inserts where the user
+would expect *in the sentence*. It is a bug in the sense that the key is named
+after a direction on the screen and does not always move in it. Windows edit
+controls move visually; macOS, GTK and Qt move logically. Both ship.
+
+**Where.** The arrow-key handlers, each of which does `cursor -= 1` /
+`cursor += 1` over a byte or character index with no reference to direction:
+
+* `gui/toolkit/src/widget.rs` -- `TextInput`
+* `gui/toolkit/src/modal.rs` -- `InputDialog`
+* `apps/editor/src/main.rs` -- `move_left` / `move_right`
+
+**Reproduce.** Type or paste a line containing a Hebrew or Arabic word between
+two English words into any of the three. Put the caret immediately before the
+right-to-left word and press Right once: the caret jumps to the *far side* of
+that word rather than moving one letter-width right, then walks back across it
+on subsequent presses.
+
+**What the proper fix looks like, if C-Q2 answers "visual".** The prerequisite
+is already built and this is the whole reason it was built:
+`TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL` (fixed 2026-08-16) gave
+`gui/toolkit/src/text.rs` a `TextCursor { byte, affinity }`, and
+`gui/font/src/shape.rs` a `ShapedRun` that knows each glyph's screen position
+and bidi direction. A visual step is then: ask the run for the glyph the cursor
+currently sits beside, take its neighbour in *draw* order (`draw_order()`), and
+set the cursor to that neighbour's leading or trailing edge depending on whether
+that glyph runs left-to-right or right-to-left -- which is exactly the pairing
+`offset_at` already computes (`in_left = upstream(next)` for an RTL cluster,
+the reverse for LTR). The affinity bit is what makes the two ends of a direction
+boundary distinguishable, so no extra state is needed.
+
+Two things must stay logical under either answer, and would be wrong to convert
+along with the arrows: Home/End and word-motion (Ctrl+arrow). Those name
+positions in the sentence, not directions on the screen.
+
+If C-Q2 answers "logical", this entry closes with no code change and a comment
+at each of the three sites recording that the behaviour is deliberate.
 ## B-BOOT-TEST-HANGS-INTERMITTENTLY-WITH-A-QEMU-GLIB-HANDLE-ERROR, AND LOOKS EXACTLY LIKE A KERNEL REGRESSION (lane B, 2026-08-16)
 
 **Status: OPEN — host-level, cause not identified. Recorded so the next lane

@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Font Manager — graphical font management and preview"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

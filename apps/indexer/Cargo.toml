@@ -8,3 +8,6 @@ description = "SlateOS Background File Indexer — builds and maintains a search
 # it needs for `/etc/indexer.conf` is not a reason to link a widget library.
 [dependencies]
 textfmt = { path = "../../textfmt" }
+
+[lints]
+workspace = true

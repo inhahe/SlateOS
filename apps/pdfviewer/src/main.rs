@@ -24,6 +24,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::textfind;
 use guitk::text;
 
 use std::path::{Path, PathBuf};
@@ -407,32 +408,34 @@ impl PdfDocument {
         if query.is_empty() {
             return Vec::new();
         }
-        let query_lower = query.to_lowercase();
         let mut results = Vec::new();
         for (page_idx, page) in self.pages.iter().enumerate() {
             for span in &page.text_spans {
-                let text_lower = span.text.to_lowercase();
-                let mut start = 0;
-                while let Some(pos) = text_lower[start..].find(&query_lower) {
-                    let abs_pos = start + pos;
-                    // The span's width comes from the document, so the honest
-                    // approximation is to spread it over the span's
-                    // *characters*. Spreading it over its bytes made the cell
-                    // too narrow for any span containing an accent, and
-                    // `abs_pos` is a byte offset, so the highlight landed short
-                    // of the match by one cell per preceding two-byte
-                    // character.
-                    let char_count = span.text.chars().count();
-                    let char_width = if span.rect.width > 0.0 && char_count > 0 {
-                        span.rect.width / char_count as f32
-                    } else {
-                        8.0
-                    };
-                    let chars_before = text_lower.get(..abs_pos).map_or(0, |p| p.chars().count());
+                // The span's width comes from the document, so the honest
+                // approximation is to spread it over the span's *characters*.
+                // Spreading it over its bytes made the cell too narrow for any
+                // span containing an accent.
+                let char_count = span.text.chars().count();
+                let char_width = if span.rect.width > 0.0 && char_count > 0 {
+                    span.rect.width / char_count as f32
+                } else {
+                    8.0
+                };
+                // `textfind` reports offsets into `span.text` itself. This used
+                // to search `span.text.to_lowercase()` and count characters in
+                // *that*, which puts the highlight in the wrong place for any
+                // span containing a character that changes length when folded —
+                // and then advanced by the *unfolded* needle's byte length
+                // inside the folded copy, which for a query of `İ` lands inside
+                // a character and panics.
+                for (start, end) in textfind::matches(&span.text, query, textfind::Case::Insensitive)
+                {
+                    let chars_before = span.text.get(..start).map_or(0, |p| p.chars().count());
+                    let match_chars = span.text.get(start..end).map_or(0, |m| m.chars().count());
                     let highlight_rect = PageRect::new(
                         span.rect.x + chars_before as f32 * char_width,
                         span.rect.y,
-                        query_lower.chars().count() as f32 * char_width,
+                        match_chars as f32 * char_width,
                         span.rect.height.max(span.font_size),
                     );
                     results.push(SearchResult {
@@ -440,7 +443,6 @@ impl PdfDocument {
                         rect: highlight_rect,
                         context: span.text.clone(),
                     });
-                    start = abs_pos + query.len();
                 }
             }
         }
@@ -2620,6 +2622,47 @@ mod tests {
             "is {} wide",
             hit.rect.width
         );
+    }
+
+    /// A highlight is placed by counting characters of the *span*, not of a
+    /// lowercased copy of it.
+    ///
+    /// Turkish `İ` (U+0130) is one character but folds to two (`i` plus a
+    /// combining dot). Counting in the folded copy therefore put every
+    /// highlight after one a whole cell to the right.
+    #[test]
+    fn a_highlight_is_placed_by_the_span_not_by_a_folded_copy_of_it() {
+        // Four characters across 100 points is 25 points each; the match is
+        // the last one, so it starts at 75.
+        let doc = doc_with_span("\u{130}abc", 100.0);
+        let hits = doc.search("C");
+        assert_eq!(hits.len(), 1);
+        let hit = hits.first().expect("one hit");
+        assert!((hit.rect.x - 75.0).abs() < 0.01, "starts at {}", hit.rect.x);
+        assert!(
+            (hit.rect.width - 25.0).abs() < 0.01,
+            "is {} wide",
+            hit.rect.width
+        );
+    }
+
+    /// Searching for a character whose folded form is longer than itself does
+    /// not walk off a character boundary. The scan used to advance by the
+    /// *unfolded* query's byte length inside the *folded* copy: for a query of
+    /// `İ` that is 2 bytes into a 3-byte folded character, and re-slicing
+    /// there panics.
+    #[test]
+    fn a_query_that_grows_when_folded_does_not_split_a_character() {
+        let doc = doc_with_span("a\u{130}b\u{130}c", 100.0);
+        let hits = doc.search("\u{130}");
+        assert_eq!(hits.len(), 2);
+    }
+
+    /// Matches do not overlap: `aa` occurs twice in `aaaa`, not three times.
+    #[test]
+    fn highlights_do_not_overlap_one_another() {
+        let doc = doc_with_span("aaaa", 100.0);
+        assert_eq!(doc.search("aa").len(), 2);
     }
 
     // -- Rotation tests -------------------------------------------------------

@@ -398,6 +398,62 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### B-BASH-SLATEOS-ELF-WAS-EXEMPT-FROM-THE-STALENESS-GATE. The one artifact that exercises our libc hardest was the one artifact allowed to be out of date — 2026-08-16 — ✅ GATE FIXED 2026-08-16 by lane B (`scripts/create-ext4-rootfs.sh`); the stale binary itself still needs a relink
+
+**In short:** The image build refuses to ship a ring-3 test program that is
+older than the C library it was compiled against, because such a program tests
+the *old* library while reporting a pass about the new one. That rule was
+written for the nine small `ctest-*` programs and never applied to a tenth,
+much bigger one: GNU bash. Bash was found four days out of date the day anyone
+checked, which means the boot test had been reporting "bash works on our libc"
+about an Aug-12 libc on every boot since. The rule now covers bash too. The
+stale binary itself has not been relinked yet — that needs the cross-build
+objects, not a one-line command.
+
+**Why bash is the worst possible exemption.** Every other staged real-world
+binary (dash, make, tcc) is a stock Ubuntu glibc program that SlateOS runs
+through the staged glibc — it exercises the *loader*, not our libc. Bash is the
+only large program compiled from source *against* `toolchain/sysroot/lib/libc.a`,
+and at ~5.3 MB it is roughly double any `ctest-*` fixture. It references 2,030
+libc symbols where a fixture references a few dozen. So it was simultaneously
+the broadest test of the POSIX layer and the only one permitted to be testing a
+library that is no longer in the build — the widest false-green on the image.
+
+**Why it was missed.** The artifact is built by `scripts/bash-spike/` into the
+**gitignored** `build/spike/`, and `slatelink.sh` hardcodes the *integration*
+worktree path (`/mnt/d/visual studio projects/os/build/spike/…`). So it exists
+in exactly one of the four worktrees. In the three lane worktrees the file is
+simply absent, the self-test self-skips, the harness prints `PATH-Z COVERAGE
+INCOMPLETE`, and nothing looks wrong; in `os` — the tree `main` is built from —
+it is present and was silently ageing. A per-worktree artifact behind a
+best-effort skip is invisible from either side.
+
+**Where it lives.** `scripts/create-ext4-rootfs.sh`, the `BASH_SLATE` block
+(~842) and the new `BASH_STALE` gate after the `ctest-*` gate (~941). The
+consumer is `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`.
+
+**Fix applied.** Absent and stale are now deliberately *not* treated alike:
+
+| State | Before | Now | Why |
+|---|---|---|---|
+| absent | warning, boot green | warning, boot green | A skip reports nothing **and says so**; the harness already prints `PATH-Z COVERAGE INCOMPLETE`. Unlike a fixture it cannot be rebuilt from a one-line command, so failing a fresh checkout would be punitive. |
+| present, older than `libc.a` | staged silently | **exit 1** | A stale binary reports OK and is wrong. This is the `ctest-*` rule verbatim; `ALLOW_STALE_FIXTURES=1` downgrades it, since a host that cannot rebuild the fixtures certainly cannot relink bash. |
+
+**Still open.** `os/build/spike/bash-slateos.elf` is dated 2026-08-12 and must be
+relinked against the current sysroot
+(`wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh`) before the next image
+built from `os` will pass. That is now *enforced* rather than hoped for, which
+is the point of the change — but it does mean the next `main` rootfs build will
+fail loudly until someone relinks it. That is the intended behaviour and is
+strictly better than the silent pass it replaces.
+
+**Worth generalising, again.** This is the third instance of the pattern
+`B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT` names: the check was not wrong, it just
+did not cover everything it applied to. When a rule is written for a *set* of
+artifacts, enumerate the set from the thing they have in common — here "links
+`libc.a`" — not from the directory that happened to hold them when the rule was
+written (`services/ctest-*`).
+
 ### TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT. `waitid` cannot express process group 1, cannot honour `WNOWAIT`, and reports `si_uid` as 0 — all three because `SYS_PROCESS_WAIT_STATUS` is `waitpid`-shaped — LOGGED 2026-08-16 by lane B
 
 **In short:** `waitid()` is the modern replacement for `waitpid()`, and it exists

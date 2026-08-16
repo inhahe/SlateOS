@@ -839,12 +839,41 @@ fi
 # the self-test self-skips, so a checkout that has never run the spike still
 # boots green.  Staged as /bin/bash only — NOT as /bin/sh, which stays dash, so
 # that adding bash cannot change the behaviour of any existing self-test.
+#
+# Staleness: absent is honest, stale is a lie.  This binary links the same
+# toolchain/sysroot/lib/libc.a the ctest fixtures below do, so the identical
+# false-green applies — and applies *harder*, because bash is by some margin
+# the largest consumer of our libc on the image (~5.3 MB against the fixtures'
+# ~2.6 MB), so a stale one is the broadest passing test that proves nothing
+# about the library actually shipped.  It was exempt from the check below until
+# 2026-08-16, and was found four days out of date the day the exemption was
+# noticed: `self_test_bash_on_slateos_libc` had been reporting OK against an
+# Aug-12 libc.a on every boot since.
+#
+# The two cases are deliberately *not* treated alike:
+#   * **absent** stays a warning.  The self-test self-skips, the harness prints
+#     "PATH-Z COVERAGE INCOMPLETE", and a checkout that has never run the spike
+#     still boots green — which is the documented best-effort contract above,
+#     and unlike the fixtures this artifact cannot be rebuilt from a one-line
+#     command (it needs the cross-built objects in build/spike/bash-cross).
+#   * **present but older than libc.a** is FATAL, exactly like a stale fixture.
+#     A skip reports nothing and says so; a stale binary reports OK and is
+#     wrong.  ALLOW_STALE_FIXTURES=1 downgrades this too, since a host that
+#     cannot rebuild the fixtures certainly cannot relink bash.
 BASH_SLATE="$ROOT_DIR/build/spike/bash-slateos.elf"
+BASH_STALE=0
 if [ -e "$BASH_SLATE" ]; then
     cp -L "$BASH_SLATE" "$STAGE/bin/bash"
     echo "[rootfs] staged GNU bash 5.2 (linked against our libc.a): /bin/bash"
     echo "[rootfs] bash binary type:"
     file "$STAGE/bin/bash" 2>/dev/null | sed 's/^/  /'
+    if [ -e "$ROOT_DIR/toolchain/sysroot/lib/libc.a" ] \
+       && [ "$ROOT_DIR/toolchain/sysroot/lib/libc.a" -nt "$BASH_SLATE" ]; then
+        echo "[rootfs] WARNING: bash-slateos.elf is OLDER than the sysroot libc.a — it links a"
+        echo "[rootfs]          stale libc and proves nothing about the current one. Relink it:"
+        echo "[rootfs]            wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh"
+        BASH_STALE=1
+    fi
 else
     echo "[rootfs] WARNING: $BASH_SLATE not found — the bash self-test will no-op"
     echo "[rootfs]          (build it with scripts/bash-spike/, see its README)"
@@ -908,6 +937,25 @@ if [ "$CTEST_COUNT" -gt 0 ]; then
     fi
 else
     echo "[rootfs] WARNING: no services/ctest-*/*.elf found — C self-tests will self-skip"
+fi
+
+# Same rule for bash (flagged further up, enforced here so that both artifact
+# families answer to one gate and neither can be stale in a shipped image).
+if [ "$BASH_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: bash-slateos.elf is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike/bash-slateos.elf is STALE."
+        echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        self_test_bash_on_slateos_libc would report OK about a libc"
+        echo "[rootfs]        that is no longer in the build — and bash is the largest"
+        echo "[rootfs]        consumer of our libc on the image, so that is the widest"
+        echo "[rootfs]        false-green available. Relink it:"
+        echo "[rootfs]          wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh"
+        echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
 fi
 
 echo "[rootfs] staged tree:"

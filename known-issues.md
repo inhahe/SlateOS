@@ -14571,7 +14571,99 @@ Tracked as part of the net-userspace migration; this control-path client is
 intentionally the bounded-self-test stand-in until then. See
 `net-userspace-migration.md` Phase 4/5 and `design-decisions.md` §64.
 
-### BENCH-COMPOSITOR-SLOW. Compositor over its 4K frame budget (~10.6ms/frame vs 2ms) — PERF BUG 2026-07-01, IMPROVED 4.6x 2026-07-02
+### BENCH-COMPOSITOR-SLOW. Compositor over its 4K frame budget (~7.0ms/frame vs 2ms) — PERF BUG 2026-07-01, IMPROVED 6.9x 2026-08-16
+
+**UPDATE 2026-08-16 (6) — inter-window occlusion cull landed, 12.0ms → 7.0ms/frame
+min (cumulative 48.6ms → 7.0ms = 6.9x). It also corrects a wrong assumption
+recorded in UPDATE (5) below.**
+
+*First, the measurement that redirected the work.* UPDATE (5) closed with
+"the 4K benchmark's dominant cost is the background clear + per-window
+RenderEngine draws", and the deferred next step recorded there (and in
+`requests/a-c-bench-compositor-entries-are-yours.md`) was a persistent tile
+thread-pool to amortize the per-frame `thread::scope` spawn. That was aimed at
+the wrong half. A new `Compositor::bench_full_composite_phases()` returning
+`(background_clear_ns, window_render_ns)` measured the split directly:
+
+| phase | before | after |
+|---|---|---|
+| background clear | 1.531 ms | 1.392 ms |
+| window render | 11.128 ms | 5.313 ms |
+| whole frame (min / mean) | 12.046 / 15.231 ms | 7.041 / 8.955 ms |
+
+The clear was **already fine** — 13% of the frame, and the three rounds of
+parallel-fill work above had done their job. Window rendering was 88%. So the
+bottleneck was not a parallelism problem at all; it was **overdraw**: windows
+were painted strictly back-to-front, so every pixel of every window was drawn
+even where a higher window overwrote it. Parallelizing that would have divided
+the wasted work across cores instead of not doing it. **Lesson worth keeping:
+the "remaining work" note at the end of a perf entry is a hypothesis, not a
+finding — measure the split before acting on it.**
+
+*The fix.* Each window's conservative drawn extent (client rect + `BORDER_WIDTH`
++ `SHADOW_SIZE` + 3 slack, plus `TITLE_BAR_HEIGHT` on top) now has the
+provably-opaque covers of all windows **above** it subtracted from it, and the
+window is redrawn once per surviving fragment under a framebuffer-level clip.
+Pieces:
+
+- `Rect::subtract` — exact rectangle difference. It cuts the top and bottom
+  bands **full-width first** and only then splits the middle row into left/right.
+  That ordering is load-bearing: the fragments must be **disjoint**, because a
+  window is redrawn once per fragment, so a pixel appearing in two fragments is
+  painted twice — invisible for an opaque fill, but *wrong* for a translucent
+  one (the shadow would darken along the seam).
+- `subtract_region(base, occluders, max_parts) -> Option<Vec<Rect>>` — declines
+  (returns `None`, caller falls back to one unclipped draw) rather than
+  fragmenting without bound. `MAX_FRAGMENTS = 4`: past that, the per-fragment
+  redraw setup costs more than the overdraw saved.
+- `window_opaque_cover` / `window_drawn_extent` — the per-window predicates,
+  factored out and now **shared with the background cull** (`opaque_cover_rects`
+  was refactored onto them), so the two culls cannot disagree about what counts
+  as opaque.
+- `Framebuffer::frame_clip` + `set_frame_clip` — the enforcement point. It lives
+  on the framebuffer rather than in `RenderEngine`'s clip stack because **three**
+  routes paint a window — the render engine's commands, the decoration helpers
+  (`render_shadow`/`render_border`/`render_title_bar`, which run *outside*
+  `execute` where the clip stack is cleared), and the shared-buffer blit — and
+  only the framebuffer is common to all three. A cull honoured by just one route
+  would silently let a hidden window's decorations through. Every primitive that
+  writes a pixel now goes through `clip_allows` (per-pixel) or `clip_span`
+  (per-row); `copy_row` and `blit_opaque_band` shift the *source* offset in step
+  with the narrowed destination. The clear/`clear_except` path is deliberately
+  **not** clipped — it runs once per frame before any window and has its own cull.
+
+*Verification, and why it is not vacuous.* `Compositor::occlusion_cull: bool`
+(default `true`) exists purely so a test can composite the same scene both ways:
+`occlusion_cull_composites_the_same_pixels_as_drawing_every_window` builds a
+900×700 six-window cascade — **window 3 deliberately translucent at 0.5**, which
+is the case a non-disjoint subtraction would corrupt — twice, and compares front
+buffers pixel for pixel. Plus
+`subtract_yields_disjoint_parts_that_miss_exactly_the_occluder` (exhaustive
+per-pixel coverage-count oracle over 6 occluder shapes: interior, disjoint,
+covering, edge bands; asserts every pixel is covered exactly 0 or 1 times and
+the areas sum) and
+`subtract_region_declines_rather_than_fragmenting_without_bound`. To prove these
+actually bite, a deliberate bug was injected (`if false &&` on the left-fragment
+push in `Rect::subtract`): **both** new tests failed, the equivalence test
+reporting "occlusion cull changed 85246 pixel(s)". 82 compositor tests, clippy
+clean.
+
+**Still open, and what to try next.** 7.0 ms against a 2.0 ms target — 3.5x to
+go, so this entry stays. The honest reading of the new phase split is that
+window render is *still* the larger half (5.3 of 7.0 ms) even with the overdraw
+gone, so the next attempt should again start by measuring rather than assuming.
+Candidates, in the order I would try them: (a) SIMD/streaming stores for the
+remaining large opaque fills — the frame is now much closer to a pure
+memory-bandwidth problem than it was, which is exactly when non-temporal stores
+pay; (b) damage tracking, i.e. recompositing only the changed region across
+frames rather than a full desktop every time — a much bigger structural win than
+anything left inside a single frame, and the natural next design step; (c) the
+persistent tile thread-pool from UPDATE (5), which is now worth *less* than it
+looked (the work it would parallelize has shrunk by half) but is still real.
+
+**`bench/baselines.toml` needs `measured_ns` 10572000 → 7041000** — that file is
+`bench/**`, i.e. lane A's zone, so it is filed as `requests/c-a-bench-baseline-compositor-frame-4k.md`
+rather than edited here.
 
 **UPDATE 2026-07-14 (5) — parallel opaque window blit landed (first increment of
 the deferred window-render parallelization).** The opaque fast path of

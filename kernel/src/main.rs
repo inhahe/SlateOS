@@ -1421,6 +1421,14 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::memfs::self_test() {
         serial_println!("WARNING: MemFs self-test failed: {:?}", e);
     }
+    // NTFS read self-test.  Unlike the ext4/ISO 9660 tests this needs no
+    // attached device: it builds a synthetic NTFS volume in RAM and drives the
+    // whole parser over it, so the hard parts (fixups, runlists, the $I30
+    // B+ tree, $ATTRIBUTE_LIST) are covered on every boot rather than only on
+    // the rare boot where someone happens to attach an NTFS disk.
+    if let Err(e) = fs::ntfs::self_test() {
+        serial_println!("WARNING: NTFS self-test failed: {:?}", e);
+    }
     // devfs self-test (validates device file operations).
     if let Err(e) = fs::devfs::self_test() {
         serial_println!("WARNING: DevFs self-test failed: {:?}", e);

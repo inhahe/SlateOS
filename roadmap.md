@@ -174,20 +174,53 @@ implements it or answers in the same file. Delete the file when it lands.
 
 ### 3. Shared documents are append-only, with per-lane sections
 
-These four files are read by all three lanes and would otherwise be the
-worst contention point in the repo:
+These files are read by all three lanes and would otherwise be the worst
+contention point in the repo.
 
-| File | Rule |
-|------|------|
-| `roadmap.md` | Edit **only** the lines tagged with your own lane letter. Never reflow or reorder. |
-| `known-issues.md` | **Append only**, at the very end of the file. Prefix every new heading with your lane letter: `### [A] B-FOO. …`. Editing an existing entry is allowed only if its heading carries your lane letter. |
-| `design-decisions.md` | Append only, at the very end. Numbering is by lane to avoid collisions: **A** takes §200–299, **B** §300–399, **C** §400–499. (§1–§127 are the existing single-agent history — never renumber them.) |
-| `open-questions.md` | Append only. Prefix the question ID with your lane letter. Write it for a reader who does not know the subsystem — see `CLAUDE.md` and the file's own header. |
-| `deferred-questions.md` | Append only, `D-Q<n>`. Questions that will need the operator *eventually* but cannot be answered usefully yet; every entry carries a `Trigger:` for promoting it back to `open-questions.md`. See `design-decisions.md` §313. |
-| `todo.txt` | Append only, under a `## Lane A` / `## Lane B` / `## Lane C` heading. |
+**The goal is that three lanes writing one file never produce a merge
+conflict. Append-only is not that rule and never was — it is a proxy for
+it, and a bad one.** Two lanes that both append at end-of-file are writing
+the *same line region*, which is the one thing git cannot auto-merge. That
+is not theoretical: on 2026-08-16 lane A's `design-decisions.md` §203 and
+lane C's §435/§436 were both appended at EOF and conflicted, despite the
+per-lane numbering that was supposed to keep them apart.
 
-If you need to *change* another lane's entry (e.g. you fixed their bug),
-file a request instead.
+What actually prevents conflicts is **partitioning**: each lane writes a
+different *region* of the file, so two lanes' edits land at different line
+offsets and git merges them without looking at the content. The rule that
+binds is therefore **"stay inside your region"**, not "never change a line
+you already wrote". Inside your own region you may edit in place, restamp a
+status, reorder, and **delete** — all of which append-only forbade for no
+gain. (Full reasoning: `design-decisions.md` §437.)
+
+| File | Your region | Inside it you may |
+|------|-------------|-------------------|
+| `roadmap.md` | The lines tagged with your own lane letter. | Edit them freely. Never reflow or reorder lines you do not own; never touch the shared prose sections (like this one) without a request to the other two lanes. |
+| `known-issues.md` | Entries whose heading carries your lane letter (`### [C] …`), plus **any** entry you are status-stamping — see the exception below. | Edit, restructure, mark fixed. New entries go at the end of `known-issues.md` with your lane letter in the heading. Move an entry to `known-issues-resolved.md` once it is fixed *and* the fix has been on `main` for a full boot test. |
+| `design-decisions.md` | Your numeric section band: **A** §200–299, **B** §300–399, **C** §400–499. (§1–§127 are single-agent history — never renumber them.) | Add and edit your own sections. **File order is numeric, not chronological**, so insert your section among its numeric neighbours rather than at EOF — that is what makes the bands physically disjoint and the merge automatic. Never edit another lane's band. |
+| `open-questions.md` | Questions whose ID carries your lane letter. | **This file holds OPEN questions only.** When one is answered, *delete the entry* and add a one-line record to the `## Resolved` index at the bottom, under your own lane's subheading. Write entries for a reader who does not know the subsystem — see `CLAUDE.md` and the file's own header. |
+| `deferred-questions.md` | Your own `D-Q<n>` entries. | Same shape as `open-questions.md`: entries leave the file when promoted or dropped, with a one-line record in its `## Closed` index. Every entry carries a `Trigger:` for promoting it back. See `design-decisions.md` §313. |
+| `todo.txt` | Everything under your own `## Lane A` / `## Lane B` / `## Lane C` heading. | Add, edit, and remove your own items. Done items are deleted, not annotated — that is what the git history is for. |
+
+**Two rules survive the change, and they are the ones that were doing the
+real work:**
+
+1. **Never write in another lane's region.** If you need to *change*
+   another lane's entry — beyond the status stamp below — file a request
+   instead. This is unchanged and is the actual conflict-prevention rule.
+2. **Never reflow, reorder, or reformat a region you do not own**, even
+   harmlessly. A whitespace-only rewrite of a paragraph you don't own
+   conflicts exactly as hard as a semantic one.
+
+**Exception — status stamps are cross-lane.** Any lane may add or update a
+single `**Status:** …` line at a fixed position (immediately under the
+heading) of *any* `known-issues.md` entry, without a request. Three reasons
+this is safe where general cross-lane editing is not: it is a one-line edit
+at a known offset, so a collision is trivially resolvable; the alternative
+is worse, since an issue you fixed but cannot mark stays open forever in the
+one file whose whole job is knowing what is open; and if two lanes stamp the
+same entry, the conflict is *itself the finding* — two lanes thought they
+fixed the same bug — and should be read, not avoided.
 
 ### 4. `Cargo.toml` at the workspace root
 
@@ -731,9 +764,16 @@ Roadmap:
   applied **twice** in *both* the Khmer and the long-shipping Indic shaper.
   1 of 45 probe strings agreed before the fix, 43 after (§433); the two
   remaining are a crate-wide default-ignorable bug, filed as
-  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES`. Next unblocked step is Myanmar,
-  then USE (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`, step 2 of 3 done), the
-  ignorable fix, and no device tables in `ValueRecord`. Vello itself waits on
+  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES`. **Myanmar done** — the shaper
+  that labels every glyph of a syllable with a position and stably sorts, with
+  a kinzi, a medial RA and a pre-base vowel as the three things that move;
+  Myanmar sweep 58/58, full sweep `misplaced` back to its 170 ignorable-caret
+  baseline. It also forced the mark-positioning fallback open: HarfBuzz's
+  *two* mark-advance-zeroing routes had been fused into one here, and a
+  combining mark of class zero was being mistaken for a cluster base (§435,
+  §436). **USE is the only shaper left**
+  (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`, step 3 of 3 done); after it, the
+  ignorable fix and device tables in `ValueRecord`. Vello itself waits on
   `[A]`'s GPU driver.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
@@ -5399,7 +5439,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [~] **Acceleration payoff gated on Q18** (open-questions.md): real 3D/virgl needs a virgl-capable test env (`virtio-gpu-gl` + host GL/display + virglrenderer — the headless CI is 2D-only) **and** the Mesa port (§4583, a large external C port needing operator go-ahead). Next kernel-side step (render-ioctl dispatch with honest no-3D reporting) is option B in Q18, available on request.
 - [ ] `[C]` OpenGL via Mesa (port Mesa's Vulkan and OpenGL drivers)
 - [-] `[C]` 2D drawing library: Vello (Rust-native, GPU compute shaders) + HarfBuzz via FFI for complex text shaping
-  - [x] **Font engine** (`gui/font/src/{sfnt,raster,scaled}.rs`) — the GPU-independent half. sfnt/TrueType container parser (`head`/`hhea`/`maxp`/`hmtx`/`loca`/`glyf`/`cmap` formats 0/4/12, composite glyphs), anti-aliased signed-area rasterizer (analytic coverage, non-zero winding, bounds-clipped because font files are untrusted input), and `ScaledFont` — glyph cache, derived metrics, `measure`/`wrap`/`draw_text` plus an 8-bit-coverage blitter. Replaces the single procedural 8x16 bitmap face the entire UI was capped at. Verified three ways: synthetic fixture, 556 host fonts (538 opened, 18 CFF rejected cleanly, 563k outlines walked, 68k glyphs rasterized at two sizes, zero panics), and ASCII-art rendering that proves letters look like letters (an ink count cannot tell a correct 'o' from a scrambled one). Tradeoffs in design-decisions.md §86.
+  - [x] **Font engine** (`gui/font/src/{sfnt,raster,scaled}.rs`) — the GPU-independent half. sfnt/TrueType container parser (`head`/`hhea`/`maxp`/`hmtx`/`loca`/`glyf`/`cmap` formats 0/4/12, composite glyphs), anti-aliased signed-area rasterizer (analytic coverage, non-zero winding, bounds-clipped because font files are untrusted input), and `ScaledFont` — glyph cache, derived metrics, `measure`/`wrap`/`draw_text` plus an 8-bit-coverage blitter. Replaces the single procedural 8x16 bitmap face the entire UI was capped at. Verified three ways: synthetic fixture, 556 host fonts (538 opened, 18 CFF rejected cleanly, 563k outlines walked, 68k glyphs rasterized at two sizes, zero panics), and ASCII-art rendering that proves letters look like letters (an ink count cannot tell a correct 'o' from a scrambled one). Tradeoffs in design-decisions.md §438.
   - [ ] CFF/Type 2 charstring outlines — `TD-FONT-NO-CFF-OUTLINES` in known-issues.md (18/556 host fonts, mostly Adobe faces; currently a hard parse error rather than a face that silently draws nothing)
   - [-] Wire `ScaledFont` into the compositor / toolkit / desktop text paths so scalable AA text actually reaches the screen
     - [x] **`osfont::system`** — `SystemFont`, a facade that presents an outline face and the built-in bitmap face through one API (`glyph`/`measure`/`wrap`/`draw_text`), so callers cannot tell which backend they hold; plus `FontCache`, keyed on rounded pixel size and weight.

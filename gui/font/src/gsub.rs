@@ -243,7 +243,7 @@ pub(crate) struct Staging<'s> {
     ///
     /// Clash resolved *towards* confinement, as HarfBuzz's `per_syllable |=`.
     pub(crate) per_syllable: u64,
-    /// The features that read ZWJ and ZWNJ themselves.
+    /// The features that read ZWNJ themselves, HarfBuzz's `F_MANUAL_ZWNJ`.
     ///
     /// For an ordinary feature the joiners are the font's business: a lookup
     /// steps over a ZWJ on its way to the next glyph, which is what makes
@@ -252,9 +252,19 @@ pub(crate) struct Staging<'s> {
     /// between a conjunct and a half-form — and stepping over one would apply
     /// the rule the joiner was typed to suppress.
     ///
-    /// Clash resolved *towards* manual, as HarfBuzz's `auto_zwj &=`. See
+    /// Clash resolved *towards* manual, as HarfBuzz's `auto_zwnj &=`. See
     /// [`Joiners`].
-    pub(crate) manual_joiners: u64,
+    pub(crate) manual_zwnj: u64,
+    /// The features that read ZWJ themselves, HarfBuzz's `F_MANUAL_ZWJ`.
+    ///
+    /// Usually the same set as [`Staging::manual_zwnj`] — HarfBuzz's
+    /// `F_MANUAL_JOINERS` is the two together, and Indic and Khmer declare
+    /// every basic feature with it. Myanmar is the script that pulls them
+    /// apart: its features are `F_MANUAL_ZWJ` only, so a ZWNJ inside one of its
+    /// rules' *context* is stepped over where an Indic rule would stop on it.
+    ///
+    /// Clash resolved *towards* manual, as HarfBuzz's `auto_zwj &=`.
+    pub(crate) manual_zwj: u64,
 }
 
 impl Staging<'static> {
@@ -265,7 +275,8 @@ impl Staging<'static> {
         Self {
             stages: &ONE_STAGE,
             per_syllable: 0,
-            manual_joiners: 0,
+            manual_zwnj: 0,
+            manual_zwj: 0,
         }
     }
 }
@@ -891,7 +902,8 @@ impl Substitutions {
             scratch: Vec::new(),
             defs: self.defs,
             mask: ALWAYS,
-            manual_joiners: staging.manual_joiners,
+            manual_zwnj: staging.manual_zwnj,
+            manual_zwj: staging.manual_zwj,
             serial: 0,
         };
         // Hoisted out of both loops for the same reason `Ctx::scratch` is: a
@@ -1047,14 +1059,18 @@ struct Ctx {
     /// by contrast, is the nested lookup's own — which is why a skipper is
     /// built per invocation rather than passed down.
     mask: u64,
-    /// The features that read the joiners themselves rather than leaving them
-    /// to the font — the plan's `manual_joiners`, unchanged for the whole run.
+    /// The features that read ZWNJ themselves rather than leaving it to the
+    /// font — the plan's `manual_zwnj`, unchanged for the whole run.
     ///
     /// Intersected with [`mask`](Self::mask) to decide whether the lookup being
-    /// applied may step over a ZWJ. Held here rather than passed down because
-    /// it is a property of the *plan*, and a nested lookup inherits the mask
-    /// that reached the rule that invoked it.
-    manual_joiners: u64,
+    /// applied may step over a ZWNJ in a rule's context. Held here rather than
+    /// passed down because it is a property of the *plan*, and a nested lookup
+    /// inherits the mask that reached the rule that invoked it.
+    manual_zwnj: u64,
+    /// The same for ZWJ — the plan's `manual_zwj`. Separate from
+    /// [`manual_zwnj`](Self::manual_zwnj) because Myanmar's features declare
+    /// one without the other.
+    manual_zwj: u64,
     /// How many ligature ids have been handed out so far in this run, for
     /// [`next_lig_id`](Ctx::next_lig_id).
     serial: u8,
@@ -1118,7 +1134,10 @@ fn skipper<'a>(lookup: &Lookup, data: &'a [u8], ctx: &Ctx) -> Skipper<'a> {
         // Manual if *any* of the features that reached the lookup is manual,
         // which is how HarfBuzz resolves it when it merges two map entries
         // that name the same lookup: `auto_zwnj &= …`, `auto_zwj &= …`.
-        Joiners::substitution(ctx.mask & ctx.manual_joiners != 0),
+        Joiners::substitution(
+            ctx.mask & ctx.manual_zwnj != 0,
+            ctx.mask & ctx.manual_zwj != 0,
+        ),
     )
 }
 
@@ -2369,7 +2388,8 @@ mod tests {
             &Staging {
                 stages: &[ALL_FEATURES],
                 per_syllable: ALL_FEATURES,
-                manual_joiners: 0,
+                manual_zwnj: 0,
+                manual_zwj: 0,
             },
             &mut glyphs,
             |_, _| {},
@@ -2438,7 +2458,8 @@ mod tests {
             &Staging {
                 stages: &[0],
                 per_syllable: 0,
-                manual_joiners: 0,
+                manual_zwnj: 0,
+                manual_zwj: 0,
             },
             &mut glyphs,
             |_, _| {},
@@ -2465,7 +2486,8 @@ mod tests {
             &Staging {
                 stages: &[0, ALL_FEATURES],
                 per_syllable: 0,
-                manual_joiners: 0,
+                manual_zwnj: 0,
+                manual_zwj: 0,
             },
             &mut glyphs,
             |i, glyphs| seen.push((i, glyphs.len())),

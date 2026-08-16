@@ -61,25 +61,34 @@ its own. Whatever position such a character keeps afterwards is inert —
 nothing reads it — but it is written the way HarfBuzz writes it, so the two
 tables stay diffable.
 
-What is deliberately not here
------------------------------
+Myanmar shares it too
+---------------------
 
-**Myanmar.** Its block brings `IV`, `As`, `DB`, `GB`, `MH`, `MW`, `MY`, `PT`,
-`VS` and more that only the Myanmar machine reads. This crate has no Myanmar
-shaper, so that block and those categories are left out, and with them every
-override in HarfBuzz's list whose target category is Myanmar-only; the handful
-that name an Indic category but only apply to Myanmar code points are skipped
-as unreachable. Adding the shaper means adding its categories here and
-re-running.
+The same arrangement, one script further: the four Myanmar blocks are here, and
+with them the eight categories only the Myanmar machine reads (`As`, `MH`,
+`MR`, `MW`, `MY`, `PT`, `VS`, `ML`) and Myanmar's half of the step-6 matra
+branch, which folds a matra's position into its category exactly as Khmer's
+does.
+
+Eight, and not the dozen the Myanmar grammar names, because most of the
+grammar's category names are *aliases*. HarfBuzz writes `IV`, `DB` and `GB`
+in the Myanmar machine for what this table calls `V`, `N` and `PLACEHOLDER`;
+they are `#define`s over the same numbers, not values the derivation can
+produce. Only the eight above are new numbers.
+
+`VS` is the odd one: U+FE00..U+FE0F are not in any allowed block, and they
+reach the table only because the overrides are applied unconditionally. That
+is deliberate — the Myanmar grammar is the one place a variation selector is
+a syllable member rather than a thing the shaper hides.
 """
 
 import os
 import unicodedata
 import urllib.request
 
-# Blocks whose code points the Indic and Khmer shapers read. HarfBuzz's list
-# minus the four Myanmar blocks; Basic Latin and the punctuation blocks are in
-# it because a placeholder or a dotted circle can stand in for a base.
+# Blocks whose code points the Indic, Khmer and Myanmar shapers read —
+# HarfBuzz's list. Basic Latin and the punctuation blocks are in it because a
+# placeholder or a dotted circle can stand in for a base.
 #
 # "Khmer Symbols" (U+19E0..U+19FF) is deliberately absent, as it is from
 # HarfBuzz's list: those are lunar-date signs, not part of a syllable.
@@ -96,6 +105,10 @@ ALLOWED_BLOCKS = (
     "Kannada",
     "Malayalam",
     "Khmer",
+    "Myanmar",
+    "Myanmar Extended-A",
+    "Myanmar Extended-B",
+    "Myanmar Extended-C",
     "Vedic Extensions",
     "General Punctuation",
     "Superscripts and Subscripts",
@@ -145,6 +158,17 @@ CATEGORIES = (
     "Robatic",
     "Xgroup",
     "Ygroup",
+    # Myanmar only, and all eight come only from an override. The grammar's
+    # other names — `IV`, `DB`, `GB` — are aliases for `V`, `N` and
+    # `PLACEHOLDER`, so they are not separate numbers and are not here.
+    "As",
+    "MH",
+    "MR",
+    "MW",
+    "MY",
+    "PT",
+    "VS",
+    "ML",
 )
 
 # The Rust variant name for each. Spelled out rather than derived so that
@@ -177,6 +201,14 @@ RUST_CATEGORY = {
     "Robatic": "Robatic",
     "Xgroup": "XGroup",
     "Ygroup": "YGroup",
+    "As": "Asat",
+    "MH": "MedialHa",
+    "MR": "MedialRa",
+    "MW": "MedialWa",
+    "MY": "MedialYa",
+    "PT": "PwoTone",
+    "VS": "VariationSelector",
+    "ML": "MedialMonLa",
 }
 
 RUST_POSITION = {
@@ -348,6 +380,62 @@ CATEGORY_OVERRIDES = {
     0x17D3: "Ygroup",
     # KHMER SIGN PHNAEK MUAN, which takes marks like a base.
     0x17D9: "PLACEHOLDER",
+    # Variation selectors. Not Myanmar's characters, but the Myanmar grammar is
+    # the only one that names them, so this is where they enter the table.
+    **{cp: "VS" for cp in range(0xFE00, 0xFE10)},
+    # Myanmar. U+104E is a Consonant_Placeholder to Unicode and a consonant to
+    # the OpenType spec, which is what the shaper follows.
+    0x104E: "C",
+    # NGA, RA and the Shan RA: a kinzi is NGA+ASAT+VIRAMA and nothing else, and
+    # `Ra` is how the machine says so.
+    0x1004: "Ra",
+    0x101B: "Ra",
+    0x105A: "Ra",
+    # AI and ANUSVARA, which the grammar groups with the cantillation marks
+    # rather than with the vowels they look like.
+    0x1032: "A",
+    0x1036: "A",
+    # ASAT, the sign that kills a consonant's inherent vowel. Its own category
+    # because it may follow almost anything in the grammar.
+    0x103A: "As",
+    # U+1040 is D0 in the spec — a digit that may stand in for a base — but
+    # Uniscribe does not categorize it that way and neither does HarfBuzz.
+    # The medials, one category each: the grammar admits them only in the order
+    # YA, RA, WA/HA, MON LA, and cannot say so with one shared category.
+    0x103E: "MH",
+    0x1060: "ML",
+    0x103C: "MR",
+    0x103D: "MW",
+    0x1082: "MW",
+    0x103B: "MY",
+    0x105E: "MY",
+    0x105F: "MY",
+    # Pwo and other tones, which end a syllable and may carry marks of their
+    # own.
+    0x1063: "PT",
+    0x1064: "PT",
+    0x1069: "PT",
+    0x106A: "PT",
+    0x106B: "PT",
+    0x106C: "PT",
+    0x106D: "PT",
+    0xAA7B: "PT",
+    # Visarga and the Shan tones, which are syllable modifiers wherever they
+    # land rather than post-base ones.
+    0x1038: "SM",
+    0x1087: "SM",
+    0x1088: "SM",
+    0x1089: "SM",
+    0x108A: "SM",
+    0x108B: "SM",
+    0x108C: "SM",
+    0x108D: "SM",
+    0x108F: "SM",
+    0x109A: "SM",
+    0x109B: "SM",
+    0x109C: "SM",
+    # MYANMAR SIGN LITTLE SECTION, which takes marks like a base.
+    0x104A: "PLACEHOLDER",
 }
 
 POSITION_OVERRIDES = {
@@ -401,9 +489,9 @@ def matra_position(u, pos, block):
     raise SystemExit(f"matra at an impossible position {pos!r}")
 
 
-# The Khmer half of step 6. The Khmer grammar has no position axis: it tells
-# vowels apart by name, so a matra's position has to be folded into its
-# category before the machine ever sees it.
+# The Khmer and Myanmar half of step 6. Neither grammar has a position axis:
+# both tell vowels apart by name, so a matra's position has to be folded into
+# its category before the machine ever sees it.
 def position_to_category(pos):
     try:
         return {
@@ -413,7 +501,7 @@ def position_to_category(pos):
             "POST_C": "VPst",
         }[pos]
     except KeyError:
-        raise SystemExit(f"Khmer matra at an impossible position {pos!r}") from None
+        raise SystemExit(f"matra at an impossible position {pos!r} for its block") from None
 
 
 # Keep in sync with `indic.rs`: the categories the shaper treats as a base.
@@ -469,7 +557,7 @@ def derive(syllabic, positional, blocks):
         if cat in CONSONANT_CATEGORIES:
             pos = "BASE_C"
         elif cat in MATRA_CATEGORIES:
-            if block.startswith("Khmer"):
+            if block.startswith("Khmer") or block.startswith("Myanmar"):
                 # The position is left as Unicode gave it. Nothing reads it —
                 # it is now redundant with the category — but HarfBuzz writes
                 # it, so the two tables stay diffable.

@@ -260,10 +260,16 @@ pub(crate) struct Run<'a> {
     pub(crate) advances: &'a [i32],
     /// Whether each glyph is one whose advance must be zeroed because it is a
     /// combining mark. Decided by the caller, which knows the face; a mark's
-    /// width is dropped after the lookups have run and before the attachment
-    /// chains are resolved, so that a mark between a base and another mark
-    /// contributes nothing to the distance between them.
+    /// width is dropped before the attachment chains are resolved, so that a
+    /// mark between a base and another mark contributes nothing to the
+    /// distance between them.
     pub(crate) marks: &'a [bool],
+    /// Whether that zeroing happens *before* the lookups rather than after —
+    /// HarfBuzz's `HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY`, which its
+    /// Myanmar and USE shapers set and no other does. See
+    /// [`fallback::Zeroing`](crate::fallback::Zeroing) for why the two orders
+    /// are not the same answer.
+    pub(crate) zero_marks_first: bool,
     /// Whether the run reads right to left.
     pub(crate) rtl: bool,
     /// The run's script, which selects the lookups.
@@ -324,20 +330,22 @@ impl Positioning {
         let mut out: Vec<Adjust> = (0..run.glyphs.len())
             .map(|i| Adjust::plain(run.advances.get(i).copied().unwrap_or(0)))
             .collect();
+        // Marks lose their width either side of the lookups, for the same
+        // reason and at the same two points HarfBuzz does it: an anchored
+        // mark's offset is measured back from its base across the advances in
+        // between, and a mark that still had a width would push every mark
+        // after it off the letter. Which side is the run's script's business —
+        // going first leaves the lookups free to charge an advance the mark
+        // then keeps, going last discards whatever they charged. See
+        // [`Run::zero_marks_first`].
+        if run.zero_marks_first {
+            zero_marks(&mut out, run.marks);
+        }
         for (lookup, _) in self.lookups.for_script(run.script, run.lang) {
             self.run_lookup(data, lookup, run, &mut out);
         }
-        // Marks lose their width here, between the lookups and the chains, for
-        // the same reason and at the same point HarfBuzz does it: an anchored
-        // mark's offset is measured back from its base across the advances in
-        // between, and a mark that still had a width would push every mark
-        // after it off the letter.
-        for (adjust, &mark) in out.iter_mut().zip(run.marks.iter()) {
-            if mark {
-                adjust.x_advance = 0;
-                adjust.y_advance = 0;
-                adjust.kern = 0;
-            }
+        if !run.zero_marks_first {
+            zero_marks(&mut out, run.marks);
         }
         propagate(&mut out, run.rtl);
         out
@@ -906,6 +914,23 @@ fn reverse_chain(out: &mut [Adjust], from: usize, stop: usize) {
             a.y_offset = offset.saturating_neg();
             a.chain = chain.saturating_neg();
             a.kind = kind;
+        }
+    }
+}
+
+/// Take the advance away from every glyph `marks` calls a combining mark.
+///
+/// HarfBuzz's `zero_mark_widths_by_gdef`, minus its `adjust_offsets` half —
+/// that one runs only when nothing else will place the mark, which here means
+/// no `GPOS` at all, which means this function was never reached. See
+/// [`ScaledFont::shape`](crate::scaled::ScaledFont::shape) for where the
+/// offset is walked back instead.
+fn zero_marks(out: &mut [Adjust], marks: &[bool]) {
+    for (adjust, &mark) in out.iter_mut().zip(marks.iter()) {
+        if mark {
+            adjust.x_advance = 0;
+            adjust.y_advance = 0;
+            adjust.kern = 0;
         }
     }
 }
@@ -1596,6 +1621,54 @@ mod tests {
         assert_eq!(asks(b"DFLT", b"mark"), (false, false, false));
     }
 
+    /// A mark's advance is taken away either side of the lookups, and which
+    /// side is the whole difference between what HarfBuzz's Myanmar shaper
+    /// prints and what every other shaper does.
+    ///
+    /// `mmrtext.ttf` is the face that makes it visible: it classes U+103C in
+    /// `GDEF` as a mark *and* gives it a 440-unit advance, and its `dist`
+    /// feature charges that 440 on. Zeroing last discards the charge and every
+    /// glyph after the medial ra slides 440 units left; zeroing first keeps it.
+    #[test]
+    fn zeroing_a_mark_before_the_lookups_lets_one_charge_an_advance_back() {
+        let data = gpos_table(&[(
+            SINGLE_POS,
+            single_pos1(
+                &[7],
+                Value {
+                    x_advance: 440,
+                    ..Value::default()
+                },
+            ),
+        )]);
+        let pos = Positioning::parse(&data, span(0, data.len()), None).expect("GPOS parses");
+        let run = glyphs(&[7, 8]);
+        let advances = alloc::vec![440, 1000];
+        let marks = alloc::vec![true, false];
+        let widths = |zero_marks_first| {
+            pos.apply(
+                &data,
+                &Run {
+                    glyphs: &run,
+                    advances: &advances,
+                    marks: &marks,
+                    zero_marks_first,
+                    rtl: false,
+                    script: None,
+                    lang: None,
+                },
+            )
+            .iter()
+            .map(|a| a.x_advance)
+            .collect::<Vec<_>>()
+        };
+        // First: the lookup charges 440 onto nothing, and the mark keeps it.
+        assert_eq!(widths(true), alloc::vec![440, 1000]);
+        // Last: the lookup charges 440 onto 440 and the zeroing throws the
+        // whole 880 away.
+        assert_eq!(widths(false), alloc::vec![0, 1000]);
+    }
+
     /// Position `ids` with the whole table at `data`, and report the x offsets.
     fn positioned(data: &[u8], ids: &[u16]) -> Vec<i32> {
         let run = glyphs(ids);
@@ -1608,6 +1681,7 @@ mod tests {
                 glyphs: &run,
                 advances: &advances,
                 marks: &marks,
+                zero_marks_first: false,
                 rtl: false,
                 script: None,
                 lang: None,

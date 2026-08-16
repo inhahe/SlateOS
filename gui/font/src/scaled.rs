@@ -39,7 +39,7 @@ use crate::indic_shape::{Script, continues_word};
 use crate::joining::{self, Form};
 use crate::lang::Lang;
 use crate::norm;
-use crate::norm::Ignorable;
+use crate::norm::{Ignorable, Piece};
 use crate::raster::{GlyphMask, rasterize};
 use crate::script::{self, ScriptTags};
 use crate::sfnt::{Face, PathCmd, SfntError};
@@ -147,6 +147,34 @@ struct Segment {
     end: usize,
     /// The script the stretch was opened under, which chooses its features.
     script: Option<ScriptTags>,
+}
+
+/// What the measuring fallback is to make of one glyph.
+///
+/// Not the same question as "is this glyph a combining mark", and the
+/// difference is the point. The fallback runs on some runs and not others — a
+/// face that files its Myanmar features under `latn` is shaped by the default
+/// shaper, which places marks by measurement, while a face that files them
+/// under `mym2` is shaped by the Myanmar shaper, which leaves them to `GPOS`
+/// — so a mark in the second is [`Role::Base`] here. That reads oddly and is
+/// exactly right: the only thing this pass ever does with a `Base` is refuse
+/// to move it and let it end the cluster before it, which is what "nothing
+/// for this pass to do" has to look like.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    /// A glyph the marks after it attach to, and the end of the run of marks
+    /// before it.
+    Base,
+    /// A combining mark this pass owns, carrying its combining class.
+    ///
+    /// Zero is a class like any other here. HarfBuzz neither moves nor zeroes
+    /// a class-zero mark — Unicode gives it that class precisely because it
+    /// needs no reordering and stacks with nothing — but it does keep it
+    /// *inside* the cluster, counting its advance towards the marks that
+    /// follow. Calling it a base instead restarts the measurement halfway
+    /// through a syllable, which is how a Myanmar dot-below ends up a letter
+    /// to the right of where it belongs.
+    Mark(u8),
 }
 
 impl ScaledFont {
@@ -527,6 +555,27 @@ impl ScaledFont {
                     .is_some_and(|gid| self.face.advance(gid).is_ok_and(|adv| adv == 0))
             },
         );
+        // Unicode variation sequences: two characters that name one glyph, and
+        // often a glyph the ordinary `cmap` cannot reach at all — `mmrtext.ttf`
+        // draws U+1000 U+FE00 with one no single character maps to. Collapsed
+        // to one piece here, which is what HarfBuzz's normalizer does with
+        // `handle_variation_selector_cluster`, and before every pass below that
+        // would otherwise count the selector as a character of its own: the
+        // level list, the run splitter and the joining forms are all one entry
+        // per piece.
+        //
+        // After the Korean pass rather than before, because that one rewrites
+        // `pieces` wholesale and `uvs` would not survive it. It takes no
+        // interest in a variation selector, so the order costs nothing.
+        //
+        // Empty, and not even allocated, for every face with no `cmap` format
+        // 14 subtable — which is nearly all of them.
+        let mut uvs: Vec<Option<u16>> = Vec::new();
+        if self.face.has_variation_sequences() {
+            collapse_variation_sequences(&mut pieces, &mut jamo, &mut uvs, |base, selector| {
+                self.face.variation_glyph(base, selector)
+            });
+        }
         // A level per *piece*, for the run splitter, and rule L4 while we are
         // here: a bracket in a right-to-left run is drawn as its pair, because
         // the character encodes the bracket that *opens* and which side that
@@ -630,20 +679,18 @@ impl ScaledFont {
         let mut placeable = runs
             .first()
             .is_none_or(|&(_, t)| fallback::positions_marks(t, simple));
-        let mut zeroed = runs
-            .first()
-            .is_none_or(|&(_, t)| fallback::zeroes_mark_advances(t, simple));
         // And whether this run is one the Indic shaper will lay out, which
         // decides whether the two facts it reads off the *character* are worth
         // deriving. Neither is free — one is a binary search of the Indic
         // table, the other of the bidi table — and neither is read anywhere
         // else, so a line of Latin pays for neither.
-        // Khmer counts here too, and not through `Script::shaping`: it reads the
-        // same [`Char`] out of the same table — the two shapers share one
-        // category enum — but has a shaper and a script tag of its own. See
-        // [`indic`](crate::indic).
-        let categorised =
-            |t: Option<ScriptTags>| Script::shaping(t).is_some() || crate::khmer::shapes(t);
+        // Khmer and Myanmar count here too, and not through `Script::shaping`:
+        // they read the same [`Char`] out of the same table — the three shapers
+        // share one category enum — but each has a shaper and a script tag of
+        // its own. See [`indic`](crate::indic).
+        let categorised = |t: Option<ScriptTags>| {
+            Script::shaping(t).is_some() || crate::khmer::shapes(t) || crate::myanmar::shapes(t)
+        };
         let mut indic = !simple && runs.first().is_some_and(|&(_, t)| categorised(t));
         for (i, &(ch, cluster)) in pieces.iter().enumerate() {
             while runs.get(run).is_some_and(|&(end, _)| end <= i) {
@@ -655,9 +702,6 @@ impl ScaledFont {
                 placeable = runs
                     .get(run)
                     .is_none_or(|&(_, t)| fallback::positions_marks(t, simple));
-                zeroed = runs
-                    .get(run)
-                    .is_none_or(|&(_, t)| fallback::zeroes_mark_advances(t, simple));
                 indic = !simple && runs.get(run).is_some_and(|&(_, t)| categorised(t));
             }
             // A tab has no glyph. Drawn through `cmap` it comes out as the
@@ -667,26 +711,37 @@ impl ScaledFont {
             let tab = ch == '\t';
             let gid = if tab {
                 space
+            } else if let Some(gid) = uvs.get(i).copied().flatten() {
+                // A variation sequence named this glyph outright, so the
+                // `cmap` is not asked: the whole point of the sequence is that
+                // the single character maps somewhere else.
+                gid
             } else {
                 self.glyph_id(pua.get(i).copied().flatten().unwrap_or(ch))
             };
+            // Whether the measuring fallback owns this run's marks: it is the
+            // one placing them, so it is the one that says which glyphs they
+            // are. False for the runs `GPOS` reaches, and false for the
+            // complex scripts whose shapers decline the fallback outright —
+            // Myanmar's does, and its marks are placed by `GPOS` or not at all.
+            let owned = synth && placeable && !tab;
+            let klass = if owned { fallback::attach_class(ch) } else { 0 };
             glyphs.push(SubGlyph {
-                klass: if synth && placeable && !tab {
-                    fallback::attach_class(ch)
-                } else {
-                    0
-                },
-                // Either of HarfBuzz's two zeroing passes is enough, and they
-                // are gated on different things — see `by_category`. The
-                // fallback's own pass runs exactly when the fallback does, so
-                // it takes `placeable`; the `GDEF` pass runs on every face but
-                // is switched off entirely for the ten scripts of
-                // [`fallback::zeroes_mark_advances`], so it takes `zeroed`.
-                // Neither is gated on the combining class, which is an ordering
-                // and leaves plenty of marks at zero.
-                mark: !tab
-                    && norm::is_mark(ch)
-                    && ((synth && placeable) || (by_category && zeroed)),
+                klass,
+                // Nothing more than "the character is `Mn`". What is *done*
+                // with that is two separate decisions taken further down —
+                // whether the advance is zeroed, and whether the glyph is a
+                // mark the fallback places rather than a base other marks
+                // attach to — and folding either of them in here would make
+                // one of the two wrong.
+                //
+                // Derived only where one of the two will be asked, since it
+                // costs a binary search of the general-category table: the
+                // fallback owns this run's marks, or the face has no `GDEF`
+                // `GlyphClassDef` and so cannot be asked which glyphs are
+                // marks. A face with a `GDEF` to class the glyph and a `GPOS`
+                // to place it needs neither.
+                mark: (owned || (by_category && !tab)) && norm::is_mark(ch),
                 // Answered here for the reason the two below are: it is a
                 // property of the character, and after substitution there may
                 // be no character left to ask. Unlike them it does not survive
@@ -744,10 +799,28 @@ impl ScaledFont {
         // no `GPOS` feature of any kind, so it wants the legacy table too.
         let legacy = self.face.has_legacy_kern();
         let mut legacy_at: Vec<bool> = alloc::vec![false; glyphs.len()];
+        // And whether a mark in the segment takes no room. A per-script
+        // question and nothing to do with the face: HarfBuzz gates its whole
+        // `GDEF` zeroing pass on `plan->zero_marks`, which eleven scripts turn
+        // off because their "marks" are spacing letters that a zero advance
+        // would pile on top of each other. See [`fallback::Zeroing`].
+        let mut zeroed_at: Vec<bool> = alloc::vec![false; glyphs.len()];
+        // What the measuring fallback is to make of each glyph, for the
+        // segments it owns. `Role::Base` everywhere else, which is exactly
+        // what a pass with nothing to do here should see: a run of bases has
+        // no clusters in it. Left empty when no segment wants it — a line of
+        // Latin in a face with a `GPOS` allocates nothing.
+        let synthesize = segments.iter().any(|s| self.places_marks(s.script));
+        let mut roles: Vec<Role> = if synthesize {
+            alloc::vec![Role::Base; glyphs.len()]
+        } else {
+            Vec::new()
+        };
         for segment in &segments {
             let applies = self.applies_gpos(segment.script);
             let answer = !applies;
             let kern = legacy && (!applies || !self.face.gpos_kerns(segment.script, lang));
+            let zero = self.zeroes_marks(segment.script);
             for slot in synth_at
                 .get_mut(segment.start..segment.end)
                 .unwrap_or_default()
@@ -760,50 +833,81 @@ impl ScaledFont {
             {
                 *slot = kern;
             }
+            for slot in zeroed_at
+                .get_mut(segment.start..segment.end)
+                .unwrap_or_default()
+            {
+                *slot = zero;
+            }
+            if !self.places_marks(segment.script) {
+                continue;
+            }
+            for at in segment.start..segment.end {
+                let Some(glyph) = glyphs.get(at) else { break };
+                if glyph.mark && let Some(slot) = roles.get_mut(at) {
+                    *slot = Role::Mark(glyph.klass);
+                }
+            }
         }
-        let synthesize = synth_at.iter().any(|&yes| yes);
 
-        let marked = self.face.has_marks();
-        // The combining classes, one per glyph, kept aside for the placement
-        // pass: `glyphs` is consumed into `out` below and `ShapedGlyph` has no
-        // business carrying a combining class around for the rest of its life.
-        // Empty unless the fallback is going to run.
-        let mut klasses: Vec<u8> = if synthesize {
-            glyphs.iter().map(|g| g.klass).collect()
-        } else {
-            Vec::new()
-        };
         // Which glyphs are combining marks, and what each one's nominal width
         // is. Both are wanted twice — once by the positioning pass, which is
         // handed whole runs, and once by the loop below, which walks one glyph
         // at a time — so they are settled here rather than recomputed.
         //
-        // Two ways to be a mark, because two different things are being asked.
-        // A face with anchors is asked about the *glyph*, since that is what
-        // the anchors are indexed by and what `GDEF` classes. A run the face's
-        // `GPOS` does not reach can only be asked about the *character*, and
-        // the answer is its general category — carried on the glyph as
-        // `SubGlyph::mark`, because substitution is free to change the glyph id
-        // and a cluster cannot tell a base from the marks that share it.
+        // This is the first of HarfBuzz's two mark-zeroing routes, and only
+        // the first: `zero_mark_widths_by_gdef` takes the advance from every
+        // glyph whose `GDEF` class is mark, on every face and whether or not
+        // `GPOS` runs. The measuring fallback's own zeroing is a separate,
+        // narrower thing — it reaches only the marks it actually places — and
+        // lives in [`synthesize_marks`](Self::synthesize_marks).
         //
-        // Both can be true of one glyph, and `||` is the right join: a Hebrew
-        // point in a face that classes it in `GDEF` but files its `GPOS` under
-        // `latn` is a mark by either route, and HarfBuzz zeroes it by either
-        // route too — `GDEF` late-zeroing and the fallback are separate passes
-        // there, both switched on.
+        // Which glyphs those are is asked of the *face* when it has a `GDEF`
+        // `GlyphClassDef` and of the *character* when it has not, and never of
+        // both: a glyph a face with classes omits from them is one it declined
+        // to call a mark, and overruling that from the character's general
+        // category would zero an advance the designer meant to keep. HarfBuzz
+        // synthesizes classes under exactly the same condition —
+        // `hb_synthesize_glyph_classes`, run only when
+        // `!hb_ot_layout_has_glyph_classes` — which is why the answer here is
+        // an either/or and not a union. `SubGlyph::mark` carries the
+        // character's half, because substitution is free to change the glyph
+        // id and a cluster cannot tell a base from the marks that share it.
+        let by_gdef = self.face.classifies_glyphs();
         let marks: Vec<bool> = glyphs
             .iter()
             .enumerate()
             .map(|(i, glyph)| {
                 let tab = tabs.get(i).copied().unwrap_or(false);
-                (marked && !tab && self.face.is_mark(glyph.gid)) || glyph.mark
+                zeroed_at.get(i).copied().unwrap_or(false)
+                    && if by_gdef {
+                        !tab && self.face.is_mark(glyph.gid)
+                    } else {
+                        glyph.mark
+                    }
             })
             .collect();
         let advances: Vec<i32> = glyphs
             .iter()
             .map(|g| i32::from(self.face.advance(g.gid).unwrap_or(0)))
             .collect();
-        let adjusted = self.position_segments(&segments, lang, &glyphs, &advances, &marks, &levels);
+        // `kept_at` says, glyph by glyph, that the positioning pass has already
+        // had the last word on this mark's advance: it zeroed the mark *before*
+        // the lookups ran and then let one of them — the face's `dist` feature,
+        // for Myanmar — charge an advance back on. The loop at the bottom zeroes
+        // every mark it is handed, which is right for every other script and
+        // would here throw away the half of the job the ordering existed to
+        // allow. See [`fallback::Zeroing`].
+        //
+        // Reported by the pass rather than worked out from the script, because
+        // "this segment is Myanmar and the face has a `GPOS`" is not the same
+        // claim as "the pass ran on it": a face whose `GPOS` carries nothing
+        // this crate reads is positioned by nobody, and its marks still keep
+        // their nominal `hmtx` advance unless the loop below takes it away.
+        // `DejaVuMathTeXGyre.ttf` is exactly that face, and asking the script
+        // instead left every Myanmar mark in it a missing-glyph box wide.
+        let (adjusted, kept_at) =
+            self.position_segments(&segments, lang, &glyphs, &advances, &marks, &levels);
         // Whether pairs still have to be kerned one at a time here. They do
         // only where the run's kerning is the legacy `kern` table's, which the
         // positioning pass cannot read; pairs the pass has already charged must
@@ -826,6 +930,10 @@ impl ScaledFont {
             // across it; kerning *against* the mark instead would shove the
             // accent off the letter it belongs to.
             let mark = marks.get(i).copied().unwrap_or(false);
+            // Whether the positioning pass has already had the last word on
+            // this mark's advance — see `kept_at`. Only ever true of a mark,
+            // and only in a Myanmar segment the pass really ran on.
+            let kept = kept_at.get(i).copied().unwrap_or(false);
             // A never-drawn character is transparent to kerning: it is neither
             // half of a pair, and it does not stand between one. Every
             // positioning lookup steps over every default ignorable —
@@ -863,17 +971,24 @@ impl ScaledFont {
             // Zeroing the advance stops the pen travelling, but the mark is
             // drawn at the pen it *arrives* at, which is still the far side of
             // the letter. HarfBuzz's `adjust_mark_offsets` subtracts the
-            // advance from the offset for exactly this reason, and only when
-            // nothing else is going to place the mark — `!has_gpos_mark` there,
-            // `klass == 0` here, which is the same claim in the same order:
-            // a mark the fallback below will position gets an offset measured
-            // from its base and does not want a second, blind shift on top.
+            // advance from the offset for exactly this reason, and it does so
+            // for *every* mark it zeroes — no combining class in sight. What
+            // makes that safe there is the order: the fallback runs afterwards
+            // and overwrites the offset of every mark it places, so the blind
+            // shift survives only on the marks nothing else had an answer for.
+            // [`synthesize_marks`](Self::synthesize_marks) overwrites in the
+            // same way and skips in the same cases — a class of zero, or a
+            // glyph the face gives no bounding box — so the shift is applied
+            // here unconditionally and left to be overwritten. Gating it on the
+            // class instead left a mark with a class but no box unshifted: an
+            // accent over `.notdef` in a face with no `GPOS`, which is what
+            // `Hack-Bold.ttf` draws for every Myanmar character there is.
+            //
             // Left-to-right only, as in HarfBuzz: in a right-to-left run the
             // pen arrives on the mark's *right*, which is where a mark drawn
             // at offset zero already belongs.
             let back = if mark
                 && synth_at.get(i).copied().unwrap_or(false)
-                && klasses.get(i).copied().unwrap_or(0) == 0
                 && levels
                     .get(glyph.cluster)
                     .is_none_or(|l| l.is_multiple_of(2))
@@ -896,7 +1011,11 @@ impl ScaledFont {
                 // letter and make `é` measure wider than `e`. HarfBuzz zeroes
                 // mark advances for the same reason. The positioning pass has
                 // already done it for the glyphs it saw; this catches the rest.
-                advance: if mark {
+                // `kept` is the one mark the pass saw and deliberately left
+                // with a width — it zeroed first and then let a lookup charge
+                // one back on, and taking it away again here would undo the
+                // half of the job the ordering existed to allow.
+                advance: if mark && !kept {
                     0.0
                 } else if tab {
                     advance * TAB_WIDTH_IN_SPACES
@@ -938,7 +1057,7 @@ impl ScaledFont {
         // the visual order below, though, because that is a permutation of
         // `out`'s indices and a deletion moves them.
         if glyphs.iter().any(|g| g.ignorable.erased()) {
-            hide_ignorables(&mut out, &mut klasses, &glyphs, space);
+            hide_ignorables(&mut out, &mut roles, &glyphs, space);
         }
 
         // Rule L2, over glyphs rather than characters: a ligature is one glyph
@@ -968,12 +1087,12 @@ impl ScaledFont {
             // reach had its marks placed there, in font units and before the
             // reordering — which is where the placement belongs, since a
             // mark's offset is measured against a pen the lookups themselves
-            // were still moving. The two never touch the same glyph: a run the
-            // pass ran on has `klass` zero throughout, because the piece loop
-            // only fills `klass` in where `applies_gpos` said no, and this pass
-            // does nothing to a glyph whose class is zero but treat it as a
-            // base.
-            self.synthesize_marks(&mut out, &visual, &klasses, &levels);
+            // were still moving. The two never touch the same glyph: a
+            // segment the pass ran on is `Role::Base` throughout, because the
+            // segment loop only writes `Role::Mark` where `applies_gpos` said
+            // no, and a run of bases has no cluster in it for this pass to
+            // find.
+            self.synthesize_marks(&mut out, &visual, &roles, &levels);
         }
         ShapedRun::reordered(out, visual)
     }
@@ -1128,6 +1247,47 @@ impl ScaledFont {
                 .is_none_or(|tag| self.face.gpos_names_script(&tag))
     }
 
+    /// Whether a run of `script` in this face zeroes its marks' advances before
+    /// the `GPOS` lookups rather than after.
+    ///
+    /// A question about the run *and* the face, because a face that files its
+    /// features under `DFLT` has called the complex shaper off and the default
+    /// shaper zeroes last — see [`fallback::shaped_as_default`]. Answered here
+    /// rather than at either call site because both of them need it and neither
+    /// is in a position to work out `simple` for itself.
+    fn zeroes_marks_first(&self, script: Option<ScriptTags>) -> bool {
+        let simple = self.face.shapes_as_default(script);
+        fallback::zeroes_mark_advances(script, simple) == fallback::Zeroing::BeforeGpos
+    }
+
+    /// Whether a run of `script` in this face zeroes its marks' advances at
+    /// all — before or after the lookups, either counts.
+    ///
+    /// HarfBuzz's `plan->zero_marks`, which gates the whole `GDEF` zeroing
+    /// pass. Eleven scripts turn it off, because what Unicode calls a mark
+    /// there is a spacing letter, and a zero advance would stack a syllable's
+    /// worth of them in one cell. See [`fallback::zeroes_mark_advances`].
+    fn zeroes_marks(&self, script: Option<ScriptTags>) -> bool {
+        let simple = self.face.shapes_as_default(script);
+        fallback::zeroes_mark_advances(script, simple) != fallback::Zeroing::Never
+    }
+
+    /// Whether the measuring fallback places a run of `script`'s marks.
+    ///
+    /// Two conditions, and both are needed. `GPOS` must not reach the run —
+    /// a face that positions its own marks has said where they go, and
+    /// measuring one into a different place would fight the design. And the
+    /// run's shaper must be one that asks for the fallback at all: HarfBuzz's
+    /// Indic, Khmer, Myanmar and Hangul shapers all end their struct with
+    /// `fallback_position = false`, because their marks are `GPOS`'s business
+    /// or nobody's. A face that files a complex script's features under
+    /// `latn` is shaped by the *default* shaper, which does ask — which is why
+    /// this cannot be answered from the script tag alone.
+    fn places_marks(&self, script: Option<ScriptTags>) -> bool {
+        !self.applies_gpos(script)
+            && fallback::positions_marks(script, self.face.shapes_as_default(script))
+    }
+
     /// Position each of `segments` with the face's `GPOS`, into one adjustment
     /// per glyph in `glyphs`.
     ///
@@ -1139,6 +1299,11 @@ impl ScaledFont {
     /// A glyph no segment covers — a tab, and every glyph when the face has no
     /// `GPOS` — keeps its nominal advance and no displacement, which is the
     /// same answer the pass would give for a glyph no lookup matched.
+    ///
+    /// The second half of the answer is one flag per glyph saying the pass
+    /// zeroed that segment's marks *before* its lookups, so that whatever a
+    /// lookup then charged back on is the final word and must not be zeroed a
+    /// second time. True only where the pass actually ran — see the call site.
     fn position_segments(
         &self,
         segments: &[Segment],
@@ -1147,10 +1312,11 @@ impl ScaledFont {
         advances: &[i32],
         marks: &[bool],
         levels: &[Level],
-    ) -> Vec<Adjust> {
+    ) -> (Vec<Adjust>, Vec<bool>) {
         let mut out: Vec<Adjust> = advances.iter().copied().map(Adjust::plain).collect();
+        let mut kept: Vec<bool> = alloc::vec![false; advances.len()];
         if !self.face.has_gpos_lookups() {
-            return out;
+            return (out, kept);
         }
         for segment in segments {
             // A segment whose script refuses this face's `GPOS` outright. Not
@@ -1178,10 +1344,12 @@ impl ScaledFont {
                     .get(glyph.cluster)
                     .is_some_and(|level| !level.is_multiple_of(2))
             });
+            let first = self.zeroes_marks_first(segment.script);
             let Some(done) = self.face.position(&Run {
                 glyphs: run,
                 advances: widths,
                 marks: is_mark,
+                zero_marks_first: first,
                 rtl,
                 script: segment.script,
                 lang,
@@ -1189,16 +1357,21 @@ impl ScaledFont {
                 continue;
             };
             for (offset, adjust) in done.into_iter().enumerate() {
-                if let Some(slot) = segment
-                    .start
-                    .checked_add(offset)
-                    .and_then(|at| out.get_mut(at))
-                {
+                let Some(at) = segment.start.checked_add(offset) else {
+                    continue;
+                };
+                if let Some(slot) = out.get_mut(at) {
                     *slot = adjust;
+                }
+                // Recorded only for the glyphs the pass reached, and only when
+                // it zeroed before its lookups rather than after: those two are
+                // exactly the conditions under which its answer is final.
+                if let Some(slot) = kept.get_mut(at) {
+                    *slot = first;
                 }
             }
         }
-        out
+        (out, kept)
     }
 
     /// Place every combining mark in `glyphs` by measuring it against the
@@ -1214,91 +1387,180 @@ impl ScaledFont {
     /// [`fallback`] holds the geometry and explains why it is HarfBuzz's
     /// geometry and not something invented here.
     ///
-    /// `klass` is one combining class per glyph, `0` for anything that is not
-    /// a mark; `levels` is [`byte_levels`]'s output, consulted only for the
-    /// double-width marks whose placement depends on which side the next glyph
-    /// is on.
+    /// `roles` is one [`Role`] per glyph, parallel to `glyphs`; `levels` is
+    /// [`byte_levels`]'s output, consulted only for the double-width marks
+    /// whose placement depends on which side the next glyph is on.
+    ///
+    /// # Clusters
+    ///
+    /// The unit is a *cluster*: a base and the marks that follow it, cut at
+    /// the next glyph that is not a mark. This is HarfBuzz's
+    /// `position_cluster_impl`, and the two things it does that a simpler rule
+    /// would not are both load-bearing.
+    ///
+    /// A mark whose combining class is zero stays inside the cluster. It is
+    /// neither moved nor zeroed — Unicode gives it class zero precisely
+    /// because it needs no reordering and no stacking — but it is *not* a new
+    /// base either, and treating it as one restarts the measurement halfway
+    /// through a syllable. In `ကို့` the two vowel signs are class zero and the
+    /// dot below is class seven: taking the second vowel sign for a base put
+    /// the dot one letter to the right of where HarfBuzz draws it.
+    ///
+    /// And a base the face gives no bounding box for ends the cluster early:
+    /// there is nothing to measure against, so the marks are zeroed where they
+    /// stand and left there. That is HarfBuzz's "if extents don't work, zero
+    /// marks and go home", and it zeroes *every* mark in the cluster, class
+    /// zero included, because a mark with a width after a letter that has no
+    /// visible mark on it is a gap with nothing in it.
     fn synthesize_marks(
         &self,
         glyphs: &mut [ShapedGlyph],
         visual: &[u32],
-        klass: &[u8],
+        roles: &[Role],
         levels: &[Level],
     ) {
-        // Nothing in the run is a mark, which is the overwhelmingly common
-        // case: no pens to accumulate and no boxes to read.
-        if !klass.iter().any(|&k| k != 0) {
+        // Nothing in the run is a mark this pass owns, which is the
+        // overwhelmingly common case: no clusters to walk and no boxes to read.
+        if !roles.iter().any(|role| matches!(role, Role::Mark(_))) {
             return;
         }
-        let pens = pens(glyphs, visual);
-        let upem = i32::from(self.face.units_per_em());
-        // The clearance between a letter and the mark over it, and between one
-        // mark and the next. A sixteenth of the em is HarfBuzz's choice, and
-        // matching it is the point — see [`fallback`].
-        let gap = upem / 16;
-
-        // The base glyph's own box, which every fresh stack starts from...
-        let mut origin = Extents::BLANK;
-        // ...and the box as the marks placed so far have grown it, which is
-        // what makes the second accent of a stack clear the first.
-        let mut grown = Extents::BLANK;
-        let mut base: Option<usize> = None;
-        // The class the open stack is of. Marks above and marks below grow the
-        // box in opposite directions, so a change of class starts a new stack
-        // from the letter rather than from the far side of the previous mark.
-        // 255 is not a combining class, so the first mark always starts one.
-        let mut open: u8 = 255;
-        // Whether the base is in right-to-left text, which decides which edge
-        // a double-width mark straddles.
-        let mut rtl = false;
-        for i in 0..glyphs.len() {
-            let Some(glyph) = glyphs.get(i) else { break };
-            let (gid, cluster) = (glyph.key.gid(), glyph.cluster);
-            if klass.get(i).copied().unwrap_or(0) == 0 {
-                // A glyph with no combining class is what the marks after it
-                // attach to — including one this face draws blank, which is
-                // why the box comes from `glyph_bbox` and the width from the
-                // advance rather than from the ink.
-                origin = self.face.glyph_bbox(gid).map_or(Extents::BLANK, |b| {
-                    Extents::new(num(b.x_min), num(b.y_min), num(b.x_max), num(b.y_max))
-                });
+        // Every cluster the pass will place, found and zeroed in one walk up
+        // front. The zeroing has to happen before the pen positions the
+        // placement measures against are added up, because a mark that takes
+        // no room must not push the mark after it along the line — which is
+        // the same order HarfBuzz works in, where each mark's advance is
+        // zeroed as the loop reaches it and the running offset it feeds the
+        // *next* mark is therefore already short of it.
+        let mut clusters: Vec<(usize, usize, Extents)> = Vec::new();
+        let mut at = 0usize;
+        while at < roles.len() {
+            // A mark with no base before it — a run that opens with a
+            // combining character — attaches to nothing, exactly as in
+            // HarfBuzz, where the first cluster simply contains no base.
+            if matches!(roles.get(at), Some(Role::Mark(_))) {
+                at = at.saturating_add(1);
+                continue;
+            }
+            let base = at;
+            let mut end = base.saturating_add(1);
+            while matches!(roles.get(end), Some(Role::Mark(_))) {
+                end = end.saturating_add(1);
+            }
+            at = end.max(base.saturating_add(1));
+            if end <= base.saturating_add(1) {
+                continue;
+            }
+            let Some(glyph) = glyphs.get(base) else { break };
+            let gid = glyph.key.gid();
+            // Whether the base is in right-to-left text, which decides which
+            // edge a double-width mark straddles and — below — whether taking
+            // an advance away also has to move the image, since in a
+            // right-to-left run the pen arrives on the mark's right, where a
+            // mark drawn at offset zero already belongs.
+            let rtl = levels
+                .get(glyph.cluster)
+                .is_some_and(|l| !l.is_multiple_of(2));
+            let origin = self.face.glyph_bbox(gid).map(|b| {
+                let mut origin =
+                    Extents::new(num(b.x_min), num(b.y_min), num(b.x_max), num(b.y_max));
                 // Horizontal placement measures against the *cell*, not the
                 // ink: a letter with no ink at all still has a width to centre
                 // an accent in, and a letter whose ink overhangs its cell
                 // (an italic `f`) would otherwise drag the accent out with it.
                 origin.x_bearing = 0;
                 origin.width = self.face.advance(gid).map_or(0, i32::from);
-                grown = origin;
-                base = Some(i);
-                open = 255;
-                rtl = levels.get(cluster).is_some_and(|l| !l.is_multiple_of(2));
-                continue;
+                origin
+            });
+            for i in base.saturating_add(1)..end {
+                let Some(Role::Mark(k)) = roles.get(i).copied() else {
+                    continue;
+                };
+                // A class-zero mark in a cluster that *has* a base keeps its
+                // advance: HarfBuzz does not place it, and so does not zero
+                // it — it only counts it into the offset of the marks after
+                // it, which is what `pens` below does for free.
+                if origin.is_some() && k == 0 {
+                    continue;
+                }
+                let Some(glyph) = glyphs.get_mut(i) else { break };
+                // Only on the no-base route does the offset move with the
+                // advance. On the other one the mark is about to be placed
+                // outright, offset and all, so shifting it first would be
+                // undone a line later — and for the one mark placement gives
+                // up on, for want of a box of its own, the shift it wants is
+                // the whole cluster's travel and not just its own advance.
+                if origin.is_none() && !rtl {
+                    glyph.offset.0 -= glyph.advance;
+                }
+                glyph.advance = 0.0;
             }
-            let (Some(at), Some(k)) = (base, klass.get(i).copied()) else {
-                continue;
-            };
-            let Some(mark) = self
-                .face
-                .glyph_bbox(gid)
-                .map(|b| Extents::new(num(b.x_min), num(b.y_min), num(b.x_max), num(b.y_max)))
-            else {
-                continue;
-            };
-            if open != k {
-                open = k;
-                grown = origin;
+            if let Some(origin) = origin {
+                clusters.push((base, end, origin));
             }
-            let (dx, dy) = fallback::place(&mut grown, &mark, k, gap, rtl);
-            // The offset is from the base's origin; the mark is drawn at its
-            // own pen, which is however far the line has moved since. Same
-            // subtraction `gpos`'s attachment propagation makes, and right in a
-            // right-to-left run for the same reason: both pens are real
-            // positions on the line.
-            let back = pens.get(at).copied().unwrap_or(0.0) - pens.get(i).copied().unwrap_or(0.0);
-            if let Some(glyph) = glyphs.get_mut(i) {
-                #[allow(clippy::cast_precision_loss)]
-                let (dx, dy) = (dx as f32, dy as f32);
-                glyph.offset = (dx.mul_add(self.scale, back), dy * self.scale);
+        }
+        if clusters.is_empty() {
+            return;
+        }
+        let pens = pens(glyphs, visual);
+        // The clearance between a letter and the mark over it, and between one
+        // mark and the next. A sixteenth of the em is HarfBuzz's choice, and
+        // matching it is the point — see [`fallback`].
+        let gap = i32::from(self.face.units_per_em()) / 16;
+        for &(base, end, origin) in &clusters {
+            let rtl = glyphs
+                .get(base)
+                .and_then(|glyph| levels.get(glyph.cluster))
+                .is_some_and(|l| !l.is_multiple_of(2));
+            // The box as the marks placed so far have grown it, which is what
+            // makes the second accent of a stack clear the first...
+            let mut grown = origin;
+            // ...and the class the open stack is of. Marks above and marks
+            // below grow the box in opposite directions, so a change of class
+            // starts a new stack from the letter rather than from the far side
+            // of the previous mark. 255 is not a combining class, so the first
+            // mark always starts one.
+            let mut open: u8 = 255;
+            for i in base.saturating_add(1)..end {
+                let Some(Role::Mark(k)) = roles.get(i).copied() else {
+                    continue;
+                };
+                if k == 0 {
+                    continue;
+                }
+                // The offset is from the base's origin; the mark is drawn at
+                // its own pen, which is however far the line has moved since.
+                // Same subtraction `gpos`'s attachment propagation makes, and
+                // right in a right-to-left run for the same reason: both pens
+                // are real positions on the line.
+                let back =
+                    pens.get(base).copied().unwrap_or(0.0) - pens.get(i).copied().unwrap_or(0.0);
+                let gid = glyphs.get(i).map_or(0, |glyph| glyph.key.gid());
+                let mark = self
+                    .face
+                    .glyph_bbox(gid)
+                    .map(|b| Extents::new(num(b.x_min), num(b.y_min), num(b.x_max), num(b.y_max)));
+                let Some(mark) = mark else {
+                    // No box to measure, so no placement — but the mark still
+                    // travelled with the pen it can no longer pay for, and
+                    // HarfBuzz still adds the cluster's running offset to
+                    // whatever it had. Without this an accent over a letter
+                    // the face draws as a missing-glyph box lands a box to the
+                    // right of it.
+                    if let Some(glyph) = glyphs.get_mut(i) {
+                        glyph.offset.0 += back;
+                    }
+                    continue;
+                };
+                if open != k {
+                    open = k;
+                    grown = origin;
+                }
+                let (dx, dy) = fallback::place(&mut grown, &mark, k, gap, rtl);
+                if let Some(glyph) = glyphs.get_mut(i) {
+                    #[allow(clippy::cast_precision_loss)]
+                    let (dx, dy) = (dx as f32, dy as f32);
+                    glyph.offset = (dx.mul_add(self.scale, back), dy * self.scale);
+                }
             }
         }
     }
@@ -1463,6 +1725,64 @@ fn num(v: f32) -> i32 {
     }
 }
 
+/// Whether `ch` is a Unicode variation selector.
+///
+/// The two ranges HarfBuzz's `is_variation_selector` names, and deliberately
+/// not the three Mongolian free variation selectors at U+180B: those are the
+/// Arabic shaper's business, and no `cmap` keys on them.
+fn is_variation_selector(ch: char) -> bool {
+    matches!(ch, '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')
+}
+
+/// Fold every `base` + variation-selector pair the face recognises into one
+/// piece, and record the glyph the face named for it.
+///
+/// `uvs` comes back the same length as `pieces`, holding the named glyph at
+/// each position a pair collapsed to and `None` everywhere else. `jamo` is
+/// shortened alongside `pieces` when it is not empty — it is one entry per
+/// piece, and a deletion that left it behind would give every Korean glyph
+/// after the pair its neighbour's syllable feature.
+///
+/// A pair the face does not recognise is left as two pieces, which is
+/// HarfBuzz's fallback and gives the right answer without doing anything: the
+/// selector is a default ignorable, so it is erased after shaping and draws
+/// nothing. A selector that follows another selector is not a pair either —
+/// HarfBuzz skips past a run of them, and only the first can attach.
+fn collapse_variation_sequences(
+    pieces: &mut Vec<Piece>,
+    jamo: &mut Vec<Option<hangul::Jamo>>,
+    uvs: &mut Vec<Option<u16>>,
+    named: impl Fn(char, char) -> Option<u16>,
+) {
+    if !pieces.iter().any(|&(ch, _)| is_variation_selector(ch)) {
+        return;
+    }
+    let korean = jamo.len() == pieces.len();
+    let mut out: Vec<Piece> = Vec::with_capacity(pieces.len());
+    let mut kept: Vec<Option<hangul::Jamo>> = Vec::new();
+    uvs.clear();
+    uvs.reserve(pieces.len());
+    let mut i = 0usize;
+    while let Some(&piece) = pieces.get(i) {
+        let pair = (!is_variation_selector(piece.0))
+            .then(|| pieces.get(i.checked_add(1)?).copied())
+            .flatten()
+            .filter(|&(next, _)| is_variation_selector(next))
+            .and_then(|(next, _)| named(piece.0, next));
+        out.push(piece);
+        uvs.push(pair);
+        if korean {
+            kept.push(jamo.get(i).copied().flatten());
+        }
+        // Two pieces consumed when the face named the pair, one otherwise.
+        i = i.saturating_add(if pair.is_some() { 2 } else { 1 });
+    }
+    *pieces = out;
+    if korean {
+        *jamo = kept;
+    }
+}
+
 /// Erase the glyphs still standing for characters that are never drawn.
 ///
 /// HarfBuzz's `hb_ot_hide_default_ignorables`, plus the zeroing that
@@ -1488,14 +1808,20 @@ fn num(v: f32) -> i32 {
 ///   visible tofu for a character whose entire point is to be invisible, so
 ///   the glyph goes. HarfBuzz makes the same choice on the same test.
 ///
-/// `klasses` is deleted from in lockstep, and that is the whole reason it is
+/// `roles` is deleted from in lockstep, and that is the whole reason it is
 /// passed: it is indexed by position in `out` by
 /// [`synthesize_marks`](ScaledFont::synthesize_marks), so a deletion here that
-/// left it alone would shift every combining class one glyph to the left and
-/// stack the accents on the wrong letters.
+/// left it alone would shift every role one glyph to the left and stack the
+/// accents on the wrong letters.
+///
+/// A *replaced* glyph keeps its role, which is deliberate and is HarfBuzz's
+/// behaviour too. Some default ignorables are themselves combining marks —
+/// U+034F COMBINING GRAPHEME JOINER and the variation selectors are `Mn` —
+/// and calling one a base after hiding it would cut the cluster in half at a
+/// character that was never meant to be visible in the first place.
 fn hide_ignorables(
     out: &mut Vec<ShapedGlyph>,
-    klasses: &mut Vec<u8>,
+    roles: &mut Vec<Role>,
     glyphs: &[SubGlyph],
     space: u16,
 ) {
@@ -1511,7 +1837,7 @@ fn hide_ignorables(
             keep
         });
         let mut j = 0;
-        klasses.retain(|_| {
+        roles.retain(|_| {
             let keep = !glyphs.get(j).is_some_and(|g| g.ignorable.erased());
             j = j.saturating_add(1);
             keep
@@ -1731,7 +2057,8 @@ mod tests {
     use super::*;
     use crate::sfnt::tests::{
         build_test_font, build_test_font_with_gdef_classes, build_test_font_with_gpos_scripts,
-        build_test_font_with_layout,
+        build_test_font_with_gsub_and_classes, build_test_font_with_layout,
+        build_test_font_with_uvs,
     };
 
     fn font(px: f32) -> ScaledFont {
@@ -1801,10 +2128,14 @@ mod tests {
             offset: (3.0, 5.0),
         };
         let mut out = alloc::vec![filled(10), filled(11), filled(12)];
-        let mut klasses = alloc::vec![0u8, 1, 2];
-        hide_ignorables(&mut out, &mut klasses, &subs, 3);
+        let mut roles = alloc::vec![Role::Base, Role::Mark(1), Role::Mark(2)];
+        hide_ignorables(&mut out, &mut roles, &subs, 3);
         assert_eq!(out.len(), 3, "the run keeps its length");
-        assert_eq!(klasses, alloc::vec![0, 1, 2], "and so does the class list");
+        assert_eq!(
+            roles,
+            alloc::vec![Role::Base, Role::Mark(1), Role::Mark(2)],
+            "and so does the role list"
+        );
         assert_eq!(out[1].key.gid(), 3);
         assert_eq!((out[1].advance, out[1].kern_next), (0.0, 0.0));
         assert_eq!(out[1].offset, (0.0, 5.0));
@@ -1814,10 +2145,10 @@ mod tests {
         assert_eq!(out[2].key.gid(), 12);
     }
 
-    /// The deletion branch must take the combining classes with it. They are
-    /// indexed by position in the glyph run by `synthesize_marks`, so a
-    /// deletion that left them alone would shift every accent one glyph left —
-    /// silently, and only on faces that need the mark fallback.
+    /// The deletion branch must take the roles with it. They are indexed by
+    /// position in the glyph run by `synthesize_marks`, so a deletion that
+    /// left them alone would shift every accent one glyph left — silently,
+    /// and only on faces that need the mark fallback.
     #[test]
     fn deleting_a_glyph_deletes_its_combining_class_too() {
         let ignorable = |yes: Ignorable| {
@@ -1838,12 +2169,12 @@ mod tests {
             offset: (0.0, 0.0),
         };
         let mut out = alloc::vec![filled(10), filled(11), filled(12)];
-        let mut klasses = alloc::vec![0u8, 230, 220];
+        let mut roles = alloc::vec![Role::Base, Role::Mark(230), Role::Mark(220)];
         // `space` of 0 is `glyph_id` reporting the face has no space glyph.
-        hide_ignorables(&mut out, &mut klasses, &subs, 0);
+        hide_ignorables(&mut out, &mut roles, &subs, 0);
         let gids: Vec<u16> = out.iter().map(|g| g.key.gid()).collect();
         assert_eq!(gids, alloc::vec![10, 12]);
-        assert_eq!(klasses, alloc::vec![0, 220]);
+        assert_eq!(roles, alloc::vec![Role::Base, Role::Mark(220)]);
     }
 
     /// LAMED then QAMATS: one Hebrew letter and one Hebrew point, neither of
@@ -1990,6 +2321,208 @@ mod tests {
             shaped(build_test_font_with_gdef_classes(BASES)),
             alloc::vec![(300.0, 0.0), (0.0, 162.0)]
         );
+    }
+
+    /// KA, VOWEL SIGN I, VOWEL SIGN U, DOT BELOW: `ကို့`, one Myanmar syllable
+    /// whose three marks are all `Mn` and whose combining classes are 0, 0 and
+    /// 7.
+    ///
+    /// Shaped against a face whose `GSUB` files everything under `DFLT`, which
+    /// is the face saying it does no complex shaping — so the run reaches the
+    /// *default* shaper, the one that measures marks. A face registering
+    /// nothing at all would not do: that one keeps the Myanmar shaper, whose
+    /// marks are placed by `GPOS` or not at all. See
+    /// [`fallback::shaped_as_default`].
+    ///
+    /// The fixture has no Myanmar glyphs, so every one of them comes out
+    /// `.notdef`: 600 units wide, drawing nothing, and therefore centred on a
+    /// 600-unit cell.
+    const SYLLABLE: &str = "\u{1000}\u{102d}\u{102f}\u{1037}";
+
+    /// [`SYLLABLE`]'s face: `DFLT` in `GSUB`, plus `classes` in `GDEF`.
+    fn syllable_font(classes: &[u16]) -> Vec<u8> {
+        build_test_font_with_gsub_and_classes(&[*b"DFLT"], classes)
+    }
+
+    /// A mark whose combining class is zero is still part of the cluster.
+    ///
+    /// This is the rule the pass used to get wrong, and the shape of the bug is
+    /// worth keeping: a class-zero mark is not placed and not zeroed, which
+    /// made it look exactly like a base, so the measurement restarted at it and
+    /// every mark after it was positioned against the wrong glyph. In `ကို့` the
+    /// dot below landed two letters to the right of where HarfBuzz draws it.
+    ///
+    /// HarfBuzz cuts clusters on the *general category* and picks the base as
+    /// the first non-mark in one, so a class-zero mark can never be a base
+    /// there; the class only decides whether the mark is moved once the base is
+    /// known. Both halves are asserted here: the dot's offset is the whole
+    /// cluster's travel back to KA, and the two class-zero vowel signs are left
+    /// where the pen put them.
+    #[test]
+    fn a_class_zero_mark_does_not_start_a_new_cluster() {
+        // No `GDEF`, so the `GDEF` zeroing pass reads the character's category
+        // instead and takes the width off all three marks. The dot is then
+        // 600 units — one KA — back from its own pen, and centred on the
+        // 600-unit cell, so 300 - 600.
+        let f = ScaledFont::from_bytes(syllable_font(&[]), 1000.0).unwrap();
+        let shaped: Vec<(f32, f32)> = f
+            .shape(SYLLABLE)
+            .glyphs()
+            .iter()
+            .map(|g| (g.advance, g.offset.0))
+            .collect();
+        assert_eq!(
+            shaped,
+            alloc::vec![(600.0, 0.0), (0.0, -600.0), (0.0, -600.0), (0.0, -300.0)],
+            "the dot is measured against KA, not against the vowel sign before it"
+        );
+    }
+
+    /// The same syllable in a face that classifies its glyphs and calls none of
+    /// them a mark — which is what a CJK face with no Myanmar in it looks like,
+    /// and is the case that found the bug in the first place.
+    ///
+    /// Now the `GDEF` pass zeroes nothing, so the two class-zero vowel signs
+    /// keep their full 600-unit advance and the measuring fallback zeroes only
+    /// the one mark it actually places. The dot's offset is therefore three
+    /// cells back rather than one — which is precisely the number the old code
+    /// could not produce, because it measured from the vowel sign beside the
+    /// dot and got zero travel.
+    #[test]
+    fn only_the_marks_the_fallback_places_lose_their_advance() {
+        let f = ScaledFont::from_bytes(syllable_font(&[1, 1, 1, 1]), 1000.0).unwrap();
+        let shaped: Vec<(f32, f32)> = f
+            .shape(SYLLABLE)
+            .glyphs()
+            .iter()
+            .map(|g| (g.advance, g.offset.0))
+            .collect();
+        assert_eq!(
+            shaped,
+            alloc::vec![
+                (600.0, 0.0),
+                (600.0, 0.0),
+                (600.0, 0.0),
+                (0.0, 300.0 - 1800.0)
+            ],
+            "a class-zero mark the face does not call a mark keeps its width"
+        );
+    }
+
+    /// VARIATION SELECTOR-1.
+    const VS: char = '\u{FE00}';
+
+    /// Run the collapse over `pieces` with a face that names every pair as
+    /// glyph 7, or names none at all.
+    fn collapse(pieces: &[Piece], names: bool) -> (Vec<Piece>, Vec<Option<u16>>) {
+        let mut pieces = pieces.to_vec();
+        let mut jamo: Vec<Option<hangul::Jamo>> = Vec::new();
+        let mut uvs: Vec<Option<u16>> = Vec::new();
+        collapse_variation_sequences(&mut pieces, &mut jamo, &mut uvs, |_, _| names.then_some(7));
+        (pieces, uvs)
+    }
+
+    /// A pair the face recognises is one piece from here on, and every pass
+    /// after this one counts pieces: the level list, the run splitter, the
+    /// joining forms. Leaving it as two would give the selector a level, a
+    /// script and a joining form of its own.
+    #[test]
+    fn a_named_pair_becomes_one_piece_carrying_its_glyph() {
+        let (pieces, uvs) = collapse(&[('A', 0), (VS, 1), ('B', 4)], true);
+        assert_eq!(pieces, alloc::vec![('A', 0), ('B', 4)]);
+        assert_eq!(uvs, alloc::vec![Some(7), None]);
+    }
+
+    /// A pair the face does not recognise stays two pieces, which is
+    /// HarfBuzz's fallback and needs nothing further: the selector is a
+    /// default ignorable, so it is erased after shaping and draws nothing.
+    #[test]
+    fn an_unnamed_pair_stays_two_pieces() {
+        let (pieces, uvs) = collapse(&[('A', 0), (VS, 1), ('B', 4)], false);
+        assert_eq!(pieces, alloc::vec![('A', 0), (VS, 1), ('B', 4)]);
+        assert_eq!(uvs, alloc::vec![None, None, None]);
+    }
+
+    /// Only the first selector of a run can attach, and a selector is never a
+    /// base. Both halves matter: a face that named every pair it was shown
+    /// would otherwise fold a whole run of selectors into the letter, and each
+    /// fold would swallow a piece that the erasure pass has to see.
+    #[test]
+    fn a_selector_never_pairs_with_the_selector_after_it() {
+        let (pieces, uvs) = collapse(&[('A', 0), (VS, 1), (VS, 4), ('B', 7)], true);
+        assert_eq!(pieces, alloc::vec![('A', 0), (VS, 4), ('B', 7)]);
+        assert_eq!(uvs, alloc::vec![Some(7), None, None]);
+
+        let (pieces, uvs) = collapse(&[(VS, 0), ('A', 3)], true);
+        assert_eq!(pieces, alloc::vec![(VS, 0), ('A', 3)], "a leading selector");
+        assert_eq!(uvs, alloc::vec![None, None]);
+    }
+
+    /// A trailing selector has nothing after it to pair with, and the
+    /// look-ahead must not read past the end to discover that.
+    #[test]
+    fn a_trailing_selector_is_left_alone() {
+        let (pieces, uvs) = collapse(&[('A', 0), (VS, 1)], true);
+        assert_eq!(pieces, alloc::vec![('A', 0)], "the pair collapsed");
+        assert_eq!(uvs, alloc::vec![Some(7)]);
+    }
+
+    /// Text with no selector in it is left untouched — including `uvs`, which
+    /// stays empty rather than being filled with `None`s. That is the case for
+    /// nearly every string, so every reader indexes `uvs` defensively; a test
+    /// that let it silently become pieces-length would hide a reader that does
+    /// not.
+    #[test]
+    fn text_with_no_selector_does_not_even_allocate() {
+        let (pieces, uvs) = collapse(&[('A', 0), ('B', 1)], true);
+        assert_eq!(pieces, alloc::vec![('A', 0), ('B', 1)]);
+        assert!(uvs.is_empty());
+    }
+
+    /// `jamo` is one entry per piece and is shortened in lockstep. A deletion
+    /// that left it behind would give every Korean glyph after the pair its
+    /// neighbour's syllable feature — `ljmo` where `vjmo` belongs.
+    #[test]
+    fn the_korean_syllable_marks_are_shortened_in_lockstep() {
+        let pieces = alloc::vec![('\u{1100}', 0), (VS, 3), ('\u{1161}', 6)];
+        let mut pieces = pieces;
+        let mut jamo = alloc::vec![
+            Some(hangul::Jamo::Leading),
+            Some(hangul::Jamo::Leading),
+            Some(hangul::Jamo::Vowel),
+        ];
+        let mut uvs: Vec<Option<u16>> = Vec::new();
+        collapse_variation_sequences(&mut pieces, &mut jamo, &mut uvs, |_, _| Some(7));
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(
+            jamo,
+            alloc::vec![Some(hangul::Jamo::Leading), Some(hangul::Jamo::Vowel)]
+        );
+    }
+
+    /// End to end: the face names a glyph its ordinary `cmap` has no entry
+    /// for, and the shaped run is one glyph rather than a letter and an
+    /// invisible selector beside it.
+    #[test]
+    fn a_recognised_pair_shapes_as_the_one_glyph_the_face_named() {
+        let bytes = build_test_font_with_uvs(&[('\u{FE00}' as u32, &[], &[('A' as u32, 2)])]);
+        let f = ScaledFont::from_bytes(bytes, 1000.0).unwrap();
+        let shaped = f.shape("A\u{FE00}");
+        let gids: Vec<u16> = shaped.glyphs().iter().map(|g| g.key.gid()).collect();
+        assert_eq!(gids, alloc::vec![2], "one glyph, and the named one");
+    }
+
+    /// The same string in the same face with the pair unlisted: two glyphs go
+    /// in, and the selector comes out erased rather than drawn, because it is
+    /// a default ignorable. The fixture has no `space` glyph, so erased means
+    /// deleted — which leaves one glyph again, but the base's own.
+    #[test]
+    fn an_unrecognised_pair_leaves_the_base_and_erases_the_selector() {
+        let bytes = build_test_font_with_uvs(&[('\u{FE01}' as u32, &[], &[('A' as u32, 2)])]);
+        let f = ScaledFont::from_bytes(bytes, 1000.0).unwrap();
+        let shaped = f.shape("A\u{FE00}");
+        let gids: Vec<u16> = shaped.glyphs().iter().map(|g| g.key.gid()).collect();
+        assert_eq!(gids, alloc::vec![1], "the base's ordinary glyph");
     }
 
     #[test]

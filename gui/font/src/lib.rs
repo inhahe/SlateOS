@@ -60,6 +60,8 @@ mod khmer_machine;
 pub mod lang;
 mod lang_tables;
 mod mark;
+mod myanmar;
+mod myanmar_machine;
 mod norm;
 mod norm_tables;
 mod otl;

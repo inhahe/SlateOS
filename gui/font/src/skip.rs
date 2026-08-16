@@ -209,6 +209,14 @@ impl Definitions {
 /// between a conjunct and a half-form rather than decorating a ligature. A
 /// lookup reached by both a manual feature and an automatic one is manual, as
 /// in HarfBuzz, where merging two entries for one lookup `&&`s the two flags.
+///
+/// The two are asked separately because HarfBuzz asks them separately:
+/// `F_MANUAL_ZWNJ` and `F_MANUAL_ZWJ` are distinct bits, and `F_MANUAL_JOINERS`
+/// is only their union. Indic and Khmer take the union, but **Myanmar takes
+/// `F_MANUAL_ZWJ` alone** — its features read a ZWJ as an instruction and leave
+/// ZWNJ to the font. Collapsing the pair into one flag would be invisible in
+/// every table dump and wrong on the one string that puts a ZWNJ inside the
+/// *context* of a Myanmar rule.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Joiners {
     /// Positioning rather than substitution. Positioning steps over
@@ -236,14 +244,14 @@ impl Joiners {
     /// constant that answered it silently is one a caller would reach for
     /// without knowing it had been asked.
     ///
-    /// `manual` is the answer for the whole set of features that reached the
-    /// lookup, not for one of them: see the type's doc.
+    /// Each `manual` is the answer for the whole set of features that reached
+    /// the lookup, not for one of them: see the type's doc.
     #[must_use]
-    pub(crate) const fn substitution(manual: bool) -> Self {
+    pub(crate) const fn substitution(manual_zwnj: bool, manual_zwj: bool) -> Self {
         Self {
             positioning: false,
-            auto_zwnj: !manual,
-            auto_zwj: !manual,
+            auto_zwnj: !manual_zwnj,
+            auto_zwj: !manual_zwj,
         }
     }
 }
@@ -697,7 +705,7 @@ mod tests {
     fn a_lookup_with_no_flag_skips_nothing() {
         let data = gdef(2, None, None);
         let defs = Definitions::parse(&data, Some(span(data.len())));
-        let skip = Skipper::new(&data, defs, 0, 0, u64::MAX, Joiners::substitution(false));
+        let skip = Skipper::new(&data, defs, 0, 0, u64::MAX, Joiners::substitution(false, false));
         assert!(skip.is_trivial());
         let glyphs = run(&[1, 10, 2]);
         // The mark at 1 is visible: nothing asked for it to be hidden.
@@ -714,7 +722,7 @@ mod tests {
             IGNORE_MARKS,
             0,
             u64::MAX,
-            Joiners::substitution(false),
+            Joiners::substitution(false, false),
         );
         assert!(!skip.is_trivial());
         // beh, fatha, beh — which is what a vowelled Arabic ligature has to
@@ -753,7 +761,7 @@ mod tests {
             IGNORE_BASE_GLYPHS,
             0,
             u64::MAX,
-            Joiners::substitution(false),
+            Joiners::substitution(false, false),
         );
         assert!(!bases.considers(&glyphs, 0));
         assert!(bases.considers(&glyphs, 1));
@@ -763,7 +771,7 @@ mod tests {
             IGNORE_LIGATURES,
             0,
             u64::MAX,
-            Joiners::substitution(false),
+            Joiners::substitution(false, false),
         );
         assert!(ligs.considers(&glyphs, 0));
         assert_eq!(ligs.next(&glyphs, 0), Some(2));
@@ -778,7 +786,7 @@ mod tests {
             IGNORE_MARKS,
             0,
             u64::MAX,
-            Joiners::substitution(false),
+            Joiners::substitution(false, false),
         );
         let glyphs = run(&[1, 10, 2]);
         // A flag that says "ignore marks" over a face that never said which
@@ -796,7 +804,7 @@ mod tests {
             USE_MARK_FILTERING_SET,
             0,
             u64::MAX,
-            Joiners::substitution(false),
+            Joiners::substitution(false, false),
         );
         // 10 is a mark and not in the set, so it is hidden; 11 is in it.
         let hidden = run(&[1, 10, 2]);
@@ -826,7 +834,7 @@ mod tests {
             1 << 8,
             0,
             u64::MAX,
-            Joiners::substitution(false),
+            Joiners::substitution(false, false),
         );
         let glyphs = run(&[1, 15, 11, 2]);
         // 15 is class 2 and hidden; 11 is class 1 and visible.
@@ -854,7 +862,7 @@ mod tests {
             IGNORE_MARKS,
             0,
             0b10,
-            Joiners::substitution(false),
+            Joiners::substitution(false, false),
         );
         // Glyph 2 is not eligible for that feature; glyph 10 is a mark the
         // flag hides. The walk must stop at 2 rather than hop over it to 3 —
@@ -875,7 +883,7 @@ mod tests {
             IGNORE_MARKS,
             0,
             0b10,
-            Joiners::substitution(false),
+            Joiners::substitution(false, false),
         );
         let glyphs = masked(&[(1, 0b10), (10, 0b10), (2, 0b01)]);
         assert_eq!(skip.next(&glyphs, 0), None);
@@ -894,7 +902,7 @@ mod tests {
             IGNORE_MARKS,
             0,
             u64::MAX,
-            Joiners::substitution(false),
+            Joiners::substitution(false, false),
         );
         let glyphs = run(&[1, 10, 2, 10, 3]);
         let mut seen = Vec::new();
@@ -918,7 +926,7 @@ mod tests {
             IGNORE_MARKS,
             0,
             u64::MAX,
-            Joiners::substitution(false),
+            Joiners::substitution(false, false),
         );
         let glyphs = run(&[3, 10, 2, 10, 1]);
         let mut seen = Vec::new();
@@ -955,7 +963,7 @@ mod tests {
     #[test]
     fn a_substitution_input_steps_over_zwj_but_stops_at_zwnj() {
         let data = gdef(2, None, None);
-        let skip = plain(&data, Joiners::substitution(false));
+        let skip = plain(&data, Joiners::substitution(false, false));
         // `f ZWJ i` is asking for the ligature; `f ZWNJ i` is asking for it not
         // to form. A matcher that treats the two alike gets one of them wrong
         // whichever way it leans.
@@ -988,7 +996,7 @@ mod tests {
             (2, Ignorable::Plain),
             (3, Ignorable::No),
         ]);
-        for joiners in [Joiners::substitution(false), Joiners::POSITIONING] {
+        for joiners in [Joiners::substitution(false, false), Joiners::POSITIONING] {
             let skip = plain(&data, joiners);
             assert_eq!(skip.next(&glyphs, 0), Some(2));
             assert_eq!(skip.context().next(&glyphs, 0), Some(2));
@@ -1003,7 +1011,7 @@ mod tests {
         for kind in [Ignorable::Zwnj, Ignorable::Zwj] {
             let glyphs = kinds(&[(1, Ignorable::No), (2, kind), (3, Ignorable::No)]);
             assert_eq!(
-                plain(&data, Joiners::substitution(false))
+                plain(&data, Joiners::substitution(false, false))
                     .context()
                     .next(&glyphs, 0),
                 Some(2)
@@ -1022,7 +1030,7 @@ mod tests {
             (3, Ignorable::No),
         ]);
         let wants_3 = |p: usize| glyphs.get(p).is_some_and(|g| g.gid == 3);
-        let subs = plain(&data, Joiners::substitution(false));
+        let subs = plain(&data, Joiners::substitution(false, false));
         assert_eq!(subs.next_matching(&glyphs, 0, wants_3), None);
         assert_eq!(subs.context().next_matching(&glyphs, 0, wants_3), None);
         let pos = plain(&data, Joiners::POSITIONING);
@@ -1036,7 +1044,7 @@ mod tests {
         // The Indic and Khmer features are `F_MANUAL_JOINERS`: their rules name
         // the joiners, so stepping over one would delete the distinction the
         // rule was written to read.
-        let manual = Joiners::substitution(true);
+        let manual = Joiners::substitution(true, true);
         for kind in [Ignorable::Zwnj, Ignorable::Zwj] {
             let glyphs = kinds(&[(1, Ignorable::No), (2, kind), (3, Ignorable::No)]);
             let wants_3 = |p: usize| glyphs.get(p).is_some_and(|g| g.gid == 3);
@@ -1047,7 +1055,7 @@ mod tests {
             // The same run under the automatic rule: the ZWJ is stepped over,
             // so the difference the flag makes is visible in one assertion.
             let auto =
-                plain(&data, Joiners::substitution(false)).next_matching(&glyphs, 0, wants_3);
+                plain(&data, Joiners::substitution(false, false)).next_matching(&glyphs, 0, wants_3);
             assert_eq!(auto, (kind == Ignorable::Zwj).then_some(2));
         }
     }
@@ -1055,7 +1063,7 @@ mod tests {
     #[test]
     fn a_rule_that_names_an_ignorable_matches_it_instead_of_stepping_over_it() {
         let data = gdef(2, None, None);
-        let skip = plain(&data, Joiners::substitution(false));
+        let skip = plain(&data, Joiners::substitution(false, false));
         let glyphs = kinds(&[
             (1, Ignorable::No),
             (2, Ignorable::Plain),
@@ -1085,7 +1093,7 @@ mod tests {
     fn a_walk_that_runs_out_of_run_fails_rather_than_matching_short() {
         let data = gdef(2, None, None);
         let defs = Definitions::parse(&data, Some(span(data.len())));
-        let skip = Skipper::new(&data, defs, 0, 0, u64::MAX, Joiners::substitution(false));
+        let skip = Skipper::new(&data, defs, 0, 0, u64::MAX, Joiners::substitution(false, false));
         let glyphs = run(&[1, 2]);
         assert_eq!(skip.walk_forward(&glyphs, 0, 3, |_, _| Some(())), None);
         assert!(skip.walk_backward(&glyphs, 1, 2, |_, _| Some(())).is_none());

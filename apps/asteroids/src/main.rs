@@ -592,7 +592,8 @@ impl AsteroidsApp {
         let angle = self.rng.next_angle();
         let speed = size.speed() * self.rng.next_range(0.5, 1.5);
         let vel = Vec2::new(cos_f32(angle) * speed, sin_f32(angle) * speed);
-        self.asteroids.push(Asteroid::new(pos, vel, size, &mut self.rng));
+        self.asteroids
+            .push(Asteroid::new(pos, vel, size, &mut self.rng));
     }
 
     /// Pick a random position along the field edges, ensuring it is far
@@ -625,7 +626,8 @@ impl AsteroidsApp {
                 sin_f32(base_angle) * child_size.radius(),
             );
             let pos = parent_pos.add(nudge).wrap(FIELD_WIDTH, FIELD_HEIGHT);
-            self.asteroids.push(Asteroid::new(pos, vel, child_size, &mut self.rng));
+            self.asteroids
+                .push(Asteroid::new(pos, vel, child_size, &mut self.rng));
         }
     }
 
@@ -693,16 +695,14 @@ impl AsteroidsApp {
             Key::Right | Key::D => self.input.right = pressed,
             Key::Up | Key::W => self.input.thrust = pressed,
             Key::Space => self.input.shoot = pressed,
-            Key::P | Key::Escape
-                if pressed => {
-                    self.state = GameState::Paused;
-                    // Release all input on pause.
-                    self.input = InputState::new();
-                }
-            Key::N
-                if pressed => {
-                    self.new_game();
-                }
+            Key::P | Key::Escape if pressed => {
+                self.state = GameState::Paused;
+                // Release all input on pause.
+                self.input = InputState::new();
+            }
+            Key::N if pressed => {
+                self.new_game();
+            }
             _ => {}
         }
     }
@@ -755,7 +755,9 @@ impl AsteroidsApp {
 
         // Shooting.
         self.shoot_cooldown -= dt;
-        if self.input.shoot && self.ship_alive && self.shoot_cooldown <= 0.0
+        if self.input.shoot
+            && self.ship_alive
+            && self.shoot_cooldown <= 0.0
             && self.bullets.len() < MAX_BULLETS
         {
             self.fire_bullet();
@@ -822,11 +824,9 @@ impl AsteroidsApp {
                 if hits.iter().any(|(_, a)| *a == ai) {
                     continue;
                 }
-                let dist = bullet.pos.wrapped_distance(
-                    asteroid.pos,
-                    FIELD_WIDTH,
-                    FIELD_HEIGHT,
-                );
+                let dist = bullet
+                    .pos
+                    .wrapped_distance(asteroid.pos, FIELD_WIDTH, FIELD_HEIGHT);
                 if dist < asteroid.radius() + BULLET_RADIUS {
                     hits.push((bi, ai));
                     break; // One bullet hits one asteroid.
@@ -888,11 +888,10 @@ impl AsteroidsApp {
             return;
         }
         for asteroid in &self.asteroids {
-            let dist = self.ship.pos.wrapped_distance(
-                asteroid.pos,
-                FIELD_WIDTH,
-                FIELD_HEIGHT,
-            );
+            let dist = self
+                .ship
+                .pos
+                .wrapped_distance(asteroid.pos, FIELD_WIDTH, FIELD_HEIGHT);
             if dist < SHIP_RADIUS + asteroid.radius() {
                 self.destroy_ship();
                 return;
@@ -1213,7 +1212,11 @@ impl AsteroidsApp {
                 self.ship.pos.x - cos_f32(self.ship.angle) * SHIP_RADIUS * 1.2,
                 self.ship.pos.y - sin_f32(self.ship.angle) * SHIP_RADIUS * 1.2,
             );
-            let flame_color = if self.frame_counter % 4 < 2 { PEACH } else { YELLOW };
+            let flame_color = if self.frame_counter % 4 < 2 {
+                PEACH
+            } else {
+                YELLOW
+            };
             cmds.push(RenderCommand::Line {
                 x1: fx + lw.x,
                 y1: fy + lw.y,
@@ -1436,7 +1439,11 @@ mod tests {
     fn tick_many(app: &mut AsteroidsApp, total_ms: u64, step_ms: u64) {
         let mut remaining = total_ms;
         while remaining > 0 {
-            let step = if remaining >= step_ms { step_ms } else { remaining };
+            let step = if remaining >= step_ms {
+                step_ms
+            } else {
+                remaining
+            };
             tick(app, step);
             remaining -= step;
         }
@@ -1855,10 +1862,7 @@ mod tests {
 
     #[test]
     fn test_bullet_wraps() {
-        let mut b = Bullet::new(
-            Vec2::new(FIELD_WIDTH - 1.0, 200.0),
-            Vec2::new(500.0, 0.0),
-        );
+        let mut b = Bullet::new(Vec2::new(FIELD_WIDTH - 1.0, 200.0), Vec2::new(500.0, 0.0));
         b.update(0.1);
         // Should wrap around.
         assert!(b.pos.x < FIELD_WIDTH);
@@ -2500,8 +2504,7 @@ mod tests {
         tick(&mut app, 100);
         // At least one asteroid should have moved.
         let new_pos = app.asteroids[0].pos;
-        let moved = (new_pos.x - old_pos.x).abs() > 0.01
-            || (new_pos.y - old_pos.y).abs() > 0.01;
+        let moved = (new_pos.x - old_pos.x).abs() > 0.01 || (new_pos.y - old_pos.y).abs() > 0.01;
         assert!(moved);
     }
 
@@ -2586,8 +2589,7 @@ mod tests {
         let old_pos = app.asteroids[0].pos;
         app.handle_event(Event::Tick { elapsed_ms: 100 });
         let new_pos = app.asteroids[0].pos;
-        let moved = (new_pos.x - old_pos.x).abs() > 0.01
-            || (new_pos.y - old_pos.y).abs() > 0.01;
+        let moved = (new_pos.x - old_pos.x).abs() > 0.01 || (new_pos.y - old_pos.y).abs() > 0.01;
         assert!(moved);
     }
 

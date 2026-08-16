@@ -141,6 +141,23 @@ is
      Export => True, Convention => C,
      External_Name => "vqd_initialize";
 
+   --  Return `Queue` to the uninitialised state, in which every operation on
+   --  it rejects.  This is not Initialize with a size of zero -- that is
+   --  refused, because a driver asking for a zero-sized queue has a bug -- it
+   --  is the deliberate teardown a driver performs when its device goes away.
+   --
+   --  Without it there is no way back to fail-closed once a queue has been
+   --  used.  A hot-unplugged device would leave its queue looking valid, and
+   --  the next completion naming one of its stale descriptor indices would be
+   --  answered as though the queue were still live.  Post-condition says so
+   --  directly: afterwards the queue has no descriptors, so `Free_Chain` and
+   --  `Allocate` reject on the size test before reaching anything else.
+   procedure Reset (Queue : U16) with
+     Global => (In_Out => Pool),
+     Post   => Size_Of (Queue) = 0,
+     Export => True, Convention => C,
+     External_Name => "vqd_reset";
+
    ---------------------------------------------------------------------------
    --  Allocation
    ---------------------------------------------------------------------------

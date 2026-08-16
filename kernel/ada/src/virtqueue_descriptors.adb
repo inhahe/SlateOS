@@ -175,6 +175,30 @@ is
       Status := Status_Ok;
    end Initialize;
 
+   procedure Reset (Queue : U16) is
+   begin
+      if Queue > Queue_Index'Last then
+         return;   -- nothing to reset; Size_Of already reads 0 for this id
+      end if;
+
+      --  Size is the whole of the state that matters: with Size = 0 every entry
+      --  point rejects before it reads States or Links.  They are cleared
+      --  anyway, so that a torn-down queue does not sit in memory holding a map
+      --  of descriptors marked Allocated -- state that is inert today only
+      --  because of a test in another subprogram, which is the kind of coupling
+      --  that stops being true quietly.  The cost is 774 bytes of stores on a
+      --  device-teardown path.
+      declare
+         Q : Queue_Record renames Queues (Queue_Index (Queue));
+      begin
+         Q.Size     := 0;
+         Q.Head     := 0;
+         Q.Free_Cnt := 0;
+         Q.States   := (others => Free);
+         Q.Links    := (others => 0);
+      end;
+   end Reset;
+
    ---------------------------------------------------------------------------
    --  Allocation
    ---------------------------------------------------------------------------

@@ -21136,3 +21136,105 @@ contamination checks all passed and its regression list was still wrong.
 A check that says something false is worse than no check, because it is
 believed — and the cost lands on the *next* real regression, which gets
 waved through as "probably noise again".
+
+## B-VIRTIO-UNVALIDATED-USED-ID — a device picks the index into its own descriptor table (lane A, 2026-08-16)
+
+**Status:** FIXED 2026-08-16 by the SPARK component in `kernel/ada/` — see the
+"How it is fixed" section at the end. Recorded in full anyway, because the
+shape of this bug is the argument for `design.txt`'s Ada/SPARK lane and will
+recur in every other queue-based driver we write.
+
+**In short.** A virtio device tells us which request it just finished by
+writing a number into shared memory. We took that number and used it, without
+checking it, as an index into an array — so the device, not us, chose which
+kernel memory we read and wrote. A malicious or merely buggy device could pick
+a number that lands far outside the array.
+
+### What the code did
+
+`kernel/src/virtio/queue.rs:283` reads a descriptor by raw pointer arithmetic:
+
+```rust
+fn desc(&self, idx: u16) -> &VirtqDesc {
+    // SAFETY: idx is within 0..queue_size (ensured by alloc_desc).
+    unsafe { &*(self.virt_base.add(idx as usize * 16) as *const VirtqDesc) }
+}
+```
+
+**That SAFETY comment is false, and its falseness is the bug.** `alloc_desc`
+is not the only producer of `idx`. `free_chain(head)` (line 255) takes `head`
+straight from the caller, and every caller gets it from `poll_used()`, which
+reads it out of the **used ring** — a structure the *device* writes:
+
+| Call site | Value passed |
+|---|---|
+| `blk.rs:362`, `:491`, `:568` | `completed_head` from `poll_used()` |
+| `net.rs:361`, `:367` | `head_idx` from `poll_used()` |
+| `net.rs:355` | same value into `desc_phys_addr()`, also unchecked |
+| `sound.rs:716` | `head` from `poll_used()` |
+| `net.rs:497`, `:504` | `completed_head` from `poll_used()` |
+
+`u16` is not a bound. The queue frame is 16 KiB and a descriptor is 16 bytes,
+so a legitimate index is at most 255 for a 256-entry queue. A device reporting
+`0xFFFF` yields `virt_base + 0xFFFF * 16` = **1 MiB past the start of the
+frame** — a read *and* a write (`free_desc` at line 245 writes `desc.next` and
+`desc.flags`) at an address the device chose. In the HHDM that address is
+mapped, so there is no fault to catch it; it silently corrupts whatever is
+there.
+
+### Three distinct failures, not one
+
+1. **Out of range.** As above — an index beyond `queue_size`.
+2. **In range but not allocated.** A device may name a descriptor we already
+   freed. `free_chain` frees it again, pushing it onto the free list twice;
+   `alloc_desc` then hands the same descriptor to two live requests, which
+   then DMA two different buffers to one address.
+3. **A cycle.** `free_chain`'s `loop` (line 257) is unbounded and terminates
+   only when it finds a descriptor whose `VRING_DESC_F_NEXT` is clear. The
+   `next` links it follows live in `desc.next` — **inside the device-visible
+   table**. A device that writes a ring of descriptors pointing at each other
+   hangs that CPU forever inside a kernel loop, with no timeout and nothing to
+   preempt it.
+
+Failure 3 is the one that shows the structural mistake rather than a missing
+check: the free list itself was stored where the device could edit it. No
+amount of validating `head` fixes that, because the *links* are attacker data
+too.
+
+### Why it was not caught
+
+Every existing virtio test drives a QEMU device that behaves. The bug needs a
+device that lies, and we have no such harness — the tests confirm the driver
+works, which was never in doubt. This is the general hazard with a hostile-
+input bug: the test suite's silence is not evidence.
+
+### How it is fixed
+
+`kernel/ada/src/virtqueue_descriptors.ad[sb]` moves the index arithmetic into
+SPARK and moves the chain links out of device-visible memory:
+
+* The links live in a private array in kernel-only memory. The descriptor
+  table becomes a write-only rendering of state whose authoritative copy the
+  device cannot reach — which is what answers failure 3 at the root.
+* `vqd_free_chain` answers all three failures explicitly and returns
+  `Freed = 0` for each, having changed nothing: it validates the entire chain
+  before freeing any of it, so a rejection is total rather than leaving half a
+  chain on the free list.
+* The walk is a bounded `for` loop over `1 .. Size`, so termination is
+  structural. A cycle cannot hang the kernel even if one were somehow built.
+* `gnatprove` discharges 97/97 checks — no overflow, no index outside its
+  range, on every path for every input. Because the exported operations take
+  raw `U16` rather than a constrained subtype, "the device sent nonsense" is
+  not a special case; it is the same proof.
+
+Note the deliberate choice **not** to give the prover an invariant to lean on:
+sizes are clamped when read, not constrained when written. An invariant is a
+promise about what that package writes, and in a kernel an unrelated wild
+write can land in the middle of those arrays — a proof resting on the
+invariant would be sound about the code and wrong about the machine. See the
+body's notes.
+
+**Remaining work at the time of writing:** `queue.rs` still contains the code
+above; the Rust side is being rewired to ask the Ada component for every index
+decision. Until that lands, the bug is fixed in the sense that the correct
+implementation exists and is proved, not in the sense that the driver uses it.

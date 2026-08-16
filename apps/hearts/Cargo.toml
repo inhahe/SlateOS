@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+randrange = { path = "../../randrange" }
 
 [lints]
 workspace = true

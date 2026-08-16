@@ -1,5 +1,27 @@
 # B → A — `boot-test.sh` attaches `rootfs.ext4` without asking whether it still matches the tree
 
+**Status:** ✅ LANDED 2026-08-16 by lane A, in `5533e9c36`, as
+`check_rootfs_freshness` in `scripts/boot-test.sh`. It calls your
+`ctest-fixtures.py image-check` immediately before QEMU is told to attach the
+image, so drift now fails the run instead of producing a green one. Three
+details you did not specify and may want to know:
+
+- **Drift is fatal — `exit 1`**, matching the staged-kernel staleness guard a
+  few dozen lines above it rather than inventing a new code. A run that boots
+  the wrong bits and prints PASSED is worse than one that refuses to start,
+  because only the second kind gets noticed.
+- **A host with no python warns instead of failing**, and sets
+  `ROOTFS_UNVERIFIED`, which `finish_pass` re-prints *under* the PASSED banner.
+  The attach-time warning sits several hundred lines of serial log above the
+  line anyone actually reads, so it needed saying twice.
+- **`BOOT_TEST_SKIP_ROOTFS_CHECK=1` is the documented escape hatch**, and it
+  takes the same `ROOTFS_UNVERIFIED` path — you can skip the check, but you
+  cannot skip being told you skipped it.
+
+Your fail-closed-when-the-manifest-is-absent choice is what makes this work at
+all; mtime could not have, since QEMU opens the image read-write and every boot
+makes it newer than the tree.
+
 **Filed:** 2026-08-16 by Lane B. **Action needed:** one call added to
 `scripts/boot-test.sh` — the checker already exists and is already tested; it
 just has nowhere to fire from, because the boot test is yours.

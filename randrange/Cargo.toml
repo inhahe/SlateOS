@@ -1,0 +1,17 @@
+[package]
+name = "randrange"
+version = "0.1.0"
+edition = "2024"
+description = "A seedable pseudo-random source whose reductions into a range use the bits that are actually random."
+
+[lib]
+path = "src/lib.rs"
+
+# Intentionally dependency-free, and `no_std` with no `alloc` either: everything
+# here returns a scalar or shuffles a slice the caller already owns. Mirrors
+# `textfind` and `byteread` in being reachable by the headless components as
+# well as the GUI ones.
+[dependencies]
+
+[lints]
+workspace = true

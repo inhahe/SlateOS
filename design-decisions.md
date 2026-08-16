@@ -5518,6 +5518,22 @@ self_test_fastpy_slateos_setuid`; tool: `services/fastpy-setuid/`.
 `sys_process_set_credentials` (check the caller's current uid before applying),
 drop the userspace cap short-circuit, and update the Phase 192–195 tests.
 
+> **SUPERSEDED IN PART, 2026-08-16 — see §213.** The "Known limitation" above is
+> closed: syscall 530 is now gated in the kernel by `(Process,
+> SET_CREDENTIALS)` for any call that *changes* the identity. The rest of this
+> entry stands — policy is still expressed in userspace, the kernel still holds
+> no uid rule of its own, and a no-op `setuid(getuid())` still needs nothing.
+>
+> What changed was not the design but its **premise**. This entry's rationale
+> turns on "the kernel cannot correlate POSIX cap bits with the handle-based
+> `CapTable`", which was true when written and was falsified by §207 (a
+> kernel-side `Rights::SET_CREDENTIALS`) and §312 (posix's `CAP_SETUID`
+> *projects from* it). Neither of those re-read this entry. The trigger written
+> here — "when credential uid gains kernel authority" — was aimed at the wrong
+> event: what mattered was the kernel acquiring a token it could check, not the
+> uid becoming authoritative. Logged as
+> `known-issues.md` → `A-SET-CREDENTIALS-IS-GATED-ONLY-IN-USERSPACE`.
+
 ## 84. fastpy `os.nice`/`os.getpriority`/`os.setpriority` — make nice a *real* scheduler attribute via a thin kernel mutation primitive (initiative F)
 
 **Decided by:** Claude (autonomous)
@@ -10249,6 +10265,607 @@ than accumulating as a list nobody remembers. The family table is data, so a new
 artifact family costs four lines — and the reason it is a table at all is
 `services/.gitignore`: a rule replicated per directory is a rule the next
 directory opts out of by not having it.
+
+---
+
+## §209 — Boot outcomes are recorded from one place and classified from evidence; an unvalidated fingerprint reports as unvalidated, never as a streak
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+**Where:** `scripts/boot-history.py`, `scripts/test-boot-history.py`,
+`scripts/boot-test.sh` (EXIT trap), `scripts/wedge-soak.sh` (`BOOT_LABEL`),
+`bench/boot-history.jsonl`
+
+**In short:** four of lane A's open kernel bugs are intermittent hangs whose
+closure condition is "N clean boots in a row" — and until now nothing counted
+the boots. W1's status line has said "clean streak **7**" since 2026-06-14
+while many dozens of boots have passed; the entry itself calls that "stale
+bookkeeping, not a real count." The boot test now writes one row per run to
+`bench/boot-history.jsonl`, and the streaks become a query instead of a number
+someone has to remember to edit. Two things were decided on the way, each with
+a real alternative: **where** the recorder is called from, and **what a
+fingerprint that has never matched is allowed to print**.
+
+### The problem the numbers were solving
+
+`bench/history.jsonl` already exists and is the precedent — `bench-history.py`
+opens with the same argument in its own voice: *"boot-test.sh already tells the
+reader to compare against prior runs — but nothing stored the prior runs, so
+that advice was unfollowable."* It stores numbers. It cannot store this: it only
+gains a record on a `--bench` run that reached its marker, so it is
+structurally blind to precisely the runs that matter here — the ones that never
+got there.
+
+Meanwhile the evidence for a failed boot lives in `build/serial-test.txt`, which
+is gitignored per-worktree scratch and is overwritten by the next run. So a hang
+is preserved only if a human pastes it into markdown before the next boot. That
+loss already cost an investigation once; `boot-test.sh`'s own comment says so at
+the tail-printing block: *"this exact loss bit the fork+exec-hang investigation."*
+
+### Decision 1 — one call site in the EXIT trap, verdict derived from `(exit code, serial log)`
+
+| Option | Why not |
+|---|---|
+| Call the recorder at each `exit` site | `boot-test.sh` has ~12. The thirteenth one someone adds is a **failure** site, and the omission reads downstream as a clean streak — the check silently disarms in the one direction that closes bugs on no evidence. |
+| Record from the callers (`wedge-soak.sh`, ad-hoc runs) | Only soaks would ever be recorded, and routine boots are the majority of the streak. The closure bars explicitly count routine boots. |
+| **One call in the EXIT trap, classifying from evidence** ✓ | Cannot be forgotten by construction: every exit path goes through it. |
+
+That forces the verdict to be *derived* rather than passed in, which turned out
+to be the better design anyway: exit 1 is reached from five distinct conditions
+and only the serial log distinguishes them, while the serial log alone cannot
+tell a stall (exit 2) from a plain timeout, since both end with no marker. Each
+source answers the half the other cannot.
+
+Two smaller calls fell out of it, both with a failure mode worth naming:
+
+- **`$?` is captured as the handler's first argument, before anything else
+  runs.** Reaping QEMU and running the recorder both clobber it otherwise.
+- **INT/TERM get a separate handler from EXIT, and record nothing.** An
+  operator's Ctrl-C is not a boot outcome; recording it would reset every hang
+  streak every time someone stopped a run early. A once-guard keeps the cleanup
+  single, since bash runs the signal handler *and then* the EXIT handler.
+- **A missing serial log is `NO_BOOT` and is not recorded at all.** It means the
+  build failed or the harness died before QEMU wrote anything. Compile errors
+  are far more common than hangs, so recording them as outcomes would reset
+  every streak faster than it could grow.
+
+### Decision 2 — `validated_by`, and the refusal to print a streak without it
+
+This is the one with a genuine cost. Each fingerprint (a predicate identifying a
+known issue in a failed boot's serial log) carries the list of real occurrences
+it is known to match. A fingerprint with an empty list prints a warning **in
+place of** its streak rather than alongside it.
+
+*Against:* a suppressed number is a number the reader wanted. Someone adding a
+fingerprint for a new bug gets no streak from it until they can point at an
+occurrence — which, for a bug seen once before the recorder existed, means
+reconstructing the sample from `known-issues.md`.
+
+*For, and decisive:* a matcher that can never fire produces a **perfect** clean
+streak, and a perfect clean streak is exactly what closes an issue. The number
+and the bug are then indistinguishable from the outside. This is the same rule
+`stamp-ancestry.py` adopted when a declared source path does not exist (§208) —
+*could not verify* must never render as *fine* — and the same lesson
+`test-bench-history.py`'s docstring records as the thing "the project keeps
+rediscovering."
+
+The validation is enforced by tests, not by the field: `test-boot-history.py`
+reconstructs a serial sample from the evidence quoted in `known-issues.md` for
+every occurrence named in `validated_by`, asserts each matches its own
+fingerprint **and no other**, and fails if a fingerprint claims validation
+without a sample. A comment claiming "this matches the 2026-06-12 hang" cannot
+fire either; a test can.
+
+### Two fingerprints that shaped the rest
+
+- **W1 is fingerprinted on the *silence*, not on the OOM self-test.** Its
+  2026-08-14 analysis argues the console-lock fixes mean a re-entry now *prints*
+  instead of spinning, and recommends retargeting the bar "from ~90 blind boots
+  to one observation." So the predicate is: no marker, log cut **mid-line**, no
+  exception and no panic anywhere. A match falsifies that analysis, which the
+  entry itself says is worth more than the 83 remaining clean boots.
+- **`B-PTHREAD-TEARDOWN-PF` is matched on `(address, task name)`, never on the
+  RIP.** The RIP moves with every kernel rebuild, so a RIP-keyed fingerprint
+  stops matching after any recompilation — and a streak that resets to *clean*
+  on recompilation is worse than no streak, because it looks like progress.
+
+### What this commits us to
+
+Every boot from `boot-test.sh` appends a row to a committed file, and failures
+carry a bounded serial tail (40 lines × 300 chars) so the freeze context
+survives the next run. Passes carry none — a passing tail is the same lines
+every time, and this file is appended to from three worktrees and merged as
+text. The known-issues streak numbers should now be *quoted from*
+`--streaks` rather than maintained by hand; the entries keep their prose, but
+the counts stop being something a session has to remember.
+
+---
+
+## §210 — NTFS is read-only by design, and its self-test carries its own volume so the parser is exercised on every boot
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+**Where:** `kernel/src/fs/ntfs/` (`source.rs`, `raw.rs`, `boot.rs`,
+`record.rs`, `attr.rs`, `index.rs`, `mod.rs`, `tests.rs`),
+`kernel/src/fs/mod.rs`, `kernel/src/main.rs` (self-test call site)
+
+**In short:** NTFS is the filesystem on every Windows disk, so a dual-boot
+machine's other partition is unreadable to us without a driver for it. This
+adds one that can *read* an NTFS volume but refuses every write, and that
+tests itself against a fake NTFS disk it builds in memory rather than needing
+a real one plugged in. Three calls were made along the way, each with a
+genuine alternative: read-only rather than read-write; a synthetic in-RAM
+volume rather than a device-gated test; and, for a filesystem whose names are
+case-insensitive on an OS whose names are case-sensitive, what
+`/HELLO.TXT` should open when the file on disk is `hello.txt`.
+
+### Decision 1 — read-only, and the mount says so
+
+NTFS keeps itself consistent through `$LogFile`, a write-ahead journal
+(a log of intended changes written before the changes themselves, so an
+interrupted write can be undone). Every Windows NTFS write goes through it.
+A driver that writes *without* it can leave a volume in a state `chkdsk`
+cannot repair — not "some lost data", but a directory tree Windows will
+refuse to mount. Implementing `$LogFile` correctly is a far larger job than
+the read path, and getting it subtly wrong is worse than not writing at all,
+because the damage is silent until the user next boots Windows.
+
+So `statvfs` reports `read_only: true` and every write path returns
+`ReadOnlyFilesystem`.
+
+*The consequence that needed a decision*: what `metadata()` should report for
+permissions. Inventing `0o644` — what almost every driver does — is a lie:
+userspace checks the mode, sees a writable file, opens it for writing and
+fails at the syscall. The driver reports `0o444` for files and `0o555` for
+directories, so the mode agrees with what the mount will actually do. The
+per-file DOS read-only bit deliberately does *not* narrow this further:
+while the whole mount refuses writes, reporting a narrower mode for the
+flagged files would imply the unflagged ones are writable.
+
+*Alternative rejected*: read-write with `$LogFile`. Not "too much work" — the
+issue is that a half-correct journal is indistinguishable from a correct one
+until the failure that tests it, and that failure destroys a user's Windows
+install. Revisit only with a full `$LogFile` implementation and a crash-
+injection test, not as an increment on this code.
+
+### Decision 2 — the self-test builds its own volume (`SectorSource`)
+
+The precedent to avoid is `fs::iso9660::self_test()`. It runs five pure unit
+tests and then prints *"No ISO 9660 filesystem mounted — skipping integration
+test"* — which, in the CI boot test, is every time. Its hard parts (volume
+descriptors, directory records, extents) have therefore never been executed by
+a test. NTFS is worse-shaped for that: **all** its hard parts are on-disk
+structures. A device-gated test would leave fixups, runlists, the `$I30`
+B+ tree and `$ATTRIBUTE_LIST` entirely uncovered.
+
+So the driver reads through a `SectorSource` trait with two implementations:
+`DeviceSource` (the block cache) and `MemorySource` (a `Vec<u8>`). The
+self-test hands it a synthetic volume built byte-by-byte by `tests.rs` and
+drives the *entire* parser — mount, directory listing, path resolution, file
+reads — with no device attached.
+
+Two properties of that builder were deliberate:
+
+- **It is written independently of the parser, not from shared code.** A
+  builder that reused the parser's notion of the layout would agree with it by
+  construction, including where both are wrong. `tests.rs` writes the fields
+  from the on-disk format documentation; `write_fixups` is a separate
+  implementation of the write side of `apply_fixups`.
+- **It covers each structural fork exactly once**, because NTFS's forks are
+  the kind where code that handles one branch passes on whichever volume it
+  was written against: resident vs. non-resident `$DATA` (a 100-byte file has
+  no clusters at all); an INDX-backed directory vs. a fully resident one (a
+  small directory has no `$INDEX_ALLOCATION`, a large one's `$INDEX_ROOT`
+  holds nothing but a child pointer — so a driver reading only the root lists
+  small directories perfectly and large ones as empty); a fragmented runlist;
+  a sparse run; `$ATTRIBUTE_LIST` with the `$DATA` in an extension record; an
+  8.3 DOS alias that must not be listed; a *negative* `clusters_per_mft_record`
+  (the signed power-of-two encoding a naive parser reads as 246); and a
+  non-zero MFT sequence number, so an unmasked 64-bit file reference shows up
+  as an absurd record number instead of silently working.
+
+*Alternative rejected*: shipping a real `.ntfs` image as a test fixture. It
+would be more authentic, but it is an opaque binary in git that nobody can
+review, it cannot be minimised to the cases above, and adding a new case means
+regenerating it on a Windows machine. The builder is readable, diffable, and
+each structure it emits sits next to a comment saying why that case exists.
+
+*Alternative rejected*: a `#[cfg(test)]` host-side test. The kernel's test
+story is the boot self-test; a host test would not run in CI at all.
+
+### Decision 3 — exact match first, then a *unique* case-insensitive match
+
+This OS is case-sensitive by design (`design.txt`); NTFS's `$I30` index
+collates case-**in**sensitively, which means a Windows-created volume cannot
+contain two names differing only in case. A path lookup therefore tries the
+exact name first, and only if that misses does it fold case — and if the fold
+matches **more than one** entry, the lookup fails with `NotFound` rather than
+picking one.
+
+The reasoning: `/HELLO.TXT` on a volume containing only `hello.txt` has
+exactly one plausible meaning, and refusing it makes a Windows disk unusable
+from a Windows-shaped path. But the collation guarantee is Windows's, not
+ours — a volume built by another tool (or a `POSIX`-namespace name, which NTFS
+does allow to be case-sensitive) can contain both. Where it does, opening
+*the wrong file* is a worse outcome than opening none, so ambiguity is
+refused rather than resolved.
+
+*Alternative rejected*: pure case-sensitivity. Consistent with the OS rule,
+but it makes half the paths a user types at a Windows disk fail for no reason
+the user can see.
+
+*Alternative rejected*: pure case-insensitivity (fold always, first match
+wins). Simple, matches Windows — but it silently picks between two real files
+when both exist, and it contradicts the OS-wide rule at the one place a user
+would notice.
+
+### Related refusals, for the same reason
+
+Three other places return an error rather than a plausible-looking answer, on
+the principle that a filesystem that guesses is worse than one that stops:
+
+| Situation | Response | Why not the alternative |
+|---|---|---|
+| Compressed or encrypted `$DATA` | `NotSupported` | Handing back the raw compressed bytes as file contents is data corruption that looks like success. |
+| A sector whose fixup does not match | `CorruptedData` | This is the *only* torn-write detector NTFS has. Downgrading it to a warning does not make the driver permissive, it makes it return half-old data. |
+| An `INDX` block whose VCN is not the one requested | `CorruptedData` | Fixups prove the block was written atomically, not that it is the block we asked for. A runlist bug yields a valid block from elsewhere *in the same directory* — real names in the wrong place, which passes every other check. |
+
+**How to reverse:** read-only is the load-bearing one; undoing it means
+implementing `$LogFile` and is a new project, not an edit. The `SectorSource`
+indirection costs one `dyn` call per sector read on a path that is already
+doing I/O, and could be removed by monomorphising `NtfsFs<S: SectorSource>` if
+that ever measures. The lookup rule is one function — `ntfs::lookup` in
+`mod.rs` — and switching to either pure policy is a few lines there.
+
+---
+
+## §211 — The QEMU boot lock queues, and a lane that cannot get a turn fails rather than booting anyway
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous), on lane B's request
+(`requests/b-a-the-boot-lock-has-no-queue-so-a-waiting-lane-can-starve.md`)
+
+**In short:** three copies of this project run on one PC, and only one of them
+can run the emulator at a time — two at once slow each other down so much that
+a healthy test looks broken. They coordinate with a "lock": whoever grabs it
+first goes, everyone else waits. The problem was that grabbing it was a pure
+race with no memory of who had been waiting, so a lane that finished and
+immediately started again beat the waiting lane *every single time* — one lane
+watched five consecutive runs of another go ahead of it across forty minutes.
+And when a wait finally timed out, the script's response was to start the
+emulator anyway, which is the exact thing the lock exists to prevent. Two
+decisions here: **wait in a line (first come, first served)**, and **when you
+still cannot get a turn, stop and say so rather than barging in**.
+
+### Decision 1 — a ticket queue in front of the `mkdir`, not a fairer race
+
+`mkdir` is atomic, which makes it a correct mutex and a useless scheduler: it
+records who *has* the lock and nothing about who has been waiting for it. Worse
+than "unfair" — it is *systematically* unfair here, because every waiter polls
+on the same 5-second period, so their probes are phase-locked and the one that
+entered the loop later probes later in every subsequent cycle, forever. There is
+no randomness for repeated attempts to average out. That is why the observed
+run was five straight losses rather than the coin-flip mix chance would predict.
+
+The alternative considered and rejected was **anti-barge**: after releasing, a
+lane declines to re-acquire for one poll interval if anyone is waiting. It is
+about a fifth of the code and fixes the exact observed case. It was rejected
+because it is a heuristic that *reduces the probability* of losing rather than
+bounding the wait — it converts "never gets a turn" into "usually gets a turn",
+and which of those you got is not visible from a log. A queue bounds it: with N
+lanes you wait at most N-1 turns, and the bound is a property of the mechanism
+rather than of the timing.
+
+Cost of the queue: tickets are state that can be orphaned. A run killed by
+`run-timeout.py`'s Job Object executes no exit path, so it leaves a ticket
+behind — and a dead ticket at the *head* blocks every lane, which is strictly
+worse than the starvation being fixed. This is paid for by sweeping tickets with
+the lock's own liveness rules (proven-alive never swept, provably-dead after
+60s, unjudgeable after 1200s) rather than inventing a second set of thresholds:
+two rules about "is that process still there?" that can disagree is how the
+next bug in this file gets written.
+
+### Decision 2 — expiry refuses (exit 4) instead of booting anyway
+
+This is the genuine tradeoff, and it reverses a prior default. `BOOT_LOCK_WAIT`
+expiry used to proceed without the lock, on the reasoning that a bounded wait
+that *proceeds* is friendlier than one that fails. That reasoning holds only if
+the wait normally ends by acquiring. Under starvation it ends by doing the
+forbidden thing — two emulators under TCG — an hour later, unattended, with the
+resulting slowdown then attributed to the code under test. A false slow/failed
+boot is a worse outcome than a refusal, because a refusal is *true* and a reader
+(or a retry loop) can act on it, whereas a contention-induced phantom failure
+sends someone to debug a kernel that is fine.
+
+Against: a refusal is a non-zero exit, so any wrapper that treats non-zero as "a
+kernel problem" now has a new way to be wrong. That is why it is exit **4**,
+documented in the script header beside 1/2/3, rather than folded into 1 — and
+why the five loop callers were taught about it explicitly rather than left to
+infer it.
+
+"Something live is ahead of us" is deliberately **two** conditions, not one: a
+live lock owner, *or* a live waiter at the head of the queue. Checking only the
+owner was the first implementation and the test harness caught it: when the lock
+is free but a live lane holds the head ticket there is no owner to check, so an
+owner-only rule boots anyway — beside the process most likely to enter the
+emulator seconds later. The escalation would have survived the fix, relocated.
+Where *nothing* live can be demonstrated (an ownerless lock, a queue of
+processes we cannot see), expiry still proceeds, preserving the original
+conservative default for genuinely unknowable states.
+
+### Decision 3 — the refuse path deletes the serial log
+
+Follows from decision 2 rather than standing alone, but it is the part most
+likely to be undone by someone who does not see why. `boot-test.sh` truncates
+the serial log *after* the lock, so on the refuse path it still holds the
+previous run's output — and every soak wrapper greps that file the instant the
+script returns. Deleting it makes "nothing was booted" self-evident to callers
+that never heard of exit 4, including ones written later. The alternative —
+relying on each caller to check the status — was rejected for the same reason
+the exit-code recorder is wired into one trap rather than twelve exit sites: the
+caller nobody remembered to update fails *silently and in the wrong direction*,
+scoring a stale log as this run's result.
+
+**How to reverse:** the queue is ~40 lines in the `BOOT-LOCK-REGION` and could
+be deleted wholesale to return to the bare race. Decision 2 is one `if` at the
+expiry branch. Both are covered by `scripts/test-boot-lock.sh`, which runs 15
+cases in ~6s with no kernel build — reverse either and the tests say which
+property you gave up.
+
+---
+
+## §212 — `resource_id == 0` names the *class*, recorded as a documented convention plus a boot check rather than a new `ResourceId` type
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous), prompted by lane B's
+`requests/b-a-does-resource-id-zero-mean-the-class-or-just-an-unknown-pid.md`
+
+**In short:** A capability in this kernel is a permission slip. Each one names
+what it applies to with a pair: a *kind* of thing (a process, a file) and a
+*number* picking out which one. Lane B found capability slips written with the
+number `0` and could not tell, from the code alone, whether `0` meant "**all**
+processes" or "one particular process whose number nobody had filled in yet" —
+and it was about to add a permission check that gives a completely different
+answer depending on which. It means **all processes**. The question was which of
+three ways to write that down: a comment, a comment plus a check that fails the
+boot if the assumption ever stops holding, or a redesign that makes the
+ambiguity impossible to express in the first place. We took the middle one.
+
+**The decision.** `resource_id == 0` in a capability entry means *the class as a
+whole*, never *an instance*. That is now stated normatively in
+`kernel/src/cap/mod.rs` (a module section, plus the `ResourceType::Process` and
+`::Thread` variant docs), and it is backed by
+`cap::verify_resource_id_zero_is_class_wide()`, which fails the boot if the next
+allocatable PID is ever `0`. No new type was introduced.
+
+**Why it needed deciding at all.** The convention was real and every call site
+already obeyed it, but it was written down nowhere — it lived in the shape of
+the code. That is survivable while exactly one predicate leans on it. Lane B was
+adding a second (`CAP_KILL`), and a second reader deriving the same unwritten
+rule from the same code is not a contract, it is a coincidence that has held
+twice. The failure mode if the two readers ever diverge is not a crash: it is a
+capability check that quietly answers a question it misunderstood.
+
+**Why the sentinel is sound.** Two properties, and only two:
+
+1. **No instance id can *be* 0.** `pcb::NEXT_PID` starts at 1 and only
+   increments; pid 0 is the kernel, which has implicit authority and is never
+   granted a capability.
+2. **Writing `0` is a statement, not an omission.** `SpawnOptions.capabilities`
+   carries the id as a full member of a `(ResourceType, u64, Rights)` triple, so
+   a caller that writes `0` chose it. The two automatic grant sites
+   (`fork.rs` step 8, `spawn.rs` step 5b) pass the child's real pid, so they can
+   never be mistaken for class-wide grants — which is precisely the property
+   lane B's fix needs.
+
+**The alternatives.**
+
+| Option | For | Against |
+|---|---|---|
+| Doc comment only | Zero code; says the true thing | Property 1 is a one-line fact in `pcb.rs`, a module neither predicate mentions. A comment cannot notice when its own premise stops being true. |
+| **Doc + boot check** (chosen) | Enforces the *one* property every call site depends on and none can check. Costs one `load` at boot. | Does not stop a site from *using* `0` incorrectly. |
+| `enum ResourceId { Class, Instance(u64) }` | Makes the ambiguity unrepresentable — the strongest form | Touches every grant site, every projection, the `CapEntryInfo` ABI (whose 24-byte layout has its own self-test) and `SpawnOptions`. Buys type safety against a confusion that has never occurred, at the price of an ABI break, in a subsystem that already has a working self-test. |
+
+**Why not the newtype, in one sentence:** the actual defect was that a *fact*
+was unrecorded, not that a *type* was too wide — and the fact is now checked by
+a machine, which a newtype would not have done any better.
+
+**What the check deliberately does not do.** It asserts only that `0` is
+unreachable as an instance id. It does not audit *which* sites pass `0`; that
+stays a policy each site owns, and enforcing it from the capability layer would
+make the layer responsible for decisions it cannot see the context of.
+
+**If it is ever reversed:** deleting the boot check returns the convention to
+comment-only status. The message it prints names the convention explicitly, so a
+future change to number processes from `0` — or to reuse a slot index as a pid —
+breaks the boot with a pointer to this section, rather than silently converting
+every class-wide grant into authority over one real process.
+
+---
+
+## §213 — `setuid()` is gated in the kernel, by the same id-agnostic predicate userspace projects from, and only when the identity actually moves
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous) — revisiting §83, which is also mine
+
+**In short:** Changing which user a program runs as is the single most
+security-relevant thing a program can ask for. Until now the kernel granted it
+to anyone who asked: the check that decided whether you were *allowed* lived in
+a userspace helper library, and nothing forced a program to call that helper —
+it could ask the kernel directly and skip it. Worse, the helper's own default
+setting was "everything is permitted", narrowed only after a later step that had
+not necessarily run yet. So the one gate on becoming root was outside the kernel
+and open by default. The kernel now checks for itself, using the same permission
+slip the userspace helper's answer is computed from — and it only checks when
+the identity would really change, so the very common "set my user to the one I
+already am" keeps working for everyone.
+
+**The decision.** `SYS_PROCESS_SET_CREDENTIALS` (530) requires
+`(ResourceType::Process, Rights::SET_CREDENTIALS)` for any call that would
+change uid or gid. Calls that resolve to the identity already held — via the
+`(uid_t)-1` KEEP sentinel or by passing the current value — require nothing.
+
+**Three things had to be got right, and each had a wrong answer that looks fine.**
+
+**1. Which predicate.** The kernel gate uses *exactly* posix's:
+`(Process, SET_CREDENTIALS)`, **id-agnostic**. The tempting alternative is to
+require `resource_id == 0` (the class sentinel, §212), which is what every
+actual grant writes and reads as the stricter, more careful choice. It is the
+wrong choice: `posix::sys_capability::project` is id-agnostic, so a kernel gate
+with an `== 0` in it would answer a *different question* from the projection.
+Then the projection is no longer a projection — userspace would compute "you may"
+from a right the kernel then refuses to honour, or the reverse, and which of the
+two is authoritative would depend on which layer a given call happened to enter
+through. Two gates on one operation must be one predicate, and the stricter of
+two disagreeing gates is not safer, it is just the one that fails.
+
+*(§212's rule that an id-agnostic `SET_CREDENTIALS` check is safe is what makes
+this available: the right has no automatic grant anywhere, so unlike `SIGNAL`
+there is no per-instance grant an id test would need to exclude. Add an
+auto-grant of `SET_CREDENTIALS` and **both** predicates must gain an `== 0` in
+the same commit.)*
+
+**2. Whether a no-op counts.** It does not. `setuid(getuid())` is permitted to
+every process in POSIX, and privilege-shedding code issues it unconditionally —
+often in code paths that never held privilege in the first place. Gating it
+would deny a capability to callers who provably need none, in order to prevent
+a transition that does not happen: the state after a refused no-op and after an
+allowed one is byte-identical. The two ways to not-move are distinct and both
+had to be handled — KEEP says "don't touch this field", passing the current
+value says "set it to what it is" — and only the first is obvious from the ABI.
+
+**3. Where the decision lives.** In `resolve_credential_request()`, a pure
+function of `(current, arg0, arg1)`, not inline in the handler. The handler
+reads `current_task_id()`, so a self-test driving it through `dispatch()` can
+only ever exercise the kernel-task path that fails before reaching the gate.
+Nine cases are pinned in `test_dispatch_set_credentials_gate`. Both failure
+directions are silent in production: a no-op misjudged as a change denies
+something harmless, and a change misjudged as a no-op *is* the escalation —
+and it would pass every other test in the tree, because the identity does end
+up where the caller asked.
+
+**Why now, rather than at §83's stated trigger.** §83 deferred this to "when
+credential-uid-based authority is introduced", which has not happened. That
+trigger was aimed at the wrong event. §83's argument for userspace policy was
+that the kernel *had nothing to check* — POSIX caps were userspace-only with no
+kernel backing. §207 then created `Rights::SET_CREDENTIALS` as a kernel-side
+handle-backed right, and §312 made `CAP_SETUID` project from it. At that moment
+the userspace check stopped being an independent policy and became a **cached
+copy of a kernel fact, enforced only on the copy** — and the condition that
+mattered was met, whatever the credential uid did or did not authorise. See
+`known-issues.md` → `A-SET-CREDENTIALS-IS-GATED-ONLY-IN-USERSPACE` for the
+mechanism by which a correct decision rotted without anyone changing it.
+
+**Alternatives.**
+
+| Option | For | Against |
+|---|---|---|
+| Leave it to userspace (§83 status quo) | Zero change; consistent with other cap-gated ops | A wrapper is not a boundary. Any process reaches uid 0 via raw syscall 530, and posix's `CAPS_DEFAULT` is *all caps held*, so the check defaults to permitting. Violates CLAUDE.md's "no ambient authority" outright. |
+| Kernel-authoritative uid rule (root may set any, others only their own) | No capability plumbing; familiar Unix semantics | Rejected in §83 and still right to reject: it invents a second, *different* policy alongside the projected one, and diverges host from target. |
+| **Capability gate, id-agnostic, change-only** (chosen) | Same predicate both sides; no new policy; provably no blast radius | Does not stop a holder from setting any uid at all — but that is what holding the right *means*. |
+
+**Blast radius: none.** `self_test_fastpy_slateos_setuid` is the only thing in
+the tree that changes identity, and `spawn.rs` already grants it
+`(Process, 0, SET_CREDENTIALS)` — placed under
+`requests/b-a-cap-grants-for-312-step3-fixtures.md` for §312 step 3. This makes
+the gate binding one layer *below* where that request expected it, and the grant
+covers the earlier event unchanged.
+
+**How to reverse:** delete the `is_change && !has_capability_type(…)` arm in
+`sys_process_set_credentials`. `resolve_credential_request` and its self-test
+stay useful either way — they describe the ABI, not the policy.
+
+**Where it lives.** `kernel/src/syscall/handlers.rs`
+(`sys_process_set_credentials`, `resolve_credential_request`,
+`CREDENTIALS_KEEP`), `kernel/src/syscall/number.rs` (the 530 doc),
+`kernel/src/syscall/dispatch.rs` (`test_dispatch_set_credentials_gate`).
+
+---
+
+## §214 — A decoder that explains exit codes must state the range it can explain, so an unknown code is announced instead of silently sitting beside a plausible neighbour
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous), answering lane B's
+`requests/b-a-jobctl-fail-diagnostic-lists-code-bands-that-stop-two-rounds-ago.md`
+
+**In short:** When one of our ring-3 test programs fails, it reports *which*
+check failed by choosing its exit code — check 177 failing means the program
+exits 177. The kernel prints that number along with a sentence explaining what
+each range of numbers means, so somebody reading the boot log knows what broke
+without opening the source. That sentence had fallen two rounds behind: it
+explained codes 10 through 77, while the program had grown checks numbered up
+to 187. A failure at 177 therefore printed "177" next to an explanation of 74
+and 77 — numbers that look adjacent and mean something completely unrelated.
+The choice was between deleting the explanation (lane B's weak preference) and
+keeping it up to date. **We kept it, added the missing ranges, and — the part
+that actually fixes the defect — made it say out loud when the code it was
+handed is outside everything it knows.**
+
+**The defect was not that the list was short. It was that a short list
+presented itself as complete.** Those are different bugs with different fixes,
+and it is worth being precise about which one was live, because the obvious fix
+addresses the wrong one:
+
+| | list is short | list claims to be complete |
+|---|---|---|
+| cost when the fixture grows | reader greps the source | reader forms a **wrong hypothesis** and debugs the wrong code path |
+| how it is noticed | immediately, by absence | never — the output looks exactly as authoritative as when it was right |
+| fixed by | adding entries (recurring work) | one conditional (once) |
+
+The right-hand column is the one that bit lane B, and only the right-hand column
+can waste someone's time. A reader who sees no explanation loses a grep. A
+reader who sees 74 and 77 explained, next to a 177 they can't find, reasonably
+assumes 177 is in that neighbourhood — it is not; it is a `WNOWAIT` peek in a
+part of the fixture written two rounds later. **Deleting the list fixes the
+right-hand column too, but by giving up the left-hand column's value; the
+conditional fixes it while keeping that value.**
+
+**Why the list's value is real and not nostalgia.** Lane B raised the
+counter-argument themselves and then set it aside; it deserves better. The band
+list is readable **from a serial log alone, with no tree to hand** — which is
+the situation you are in when triaging a boot someone else ran, on a machine
+that does not have the repository, from a pasted log. That is not a rare case
+for an OS; it is the normal case for a failure report. `grep 'rc = 177'` is
+strictly better *when you have the source*, and worth nothing when you do not.
+
+**What was decided:**
+
+1. **Keep the band list**, and fill in the four bands the fixture has added
+   since it was written (150-163 full-size `WaitInfo`, 164-169 truncation,
+   170-177 `WNOWAIT`, 178-187 `WPGID`). The bands were read out of
+   `services/ctest-jobctl/main.c` directly rather than copied from the request,
+   which is how the 120-132 / 140-147 split survived — lane B's summary had
+   collapsed those into a single "100-126".
+2. **Print the highest code the decoder knows.** When the observed code is
+   outside every band, the message says so explicitly and sends the reader to
+   `grep` instead of offering a table that cannot contain the answer. This is
+   the whole fix: from now on, growing the fixture degrades the diagnostic into
+   an honest "I do not know this one", never into a confident wrong neighbour.
+3. **Correct the doc comment**, which claimed the function "needs no change as
+   the fixture grows … rather than duplicating a per-code table" while sitting
+   directly above a per-code table. It now says what is true: the table is a
+   convenience that may lag, the lag is self-announcing, and the exit code plus
+   `main.c` is the authority.
+
+**Alternatives:**
+
+| Option | Verdict |
+|---|---|
+| Delete the band list, keep the `main.c` pointer (lane B's weak preference) | Rejected — fixes the misleading-output bug by discarding the no-tree-to-hand case, which is the case failure reports actually arrive in. |
+| Keep and extend the list, nothing else | Rejected — this is the status quo plus one round of catch-up. It has now silently gone stale twice; a third time is a prediction, not a risk. |
+| Keep, extend, **and announce the decoder's own limit** (chosen) | The only option under which a future round of fixture growth cannot produce a misleading message, whether or not anyone remembers to update the table. |
+| Generate the table at build time from `main.c`'s `rc = N` comments | Rejected — `ctest-fixtures.py` is lane B's, the fixture's comments are not a machine format, and it is a large mechanism to remove a cost that option 3 has already made harmless. Reconsider only if several fixtures want it. |
+
+**What this generalises to.** Any diagnostic that *decodes* a value — an exit
+code, an errno, a status word, a magic number — is a lookup table that lives
+apart from the thing it describes, and will therefore drift from it. The
+sustainable form is not a table that someone promises to maintain; it is a
+table that knows its own domain and says when it has been handed something
+outside it. The maintenance then becomes optional, which is the only kind of
+maintenance that reliably survives.
+
+**Where it lives.** `kernel/src/proc/spawn.rs::self_test_jobctl` — the doc
+comment and the `exit_code != EXPECTED` branch.
 
 ---
 
@@ -16560,3 +17177,109 @@ later if a profile ever asks for it, and would not change the interface.
 and the `undo_tests` module.
 
 ---
+
+## §447 — One shared `randrange` crate, with the generator's output permuted as well as its reduction fixed
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** Twenty-seven of this tree's applications each contained a
+copy-pasted eight-line random number generator, and all twenty-seven copies had
+the same bug: asking one for "a number under 4" returned a repeating pattern
+of four numbers, for ever, in every game. In `apps/simon` that pattern *was*
+the game — the colour sequence a player was asked to memorise was the same four
+colours in the same order every time. The decision is to replace all twenty-
+seven copies with one shared crate, and — separately — to change the generator
+itself rather than only the "pick a number under N" step that was visibly
+broken.
+
+### The bug, stated once
+
+The copied generator is a linear congruential generator with modulus
+2<sup>64</sup> (`state = state * A + C` on a `u64`, wrapping). In *any* such
+generator, bit *k* of the state has period 2<sup>*k*+1</sup>: the bottom bit
+alternates, the bottom two bits count through four values, and so on. That is a
+property of the construction, not of the constants.
+
+The copied reduction was `state % bound`, which for a power-of-two `bound`
+keeps exactly those bottom bits. So every draw from a power-of-two-sized set
+was a fixed cycle of that length. An odd bound escapes, because the remainder
+then depends on the whole word — which is why the defect survived: `% 7` for
+tetrominoes is fine and `% 4` for four colours is not, and in `apps/simon` the
+two ideas lived three lines apart.
+
+`apps/simon` had 106 passing tests. None caught it, because the broken draw
+uses all four colours **exactly equally** — only the order is degenerate.
+*A distribution check cannot see this bug.*
+
+### Decision 1 — one crate, not twenty-seven fixes
+
+| | Fix each copy in place | One shared crate *(chosen)* |
+|---|---|---|
+| Work now | 27 small edits | 1 crate + 27 one-line dependency changes |
+| Next app that needs randomness | copies whichever neighbour it finds | `use randrange::Rng` |
+| A future improvement (better generator, unbiased range) | 27 places | 1 |
+| Risk | a copy gets missed and stays broken | a bug is shared by everything at once |
+
+Chosen because the evidence for the shared crate is *already in the tree*: the
+27 copies are not similar, they are identical down to both magic constants, so
+they were never independent implementations that happened to agree. They were
+one implementation stored 27 times, and storing it once is the honest
+representation. The tree already has four precedents for exactly this move —
+`yamldoc`, `textfmt`, `textfind`, `byteread` — each created after the same
+discovery, and `textfind`'s note records the same finding in stronger terms:
+eight crates had written the same search and made *the same three mistakes*.
+
+The "shared bug" risk is real and is the reason the crate carries 15 tests for
+120 lines of code, including one that rebuilds the historical defect inside the
+test file and asserts it still reproduces — so the module documentation's claim
+about *why* the crate exists is itself checked, rather than being a story in a
+comment.
+
+### Decision 2 — permute the output, don't only fix the reduction
+
+Fixing `below` to take the high bits (multiply by the bound, keep the top half
+of the 128-bit product) is sufficient for the reductions this crate provides.
+The question was whether to stop there.
+
+| | Fix the reduction only | Also permute the output *(chosen)* |
+|---|---|---|
+| `rng.below(4)` | correct | correct |
+| A caller writing `rng.next_u64() % 2` | **alternating counter** | correct |
+| Cost | none | three instructions per draw |
+| Honesty of the interface | `next_u64` returns a word whose bits are not equal | every bit is equally good |
+
+Chosen because the first column leaves a loaded gun. A `next_u64` whose low
+bits are a counter is a correct-but-treacherous interface: it hands out a value
+that *looks* like 64 random bits and is not, and the next person to reduce it
+themselves gets the bug back — which is precisely how 27 crates acquired it in
+the first place. The state still advances by the same LCG, with the same
+recognisable constants, and the output is then run through SplitMix64's
+xor-shift/multiply finaliser, which mixes the high bits down. This is the shape
+of the PCG family: a cheap LCG for the state, a permutation for the bit quality
+the LCG cannot provide.
+
+A consequence worth stating: the two defences are independent, and either alone
+makes the "no cycle" test pass. That was verified by reverting each separately,
+and the test's own doc comment now says so, so a future reader does not mistake
+it for pinning the reduction.
+
+### What was deliberately not done
+
+- **Not a cryptographic generator.** The state is 64 bits and recoverable from
+  a couple of outputs. The crate says so in its first screen. Password
+  generation and key material must not come from here; `apps/passwordgen` is
+  therefore *not* a migration target, and its own generator is a separate
+  question.
+- **Not stream-compatible with the copies it replaces.** Preserving the old
+  stream was never on the table: the old stream is the bug. Tests in the
+  migrating crates that pinned a specific board layout will need new
+  expectations, and each of those is a chance to check whether the test was
+  asserting a property or merely a photograph.
+- **Not `rand`.** It is a large dependency tree for a machine that has no
+  package manager yet, and the parts of it that matter here are 120 lines.
+
+### Where it lives
+
+`randrange/src/lib.rs`, a workspace member (not a default member — same
+rationale as `yamldoc`), `no_std` with no `alloc`.

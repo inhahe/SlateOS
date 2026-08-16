@@ -1,5 +1,20 @@
 # B → A — every process that has ever forked projects `CAP_KILL`; the fix needs `resource_id = 0` to mean something you have not said it means
 
+**Status:** ✅ LANDED 2026-08-16 by lane A, in `927a4c0b5`. Answer:
+**`resource_id = 0` names the class**, and your `CAP_KILL` predicate is correct
+as written. It is now normative in `kernel/src/cap/mod.rs` rather than implied,
+and `cap::verify_resource_id_zero_is_class_wide()` fails the boot if the next
+allocatable PID is ever 0 — so the property your predicate rests on can no
+longer stop being true quietly. Full reply, including the sharper reason your
+id-agnostic `SET_CREDENTIALS` check is right, in
+`requests/a-b-resource-id-zero-names-the-class.md`; the decision is
+`design-decisions.md` §212.
+
+**Follow-on you should know about:** the `SYS_PROCESS_SET_CREDENTIALS` gap you
+noted in passing is also closed (`6c5187c55`, §213) — the syscall now performs
+the kernel-side check itself, using your id-agnostic predicate unchanged, and
+only when the call would actually change the identity.
+
 **Filed:** 2026-08-16 by Lane B, following the "one thing I noticed but did not
 touch" section of `requests/a-b-set-credentials-right.md`. **Action needed:** a
 statement about a convention, not a code change — is `resource_id = 0` on a

@@ -64,8 +64,9 @@ use super::number::{
     SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE,
     SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_COUNT,
     SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS,
-    SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_SID,
-    SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID,
+    SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID,
+    SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID, SYS_PROCESS_IS_READY,
+    SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID,
     SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE,
     SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX,
     SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_SCHED_GET_PROFILE,
@@ -388,6 +389,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_WAIT as usize] = Some(handlers::sys_process_wait);
     handlers[SYS_PROCESS_TRY_WAIT as usize] = Some(handlers::sys_process_try_wait);
     handlers[SYS_PROCESS_WAIT_STATUS as usize] = Some(handlers::sys_process_wait_status);
+    handlers[SYS_PROCESS_GET_RUSAGE as usize] = Some(handlers::sys_process_get_rusage);
     handlers[SYS_PROCESS_ID as usize] = Some(handlers::sys_process_id);
     handlers[SYS_SET_EXCEPTION_HANDLER as usize] = Some(handlers::sys_set_exception_handler);
     handlers[SYS_PROCESS_KILL as usize] = Some(handlers::sys_process_kill);
@@ -858,6 +860,8 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_wait_status_reports_job_control()?;
     test_dispatch_wait_status_wpgid_and_wnowait()?;
     test_dispatch_wait_info_layout()?;
+    test_dispatch_rusage_info_layout()?;
+    test_dispatch_set_credentials_gate()?;
 
     serial_println!("[syscall] Dispatch self-test PASSED");
     Ok(())
@@ -2068,6 +2072,236 @@ fn test_dispatch_wait_info_layout() -> KernelResult<()> {
     }
 
     serial_println!("[syscall]   WaitInfo (1063 arg3) byte layout: OK");
+    Ok(())
+}
+
+/// Pin down the on-wire byte layout of `RusageInfo`
+/// (`SYS_PROCESS_GET_RUSAGE` `arg1`/`arg2`), and the `who` gate in front of
+/// it.
+///
+/// Same reasoning as [`test_dispatch_wait_info_layout`]: nothing in the
+/// kernel reads these offsets back, so a transposed field would compile,
+/// boot, and hand userspace a fault count where it asked for CPU time,
+/// forever.
+///
+/// The **first six fields must be `WaitInfo`'s last six, in order and in the
+/// same units** — that is the property that makes "what a parent reads for a
+/// reaped child" and "what that child could have read for itself" agree by
+/// construction. The test asserts it directly by encoding one `ProcessUsage`
+/// through both encoders and comparing the two byte ranges, rather than by
+/// listing the numbers twice: a shared expectation table can be edited once
+/// and still agree with itself while disagreeing with the ABI.
+///
+/// The `who` gate is checked here too, with a null pointer. An unrecognised
+/// selector must be `InvalidArgument` and must be decided *before* the
+/// pointer is looked at — otherwise a caller probing for support gets
+/// `InvalidAddress` from us and `EINVAL` from Linux for the same call.
+fn test_dispatch_rusage_info_layout() -> KernelResult<()> {
+    use crate::proc::thread::ProcessUsage;
+    use crate::syscall::handlers::{RUSAGE_INFO_SIZE, rusage_info_image, wait_info_image};
+    use crate::syscall::number::SYS_PROCESS_GET_RUSAGE;
+
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: RusageInfo layout: {}", msg);
+        Err(KernelError::InternalError)
+    }
+
+    let usage = ProcessUsage {
+        user_ticks: 3,
+        sys_ticks: 7,
+        min_flt: 101,
+        maj_flt: 102,
+        nvcsw: 103,
+        nivcsw: 104,
+    };
+    let img = rusage_info_image(&usage, 9_999);
+
+    let rd64 = |b: &[u8], off: usize| -> Option<u64> {
+        b.get(off..off.saturating_add(8))
+            .and_then(|s| <[u8; 8]>::try_from(s).ok())
+            .map(u64::from_le_bytes)
+    };
+
+    let expect: [(usize, u64, &str); 7] = [
+        (0, 30_000, "utime_us@0 (3 ticks = 30ms)"),
+        (8, 70_000, "stime_us@8 (7 ticks = 70ms)"),
+        (16, 101, "minflt@16"),
+        (24, 102, "majflt@24"),
+        (32, 103, "nvcsw@32"),
+        (40, 104, "nivcsw@40"),
+        (48, 9_999, "maxrss_kib@48"),
+    ];
+    for (off, want, what) in expect {
+        if rd64(&img, off) != Some(want) {
+            return fail(what);
+        }
+    }
+    // The last field must be the last field. Compile-time, so a size change
+    // fails the build rather than the boot.
+    const _: () = assert!(RUSAGE_INFO_SIZE == 48 + 8);
+
+    // The agreement property, asserted rather than assumed: WaitInfo's
+    // counter block starts at 24 and RusageInfo's at 0, and the 48 bytes
+    // must be byte-identical for the same counters.
+    let wi = wait_info_image(&crate::syscall::wait::FoundEvent {
+        pid: 1,
+        uid: 0,
+        usage,
+        event: crate::syscall::wait::ChildEvent::Exited(crate::proc::pcb::ExitInfo {
+            exit_code: 0,
+            crash: None,
+        }),
+    });
+    for off in (0..48).step_by(8) {
+        if rd64(&img, off) != rd64(&wi, off.saturating_add(24)) {
+            return fail("counter block disagrees with WaitInfo's");
+        }
+    }
+
+    // `who` gate: unknown selector is EINVAL before the null pointer is
+    // EFAULT, and a *known* selector with a null pointer is EFAULT — which
+    // together prove the order rather than just the two verdicts.
+    let mk = |who: u64, ptr: u64| SyscallArgs {
+        arg0: who,
+        arg1: ptr,
+        arg2: RUSAGE_INFO_SIZE as u64,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    if dispatch(SYS_PROCESS_GET_RUSAGE, &mk(42, 0)).value
+        != i64::from(KernelError::InvalidArgument.code())
+    {
+        return fail("who=42 with a null pointer must be InvalidArgument, not InvalidAddress");
+    }
+    // -1 is RUSAGE_CHILDREN; the register carries it sign-extended, so this
+    // also proves the i32 truncation is done rather than the raw u64 compared.
+    if dispatch(SYS_PROCESS_GET_RUSAGE, &mk(u64::MAX, 0)).value
+        != i64::from(KernelError::InvalidAddress.code())
+    {
+        return fail("who=-1 (sign-extended) must be accepted, then fault on the null pointer");
+    }
+
+    serial_println!("[syscall]   RusageInfo (1064) byte layout + who gate: OK");
+    Ok(())
+}
+
+/// Pin which `SYS_PROCESS_SET_CREDENTIALS` (530) requests count as an
+/// *identity change*, because that is the whole of its capability gate.
+///
+/// The gate itself cannot be driven from here — the handler reads
+/// `current_task_id()`, so exercising the deny path through `dispatch()` would
+/// need a synthetic caller with a synthetic capability table. What it *can* be
+/// driven from is `resolve_credential_request`, which is the entire decision
+/// with the lookup removed. Both failure directions are bad in ways that would
+/// not show up as a crash:
+///
+/// - a no-op wrongly judged a change denies `setuid(getuid())` to processes
+///   that hold no capability and need none, breaking privilege-shedding code
+///   that never actually held privilege;
+/// - a change wrongly judged a no-op is the escalation this gate exists to
+///   stop, and it would pass every other test in the tree, because the identity
+///   really does end up where the caller asked.
+fn test_dispatch_set_credentials_gate() -> KernelResult<()> {
+    use crate::syscall::handlers::{CREDENTIALS_KEEP, resolve_credential_request};
+
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: set_credentials gate: {}", msg);
+        Err(KernelError::InternalError)
+    }
+
+    // (current, arg0, arg1) -> (resolved, is_change, what)
+    let cases: [((u32, u32), u64, u64, (u32, u32), bool, &str); 9] = [
+        (
+            (0, 0),
+            CREDENTIALS_KEEP,
+            CREDENTIALS_KEEP,
+            (0, 0),
+            false,
+            "KEEP/KEEP touches nothing",
+        ),
+        (
+            (1000, 1000),
+            1000,
+            1000,
+            (1000, 1000),
+            false,
+            "setuid(getuid()) is a no-op, not an exercise of authority",
+        ),
+        (
+            (1000, 1000),
+            1000,
+            CREDENTIALS_KEEP,
+            (1000, 1000),
+            false,
+            "redundant uid + KEEP gid",
+        ),
+        (
+            (1000, 1000),
+            0,
+            CREDENTIALS_KEEP,
+            (0, 1000),
+            true,
+            "1000 -> root is a change",
+        ),
+        (
+            (0, 0),
+            1000,
+            CREDENTIALS_KEEP,
+            (1000, 0),
+            true,
+            "dropping privilege is a change too",
+        ),
+        (
+            (1000, 1000),
+            CREDENTIALS_KEEP,
+            0,
+            (1000, 0),
+            true,
+            "a gid-only change must be gated, not just uid",
+        ),
+        (
+            (0, 0),
+            3131,
+            4242,
+            (3131, 4242),
+            true,
+            "both fields at once (the fastpy-setuid fixture's move)",
+        ),
+        // The sentinel is u32::MAX widened, not u64::MAX: the value that means
+        // "keep" is exactly the one no process can adopt.
+        (
+            (7, 7),
+            u64::MAX,
+            CREDENTIALS_KEEP,
+            (0xFFFF_FFFF, 7),
+            true,
+            "u64::MAX is NOT the KEEP sentinel; it truncates to a real uid",
+        ),
+        // Truncation happens before the comparison as well as before the write,
+        // so high garbage over a matching low half is judged on what would
+        // actually be stored.
+        (
+            (5, 5),
+            0x1_0000_0005,
+            CREDENTIALS_KEEP,
+            (5, 5),
+            false,
+            "high bits above a matching low half resolve to no change",
+        ),
+    ];
+
+    for (current, arg0, arg1, want, want_change, what) in cases {
+        let (got, got_change) = resolve_credential_request(current, arg0, arg1);
+        if got != want {
+            return fail(what);
+        }
+        if got_change != want_change {
+            return fail(what);
+        }
+    }
+
+    serial_println!("[syscall]   set_credentials (530) identity-change gate: OK");
     Ok(())
 }
 

@@ -457,6 +457,7 @@ name = "asteroids"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -727,6 +728,7 @@ name = "battleship"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -3236,6 +3238,7 @@ name = "flood"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -3390,6 +3393,7 @@ name = "freecell"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -4189,6 +4193,7 @@ name = "hearts"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -6311,6 +6316,7 @@ name = "minesweeper"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -7521,6 +7527,7 @@ name = "pacman"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -8544,6 +8551,10 @@ name = "rancher-cli"
 version = "0.1.0"
 
 [[package]]
+name = "randrange"
+version = "0.1.0"
+
+[[package]]
 name = "ranger-cli"
 version = "0.1.0"
 
@@ -9541,6 +9552,7 @@ name = "sliding"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -9580,6 +9592,7 @@ name = "snake"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -9685,6 +9698,7 @@ name = "solitaire"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -11722,6 +11736,7 @@ name = "wordsearch"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -12025,6 +12040,7 @@ name = "yahtzee"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]

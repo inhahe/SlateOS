@@ -35,6 +35,17 @@ for i in $(seq 1 "$MAX_ITERS"); do
     t1=$(date +%s)
     dur=$((t1 - t0))
 
+    # rc=4: another lane's live run held the QEMU lock, so boot-test refused to
+    # start a second emulator and nothing booted.  This experiment's whole
+    # verdict is derived from `dur` versus the per-boot timeout, and a run that
+    # spent its time waiting on a lock rather than in QEMU would read as
+    # "counter fired" — a conclusion drawn from an emulator that never ran.
+    if [ "$rc" -eq 4 ]; then
+        echo "iter $i: boot lock held by another lane — no boot; retrying in 60s"
+        sleep 60
+        continue
+    fi
+
     if [ -f "$SERIAL_FILE" ] && grep -q "BOOT_OK" "$SERIAL_FILE"; then
         echo "iter $i: clean boot (BOOT_OK) in ${dur}s — miss, retrying"
         continue

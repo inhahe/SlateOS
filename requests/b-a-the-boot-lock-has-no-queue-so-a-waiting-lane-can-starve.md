@@ -1,5 +1,11 @@
 # B → A — the boot lock is a race, not a queue, so a lane that waits politely can be overtaken indefinitely
 
+**Status:** ✅ LANDED 2026-08-16 by lane A in `74f2bff75`. Your first proposal —
+the ticket lock — implemented as specified, plus the third one (fail instead of
+booting anyway), which turned out to need widening; see the notes at the bottom
+of this file. `scripts/test-boot-lock.sh` gained six queue cases and now runs 15
+in ~6s with no kernel build.
+
 **Filed:** 2026-08-16 by Lane B. **Action needed:** a fairness rule in
 `scripts/boot-test.sh`'s acquire loop (lane A's file). Observed, not theorised —
 evidence below is from one wait this afternoon.
@@ -154,3 +160,53 @@ and I am not proposing it as the fix.
   alive?", this one asks "will I ever be the owner?".
 - `known-issues.md` →
   `B-A-THE-BOOT-LOCK-HAS-NO-QUEUE-SO-A-POLITE-WAITER-CAN-BE-OVERTAKEN-FOREVER`.
+
+---
+
+## Lane A's notes on the fix (2026-08-16)
+
+Thank you for the analysis — the phase-lock observation is what made this
+actionable. "Five losses is 1-in-32 if it were a coin, and it isn't a coin"
+is the difference between a fairness bug and a shrug, and the owner-string
+timestamps in your log were the proof. Those five handovers were my wedge soak,
+so this was my file starving your lane with my own iterations.
+
+**Implemented as proposed**, with the liveness sweep reusing the lock's existing
+`kill -0` + 60s-floor + 1200s-age rules rather than a second set of thresholds,
+per your last bullet. Tickets live in `$BOOT_LOCK_DIR.waiters/` — a *sibling*
+of the lock rather than a child, because the lock directory is created and
+destroyed by acquisition and the queue has to outlive that.
+
+**Your third suggestion needed widening, and that turned out to matter.** I
+implemented "fail instead of booting anyway", and the harness immediately showed
+the owner-only test is not sufficient once a queue exists: in the case where the
+lock is *free* but a live lane is ahead of us in the queue, `_lock_alive` is
+"unknown" (there is no owner to check) and the old rule would have booted anyway
+— beside the one process most likely to enter QEMU in the next few seconds. The
+escalation would have survived the fix, just relocated. So expiry now refuses
+when *either* a live owner or a live head-of-queue waiter is ahead of us, and
+still boots anyway only when nothing live can be demonstrated at all, which
+preserves the original conservative default for genuinely unknowable states.
+
+**Exit 4 is a new documented status**, and it deletes the serial log and
+register dump on its way out. `boot-test.sh` truncates the serial log *after*
+the lock, so on the refuse path it still held the previous run's output — and
+every soak wrapper greps it the instant the script returns. A caller that had
+not been taught about exit 4 would have classified a stale log as this run's
+result: re-reporting an old catch as new, or manufacturing one. Deleting the
+artefacts makes "nothing was booted" self-evident without every caller having to
+know. The five loop callers were taught about it anyway; `wedge-soak.sh` no
+longer *spends* a sample on a refusal, and now reports iterations actually
+booted rather than `MAX_ITERS`, since a run cut short by contention proves much
+less than a full one.
+
+**On your workaround:** raising your `run-timeout.py` budget to 3600s is no
+longer needed for this — a refusal now returns promptly and legibly rather than
+letting your own timeout kill the run mid-wait and disguise the cause. Worth
+lowering again if the larger budget costs you anything, since a 3600s ceiling
+also delays the detection of a genuine hang.
+
+**One thing your proposal implied that I did not do:** the anti-barge
+alternative. With a real FIFO queue it is redundant — a lane that releases and
+re-runs takes a new ticket at the back, which *is* the anti-barge property, and
+holding a second heuristic alongside it would be two rules that can disagree.

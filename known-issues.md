@@ -138,6 +138,18 @@ Worst crates: `editor` 500, `markdowneditor` 348, `explorer` 264, `paint` 234,
 `contacts`, `simon`, `diskcleanup`, `pomodoro` and `radio` have exactly one
 finding each.
 
+**Two of those counts were wrong, in opposite directions** (found 2026-08-16
+while sweeping them; see the entries below). `contacts` really did have one
+*production* finding — and following that one warning found two user-visible
+defects. `simon` had **35**: the crate blanket-allowed five defensive lints at
+its crate root, so every count ever taken for it was measured against a
+suppressed baseline, and one of the 35 hidden findings was the entire game
+being a fixed four-step cycle. `apps/hangman` (5 such allows) and
+`apps/jsonviewer` (2) suppress the same way and have not been re-counted, so
+**treat any per-crate figure above as a lower bound until that crate's root has
+been checked for `#![allow]`** — a count taken through a suppression measures
+the suppression, not the crate.
+
 The 1919 `indexing_slicing` findings are the ones worth attacking first: that
 is precisely the lint class that would have caught the eighteen byte/character
 sites recorded above at the moment they were written. `arithmetic_side_effects`
@@ -225,7 +237,9 @@ character — a panic. Call `textfind`; do not write the loop.
 
 This was a targeted pass at one defect family, not a full sweep of those five
 crates; their remaining `indexing_slicing` counts are `rssreader` 93,
-`spreadsheet` 42, `filediff` 17, `ebook` 16, `pdfviewer` 13.
+`spreadsheet` 42, `filediff` 17, `ebook` 16, `pdfviewer` 13. (`rssreader`,
+`spreadsheet`, `filediff`, `ebook` and `pdfviewer` have since all been swept
+to zero, so this list is now closed.)
 
 ### Sweep progress: `explorer` 264 → 55, `indexing_slicing` 0 (2026-08-16)
 
@@ -519,6 +533,617 @@ Other findings worth keeping:
   the path of addresses being visited, so a depth failure is never one; the
   depth backstop used to report `#CIRC!`, which pointed at a cycle that was not
   there.
+
+### Sweep progress: `simon` 35 → 0, all lint classes (2026-08-16)
+
+Thirteenth crate, eighth to reach **zero warnings of every class** across
+`--all-targets`. Tests 106 → 110.
+
+The table near the top of this file credits `simon` with **one** finding. It
+had **35**, because the crate root carried five `#![allow(clippy::…)]` lines —
+`unwrap_used`, `expect_used`, `panic`, `indexing_slicing`,
+`arithmetic_side_effects` — and a lint that is allowed does not appear in a
+count of lints. Twenty-two of the 35 were in the game logic rather than the
+tests, and one of those twenty-two was the entire game (next entry). The allows
+now sit on `mod tests`, where panicking on bad data is the point, and the crate
+root enforces the workspace lints like every other crate.
+
+## `apps/simon` dealt the same four colours in the same order, in every game, at every seed (lane C)
+
+**Status: FIXED 2026-08-16** in `8d135ad07`. Verified by reverting the
+reduction alone and watching the new test fail.
+
+`Lcg::next_bounded` reduced the generator's output with `val % bound`. This
+generator is a linear congruential generator with modulus 2^64 — i.e. it
+multiplies and adds in wrapping `u64` arithmetic — and in such a generator
+**bit *k* of the state has period 2^(*k*+1)**. Bit 0 alternates 0,1,0,1. Bit 1
+has period 4. The low bits of a power-of-two LCG are not merely "weaker" in the
+folklore sense; they are a counter. `val % bound` for a power-of-two `bound`
+returns exactly those bits and nothing else.
+
+Simon draws from four colours, so `val % 4` read the low two bits, period
+exactly 4. Every game, at every seed, dealt out Green, Red, Yellow, Blue, then
+Green, Red, Yellow, Blue, for ever. The step from each colour to the next was
+always the same step. There was nothing to memorise — the game's whole content
+was gone — and the only thing a player would notice is that they could not lose
+after the first round.
+
+**106 existing tests passed against it**, and that is the part worth keeping:
+the broken draw is *perfectly uniform*. Every colour appears exactly a quarter
+of the time, the mean is right, a chi-squared test on the counts is clean. Only
+the *order* is degenerate. **A distribution check cannot see this bug**, so the
+new test asserts that the *step* between consecutive colours varies, which is a
+property of a sequence rather than of a histogram.
+
+The fix takes the **high** bits instead, by multiplying the 64-bit output by
+the bound as a 128-bit product and keeping the top half (Lemire 2019). That is
+nearly unbiased, needs no rejection loop, and is total: a bound of zero returns
+0 where the old body divided by zero.
+
+Three further findings from the same read, all instances of patterns this sweep
+keeps hitting: `start_next_round` asked for `next_bounded(4)` and then mapped
+the answer through `from_index`, *stating the number of colours twice*;
+`advance_playback` tested `step_index >= sequence.len()` and then indexed with
+`step_index`, *asking one question twice*; `player_press` indexed the sequence
+on an invariant maintained by four other methods. All three are now a single
+`get`.
+
+## The same broken reduction is copy-pasted into 27 crates, and `randrange` now exists to replace it (lane C)
+
+**Status: OPEN 2026-08-16 — thirteen of 27 crates fixed** (`simon`,
+`battleship`, `sliding`, `asteroids`, `yahtzee`, `hearts`, `solitaire`,
+`freecell`, `minesweeper`, `flood`, `snake`, `wordsearch`, `pacman`); the
+shared crate that the rest should move to is written and green.
+
+The defect above is not `simon`'s. A scan of the tree
+(`build/scratch/lcg_scan.py`) finds the same LCG constants in **~36 places** and
+the same low-bit `%` reduction in **27 crates**. It is one piece of code that
+was pasted 27 times, so it has 27 copies of one bug.
+
+Whether a given copy is visibly broken depends only on whether its bound is a
+power of two, because an odd factor in the bound makes the remainder depend on
+the whole word again and the period comes back. But **an even bound is enough
+to matter even when it is not a power of two**, because `x % n` for even `n`
+preserves the parity of `x` — so any draw with an even bound has a *parity* that
+alternates with the draw counter, whatever else it does. That is how the
+battleship defect below works, with a bound of 10.
+
+Confirmed degenerate call sites, with the measured symptom where one has been
+measured:
+
+| crate | bound | what it did | status |
+|---|---:|---|---|
+| `apps/simon` | 4 | dealt Green, Red, Yellow, Blue for ever, at every seed | fixed `8d135ad07` |
+| `apps/battleship` | 2, 10 | every AI ship's bow on an odd `row + col` — one colour of the checkerboard, over all 1999 seeds tried | fixed `7544fdb3c` |
+| `apps/sliding` | 4 | 499 seeds produced **two** distinct 4×4 boards between them | fixed `de4280a98` |
+| `apps/asteroids` | 4 | every asteroid of every wave entered from **one** edge; the seed only chose which | fixed `762afae1f` |
+| `apps/yahtzee` | 6 | adjacent dice locked to opposite parity, so a Yahtzee was impossible — zero in 15 000 rolls, ~12 expected | fixed `81b88fc5e` |
+| `apps/hearts` | 2..52 | the two of hearts reached seat 2 44.3% of deals and seat 0 9.5%; 40 of 52 cards misdealt by >2 points; seat 0 led 33.6% of hands | fixed `63066a45b` |
+| `apps/solitaire` | 2..52 | the two of hearts was the leftmost face-up card in 17.6% of deals, against 1.9% | fixed `ea4560541` |
+| `apps/freecell` | 2..52 | the ace of hearts was the deepest card on the board in 17.4% of deals; ace depth alternated 8.5 / 15.5 / 9.7 / 16.2% | fixed `e1fa03154` |
+| `apps/minesweeper` | 256 | an Intermediate board was a window into one 256-cell cycle: 5000 seeds gave 252 layouts, and the 257th new game replayed the first | fixed `3f28501a6` |
+| `apps/flood` | 6 | no two cells in a row ever shared a colour — zero matches in 61 200 pairs; each column used half the palette | fixed `15d7265d6` |
+| `apps/snake` | 20, 20 | the food could reach 50 of the 400 cells, in a fixed diagonal lattice | fixed `4d448a617` |
+| `apps/wordsearch` | 26, 2..30 | every second filler letter came from {A,C,…,Y} and the ones between from {B,D,…,Z} — 0 repeats in 2000 draws, 76 expected; and BISON was picked for 14% of puzzles against ZEBRA's 41% | fixed `4cce605f8` |
+| `apps/pacman` | 31, 28 | each frightened ghost could flee to 7 of the 28 columns and 217 of the 868 cells; all four together to 14 columns, the seed choosing only *which* 14 | fixed `481f36e8d` |
+
+**The three card games are one shape and worth reading together.** All three
+shuffle 52 cards with a correct downward Fisher–Yates and draw the partner with
+`state % (i + 1)`. Half of those 51 bounds are even, so on 25 of the swaps the
+partner index carried a fixed parity — set by the parity of the draw counter,
+which is set by the seed and nothing else. `solitaire` and `freecell` make it
+worse than `hearts` does, because their `new_game` *reseeds* (`Rng::new(self
+.rng.next_u64())`): the draw counter restarts at zero every deal, so every deal
+repeats the same pattern of fixed parities and only which parity varies. That
+is why one card could own the same slot in a sixth of all games.
+
+`apps/pipes` was in this table and should not have been: its `next_bounded`
+shifts (`>> 33`) before the `%`, so it never touches the low-bit counter. The
+same correction applies to `apps/game2048`, `apps/mahjong`, `apps/spades`
+(`>> 32`), `apps/videoplayer`, `apps/speedtest` (`>> 33`) and
+`apps/credmanager` (an xorshift finaliser) — **all seven are safe**, and the
+scan that flagged them matched the LCG constants rather than the reduction.
+Confirm the reduction, not the constants, before adding a crate here.
+
+`apps/life`'s `next_bool` uses `% 100`; 100 = 4 × 25, and the odd factor 25
+restores a long period, so it is mild. That is exactly why the defect survived
+so long: most call sites use an odd or non-power-of-two bound and look fine,
+and the ones that do not still pass every distribution test written against
+them.
+
+Still degenerate, not yet migrated: `breakout`, `dots`, `hangman`, `life`,
+`lightsout`, `match3`, `maze`, `memory`, `pinball`, `sudoku`, `tetris`,
+`wordle`.
+
+**`pacman` is the cleanest case of the two-draws-per-consumer stride**, and it
+is the one to remember when a crate draws for several actors in a round-robin.
+Its two bounds sit side by side in one expression — 31 for the row, 28 for the
+column — and the odd one behaved perfectly while the even one lost most of the
+board. Because four ghosts draw a pair each per tick, every ghost saw a draw
+counter of the *same* parity for ever, so the parity coupling never averaged
+out the way it does for a single consumer. Counting the reach of all four
+ghosts together hides this: 14 columns of 28 looks merely halved, when each
+individual ghost is confined to 7.
+
+**`wordsearch` is the first crate whose two call sites broke in two different
+ways, and it is the argument for checking every bound rather than the worst
+one.** Its filler alphabet (`% 26`) failed loudly — a visible comb across the
+grid. Its Fisher–Yates over the 30-word category list failed quietly: the word
+list still looked random, and only counting over 5000 games showed one animal
+in 14% of puzzles and another in 41%. A crate can be cleared on the symptom you
+went looking for and still be wrong in the way you did not.
+
+**Three bound shapes account for every symptom found so far**, and it is worth
+checking a call site against all three rather than only the first:
+
+1. **A power-of-two bound** makes the draw the low *n* bits, which are an LCG
+   of the same shape modulo 2^*n* — period 2^*n*, and a permutation of the
+   whole range. `simon` (4), `sliding` (4), `asteroids` (4), `minesweeper`
+   (256). This is the one that makes a *distribution* test pass perfectly
+   while the sequence is worthless.
+2. **Any even bound** preserves the parity of the state, so the draw's parity
+   alternates with the draw counter. `battleship` (10), `yahtzee` (6), `flood`
+   (6), the card games (the even half of `2..52`). Costs half the range when
+   two draws are compared to each other.
+3. **An even bound with a power-of-two factor** does both. `snake` (20 = 4×5)
+   lost half the board to the parity coupling and half of what was left to
+   `row % 4` having period four.
+
+The replacement is **`randrange/`**, a new top-level `no_std`,
+dependency-free crate on the same pattern as `textfind`, `byteread` and
+`yamldoc`. It fixes the bug twice over, deliberately:
+
+1. **The reduction uses the high bits** (the Lemire multiply above), so no
+   caller can pick up the low-bit counter through the API.
+2. **The generator's output is permuted** by SplitMix64's finaliser before it
+   is returned, so `next_u64()` has no weak bits *at all* — a caller who
+   ignores `below()` and writes their own `% 2` is still fine.
+
+Either defence alone makes the cycle test pass, which is why the crate also
+carries `the_original_defect_still_cycles_when_reproduced`: it rebuilds the
+historical `state % bound` body inside the test and asserts it *does* cycle, so
+the test pins the claim rather than the implementation. See
+`design-decisions.md` §447 for why one crate rather than 27 local fixes, and
+for what `randrange` deliberately is not (it is **not** cryptographic —
+`apps/passwordgen` must not migrate to it).
+
+**Migration is the open part.** The remaining 26 crates each need their local
+`Lcg` deleted and `randrange::Rng` used instead. `randrange` is *not*
+stream-compatible with the code it replaces — the same seed gives a different
+sequence, necessarily, since that is the fix — so any test that pinned a
+specific board layout, shuffle or spawn pattern will need a new expectation.
+Each of those is worth reading rather than re-baselining: a test that pins a
+layout is asserting a photograph, and the question it should have been asking
+(is the board solvable, are the ships non-overlapping, does the sequence vary)
+is usually one line away and would have survived the fix.
+
+**Four ways a test can look like it covers this and not.** All four were found
+while migrating, and all four are worth checking for in the remaining twenty:
+
+- **A distribution check cannot see it.** `simon`'s broken draw used all four
+  colours exactly equally; only the order was fixed. A histogram is the right
+  answer and the sequence is still worthless.
+- **A marginal check cannot see it.** `battleship`'s rows were uniform and its
+  columns were uniform. Only the *joint* distribution — row against column —
+  was degenerate, and that is where the parity coupling lives.
+- **Two samples cannot see it.** `sliding`'s `test_shuffle_different_seeds`
+  compared seed 1 against seed 2 and asserted they differed. They did. There
+  were only ever two boards in the whole seed space, and the test happened to
+  draw one of each. "Are these two different?" cannot distinguish two outcomes
+  from a thousand; count distinct results over a hundred seeds instead.
+- **Pooling across seeds cannot see it.** The first draft of `asteroids`'
+  spawn-edge test gathered edges from twenty seeds into *one* set and asserted
+  all four appeared. It passed against the broken generator, because the defect
+  was per-game: each seed picked one edge and used it for every asteroid, and
+  twenty seeds between them covered all four. The defect is only visible inside
+  a single game, so build the set per seed and assert inside the loop. This one
+  produced a false green that was caught only by running the revert.
+
+### Sweep progress: `contacts` 83 → 0, all lint classes (2026-08-16)
+
+Twelfth crate, seventh to reach **zero warnings of every class** across
+`--all-targets`. Tests 190 → 195.
+
+The most lopsided split of the sweep so far: of 83 warnings, **82 were in the
+test module and exactly one was in production code** — a single
+`indexing_slicing` on a twelve-element lookup table. Following that one warning
+found two user-visible defects and a third latent one, which is the sweep's
+recurring lesson stated as starkly as it gets: *the count of warnings in a
+crate says nothing about the number of defects in it.*
+
+## Two defects in `apps/contacts`' birthday handling (lane C)
+
+**Status: both FIXED 2026-08-16.** Each verified by reverting it alone and
+watching the specific tests fail.
+
+The one production warning was `days_before[m]` in `day_of_year`, guarded by
+`.min(11)` against a twelve-element array — safe, but *the bound written
+twice*. What made it worth pulling on is what the table sat next to:
+`SimpleDate::new` validated the day against a flat `1..=31` with no reference
+to the month at all. So the crate stated the calendar twice, in two
+incompatible forms, and the two disagreed.
+
+- **31 February was an acceptable birthday.** `SimpleDate::new(2026, 2, 31)`
+  returned `Some`, and `parse` goes through `new`, so the date came in from a
+  hand-typed field or an imported vCard, was stored, and was displayed straight
+  back as `2026-02-31` — nothing anywhere said it was impossible. It also
+  counted as a day of the year past the real end of February (59 + 31 = 90,
+  where 1 March is 60), so the "upcoming birthdays" list placed it thirty days
+  from where the person reading it would expect. Fixed by checking the day
+  against *that month's* length, taken from the same table `day_of_year` uses,
+  with the Gregorian leap rule applied so that 29 February 1988 is accepted and
+  29 February 1989 and 1900 are not.
+- **vCard's basic date form imported as no birthday at all.** `parse` split on
+  `-` and required exactly three parts, so it accepted `1990-12-25` and
+  rejected `19901225`. The second is not an edge case: **vCard 4.0 specifies
+  the basic form**, and it is what phones and mail clients export, so importing
+  a real address book dropped birthdays — silently, and indistinguishably from
+  a card that never carried one. Now both spellings parse to the same date.
+  Export still writes the extended form, which every reader accepts.
+
+The structural fix behind both is one table, `MONTH_LENGTHS`, used for the
+validation *and* for the day-of-year count, with `day_of_year` reaching it
+through `.iter().take(month - 1)` rather than an index — the months before this
+one are exactly the ones the iterator yields, so a month past December can only
+mean "all of them" and the `.min(11)` second copy of the bound is gone. A new
+property test asserts the first of each month is one past the last of the month
+before, which is what a single table makes true by construction.
+
+**Still not accepted, deliberately: vCard's year-less `--MMDD`** ("I know the
+day but not the year"), which real cards do carry. That one is not a parse bug
+but a missing representation — `SimpleDate` has a non-optional `year`, and a
+sentinel year would leak into `format_display`, the edit field and the sort
+order. Recording it here rather than fixing it in a lint sweep; the fix is an
+`Option<u16>` year with a display form of `--MM-DD`.
+
+Two further notes from the same read, neither a defect today:
+
+- `is_upcoming_within` takes `today_month`/`today_day` as raw `u8`s rather than
+  a `SimpleDate`, so the "today" side is unvalidated while the birthday side is
+  validated by construction. Left alone because there is no clock in the system
+  to feed it and its only non-test caller, `ContactStore::upcoming_birthdays`,
+  is itself uncalled — changing the signature now would be churn against an API
+  nobody has used yet.
+- `day_of_year` stays leap-agnostic on purpose, and the reason is now in its doc
+  comment: it compares a birthday against today, and those fall in *different*
+  years, so applying each side's own leap rule would move one and not the other.
+  A uniform 365-day year keeps the pair comparable, and one day of slack is
+  inside the tolerance the question is asking about.
+
+### Sweep progress: `pdfviewer` 94 → 0, all lint classes (2026-08-16)
+
+Eleventh crate, sixth to reach **zero warnings of every class** across
+`--all-targets`, and the last of the five crates listed as outstanding in the
+`textfind` note near the top of this file. Tests 110 → 118.
+
+The split is worth recording because it is unlike the other ten: of 94
+warnings, **67 were in the test module** and only 27 in production code, and
+all 27 were `arithmetic_side_effects` — not one `indexing_slicing` in shipping
+code. The crate is a plain data model over `Vec<PdfPage>` and it already goes
+through `get()` almost everywhere. The defects were therefore not where the
+warnings were, which is the usual finding by now: four of the five below are in
+a subsystem that produced five warnings between them.
+
+## Four defects in `apps/pdfviewer`'s print range, and one in its annotations
+
+**Status: all FIXED 2026-08-16** (lane C). Each verified by reverting it alone
+and watching the specific tests fail.
+
+`PrintSettings::resolve_pages` turns a page range into the list of pages to
+print, and `parse_page_range` turns what the user typed into that range. Both
+clamped against the page count — *the same bound written in two places*, the
+shape this sweep keeps finding — and the two copies disagreed:
+
+- **A range naming no pages printed the whole document.** `parse_page_range`
+  dropped the parts it could not use, found itself holding an empty list, and
+  fell back to `All`. So typing `50-60` into a ten-page document — a plain typo
+  — printed all ten pages. Now `Custom(vec![])`, which prints nothing. Blank
+  input and the word `all` are handled before that point, so reaching it means
+  the user named specific pages; if none of them exist, the honest answer is
+  "none". Of the two ways to be wrong about a range nobody asked for, printing
+  everything is the expensive one.
+- **A range beyond the end was dragged onto the last page.** The parser clamped
+  the range's *start* as well as its end, so `50-60` of a ten-page document
+  became `(9, 9)` — "print page 10". Now the start is a validity test (drop the
+  range) and only the end is clamped, at print time, by the one function that
+  knows how many pages the document has *now* rather than when it was typed.
+- **`Custom` returned `[0]` for a document with no pages.** The end clamp is
+  `page_count - 1`, saturating to `0`, so every range collapsed to `start..=0`
+  and one starting at zero yielded page zero — an index into an empty document,
+  handed to a caller with every reason to trust it. The `All` and `CurrentPage`
+  arms both return nothing there; this arm being the odd one out is the tell.
+  For a document that *has* pages the bug was masked, because `49..=9` is an
+  empty `RangeInclusive` — and it is exactly that accidental reasoning which
+  stopped holding at zero pages, so the precondition is now stated outright
+  rather than left to emerge from the range type.
+- **Overlapping ranges were deduplicated in quadratic time**, by a `contains`
+  scan per page, on a list that was sorted on the way out anyway. Now
+  `sort_unstable` + `dedup`.
+
+And separately, in the annotation layer:
+
+- **A failed annotation consumed an id.** `add_highlight`, `add_note` and
+  `add_freehand` were three copies of one routine, and each took an id from the
+  counter *before* looking for a page to put the annotation on — the guard
+  running downstream of the operation it guards, another shape already in this
+  sweep. Every call on a tab with no document returned `None` having burnt an
+  id. The ids stayed unique so nothing broke visibly; they simply grew gaps,
+  which is the kind of thing noticed only by whoever later assumes they are
+  dense. Now one private `add_annotation` that allocates after the page is in
+  hand, with the three public methods differing only in the `AnnotationType`
+  they build.
+
+Both id counters (`next_annotation_id` and `IdGenerator::next_id`) also moved
+from `+= 1` to `saturating_add`. The reasoning in the comments is deliberately
+not about overflow being reachable — it is that *wrapping* is the one failure
+mode that would be silent and wrong, because a wrapped id collides with a live
+object and makes `remove_annotation(id)` delete something else. Saturating
+turns that into a stuck feature rather than a corrupted document.
+
+## `apps/pdfviewer` can print nothing at all — the whole model is unwired (lane C)
+
+**Status: OPEN.** Recorded 2026-08-16 by lane C. *How* to wire it is `C-Q4` in
+`open-questions.md`, because it is an architecture choice rather than a repair.
+
+`PrintSettings`, `PrintPageRange`, `parse_page_range` and `resolve_pages` are
+complete, and as of today correct and tested. **Nothing outside the test module
+calls any of them.** `PdfViewerApp` holds a `print_settings` field written once
+at construction and never read. There is no print dialog, no Ctrl+P handler,
+and no path from the viewer to any output.
+
+This is the `filediff` find-in-diff shape again — a feature fully modelled and
+never connected — with a twist that makes it an architecture question rather
+than a missing render pass: **`gui/desktop/src/print_manager.rs` already
+contains a full printing stack**, 1409 lines of it, with `Printer`,
+`PrinterCapabilities`, a `PrintManager` job queue offering submit/cancel/pause/
+resume, a spooler flag, and a `PrintDialog`. It is used only by
+`gui/desktop/src/main.rs`. No application in `apps/**` submits a print job.
+
+So the tree has two print models that do not know about each other, and each is
+richer than the other in a different dimension:
+
+| | `pdfviewer` | `gui/desktop` |
+|---|---|---|
+| Page range | discontiguous list — `1-3, 5, 7-9` | one `(start, end)` pair |
+| Copies, paper, duplex, quality, scale | absent | present, with capability validation |
+| Job queue, spooler, cancel/pause | absent | present |
+| Reachable from an app | no | no |
+
+Neither is wrong; they were written for different halves of the problem. The
+range belongs with the document, which is the only thing that knows its page
+count and the reader's current page; everything else belongs with the system,
+which is the only thing that knows what printers exist. What is missing is the
+seam between them, and choosing it is the open question — an `apps/**` crate
+depending on the desktop shell crate would be the cheap answer and the wrong
+shape.
+
+Until that is answered, the honest description is that **the PDF viewer has no
+print command**, and the tested range logic is a component waiting for one.
+
+### Sweep progress: `ebook` 20 → 0, all lint classes (2026-08-16)
+
+Tenth crate, fifth to reach **zero warnings of every class** across
+`--all-targets`. Tests 114 → 119. As with `filediff`, the lint work was small
+and the finding was not a lint: **the reader's position in a book was stored as
+a page number**, and a page number is a fact about a *pagination*, which
+depends on the font size and the window size. Pressing `+` once moved the
+reader from page 2 of four to page 2 of six — backwards through the book, by
+about a fifth of it, on one keystroke.
+
+The shape is one already recorded in this sweep — *an index into a derived
+layout stored across a rebuild of that layout* — and this is its third
+appearance (after `filediff`'s edit-index-as-display-row and the stale search
+matches). The fix is always the same: **store the stable thing and derive the
+volatile one.**
+
+What makes this instance worth recording separately is that the codebase
+already contained the right answer. `Chapter` stored a `byte_offset`, with a
+comment saying why. The reading position and the bookmarks were simply the two
+places that had never been given the same treatment — so this was not a design
+that needed inventing, it was a design that had not been applied uniformly.
+That is a cheaper class of bug to look for than it sounds: *find the type that
+already got it right, then check its siblings.*
+
+| Was | Is |
+|---|---|
+| `ReadingState { current_page: usize }` | `ReadingState { offset: usize }`, with `current_page()` derived from the live pagination |
+| `bookmarks: Vec<usize>` of page numbers | `Vec<usize>` of byte offsets; `is_page_bookmarked` is a containment test against the page's range, not an equality test |
+| `jump_to_chapter` converted the chapter's offset to a page and jumped to that | jumps to the offset directly, so it no longer rounds the reader to the top of whichever page happens to contain the chapter |
+| `repaginate` needed a fix-up for the stored page | needs none, which is the point |
+
+## The reading position and bookmarks in `apps/ebook` were page numbers (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Verified by reverting each half
+separately: restoring the page-preserving font change fails
+`changing_the_font_size_keeps_the_reader_where_they_were` and
+`shrinking_the_font_keeps_the_reader_where_they_were`; restoring page-number
+bookmarks fails three, including two that predate this work.
+
+Reproduced before fixing, on sample book 3: at page 2 the reader is at
+`"True determinism would mean we're living in a sim…"`; press `+`; the same
+page number now shows `"2. Calibration"`. The book got longer in pages, the
+stored number did not move, so the reader was thrown backwards. `-` threw them
+forwards by the same mechanism. Bookmarks had it too — a bookmark set at one
+font size marked different words at another — and because bookmarks persist,
+that one is silent and permanent rather than merely startling.
+
+The two tests are written to be independent rather than as a round trip. The
+first draft *was* a round trip (`increase` then `decrease`, assert the offset
+came back), and it **passed with the bug reverted**: both directions repaginate
+by the same rule, so two page-preserving errors cancel exactly. The
+replacement grows the font *before* measuring, leaving the shrink as the only
+operation under test. Same lesson as `filediff`'s stale-match test, in a
+different disguise: a test that exercises an operation and its inverse together
+cannot see a bug that is symmetric in them.
+
+The bookmark test carries a `assert_ne!` premise for the same reason —
+comparing the stored bookmark list before and after a font change proves
+nothing, because nothing writes to it. The test only says something once the
+bookmarked text is known to have landed on a *different page number*.
+
+## The `apps/ebook` library list reported 0% for every book but one (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Verified by reverting; the test then
+reports `a book read to its last page reports 0, not near 1.0`.
+
+The shelf showed `… | 12 min | 0%` against every book. Progress was
+`current_page / total_pages`, and **a pagination exists only for the book that
+is currently open** — every other row divided a page number that was never
+updated by a total that was zero. A reader who had finished nine of ten books
+saw a shelf of untouched ones.
+
+Now `EbookApp::book_progress(index)`, measured in bytes of the text, which is
+the only measure available for a book that is not open. Deliberately a separate
+method from `reading_progress`, not a generalisation of it: that one answers
+"which page of how many", which is the right thing for the status bar of an
+open book and is unavailable everywhere else. Bytes rather than characters is
+fine here and the doc comment says why — it is a ratio of two lengths of the
+same text, rounded to a whole percent.
+
+Extracting the method was itself part of the fix rather than tidying. The
+computation had lived inline in the render loop, so the only way to test it was
+to recompute the ratio in the test — which would have proved that the test and
+the fix agreed with each other and nothing more.
+
+### Negative result: the wrapping-cursor rule does not want a shared crate
+
+Recorded so the analysis is not repeated. The `if !v.is_empty() { i = (i + 1) %
+v.len() }` shape appears about **59 times** tree-wide, and unifying it into a
+shared helper looked like the obvious follow-up to `filediff`'s `wrap_next` /
+`wrap_prev`. A scan (`build/scratch/wrapscan.py`) flagged 32 as unguarded;
+reading all 32 found **none that can actually divide by zero**. Nearly all take
+the modulus of a `const` array's length, which cannot be zero, or derive the
+index from a `position()` call, which implies the collection is non-empty. The
+two that looked genuinely dangerous — `gui/toolkit/src/svg.rs:2279` and
+`apps/crossword/src/main.rs:866` — are both guarded, the second by an
+`is_empty` early return sitting exactly twelve lines up, which is what the
+scanner's window missed.
+
+So the shape is common but the *bug* is not, and a shared crate would be
+churn across sixteen files to prevent nothing. Keep `wrap_next`/`wrap_prev`
+local to `filediff`, where they earned their place by collapsing three copies
+that were genuinely reachable. The general point: **a repeated shape is a
+reason to look, not a reason to refactor** — the refactor needs its own
+evidence.
+
+### Sweep progress: `filediff` 23 → 0, all lint classes (2026-08-16)
+
+Ninth crate, fourth to reach **zero warnings of every class** across
+`--all-targets`. Tests 79 → 97. The lint work itself was small; what the crate
+actually had was **a feature that was fully computed and never drawn**, which
+no lint could have named — the warnings were the reason to read the file, not
+the finding.
+
+Three structural changes carried the warnings, and each of the three is a
+repeat of a shape already recorded in this sweep:
+
+| Was | Is | Shape |
+|---|---|---|
+| the wrapping-cursor rule (`if !v.is_empty() { i = (i + 1) % v.len() }`) written out for the search matches, the change list and the merge hunks | `wrap_next` / `wrap_prev`, where `checked_rem(len) == None` **is** the emptiness test | *the same bound written out N times* |
+| the viewport rule (`scroll as usize`, `(height / LINE_HEIGHT) as usize`, `.min(len)`) written out in four render paths, three of them with a bare `+ 2` | one `visible_range` and a named `OVERSCAN_ROWS` | *the same bound written out N times* |
+| `Vec<SideBySidePair>` returned alone, with "row N is edit N" as an unwritten convention that is **false** for this view | `SideBySideRows { pairs, row_of_edit }`, both filled by the one loop that knows | *a `Vec` plus an index is an invariant expressed as a convention* |
+
+The third of those is the interesting one, and it is recorded as a defect
+below: side-by-side is the only view whose row count differs from its edit
+count, and two separate places had assumed otherwise.
+
+Also worth keeping: the directory list was the *fourth* copy of the viewport
+rule and the only one that added no overscan, so it dropped its bottom row
+while scrolling — a real if minor rendering bug that existed purely because
+the rule was written four times instead of once. Unifying the four fixed it
+without anyone diagnosing it.
+
+## Find-in-diff in `apps/filediff` was computed but never drawn (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Verified by disabling the highlighter
+and watching five tests fail, then restoring.
+
+`SearchState` scanned every edit, recorded byte offsets and match lengths,
+recorded an equal line's hit once per side-by-side panel, and the status bar
+counted them — "4/17". Enter and F3 advanced the counter. **Nothing was ever
+rendered, and the view never moved.** On any file longer than one screen the
+entire find feature was a number that changed while the display stayed still.
+
+The giveaway that this had been true for a while: an earlier pass had
+carefully corrected the offsets to be offsets into `edit.text` rather than
+into a `to_lowercase()` copy — the `İ` (U+0130) two-bytes-folds-to-three case —
+*for the benefit of a highlighter that did not exist*. Correctness work had
+been done on the output of a function whose only consumer was a counter.
+
+What was added: `render_search_highlights`, a `SearchOverlay` carrying the
+three things a line needs (its matches, which panel it is, which match is
+focused) as one value, `SearchState::matches_on_edit` (a binary search — the
+list is non-decreasing in `edit_index` by construction, because `search` walks
+the edits in order — since the highlighter asks once per visible row per
+frame), `canonical_panel` so the single-column views draw an equal line's
+doubly-recorded hit once rather than twice, and `scroll_to_current_match`
+wired into Enter, F3, Shift-F3 and every edit of the query.
+
+Two details in the highlighter are the recurring hazards of this sweep:
+
+- **The box is measured in cells, not bytes.** `columns(before)`, not
+  `before.len()`. Byte-vs-character confusion is now this sweep's single most
+  common defect — this is the fifth — and here it would have put the box some
+  columns right of the word on any line holding a non-ASCII character. Pinned
+  by `a_highlight_is_placed_in_cells_not_bytes`, which searches `éééNEEDLE`.
+- **`text.get(..)`, not `&text[..]`.** A match list that has outlived the diff
+  it was computed against should draw nothing, not take the window down.
+
+## An edit index used as a display row in `apps/filediff` (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Verified by reverting; the test then
+reports `row 39 is not on screen: scrolled to 56 showing 4 rows`.
+
+Side-by-side folds a delete and the insert immediately after it into **one**
+row — that is what a modified line is — so its row count is smaller than its
+edit count, by one per modified line. Unified and inline draw one row per
+edit, so for those two the row *is* the edit. Two places used the edit index
+as a row anyway:
+
+- `scroll_to_current_change` scrolled to edit N when the change was drawn on
+  row N−k. On a file with twenty modified lines the last change scrolled to
+  row 56 of a 40-row list: **"jump to last change" showed a blank panel.**
+- `max_scroll` returned `diff.edits.len() − visible`, letting the view scroll
+  past the bottom by one row per modified line.
+
+Fixed structurally rather than by correcting the two arithmetic sites:
+`build_side_by_side_pairs` now returns `SideBySideRows { pairs, row_of_edit }`
+with the map filled *by the loop that builds the rows* — the only code that
+knows an edit was folded into the row before it — and the app asks
+`display_row_count()` / `display_row_of_edit()`, which answer per view mode.
+A second pass over the output would have had to reconstruct that decision, and
+could have reconstructed it differently. Pinned by
+`jumping_to_a_change_scrolls_to_the_row_it_is_drawn_on`,
+`the_scroll_limit_counts_rows_not_edits` and
+`a_paired_modification_puts_both_its_edits_on_one_row`.
+
+**Note on the test's file shape**, because the first attempt at it was wrong
+in an instructive way: two files with *no* lines in common diff as one delete
+block followed by one insert block, so the pairing rule fires exactly once, at
+the seam. Twenty changed lines with no context are 39 rows, not 20. The
+divergence only appears when the changes are separated by unchanged lines,
+which is what real files look like and what the test now builds.
+
+## Two smaller `apps/filediff` findings from the same read (lane C)
+
+**Status: both FIXED 2026-08-16** (lane C).
+
+- **The whole document was cloned every frame.** `build_side_by_side_pairs`
+  and `build_inline_rows` ran inside `render()`, and both clone every line of
+  both files. At 60 fps on a hundred-thousand-line comparison that is
+  megabytes of `String` allocation per frame against a two-millisecond frame
+  budget. Both are now cached on the app and rebuilt in `recompute_diff`,
+  which is also what made `row_of_edit` reachable between frames at all — it
+  had been a local variable inside `render`.
+- **Stale matches survived a diff recompute.** `recompute_diff` re-ran the
+  search only `if self.search.visible`, but Escape hides the search *bar*, not
+  the highlights. Toggling "ignore whitespace" with hidden-but-live matches
+  left them naming edits that no longer existed. Harmless while nothing drew
+  them; not harmless once something did. Now unconditional, and it clears the
+  list outright when there is no diff. Pinned by
+  `recomputing_the_diff_does_not_leave_stale_matches` — which had to be
+  rewritten once, because the first version's file shrank by too few edits for
+  the stale index to fall off the end, so it passed against the bug.
 
 ## Two reachable crashes in `apps/spreadsheet`, found by the lint sweep (lane C)
 
@@ -13138,6 +13763,24 @@ Left at WATCHLIST rather than closed unilaterally, since retargeting a closure
 condition an earlier session set deliberately is the operator's call if they
 want it; the analysis above is the argument for doing so.
 
+**The streak is now counted by machine, 2026-08-16.** `scripts/boot-history.py`
+records every `boot-test.sh` run to `bench/boot-history.jsonl`; ask it rather
+than trusting the **7** above, which is stale by construction:
+
+```
+python scripts/boot-history.py --streaks
+```
+
+Its `W1` fingerprint deliberately encodes the *retargeted* reading of this
+entry, not the original one — no marker, serial cut **mid-line**, and **no
+exception or panic anywhere**. Per the analysis above a console-lock re-entry
+should now print rather than go silent along both remaining paths, so a match
+is not another tick toward ~90: it **falsifies** the cured-incidentally
+argument, and is the one observation this entry says is worth more than the 83
+remaining blind boots. The recorder prints that instruction next to the match.
+The counter starts at 0 today and says so — it cannot retroactively count the
+boots since 2026-06-14. See the TOOLING entry at the end of this file.
+
 ### B-FONT-CALIBRI-SHAPES-A-FRACTION-SLASH-DIFFERENTLY-FROM-HARFBUZZ. Three faces disagree by one glyph on `1/2` — 2026-08-14 — ✅ FIXED 2026-08-14 (`gui/font/src/otl.rs`, `gui/font/src/gsub.rs`)
 
 **Where:** `gui/font/src/gsub.rs`, the substitution pass; the disagreement is
@@ -24143,10 +24786,81 @@ Lane A's own artifacts are already relinked against the fresh `libc.a`
 (`bash-slateos.elf`, `pkgconf-slateos.elf`), so once the nine ELFs land the
 image builds with no further action from anyone.
 
+## TOOLING — boot outcomes are now counted, so the "clean streak" closure conditions above are queryable (2026-08-16, lane A)
+
+**Status: LANDED 2026-08-16** — `scripts/boot-history.py`,
+`scripts/test-boot-history.py`, wired into `scripts/boot-test.sh`'s EXIT trap.
+
+Several entries in this file close on a **count** — "a fresh combined
+dedicated-soak + routine-boot clean streak past ~90 with no recurrence" (W1),
+and similar bars on the other intermittent hangs. Nothing counted them. W1's
+own status line has read **clean streak 7** since 2026-06-14 while many dozens
+of boots have passed, and the entry says so itself: *"the recorded streak of 7
+is stale bookkeeping, not a real count."*
+
+That is not carelessness. Keeping the number right by hand means editing this
+file after every boot, which nobody will do and nobody did.
+
+**What now happens.** Every run of `scripts/boot-test.sh` appends one row to
+`bench/boot-history.jsonl` — verdict, commit, branch, host, wall time, label,
+and for a **failure**, the last 40 serial lines. The last part matters
+independently of the counting: `build/serial-test.txt` is gitignored scratch
+that the next run overwrites, so until now the evidence for a hang survived
+only if somebody pasted it in here before the next boot. That loss already cost
+one investigation (`B-FORKEXEC-BOOT-HANG`; `boot-test.sh`'s own comment says
+so). Failures now carry their freeze context into a committed file.
+
+**How to read it:**
+
+```
+python scripts/boot-history.py --streaks     # per-issue standing
+python scripts/boot-history.py --list        # recent runs, one line each
+```
+
+**Fingerprints currently recognised**, each validated by a serial sample
+reconstructed in `scripts/test-boot-history.py` from the evidence quoted in
+this file:
+
+| id | matched on |
+|---|---|
+| `W1` | no marker, log cut **mid-line**, no exception and no panic anywhere |
+| `B-KASAN-…-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` | the cut lands inside the `EXCEPTION:` line itself |
+| `B-PTHREAD-TEARDOWN-PF` | `#PF` at a small fixed address with `cloned-thread` in the report |
+| `B-FORKEXEC-BOOT-HANG` | quiet stop **between** lines right after the last thread is reaped |
+| `W-KERNEL-COW-WRITE` | `error=0x3` write fault against a user-half address |
+
+**Two properties that are the point, not decoration.**
+
+1. **The verdict is derived from `(exit code, serial log)` at one call site**,
+   not passed in at each of `boot-test.sh`'s ~12 `exit` sites. A recorder wired
+   per-site is wrong the first time someone adds a thirteenth — and wrong in the
+   direction that matters, because the site nobody wired up is a *failure* site,
+   so the omission reads downstream as a clean streak.
+2. **A fingerprint that has never been validated against a real occurrence
+   prints a warning in place of its streak, not a number.** A matcher that
+   cannot fire produces a *perfect* clean streak, and a perfect clean streak is
+   exactly what closes an entry in this file. Same rule as
+   `scripts/stamp-ancestry.py` (design-decisions.md §208): *could not verify*
+   must never render as *fine*.
+
+**What this does not do.** It does not retroactively count the boots that
+happened before it existed, and it says so: an entry whose known occurrences
+predate the file reports "the count starts at the recorder, not at the bug."
+So the streaks above start at 0 today and are honest rather than flattering.
+Ctrl-C and build failures are deliberately **not** recorded — an interruption
+is not a boot outcome, and compile errors are common enough that recording them
+would reset every streak faster than it could grow.
+
+Rationale and the alternatives considered: design-decisions.md §209.
+
 ## B-A-THE-BOOT-LOCK-HAS-NO-QUEUE-SO-A-POLITE-WAITER-CAN-BE-OVERTAKEN-FOREVER (lane B, 2026-08-16)
 
-**Status: open.** `scripts/boot-test.sh` is lane A's file; asked as
-`requests/b-a-the-boot-lock-has-no-queue-so-a-waiting-lane-can-starve.md`.
+**Status: ✅ FIXED 2026-08-16 by lane A in `74f2bff75`** — ticket queue in
+`scripts/boot-test.sh`'s `BOOT-LOCK-REGION`, plus a new exit status 4 for
+"refused to boot beside a live lane". See "How it was fixed" at the end of this
+entry; the request file
+(`requests/b-a-the-boot-lock-has-no-queue-so-a-waiting-lane-can-starve.md`)
+carries lane A's full reply.
 
 ### What is wrong
 
@@ -24215,12 +24929,60 @@ owner) are in the request. The last of those is worth doing regardless: it does
 not fix starvation, but it stops starvation from silently becoming an invalid
 result.
 
-### Workaround in use
+### Workaround in use (no longer needed)
 
 Lane B raised its own `run-timeout.py` budget from 1200s to 3600s. The smaller
 budget was killing the run *during the lock wait*, which made the starvation
 present as a self-inflicted timeout — worth knowing, but it is a symptom
-workaround and not the fix.
+workaround and not the fix. With exit 4 a refusal now returns promptly and
+legibly, so the larger budget is no longer required for this; lane B may want to
+lower it again, since a 3600s ceiling also delays detection of a genuine hang.
+
+### How it was fixed (lane A, `74f2bff75`)
+
+The ticket queue as proposed. Every run drops `<epoch>-<pid>` in
+`$BOOT_LOCK_DIR.waiters/` before the acquire loop and attempts `mkdir` only when
+its own ticket is oldest; a lane that releases and immediately re-runs takes a
+fresh ticket at the back, which is what converts the observed starvation into a
+handover. Tickets are swept with the lock's *existing* liveness rules rather
+than a second set (proven-alive never swept, provably-dead after 60s, anything
+unjudgeable after 1200s), because a dead ticket at the head of the queue would
+block every lane — a worse failure than the starvation being fixed. The queue
+directory is a *sibling* of the lock, not a child, since the lock dir is created
+and destroyed by acquisition and the queue must outlive that.
+
+The escalation was fixed too, and it needed to be wider than the request
+proposed. `BOOT_LOCK_WAIT` expiry now refuses with **exit 4** whenever something
+live is demonstrably ahead of us. Checking only the *lock owner* is not enough
+once a queue exists: in the case where the lock is free but a live lane holds
+the head ticket, there is no owner to check, so an owner-only rule would boot
+anyway — beside the one process most likely to enter QEMU seconds later. The
+escalation would have survived the fix, merely relocated. Expiry still boots
+anyway when nothing live can be demonstrated at all, preserving the original
+conservative default for genuinely unknowable states.
+
+Exit 4 also **deletes the serial log and register dump**. `boot-test.sh`
+truncates the serial log only *after* the lock, so on the refuse path it still
+held the previous run's output, and every soak wrapper greps it the moment the
+script returns — which would re-report an old catch as new, or manufacture one
+outright. Deleting the artefacts makes "nothing was booted" self-evident to any
+caller, including ones written later that never heard of the status. The five
+loop callers were taught about it regardless: `wedge-soak.sh` no longer spends a
+sample on a refusal and now reports iterations actually *booted* rather than
+`MAX_ITERS`; `wdog-reset-experiment.sh` mattered most, since it derives its
+entire verdict from wall time and would have read a lock wait as "the watchdog
+counter fired".
+
+The anti-barge alternative was deliberately **not** taken: with a real FIFO
+queue it is redundant (a re-running lane already goes to the back), and keeping
+a heuristic alongside a queue is two rules that can disagree.
+
+Both defects that made the final version correct were found by
+`scripts/test-boot-lock.sh`, not by reading: the exit status was being swallowed
+by a command-substitution subshell in the harness itself, and the free-lock /
+live-head-waiter hole above. That harness now runs 15 cases in ~6s with no
+kernel build — cases 10-15 cover FIFO in both directions, the ticket sweep and
+its 60s floor, unparseable tickets, and that acquiring drops our own ticket.
 
 ## B-THE-FIXTURE-STAMP-HASHED-WORKTREE-BYTES-SO-IT-DID-NOT-SURVIVE-A-CHECKOUT (lane B, 2026-08-16)
 
@@ -24583,3 +25345,316 @@ error rather than hanging, and the existing `MAX_PROG` bound on program size.
 construct it cannot do, and it exits non-zero. Nothing silently produces a wrong
 answer. What it costs is GNU compatibility for a small, well-known family of
 scripts.
+
+---
+
+## A-SET-CREDENTIALS-IS-GATED-ONLY-IN-USERSPACE (lane A, 2026-08-16)
+
+**Status:** FIXED in the same change that logged it. Recorded anyway, because
+the *reason* it survived this long is the interesting part and it will recur:
+the entry that created the hole (design-decisions.md §83) was correct when it
+was written, and nothing re-read it when the fact it rested on changed.
+
+### What was wrong
+
+`SYS_PROCESS_SET_CREDENTIALS` (530) is the kernel primitive behind POSIX
+`setuid()`/`setgid()`. It performed **no capability check at all**. The only
+invariant it enforced was structural — you may set your own credentials — which
+is not a permission, it is the absence of a pid argument.
+
+The permission check lived entirely in the userspace posix wrapper. So any
+ring-3 process could become uid 0 by issuing syscall 530 directly and never
+going through `posix::unistd::setuid` at all. There is no privilege boundary
+between "call the wrapper" and "issue the syscall"; a wrapper is a convenience,
+not a gate.
+
+Worse, the userspace gate is **open by default**. `posix::sys_capability`'s
+`CAPS_DEFAULT` is *every defined capability held* — `DEFAULT_CAPS_LOW =
+u32::MAX` — and the kernel projection (§312) that narrows it is absent until
+`kernel_view::refresh` has succeeded, tracked by a separate `PROJ_VALID` flag
+precisely because "no capabilities" and "never asked" must not collapse. So
+until a refresh lands, `has_capability(CAP_SETUID)` answers *yes* to everyone,
+and the one gate on `setuid()` in the entire system was a check that defaults
+to permitting.
+
+CLAUDE.md's architectural rules are not ambiguous about this: "Capability-based
+security from day one… **No ambient authority.**" A credential mutation any
+process can perform is ambient authority by definition.
+
+### Why it was not a bug when it was written, and became one
+
+design-decisions.md §83 put the policy in userspace, and gave a sound reason:
+
+> POSIX capabilities in SlateOS are **userspace-only** … the kernel's
+> Fuchsia-style `CapTable` is a separate, handle-based system the kernel cannot
+> correlate with POSIX cap bits. So the kernel **cannot** enforce a "only root
+> may setuid" rule anyway — it has no authority to check.
+
+That was true. Then two later decisions made it false, and neither noticed:
+
+| | what it did | what it did to §83 |
+|---|---|---|
+| **§207** | added `cap::Rights::SET_CREDENTIALS` as a dedicated kernel-side, handle-backed right | gave the kernel exactly the authority §83 said it lacked |
+| **§312** | made posix's `CAP_SETUID`/`CAP_SETGID` *project from* that right | made the userspace answer a **derivative** of the kernel one |
+
+After §312, the userspace check was no longer an independent policy the kernel
+could not see. It was a **cached copy** of a kernel fact, enforced only on the
+copy. §83 even named the exit — "or gate the syscall behind a capability" — but
+the trigger it wrote for taking that exit was "when credential uid gains kernel
+authority", which had not happened, so the exit was never taken. The trigger was
+aimed at the wrong event: what mattered was not the uid becoming authoritative,
+but the *kernel acquiring the token to check*.
+
+### The fix
+
+`sys_process_set_credentials` now requires `(Process, SET_CREDENTIALS)` for any
+call that would **change** the identity. A call that leaves both fields where
+they are — via the `(uid_t)-1` KEEP sentinel or by passing the value already
+held — needs nothing, because `setuid(getuid())` is permitted to every process
+in POSIX and is issued unconditionally by a great deal of privilege-shedding
+code that never held privilege. Denying a no-op protects a transition that does
+not occur.
+
+The predicate is **id-agnostic** and identical to posix's:
+`(Process, SET_CREDENTIALS)`, no resource-id test. That is deliberate and it is
+the point — if the kernel gate and the projection asked different questions, the
+projection would stop being a projection, and userspace would authorise calls
+the kernel refuses or the reverse. (Per design-decisions.md §212, `SET_CREDENTIALS`
+has no automatic grant anywhere, which is what makes an id-agnostic check safe
+here where the same shape would be wrong for `SIGNAL`.)
+
+The decision is factored into a pure `resolve_credential_request()` and pinned
+by `test_dispatch_set_credentials_gate` in the boot self-test, over nine cases.
+The handler itself cannot be driven from a self-test — it reads
+`current_task_id()` — so a test through `dispatch()` would prove only the
+kernel-task path. Both failure directions are silent: a no-op misjudged as a
+change denies a capability nobody needs, and a change misjudged as a no-op is
+the escalation itself, which passes every other test in the tree because the
+identity really does end up where the caller asked.
+
+### Blast radius: none
+
+`self_test_fastpy_slateos_setuid` is the only thing in the tree that changes
+process identity, and `spawn.rs` already grants it
+`(ResourceType::Process, 0u64, Rights::SET_CREDENTIALS)` — added under
+`requests/b-a-cap-grants-for-312-step3-fixtures.md` in anticipation of §312 step
+3 making the gates binding. This change makes them binding one layer lower than
+that request expected, and the grant that was placed for the later event covers
+the earlier one unchanged.
+
+### The generalisable lesson
+
+A decision that rests on a *capability of the system* ("the kernel cannot see
+X") needs its premise re-checked whenever the system gains that capability —
+and nothing does that automatically. §83's own reversal instructions were
+present and correct; what was missing was any reason for someone adding §207 to
+go and read §83. The mitigation used here is the one available: §207 and §312
+are now cited *in the syscall's own doc comment* at the point where the check
+happens, so the next reader of the gate meets the history without going looking
+for it.
+
+---
+
+## A-CRYPTO-BENCHMARKS-STEPPED-58-PERCENT-WITH-BYTE-IDENTICAL-CRYPTO-SOURCE (lane A, 2026-08-16)
+
+**Status: RESOLVED 2026-08-16 — not a regression. A QEMU/TCG code-layout
+artifact, proven mechanically (see "Verdict" at the end). No kernel change is
+warranted and the range must NOT be bisected. Not a boot failure; all 18 boots
+green.**
+
+**What happened.** Three crypto benchmarks stepped up by a near-uniform ~1.58x
+between the last benchmarked commit (`86a923fe1`) and `9ecef3188`, and stayed
+there across two runs of the *same binary*:
+
+| benchmark | historical range (11 runs) | run 1 | run 2 (`--no-stage`, identical image) |
+|---|---|---|---|
+| `crypto_chacha20_1KiB` | 11749–12178 ns | 19105 | 19187 |
+| `crypto_poly1305_1KiB` | 4976–5166 ns | 8102 | 8257 |
+| `crypto_aead_1KiB` | 18922–19366 ns | 29386 | 29543 |
+
+The historical range is *tight* — chacha20 varied by 3.6% across eleven runs
+spanning many commits — so 19105 is not a tail of the old distribution. The
+ratios are 1.590 / 1.573 / 1.569, and `aead` is chacha20+poly1305, so this
+reads as **one cause appearing three times**, not three findings.
+
+**Why this is not the usual bench flakiness.** The same pair of runs also
+flagged `pick_next` (+150%), `ipc_pipe` (+42%) and `ipc_channel_sync` (+30%),
+and those *did* revert on the second run — 1613→820 ns and 1277→872 ns, back
+inside their own ranges. That is the documented
+`B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY` behaviour and it
+was almost certainly self-inflicted: this agent was running `git fetch`,
+`git merge`, file edits and a `cargo clippy` on the host *while run 1 was
+measuring*, which the canary is documented as unable to see
+(`B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING` — it counts guest cycles, which do
+not advance while the host runs something else). Run 2 was executed with the
+agent deliberately idle. **The crypto trio survived that control and the other
+three did not**, which is what promotes it from noise to a finding.
+
+Note the reporting subtlety that nearly hid this: the *run-over-run* half of the
+suite stopped flagging the trio the moment the elevated value became the
+previous run. It was found by reading `bench/history.jsonl` directly, not from
+the run verdict, which said `RUN CLEAN`.
+
+**Correction (same day, before acting on it).** An earlier version of this
+paragraph went on to claim the comparator "can only ever report edges, never
+levels" and called that a defect worth fixing separately. **That is wrong, and
+the error is worth recording because it was about to cost a redundant fix.**
+`scripts/bench-history.py::level_shifts` already exists for exactly this case —
+its docstring opens with the same miss, found on `http_build_response_1KiB` on
+2026-08-15 — and it reports under `SUSTAINED SHIFT`, measured against a baseline
+drawn from *before* the last `LEVEL_SHIFT_SKIP = 3` runs so a new step cannot
+enter its own reference.
+
+Why it was silent here is not a bug but a threshold: it requires the shift in
+the run being judged **and** in `LEVEL_SHIFT_PERSIST = 2` runs before it — three
+consecutive elevated runs — and this step has been measured twice. Replaying it
+against the real history confirms both halves:
+
+```
+level_shifts(records excluding current run) -> NOTHING
+level_shifts(records including current run) -> crypto_poly1305 +63.2%,
+                                               crypto_chacha20 +59.6%,
+                                               crypto_aead     +56.0%
+```
+
+(`report()` is called at line ~2598 with history loaded at ~2574, and
+`append_record` runs at ~2723 — *after* — so `records` correctly excludes the
+run being judged. The two-line replay above is the honest test of the detector,
+not evidence against it.) Persistence is deliberate and measured: without it the
+check fired on 11 of 26 replayed runs, nearly all single-run host excursions.
+
+**So the third consecutive bench run at or after `9ecef3188` will print
+`SUSTAINED SHIFT` for these three unprompted.** The tooling is not blind to
+this, and this entry is not the only thing standing between the finding and
+silent acceptance — which is what the closing paragraph originally claimed.
+
+**What is ruled out.** `kernel/src/crypto.rs` and `kernel/src/bench.rs` are
+**byte-identical** across the range (`git diff 86a923fe1..HEAD --` on both is
+empty). No crypto-related file changed anywhere in the tree. Nothing in the
+build profile changed; the only root `Cargo.toml` edit is lane C adding the
+`byteread` workspace member, which is not in the kernel's dependency graph.
+
+**Leading hypothesis, unconfirmed: code layout under TCG.** The range adds
+~5,400 lines to the kernel image, almost all of it NTFS
+(`kernel/src/fs/ntfs/*`, §210). QEMU's TCG is sensitive to code placement and
+translation-block behaviour in ways real hardware is not, so a hot loop can
+shift substantially without its own source changing. This would make the number
+an emulation artifact rather than a real slowdown — but that is a hypothesis,
+and "probably the emulator" is exactly the reasoning that lets a real
+regression sit unexamined.
+
+**Explicitly considered and rejected:** that the new NTFS self-test perturbs
+machine state before the benchmarks. It does run on every boot, before the
+suite (`kernel/src/main.rs`, `fs::ntfs::self_test()`), but its synthetic volume
+is `TOTAL_CLUSTERS(24) * CLUSTER(4096)` ≈ 98 KiB in a dropped `Vec` — far too
+small to matter, and a memory-pressure effect would move the whole suite rather
+than three benchmarks (whole-suite drift was +0.0%).
+
+**How to settle it — cheapest test FIRST, which is not the one that was
+started.** The layout hypothesis has a mechanical, no-boot test that this
+project already built for precisely this situation:
+
+```
+python scripts/straddle-check.py --compare <86a923fe1-kernel-elf> <9ecef3188-kernel-elf>
+```
+
+It disassembles both, locates each hot loop's backward branch, and compares
+`addr >> 12` at the two ends: a loop whose branch crosses a 4 KiB guest page
+cannot stay one directly-chained translation block and pays a dispatcher
+round-trip every iteration, measured on this project at **~1.7x**
+(`B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x`). The observed ratios here are
+1.590 / 1.573 / 1.569.
+
+That number being *that* close to the documented penalty, in three benchmarks
+whose source is byte-identical, in a range that added ~5,400 lines of unrelated
+NTFS, is the single most likely explanation — and the straddle check settles it
+in seconds against two ELFs, with no boot at all.
+
+**Do not bisect before that check.** `bench-history.py::mode_structure` exists
+to ask whether a fence separates *binaries* (code layout — no guilty commit
+exists and bisecting is the wrong tool) or *runs* (noise), and the precedent is
+recorded in its own docstring: `http_build_response_1KiB` "was bisected across
+three commits before anyone asked; the answer was 'binaries', and there was no
+guilty commit." The `SUSTAINED SHIFT` report prints the straddle-check command
+as its first suggested action for this reason.
+
+I started the expensive path first — a throwaway worktree at `86a923fe1`, full
+rebuild and bench (~40 min) — before finding the above. That run is still worth
+having, because it measures the *old binary on today's host* and so separates
+"binary-dependent" from "host-dependent", which the straddle check cannot do.
+But it should have been step 2. Do **not** run anything else on the host during
+a measuring run.
+
+**Why it is filed rather than fixed.** The cause is unknown and the honest
+options differ by an order of magnitude in effort. If the straddle check shows
+a page-crossing difference in the chacha20/poly1305 inner loops, this is an
+emulation artifact, gets recorded as one, and no kernel change is warranted.
+
+---
+
+## Verdict (2026-08-16): code layout under TCG. Not a regression.
+
+The straddle check predicted above was run, and it lands exactly on the two
+functions that drive the three benchmarks. `--compare` between the `86a923fe1`
+and post-`9ecef3188` kernel ELFs reports **`recompiled: 0`** — the machine code
+of these functions is byte-identical and only their *addresses* moved:
+
+```
+STRADDLE GAINED (expect these to be SLOWER): 4
+  kernel::fs::encrypt::chacha20_crypt   760 B  ffffffff804fb860 -> ffffffff80507fe0
+  kernel::fs::encrypt::chacha20_crypt   712 B  ffffffff804fb860 -> ffffffff80507fe0
+  kernel::crypto::poly1305              616 B  ffffffff80a07770 -> ffffffff80a13ef0
+  kernel::crypto::chacha20_block        344 B  ffffffff809fd7c0 -> ffffffff80a09f40
+STRADDLE LOST (expect these to be FASTER): 1
+  kernel::rng::ChaCha20State::generate_block  335 B  ffffffff808a2fb0 -> ffffffff808af730
+```
+
+**Five independent lines of evidence agree:**
+
+1. **Source is byte-identical** — `git diff 86a923fe1..HEAD` on `crypto.rs` and
+   `bench.rs` is empty, and the tool independently confirms it (`recompiled: 0`).
+2. **The mapping is exact.** `chacha20_block` drives `crypto_chacha20_1KiB`;
+   `poly1305` drives `crypto_poly1305_1KiB`; **both** gained a page crossing
+   (0 → 1). `crypto_aead_1KiB` is those two composed, which is why the third
+   benchmark moved and why it moved by the composed amount.
+3. **The magnitude matches the documented penalty.** Measured ratios
+   1.590 / 1.573 / 1.569 against the ~1.7x per-iteration cost recorded in
+   `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x`.
+4. **It is binary-dependent, not host-dependent.** `86a923fe1` was rebuilt and
+   re-benched on the same host *after* the step was observed and returned to
+   baseline in all three: chacha20 **12045 ns**, poly1305 **5098 ns**, aead
+   **19193 ns** — every one inside its historical band. So the host is not the
+   variable; the image is.
+5. **Benchmarks moved in both directions**, which is a layout re-roll's
+   signature and not a regression's: `net_veth_recv` −25.1%, `net_arp_lookup`
+   −17.3%, `crypto_ed25519_sign` −17.1%, `vfs_stat_root` −11.3%.
+
+**A second finding, same cause.** `page_alloc_free` (+44.9%, 457 → 662 ns) is
+the same artifact: `mm::frame::alloc_frame` gained a straddle on all three of
+its loops (878 B, 491 B, 464 B) with `recompiled: 0`, while `free_frame` lost
+one. This matters more than the crypto trio, because `page_alloc_free` is on the
+performance-critical list with a **< 1 µs** target — worth stating plainly that
+662 ns still meets it, and that the true cost is unchanged.
+
+**Left unexplained, deliberately.** `cp_try_wait_empty` (+104.6%, 131 → 268 ns)
+is *not* accounted for by this: `ipc::semaphore::try_wait` moved the favourable
+way (1 → 0 crossings), so layout predicts it faster and it measured slower. At
+131 ns the absolute movement is ~137 ns and the benchmark is near the floor
+where run noise dominates, so the likeliest reading is noise — but that is a
+guess, and it is recorded as unexplained rather than folded into a tidy story.
+
+**What NOT to do.** Do not bisect `86a923fe1..9ecef3188` for these. There is no
+guilty commit — the ~5,400 lines of NTFS (§210) shifted addresses, which is what
+every commit does. This is precisely the trap `mode_structure()` documents:
+`http_build_response_1KiB` "was bisected across three commits before anyone
+asked; the answer was 'binaries', and there was no guilty commit."
+
+**Process lesson worth more than the finding.** Two rules paid off and one cost
+~40 minutes:
+- Re-benching the old commit was worth it — it is the only step that separated
+  binary-dependent from host-dependent, which static analysis cannot do.
+- The straddle check should have run **first**: seconds, no boot, and it was
+  already named as the first suggested action in the `SUSTAINED SHIFT` report.
+- The near-miss to remember: this was one step away from being "fixed" as a
+  comparator defect that did not exist, and one step away from a bisect for a
+  commit that does not exist.

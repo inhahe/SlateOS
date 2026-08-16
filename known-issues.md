@@ -23812,7 +23812,32 @@ performed by the userspace posix wrappers") — which is why it carries a test
 asserting no other Process right, `METADATA` above all, can reach it.
 ## B-A-A-MERGE-OF-TWO-CORRECT-COMMITS-LEFT-NINE-FIXTURES-LINKING-A-LIBC-`main`-NO-LONGER-BUILDS (lane B's tree; filed by lane A, 2026-08-16)
 
-**Status: OPEN 2026-08-16.** Blocks `rootfs.ext4` rebuilds in every worktree.
+**Status: ✅ FIXED 2026-08-16 — both halves.** Detection is
+`scripts/stamp-ancestry.py` (lane A, described below); the repair is lane B's
+`3ad5c98aa`, which relinks all nine ELFs and rewrites all nine `.stamp` files
+against a sysroot built from the merged `posix/src`. On lane B's tree today:
+`ctest-fixtures.py check` → `ok` ×9, `image-check` → `ok rootfs.ext4 (74 staged
+ELFs match the tree)`, `stamp-ancestry.py` → `OK … no source commit outranks
+stamp commit 3ad5c98aa` (exit 0), and the boot test passes with
+`self_test_bash_on_slateos_libc` no longer self-skipping.
+
+**Not archived yet, deliberately.** `3ad5c98aa` is on `lane-b` and reaches
+`main` only with the merge that carries this line; the archiving rule is "fixed
+*and* the fix has been on `main` for a full boot test". Move it to
+`known-issues-resolved.md` after the next green boot test on a tree that
+contains it via `main`.
+
+**The judgement call the detector left open is answered:
+`design-decisions.md` §321 — no.** The stamp will not carry a `posix/` tree
+hash. Reasons in full there; in one line, a source tree hash is wrong in both
+directions (it moves on formatting-only commits, and it misses `tzrules/`,
+`toolchain/build-sysroot.ps1` and `[profile.release]`), and a stamp mismatch is
+*fatal* to `create-ext4-rootfs.sh`, so the inaccuracy would land where the only
+escape hatch also disables the exact check beside it.
+
+Original report follows, unedited, because the history is the content.
+
+**Was: OPEN 2026-08-16.** Blocked `rootfs.ext4` rebuilds in every worktree.
 Requests filed: `requests/a-b-nine-ctest-fixtures-on-main-link-a-libc-main-no-longer-builds.md`
 (the repair, lane B's) and `requests/a-c-fixture-rebuild-was-correct-on-lane-c-and-wrong-on-main.md`
 (the habit, lane C's). Recorded here as well as there because a request is read
@@ -23954,17 +23979,19 @@ fires. The stale-config and missing-family branches were exercised directly and
 both exit 2. The `:(glob)` pathspec magic is deliberate and load-bearing: plain
 git globbing lets `*` cross `/`, which would silently widen the stamp pathspec.
 
-**Still open: the repair** (lane B rebuilds and re-commits the nine ELFs), and
-one judgement call the detector does not settle — whether to also record the
-libc's **source** identity in the stamp (the tree hash of `posix/`, alongside
-the existing `libc.a` content hash). That would make the stamp answer the right
-question directly rather than have a second script answer it alongside, at the
-cost of coupling a file under `services/` to a path outside it. The detector
-makes that optional rather than urgent; lane A has a stake only in the class
-being detectable, which it now is.
+**Repair half: FIXED 2026-08-16 — `3ad5c98aa`** (see the status block at the
+top). The judgement call the detector did not settle — whether to also record
+the libc's **source** identity in the stamp (the tree hash of `posix/`, alongside
+the existing `libc.a` content hash) — was **declined**, in `design-decisions.md`
+§321. It would have made the stamp answer the right question directly rather
+than have a second script answer it alongside; what ruled it out is that a tree
+hash cannot answer it *accurately* in either direction, while a stamp mismatch
+is fatal to the image build. The coupling cost lane A flagged (a file under
+`services/` naming a path outside it) turned out to be the smaller objection —
+the stamp already names `toolchain/sysroot/lib/libc.a`.
 
-**What it blocks right now.** `create-ext4-rootfs.sh` exits 1 on the stamp
-mismatch, correctly, so no worktree can rebuild `rootfs.ext4`. That leaves the
+**What it blocked while open.** `create-ext4-rootfs.sh` exits 1 on the stamp
+mismatch, correctly, so no worktree could rebuild `rootfs.ext4`. That left the
 boot test running an image with no `/bin/bash`, so
 `self_test_bash_on_slateos_libc` self-skips and every run ends:
 

@@ -55506,6 +55506,58 @@ removed, **18/18 misplaced**. On `DavidCLM-Medium.otf` specifically the meteg
 lands at x=77 and the qamats at x=315, both exactly HarfBuzz's, against x=2 and
 x=240 without.
 
+**Status: FIXED** (2026-08-16). Device tables were the last open item, so with
+them read this entry is closed and moves to `known-issues-resolved.md` once it
+has been on `main` through a boot test.
+
+`gui/font/src/device.rs` is the reader; `Ppem` — a pixel size and the em it is
+measured against — is threaded from `ScaledFont` through `Face::ppem` onto
+`Run`, and from there into `Value::read`, `mark::anchor` and `Kerning::pair`.
+All four value-record fields and both anchor axes are corrected, across single,
+pair, cursive, mark-to-base, mark-to-ligature and mark-to-mark.
+
+The entry's own plan for this item — "a `ValueRecord` reader change plus a ppem
+the pass is not currently told" — named the wrong half. `gui/font/tools/
+device_survey.py` was written to check it and reports that on this host **not
+one value record carries a real device table**: all 152 hang off *anchors*, in
+five faces (`micross.ttf` 130, `mmrtext.ttf` 4, `mmrtextb.ttf` 4, `taile.ttf`
+7, `taileb.ttf` 7). The half the entry named is the half that never fires here;
+the half it omitted is where all the effect is. Both were implemented.
+
+Two things the survey settled that were not going to be settled by reading the
+spec:
+
+* **The format word must be read before the size range**, not after. 9,215 of
+  this host's device-table slots are `VariationIndex` records (`deltaFormat`
+  `0x8000`), which reuse the first four bytes as indices into a variable font's
+  `ItemVariationStore`. Read as a `startSize`/`endSize` pair, those indices
+  *bracket* an ordinary UI size often enough to matter: 3,146 of them at 9
+  ppem, 3,086 at 12, 2,832 at 16. A range-check-first reader does not return a
+  slightly wrong correction for those, it returns an arbitrary one.
+* **The size a cross-check runs at has to be read off the fonts.** All 130 of
+  `micross.ttf`'s tables name `startSize == endSize == 11`. A sweep at 12 ppem
+  reaches none of them and reports agreement that both halves obtained by doing
+  nothing — which is exactly what the first run of it did.
+
+**Measured.** `harfbuzz_sweep.py` grew `--ppem N`, which sets `ppem` on the
+HarfBuzz font while leaving its scale at the em (HarfBuzz gates device tables
+on `font->x_ppem` and computes `pixels * x_scale / ppem`, so both halves then
+report design units with the correction folded in) and opens our face at N
+pixels, dividing the positions back. On `micross.ttf` shaping LAM-FATHA-ALEF
+the fatha's y goes 380 → **8** at 11 ppem and back to 380 at 10 and 12; on
+`mmrtext.ttf` shaping NNYA + MEDIAL HA it goes 650 → **735** at 24 ppem.
+HarfBuzz answers 8 and 735 at those sizes and 380 and 650 either side of them —
+identical on every glyph, truncation included. Across all 556 host faces the
+full sweep at 11 ppem is **byte-for-byte the sizeless one** (48,087 agree, 170
+misplaced, 1,178 differ, 0 reordered); at 24 ppem with the new Myanmar corpus
+string it is 48,643 agree — the same numbers plus one string agreeing on all
+556 faces. `cargo test -p osfont` is 701 passing, up from 686.
+
+Twelve of the 152 tables (Tai Le's) are not reachable from any two- or
+three-character sequence in the script's block — searched exhaustively against
+HarfBuzz at every size in their ranges — so they are covered by the unit tests
+in `device.rs` and by nothing else.
+
 ## TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS
 
 **What.** Unicode gives Hebrew points the canonical combining classes 10–26
@@ -58661,3 +58713,51 @@ operator's own `LithicBackup.exe` was also running (started 03:38, ~16 h).
 3. **`Write` is not atomic under `ENOSPC`.** The failed write left a zero-byte
    file that had to be removed by hand before retrying. Worth remembering when a
    tool reports a write failure: check the file, do not assume it is untouched.
+
+## TD-FONT-DOES-NOT-READ-VARIATION-STORES
+
+**What.** `gui/font/src/device.rs` reads `GPOS` device tables — the per-pixel
+correction a face hangs off a value record's field or an anchor's axis — but
+declines the *other* thing that can occupy that slot. A `Device` whose
+`deltaFormat` is `0x8000` is not a device table at all: it is a
+`VariationIndex`, whose first four bytes are a `deltaSetOuterIndex` and
+`deltaSetInnerIndex` into a variable font's `ItemVariationStore`. Reading one
+needs the store (an `ItemVariationStore` in `GDEF`, plus `fvar`/`avar` to turn
+the caller's axis settings into normalized coordinates), which this crate does
+not parse. `Ppem::delta` recognises the format and returns zero.
+
+**Symptom.** A variable font drawn at a non-default instance positions its
+marks and its kerns at the *default* instance's values. The glyph outlines
+themselves are already wrong for the same reason — `gvar` is not read either —
+so nothing here is visible in isolation: a variable face renders at its default
+weight and width throughout, and positioning is consistent with that. It is
+recorded as its own entry because it is the one place where the missing feature
+is silently *skipped inside code that is otherwise doing its job*, rather than
+absent at the top level.
+
+**Measured.** `gui/font/tools/device_survey.py` over this host's fonts: 9,215
+`VariationIndex` records across the font directory, against 152 real device
+tables. Variation indices outnumber real device tables 60 to 1 here, so the
+un-read case is by far the common one — nearly all of them in
+`anchor:base4/variation` (8,720), i.e. mark-to-base attachment.
+
+**Why it is filed rather than fixed.** It is not a device-table change; it is
+variable-font support, and the device-table slot is the last piece of it rather
+than the first. In order: `fvar` (what axes exist and their defaults), `avar`
+(the caller's axis value mapped onto the normalized -1..1 scale), `gvar`/`CFF2`
+(the outlines, which is the part a user actually sees), then
+`HVAR`/`MVAR`/`GDEF`'s `ItemVariationStore` (advances, metrics and *these*
+deltas). Reading the store on its own would apply a positioning correction for
+an instance whose outlines are the default instance's — worse than applying
+none, because the marks would move off the shapes they belong to.
+
+**Proper fix.** Parse `fvar`/`avar` into a normalized coordinate vector on
+`ScaledFont` (not on `Face` — the same parsed face must be usable at two
+instances at once), then an `ItemVariationStore` reader, and give `Ppem` a
+sibling that carries the coordinates so `Ppem::delta` can dispatch on the
+format instead of declining one arm of it. Until `gvar` exists, this should
+stay declined.
+
+**Where.** `gui/font/src/device.rs` — `VARIATION_INDEX` and the format check in
+`pixel_delta`, and the "What is not here" section of the module doc, which
+names this entry.

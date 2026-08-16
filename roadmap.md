@@ -792,10 +792,18 @@ Roadmap:
   (`TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES` closed, §434) — it was two bugs
   under one name, erasing them *and* stepping over them, and the 170/40
   `misplaced` that survive it are a deliberate divergence in where an erased
-  zero-advance glyph sits, not a residue. **Next: device tables in
-  `ValueRecord`**, then right-to-left reordering
-  (`TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT`). Vello itself waits on
-  `[A]`'s GPU driver.
+  zero-advance glyph sits, not a residue. **Device tables are done too** (§440;
+  `TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING` closed — they were
+  its last open item), and the survey written to check them corrected the plan
+  this line used to carry: not one of this host's 152 real device tables is on a
+  `ValueRecord`, they are all on *anchors*, and the 9,215 `VariationIndex`
+  records that share the same eight bytes outnumber them 60 to 1 — which is why
+  the format word is read before the size range.
+  `harfbuzz_sweep.py --ppem N` is the new measurement: at 11 ppem `micross.ttf`
+  drops a fatha from y=380 to y=8 and HarfBuzz says 8 too, while the full
+  556-face sweep at that size is byte-for-byte the sizeless one. **Next:
+  right-to-left reordering** (`TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT`).
+  Vello itself waits on `[A]`'s GPU driver.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
   (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it

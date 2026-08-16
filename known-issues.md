@@ -58893,3 +58893,90 @@ operator's own `LithicBackup.exe` was also running (started 03:38, ~16 h).
 3. **`Write` is not atomic under `ENOSPC`.** The failed write left a zero-byte
    file that had to be removed by hand before retrying. Worth remembering when a
    tool reports a write failure: check the file, do not assume it is untouched.
+
+### [A] B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY-EVEN-ON-A-CLEAN-RUN — 2026-08-16 — ⚠️ OPEN (measured A/A, 2 false "REGRESSED" verdicts on identical code)
+
+**Status:** OPEN. Follows on from
+`### B-BENCH-COMPARES-TO-ONE-PRIOR-RUN-NOT-THE-DISTRIBUTION`, whose
+2026-08-15 fix added each benchmark's **own recent range** as a second
+gate precisely so a verdict could not be made from a single run-over-run
+delta. That fix helped and is not being undone here. What is new is a
+measurement of what it still lets through, and the number is not small.
+
+**What was measured.** Two `./scripts/boot-test.sh --bench` runs of the
+**same commit** (`602fc62e0`), 2.5 minutes apart, nothing rebuilt between
+them — an A/A test, where by construction every reported regression is a
+false positive:
+
+| | run A `10:39:57` | run B `10:42:35` |
+|---|---|---|
+| harness run verdict | `RUN CONTAMINATED` | **`RUN CLEAN`** |
+| `REGRESSED` (confirmed) | `pick_next` +92% | `page_alloc_free` +85%, `vfs_stat_breakdown_full` +36% |
+| `REGRESSED, UNCONFIRMED` | `futex_wait_mismatch` +38% | `heap_raw_alloc_free_512` +54% |
+
+Drift-corrected, **5 of 83 benchmarks moved >25% between two runs of one
+binary**. The distribution is not uniformly noisy — it is a thin tail on
+a stable body:
+
+    |change| across 83 benchmarks:  median 2%   p90 9%   max 85%
+
+**The two findings that matter, neither of which is "benchmarks are noisy".**
+
+1. **`RUN CLEAN` does not mean the verdicts are trustworthy.** Run B
+   passed every contamination instrument — canary steady, dispersion 16
+   within the host band of 16.0, wall time within band — and still
+   produced two *confirmed* regressions on code that had not changed.
+   The run-level verdict and the per-benchmark verdict are answering
+   different questions, and the output currently invites reading the
+   first as a warrant for the second.
+2. **The own-range gate is weakest exactly where it is needed most.**
+   The gate asks whether a value left that benchmark's recent range. For
+   a benchmark whose tail is heavy, the recent range is narrow only
+   because the tail has not fired lately — so the first tail event both
+   exceeds 25% *and* leaves the range, and is promoted to `REGRESSED`.
+   `page_alloc_free` (range 293-453ns, observed 680ns) and `pick_next`
+   (range 417-780ns, observed 1052ns) are both this shape.
+
+**Why `pick_next` is the instructive case.** In run A it was the single
+confirmed regression, +92%, on the scheduler path `CLAUDE.md` lists as
+performance-critical and requires to stay O(1). Normalised to the suite
+median it read 753/1000 against a 34-run historical range of 271-534 —
+i.e. an outlier by the *history*, not just by the previous run. It was
+still noise: run B put it at 1177ns and did not flag it at all. A
+plausible-looking regression, on a benchmark that matters, corroborated
+by a second statistic, was wrong.
+
+**What this does *not* say.** It is not evidence that the suite is
+useless: 90% of benchmarks agreed to within 9% across the pair, which is
+enough to catch the kind of regression that matters (a 2x algorithmic
+loss). The problem is confined to how a *verdict* is derived from one
+comparison.
+
+**What the proper fix looks like.** Do not call anything `REGRESSED`
+from a single pair of runs. The harness already records history and
+already computes a whole-suite median, so the material is present:
+
+- **Require replication.** Promote to `REGRESSED` only when the movement
+  survives into a second run of the same commit. The A/A above shows one
+  extra boot (~2 min, no rebuild) settles it — cheap next to the reader
+  attention a false positive spends.
+- **Use a dispersion-aware band, not a min/max range.** The min-max of 8
+  runs is not robust; a median plus an interquartile or MAD-based band
+  would not have promoted either tail event.
+- **Record each benchmark's own A/A noise floor** and refuse to judge
+  any movement smaller than it. `page_alloc_free` demonstrably has a
+  floor near 85%; a 30% move in it is unjudgeable and should say so,
+  the way `P21(b)` was correctly recorded as `UNGRADEABLE` rather than
+  graded.
+
+**Where it lives:** `scripts/bench-history.py` (verdict logic),
+`scripts/boot-test.sh --bench` (invocation), `bench/history.jsonl` (the
+34-run record the A/A above was drawn from; the last two entries share
+commit `602fc62e0` and are the pair in question).
+
+**Standing lesson this is another instance of.** Conservation is not
+placement, and a clean instrument is not a correct conclusion: run B's
+contamination checks all passed and its regression list was still wrong.
+A check that says something false is worse than no check, because it is
+believed — and the cost lands on the *next* real regression, which gets
+waved through as "probably noise again".

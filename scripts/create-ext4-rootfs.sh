@@ -826,6 +826,66 @@ if [ "$PROMOTED_COUNT" -gt 0 ]; then
     echo "[rootfs] installed $PROMOTED_COUNT promoted fastpy command(s) into /bin"
 fi
 
+# --- the sysroot libc.a itself, against the sources it is built from ----------
+# Everything below — bash-slateos.elf and all nine services/ctest-*/*.elf — is
+# checked against `toolchain/sysroot/lib/libc.a`, on the assumption that libc.a
+# is itself current.  Nothing checked that assumption until 2026-08-16, and it
+# was false: libc.a is a *gitignored build artifact*, so a `git merge` that
+# brings in new posix/src does not touch it, and nothing in the image build
+# regenerates it.
+#
+# That morning the merge brought in lane B's "posix: make waitid fill siginfo_t"
+# (cff19bfa2, 07:35) while the libc.a on disk was from 05:37.  The fixture
+# rebuild at 09:26 therefore linked the OLD waitid — the one that returned 0
+# having written nothing through `infop` — and ctest-jobctl exited 101 (its
+# `si_pid` still holding the 0x5A poison it writes before every call) after a
+# full ~7-minute boot cycle.  Both staleness checks below passed while that
+# happened: the ELF was newer than libc.a and newer than its own source.  Both
+# were true, and both were irrelevant, because the staleness was one level
+# further up.
+#
+# So this is the *root* of the chain and is checked first: if libc.a is older
+# than anything it is compiled from, every artifact downstream is suspect no
+# matter what its own timestamps say — and, worse, rebuilding those artifacts
+# *silences* their own checks while leaving them just as wrong.
+#
+# What counts as a source of libc.a: `posix/src` is the library's code;
+# `posix/Cargo.toml` its dependencies and lints; `toolchain/stubs` is compiled
+# into the same sysroot; and `build-sysroot.ps1` carries the RUSTFLAGS — the
+# soft-float ABI bug (BUG-SYSROOT-SOFT-FLOAT-ABI in known-issues.md) lived in
+# *that file*, so a libc.a older than it is wrong even with identical sources.
+#
+# `-print -quit` stops at the first hit: this is a yes/no question over ~300
+# files.  `|| true` keeps a missing directory from killing the script under
+# `set -e` — see the fixture loop below for what that failure mode costs when
+# it happens silently.
+LIBC_A="$ROOT_DIR/toolchain/sysroot/lib/libc.a"
+SYSROOT_STALE=""
+if [ -e "$LIBC_A" ]; then
+    for sysroot_src in "$ROOT_DIR/posix/src" \
+                       "$ROOT_DIR/posix/Cargo.toml" \
+                       "$ROOT_DIR/toolchain/stubs" \
+                       "$ROOT_DIR/toolchain/build-sysroot.ps1"; do
+        [ -e "$sysroot_src" ] || continue
+        newer="$(find "$sysroot_src" -type f -newer "$LIBC_A" -print -quit 2>/dev/null || true)"
+        [ -n "$newer" ] || continue
+        SYSROOT_STALE="${newer#"$ROOT_DIR/"}"
+        break
+    done
+fi
+if [ -n "$SYSROOT_STALE" ]; then
+    echo "[rootfs] WARNING: toolchain/sysroot/lib/libc.a is OLDER than $SYSROOT_STALE."
+    echo "[rootfs]          libc.a is a gitignored build artifact, so a merge or checkout that"
+    echo "[rootfs]          changes posix/src leaves it behind without saying so. Everything"
+    echo "[rootfs]          that links it — every ctest fixture and bash-slateos.elf — is then"
+    echo "[rootfs]          testing a libc that is not the one in the tree, including freshly"
+    echo "[rootfs]          rebuilt ones, whose own staleness checks stay quiet precisely"
+    echo "[rootfs]          because they are fresh. Rebuild in this order:"
+    echo "[rootfs]            powershell -File toolchain/build-sysroot.ps1"
+    echo "[rootfs]            PYTHONPATH=<fastpy> python services/<name>/build.py   # each fixture"
+    echo "[rootfs]            wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh # if present"
+fi
+
 # --- GNU bash 5.2, cross-compiled and linked against OUR OWN libc -------------
 # Every other real-world binary above (dash, make, tcc) is a stock Ubuntu glibc
 # program that SlateOS runs through the staged glibc + ld-linux.  This one is
@@ -905,7 +965,8 @@ fi
 # result that carries no information.  Set ALLOW_STALE_FIXTURES=1 to downgrade
 # it back to a warning (for a host that has the sysroot but not the fixture
 # toolchain, i.e. no zig, and so cannot rebuild them).
-LIBC_A="$ROOT_DIR/toolchain/sysroot/lib/libc.a"
+# ($LIBC_A is set by the sysroot-staleness check further up, which has to run
+# before anything that links libc.a is judged against it.)
 CTEST_COUNT=0
 CTEST_STALE=0
 for elf in "$ROOT_DIR"/services/ctest-*/*.elf; do
@@ -990,6 +1051,27 @@ if [ "$BASH_STALE" -gt 0 ]; then
         echo "[rootfs]        consumer of our libc on the image, so that is the widest"
         echo "[rootfs]        false-green available. Relink it:"
         echo "[rootfs]          wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh"
+        echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+# And the sysroot the other two are measured against.  Enforced last so that
+# a run which is stale at several levels prints all of it before exiting —
+# telling someone to rebuild libc.a and then stopping, only for the rebuilt
+# fixtures to be flagged on the next run, would cost a second cycle to learn
+# something this run already knew.
+if [ -n "$SYSROOT_STALE" ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: the sysroot libc.a is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: toolchain/sysroot/lib/libc.a is STALE (older than"
+        echo "[rootfs]        $SYSROOT_STALE). This is the worst of the three staleness"
+        echo "[rootfs]        cases, because it is invisible to the other two: rebuilding a"
+        echo "[rootfs]        fixture against a stale libc.a makes the fixture look current"
+        echo "[rootfs]        while leaving it just as wrong. Rebuild the sysroot first"
+        echo "[rootfs]        (command above), then the fixtures, then re-run this script,"
         echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi

@@ -908,41 +908,83 @@ pub fn format_timestamp(ts: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}")
 }
 
-/// Convert days since Unix epoch to (year, month, day).
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    // Adjusted algorithm based on civil calendar
-    let mut year: u64 = 1970;
+/// Convert days since the Unix epoch to (year, month, day).
+///
+/// Closed form, after Howard Hinnant's `civil_from_days`
+/// (<https://howardhinnant.github.io/date_algorithms.html>), which reckons
+/// from 0000-03-01 so that the leap day falls at the end of the year and the
+/// month lengths become a repeating pattern with no table and no branch.
+///
+/// It replaced a `loop` that subtracted one year's worth of days at a time
+/// starting from 1970. `days` is `ts / 86400` where `ts` is an article's
+/// `published`, which is parsed out of a feed's `<pubDate>` — so the number of
+/// iterations was chosen by whoever wrote the feed. See [`days_from_civil`]
+/// for the same defect in the other direction, and the measurement.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "Every operand here is bounded by the shape of the algorithm, not \
+              by an invariant elsewhere: `era` is at most days/146097, and \
+              `era * 146097` is therefore at most `days`, which came from \
+              `ts / 86400` and so is at most u64::MAX/86400. `day_of_era` is \
+              in 0..=146096 by construction, `year_of_era` in 0..=399, and \
+              `day_of_year` in 0..=365, so `365 * year_of_era`, `5 * \
+              day_of_year` and `153 * month_index` are all under 150_000. \
+              Writing these as checked operations would return an `Option` \
+              that no input can make `None`."
+)]
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Shift the epoch from 1970-01-01 to 0000-03-01.
+    let shifted = days.saturating_add(DAYS_FROM_0000_03_01_TO_EPOCH);
 
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-
-    let month_days: [u64; 12] = if is_leap_year(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    let era = shifted / DAYS_PER_ERA;
+    let day_of_era = shifted - era * DAYS_PER_ERA; // 0..=146096
+    // Count the whole years inside the era, correcting for the 4/100/400 rule.
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524
+        - day_of_era / 146_096)
+        / 365; // 0..=399
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    // March is month 0 in this reckoning; 153/5 is the mean length of a month
+    // in the repeating five-month 31-30-31-30-31 pattern the shift produces.
+    let month_index = (5 * day_of_year + 2) / 153; // 0..=11
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1; // 1..=31
+    let month = if month_index < 10 {
+        month_index + 3
     } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        month_index - 9
     };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
 
-    let mut month: u64 = 1;
-    for &md in &month_days {
-        if days < md {
-            break;
-        }
-        days -= md;
-        month += 1;
-    }
-
-    (year, month, days + 1)
+    (year, month, day)
 }
+
+/// Days from 0000-03-01 (the epoch of the shifted civil calendar) to
+/// 1970-01-01.
+const DAYS_FROM_0000_03_01_TO_EPOCH: u64 = 719_468;
+/// Days in a 400-year Gregorian era, which is a whole number of weeks.
+const DAYS_PER_ERA: u64 = 146_097;
+
+/// The range of years this program will accept in a date.
+///
+/// A `<pubDate>` outside it is not a date that has been mangled, it is not a
+/// date at all, and treating it as one is how the parser used to be talked
+/// into arithmetic on numbers no calendar has. Rejecting it gives
+/// `parse_date_string` a `None`, which every caller already handles.
+const YEAR_RANGE: core::ops::RangeInclusive<u64> = 1970..=9999;
 
 /// Check if a year is a leap year.
 fn is_leap_year(year: u64) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+}
+
+/// Length of `month` (1-based) in a leap or common year, or `None` if `month`
+/// is not a month.
+fn days_in_month(month: u64, leap: bool) -> Option<u64> {
+    let lengths: [u64; 12] = if leap {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    lengths.get(month.checked_sub(1)? as usize).copied()
 }
 
 /// Parse a simple date string into a Unix timestamp.
@@ -996,7 +1038,7 @@ fn try_parse_iso8601(s: &str) -> Option<u64> {
         (0, 0, 0)
     };
 
-    Some(ymd_hms_to_epoch(year, month, day, hours, minutes, seconds))
+    ymd_hms_to_epoch(year, month, day, hours, minutes, seconds)
 }
 
 /// Parse time components from "HH:MM:SS" or "HH:MM" string.
@@ -1035,7 +1077,7 @@ fn try_parse_rfc822(s: &str) -> Option<u64> {
         (0, 0, 0)
     };
 
-    Some(ymd_hms_to_epoch(year, month, day, hours, minutes, seconds))
+    ymd_hms_to_epoch(year, month, day, hours, minutes, seconds)
 }
 
 /// Convert month name abbreviation to number (1-12).
@@ -1066,34 +1108,71 @@ fn try_parse_simple_date(s: &str) -> Option<u64> {
     let year: u64 = parts.first()?.parse().ok()?;
     let month: u64 = parts.get(1)?.parse().ok()?;
     let day: u64 = parts.get(2)?.parse().ok()?;
-    Some(ymd_hms_to_epoch(year, month, day, 0, 0, 0))
+    ymd_hms_to_epoch(year, month, day, 0, 0, 0)
+}
+
+/// Days from 1970-01-01 to `year-month-day`, or `None` if that is not a date.
+///
+/// Closed form, after Howard Hinnant's `days_from_civil` — the exact inverse
+/// of [`days_to_ymd`], and it replaced the same defect. The old version was
+/// `for y in 1970..year { total_days += … }`, and `year` is parsed straight
+/// out of a feed's `<pubDate>` with `parse().ok()?` into a `u64`. So a feed
+/// served from any URL the user had subscribed to could set the trip count of
+/// a loop on the parsing thread. Measured: `"4000000-01-01"` took 107 ms for
+/// one date — a hundred such items in a feed is eleven seconds of freeze —
+/// and `"18446744073709551615-01-01"` did not finish, and cannot, because
+/// 1.8e19 iterations is not a wait, it is a hang.
+///
+/// The bound is [`YEAR_RANGE`] rather than merely "small enough not to hang":
+/// the two are the same fix, but a year outside it is not a date and saying
+/// so is more useful than computing a timestamp from it.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "The guard on the first line bounds `year` to 9999 and `month` to \
+              12, and `days_in_month` bounds `day` to 31, so `shifted_year` is \
+              under 10_000, `year_of_era` is in 0..=399, `month_index` in \
+              0..=11 and `day_of_year` in 0..=365. Every product below is \
+              therefore under 1.5 million, against a u64. The subtraction of \
+              DAYS_FROM_0000_03_01_TO_EPOCH is the one operation that can \
+              genuinely go negative -- for a year before 1970 -- and it is \
+              written as `checked_sub`."
+)]
+fn days_from_civil(year: u64, month: u64, day: u64) -> Option<u64> {
+    if !YEAR_RANGE.contains(&year) || !(1..=12).contains(&month) {
+        return None;
+    }
+    if day < 1 || day > days_in_month(month, is_leap_year(year))? {
+        return None;
+    }
+
+    // March is month 0, so the leap day is the last day of the year rather
+    // than one buried in the middle that every later month has to know about.
+    let shifted_year = if month <= 2 { year - 1 } else { year };
+    let era = shifted_year / 400;
+    let year_of_era = shifted_year - era * 400; // 0..=399
+    let month_index = if month > 2 { month - 3 } else { month + 9 }; // 0..=11
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1; // 0..=365
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+
+    (era * DAYS_PER_ERA + day_of_era).checked_sub(DAYS_FROM_0000_03_01_TO_EPOCH)
 }
 
 /// Convert year/month/day/hour/minute/second to Unix epoch seconds.
-fn ymd_hms_to_epoch(year: u64, month: u64, day: u64, h: u64, m: u64, s: u64) -> u64 {
-    let mut total_days: u64 = 0;
-
-    // Days from years
-    for y in 1970..year {
-        total_days += if is_leap_year(y) { 366 } else { 365 };
+///
+/// `None` for a date [`days_from_civil`] refuses, or a clock reading that is
+/// not one — 25:00 and 00:99 turn up in feeds written by hand, and a parser
+/// that accepts them silently reports an article as posted the following day.
+fn ymd_hms_to_epoch(year: u64, month: u64, day: u64, h: u64, m: u64, s: u64) -> Option<u64> {
+    if h > 23 || m > 59 || s > 60 {
+        // 60 is allowed: a leap second is a real reading, and folding it into
+        // the following minute is closer than rejecting the whole article.
+        return None;
     }
-
-    // Days from months in the current year
-    let month_days: [u64; 12] = if is_leap_year(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-
-    for i in 0..(month.saturating_sub(1) as usize) {
-        if let Some(&md) = month_days.get(i) {
-            total_days += md;
-        }
-    }
-
-    total_days += day.saturating_sub(1);
-
-    total_days * 86400 + h * 3600 + m * 60 + s
+    let days = days_from_civil(year, month, day)?;
+    days.checked_mul(86_400)?
+        .checked_add(h.checked_mul(3600)?)?
+        .checked_add(m.checked_mul(60)?)?
+        .checked_add(s)
 }
 
 // ============================================================================
@@ -2183,8 +2262,16 @@ impl RssReaderApp {
     }
 
     /// Get the indices of articles matching current filter, sort, and sidebar selection.
+    ///
+    /// The articles are carried alongside their indices through the sort
+    /// rather than being looked up again from the index while comparing. The
+    /// index and the article it names are the same fact, and holding them
+    /// together means the comparator cannot be handed one that no longer
+    /// resolves — `self.articles[a_idx]` inside a `sort_by` was safe only
+    /// because the indices had just come from `enumerate()` twenty lines
+    /// above, which is an invariant no reader of the comparator can see.
     pub fn filtered_article_indices(&self) -> Vec<usize> {
-        let mut indices: Vec<usize> = self
+        let mut matching: Vec<(usize, &Article)> = self
             .articles
             .iter()
             .enumerate()
@@ -2222,41 +2309,30 @@ impl RssReaderApp {
                     || textfind::contains(&a.author, &self.search_query, case)
                     || textfind::contains(a.display_content(), &self.search_query, case)
             })
-            .map(|(i, _)| i)
             .collect();
 
-        // Sort
-        indices.sort_by(|&a_idx, &b_idx| {
-            let a = &self.articles[a_idx];
-            let b = &self.articles[b_idx];
-            match self.sort_order {
-                SortOrder::DateDesc => b.published.cmp(&a.published),
-                SortOrder::DateAsc => a.published.cmp(&b.published),
-                SortOrder::TitleAsc => a.title.cmp(&b.title),
-                SortOrder::TitleDesc => b.title.cmp(&a.title),
-                SortOrder::FeedNameAsc => {
-                    let fa = self.feed_name(a.feed_id);
-                    let fb = self.feed_name(b.feed_id);
-                    fa.cmp(&fb)
-                }
-                SortOrder::FeedNameDesc => {
-                    let fa = self.feed_name(a.feed_id);
-                    let fb = self.feed_name(b.feed_id);
-                    fb.cmp(&fa)
-                }
-            }
+        matching.sort_by(|(_, a), (_, b)| match self.sort_order {
+            SortOrder::DateDesc => b.published.cmp(&a.published),
+            SortOrder::DateAsc => a.published.cmp(&b.published),
+            SortOrder::TitleAsc => a.title.cmp(&b.title),
+            SortOrder::TitleDesc => b.title.cmp(&a.title),
+            SortOrder::FeedNameAsc => self.feed_name(a.feed_id).cmp(self.feed_name(b.feed_id)),
+            SortOrder::FeedNameDesc => self.feed_name(b.feed_id).cmp(self.feed_name(a.feed_id)),
         });
 
-        indices
+        matching.into_iter().map(|(i, _)| i).collect()
     }
 
     /// Get the display name of a feed by ID.
-    pub fn feed_name(&self, feed_id: FeedId) -> String {
+    ///
+    /// Borrowed, not cloned: the feed-name sort orders call this twice per
+    /// comparison, so returning a `String` allocated and freed two feed titles
+    /// for every step of an O(n log n) sort that runs on every frame.
+    pub fn feed_name(&self, feed_id: FeedId) -> &str {
         self.feeds
             .iter()
             .find(|f| f.id == feed_id)
-            .map(|f| f.title.clone())
-            .unwrap_or_else(|| "Unknown Feed".to_string())
+            .map_or("Unknown Feed", |f| f.title.as_str())
     }
 
     /// Navigate to the next article.
@@ -3372,7 +3448,13 @@ impl RssReaderApp {
                 break; // Below visible area
             }
 
-            let article = &self.articles[article_idx];
+            let Some(article) = self.articles.get(article_idx) else {
+                // Keep the row's slot. A bare `continue` here would skip the
+                // `cy += item_height` at the foot of the loop and slide every
+                // article below this one up by a row.
+                cy += item_height;
+                continue;
+            };
             let is_selected = list_idx == self.selected_article_index;
             let is_active = is_selected && self.active_pane == ActivePane::ArticleList;
 
@@ -4374,6 +4456,115 @@ mod tests {
         }
     }
 
+    /// `<pubDate>` is remote data and the year was parsed from it into a `u64`
+    /// with no range check, then used as the trip count of `for y in
+    /// 1970..year`. Measured against the old code: `"4000000-01-01"` took
+    /// 107 ms to parse one date, and `"18446744073709551615-01-01"` never
+    /// returned — 1.8e19 iterations is not a slow parse, it is a hang, on
+    /// whichever thread was fetching the feed.
+    #[test]
+    fn an_absurd_year_is_refused_instead_of_hanging_the_parser() {
+        let started = std::time::Instant::now();
+        for date in [
+            "18446744073709551615-01-01",
+            "4000000-01-01",
+            "999999999-12-31T23:59:59Z",
+            "1 Jan 18446744073709551615 00:00:00 GMT",
+        ] {
+            assert_eq!(parse_date_string(date), None, "{date} is not a date");
+        }
+        // Not a timing assertion so much as a liveness one: the old code did
+        // not finish the first of these at all, so any bound at all is the
+        // difference being tested. A second is orders of magnitude of slack
+        // over the closed form.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "parsing four impossible dates should be instant, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// `days_from_civil` and `days_to_ymd` are inverses, and this is the
+    /// property that says so — the two closed forms replaced two loops that
+    /// were each other's inverse by construction, so nothing weaker than a
+    /// round trip over the whole accepted range would catch a transcription
+    /// slip in one of them.
+    #[test]
+    fn the_two_calendar_directions_are_inverses_over_the_whole_year_range() {
+        let mut checked = 0u32;
+        let mut previous_days = None;
+        for year in YEAR_RANGE {
+            let leap = is_leap_year(year);
+            for month in 1..=12u64 {
+                let last = days_in_month(month, leap).expect("1..=12 are months");
+                for day in [1, 2, 15, last] {
+                    let days = days_from_civil(year, month, day)
+                        .unwrap_or_else(|| panic!("{year:04}-{month:02}-{day:02} is a real date"));
+                    assert_eq!(
+                        days_to_ymd(days),
+                        (year, month, day),
+                        "round trip failed for {year:04}-{month:02}-{day:02}"
+                    );
+                    // Monotonic: a later date is a larger day number. A sign
+                    // error inside one era could round-trip and still be wrong.
+                    if let Some(prev) = previous_days {
+                        assert!(
+                            days > prev,
+                            "{year:04}-{month:02}-{day:02} did not advance the day count"
+                        );
+                    }
+                    previous_days = Some(days);
+                    checked += 1;
+                }
+                // Never accept a day past the end of the month.
+                assert_eq!(
+                    days_from_civil(year, month, last + 1),
+                    None,
+                    "{year:04}-{month:02} has only {last} days"
+                );
+            }
+        }
+        assert!(checked > 380_000, "expected the whole range, got {checked}");
+    }
+
+    /// Leap-year handling is the part of a calendar that goes wrong quietly.
+    #[test]
+    fn february_29_exists_exactly_in_leap_years() {
+        for (year, leap) in [
+            (2000u64, true), // divisible by 400, so a leap year
+            (2024, true),
+            (2023, false),
+            (2100, false), // divisible by 100 but not 400, so it is not
+            (2400, true),
+        ] {
+            assert_eq!(
+                days_from_civil(year, 2, 29).is_some(),
+                leap,
+                "February 29 in {year}"
+            );
+        }
+    }
+
+    /// A clock reading that is not one used to be folded into the following
+    /// day rather than rejected, so an article stamped 25:00 was reported as
+    /// posted tomorrow.
+    #[test]
+    fn an_impossible_clock_reading_is_refused() {
+        assert!(ymd_hms_to_epoch(2024, 1, 1, 23, 59, 59).is_some());
+        assert_eq!(ymd_hms_to_epoch(2024, 1, 1, 24, 0, 0), None);
+        assert_eq!(ymd_hms_to_epoch(2024, 1, 1, 0, 60, 0), None);
+        assert_eq!(ymd_hms_to_epoch(2024, 1, 1, 0, 0, 61), None);
+        // A leap second is a real reading and is kept.
+        assert!(ymd_hms_to_epoch(2016, 12, 31, 23, 59, 60).is_some());
+        // As are the dates that are not dates.
+        assert_eq!(ymd_hms_to_epoch(2023, 2, 29, 0, 0, 0), None);
+        assert_eq!(ymd_hms_to_epoch(2024, 13, 1, 0, 0, 0), None);
+        assert_eq!(ymd_hms_to_epoch(2024, 1, 0, 0, 0, 0), None);
+        // Before the epoch there is no u64 timestamp to return, and the old
+        // code silently answered as though the year were 1970.
+        assert_eq!(ymd_hms_to_epoch(1969, 12, 31, 0, 0, 0), None);
+    }
+
     /// Sibling elements are not nesting. The counter is decremented when a
     /// child closes, so a feed with thousands of `<item>`s under one
     /// `<channel>` — which is completely ordinary — must not trip the limit.
@@ -4791,7 +4982,7 @@ mod tests {
     #[test]
     fn test_format_timestamp_known_date() {
         // 2024-01-01 00:00:00 UTC
-        let ts = ymd_hms_to_epoch(2024, 1, 1, 0, 0, 0);
+        let ts = ymd_hms_to_epoch(2024, 1, 1, 0, 0, 0).expect("2024-01-01 is a date");
         let formatted = format_timestamp(ts);
         assert!(formatted.starts_with("2024-01-01"));
     }
@@ -4813,7 +5004,7 @@ mod tests {
     #[test]
     fn test_days_to_ymd_known_date() {
         // 2024-01-01 is day 19723 since epoch
-        let ts = ymd_hms_to_epoch(2024, 1, 1, 0, 0, 0);
+        let ts = ymd_hms_to_epoch(2024, 1, 1, 0, 0, 0).expect("2024-01-01 is a date");
         let days = ts / 86400;
         let (y, m, d) = days_to_ymd(days);
         assert_eq!((y, m, d), (2024, 1, 1));

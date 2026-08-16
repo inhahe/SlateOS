@@ -138,6 +138,18 @@ Worst crates: `editor` 500, `markdowneditor` 348, `explorer` 264, `paint` 234,
 `contacts`, `simon`, `diskcleanup`, `pomodoro` and `radio` have exactly one
 finding each.
 
+**Two of those counts were wrong, in opposite directions** (found 2026-08-16
+while sweeping them; see the entries below). `contacts` really did have one
+*production* finding — and following that one warning found two user-visible
+defects. `simon` had **35**: the crate blanket-allowed five defensive lints at
+its crate root, so every count ever taken for it was measured against a
+suppressed baseline, and one of the 35 hidden findings was the entire game
+being a fixed four-step cycle. `apps/hangman` (5 such allows) and
+`apps/jsonviewer` (2) suppress the same way and have not been re-counted, so
+**treat any per-crate figure above as a lower bound until that crate's root has
+been checked for `#![allow]`** — a count taken through a suppression measures
+the suppression, not the crate.
+
 The 1919 `indexing_slicing` findings are the ones worth attacking first: that
 is precisely the lint class that would have caught the eighteen byte/character
 sites recorded above at the moment they were written. `arithmetic_side_effects`
@@ -521,6 +533,116 @@ Other findings worth keeping:
   the path of addresses being visited, so a depth failure is never one; the
   depth backstop used to report `#CIRC!`, which pointed at a cycle that was not
   there.
+
+### Sweep progress: `simon` 35 → 0, all lint classes (2026-08-16)
+
+Thirteenth crate, eighth to reach **zero warnings of every class** across
+`--all-targets`. Tests 106 → 110.
+
+The table near the top of this file credits `simon` with **one** finding. It
+had **35**, because the crate root carried five `#![allow(clippy::…)]` lines —
+`unwrap_used`, `expect_used`, `panic`, `indexing_slicing`,
+`arithmetic_side_effects` — and a lint that is allowed does not appear in a
+count of lints. Twenty-two of the 35 were in the game logic rather than the
+tests, and one of those twenty-two was the entire game (next entry). The allows
+now sit on `mod tests`, where panicking on bad data is the point, and the crate
+root enforces the workspace lints like every other crate.
+
+## `apps/simon` dealt the same four colours in the same order, in every game, at every seed (lane C)
+
+**Status: FIXED 2026-08-16** in `8d135ad07`. Verified by reverting the
+reduction alone and watching the new test fail.
+
+`Lcg::next_bounded` reduced the generator's output with `val % bound`. This
+generator is a linear congruential generator with modulus 2^64 — i.e. it
+multiplies and adds in wrapping `u64` arithmetic — and in such a generator
+**bit *k* of the state has period 2^(*k*+1)**. Bit 0 alternates 0,1,0,1. Bit 1
+has period 4. The low bits of a power-of-two LCG are not merely "weaker" in the
+folklore sense; they are a counter. `val % bound` for a power-of-two `bound`
+returns exactly those bits and nothing else.
+
+Simon draws from four colours, so `val % 4` read the low two bits, period
+exactly 4. Every game, at every seed, dealt out Green, Red, Yellow, Blue, then
+Green, Red, Yellow, Blue, for ever. The step from each colour to the next was
+always the same step. There was nothing to memorise — the game's whole content
+was gone — and the only thing a player would notice is that they could not lose
+after the first round.
+
+**106 existing tests passed against it**, and that is the part worth keeping:
+the broken draw is *perfectly uniform*. Every colour appears exactly a quarter
+of the time, the mean is right, a chi-squared test on the counts is clean. Only
+the *order* is degenerate. **A distribution check cannot see this bug**, so the
+new test asserts that the *step* between consecutive colours varies, which is a
+property of a sequence rather than of a histogram.
+
+The fix takes the **high** bits instead, by multiplying the 64-bit output by
+the bound as a 128-bit product and keeping the top half (Lemire 2019). That is
+nearly unbiased, needs no rejection loop, and is total: a bound of zero returns
+0 where the old body divided by zero.
+
+Three further findings from the same read, all instances of patterns this sweep
+keeps hitting: `start_next_round` asked for `next_bounded(4)` and then mapped
+the answer through `from_index`, *stating the number of colours twice*;
+`advance_playback` tested `step_index >= sequence.len()` and then indexed with
+`step_index`, *asking one question twice*; `player_press` indexed the sequence
+on an invariant maintained by four other methods. All three are now a single
+`get`.
+
+## The same broken reduction is copy-pasted into 27 crates, and `randrange` now exists to replace it (lane C)
+
+**Status: OPEN 2026-08-16 — one of 27 crates fixed** (`apps/simon`, above); the
+shared crate that the rest should move to is written and green.
+
+The defect above is not `simon`'s. A scan of the tree
+(`build/scratch/lcg_scan.py`) finds the same LCG constants in **~36 places** and
+the same low-bit `%` reduction in **27 crates**. It is one piece of code that
+was pasted 27 times, so it has 27 copies of one bug.
+
+Whether a given copy is visibly broken depends only on whether its bound is a
+power of two, because an odd factor in the bound makes the remainder depend on
+the whole word again and the period comes back. Confirmed degenerate call sites:
+
+| crate | bound | what repeats |
+|---|---:|---|
+| `apps/simon` | 4 | the whole colour sequence (fixed) |
+| `apps/asteroids` | 4 | — |
+| `apps/pipes` | 4 | — |
+| `apps/sliding` | 4 | — |
+| `apps/battleship` | 2 | — |
+
+`apps/life`'s `next_bool` uses `% 100`; 100 = 4 × 25, and the odd factor 25
+restores a long period, so it is mild. That is exactly why the defect survived
+so long: most call sites use an odd or non-power-of-two bound and look fine,
+and the ones that do not still pass every distribution test written against
+them.
+
+The replacement is **`randrange/`**, a new top-level `no_std`,
+dependency-free crate on the same pattern as `textfind`, `byteread` and
+`yamldoc`. It fixes the bug twice over, deliberately:
+
+1. **The reduction uses the high bits** (the Lemire multiply above), so no
+   caller can pick up the low-bit counter through the API.
+2. **The generator's output is permuted** by SplitMix64's finaliser before it
+   is returned, so `next_u64()` has no weak bits *at all* — a caller who
+   ignores `below()` and writes their own `% 2` is still fine.
+
+Either defence alone makes the cycle test pass, which is why the crate also
+carries `the_original_defect_still_cycles_when_reproduced`: it rebuilds the
+historical `state % bound` body inside the test and asserts it *does* cycle, so
+the test pins the claim rather than the implementation. See
+`design-decisions.md` §447 for why one crate rather than 27 local fixes, and
+for what `randrange` deliberately is not (it is **not** cryptographic —
+`apps/passwordgen` must not migrate to it).
+
+**Migration is the open part.** The remaining 26 crates each need their local
+`Lcg` deleted and `randrange::Rng` used instead. `randrange` is *not*
+stream-compatible with the code it replaces — the same seed gives a different
+sequence, necessarily, since that is the fix — so any test that pinned a
+specific board layout, shuffle or spawn pattern will need a new expectation.
+Each of those is worth reading rather than re-baselining: a test that pins a
+layout is asserting a photograph, and the question it should have been asking
+(is the board solvable, are the ships non-overlapping, does the sequence vary)
+is usually one line away and would have survived the fix.
 
 ### Sweep progress: `contacts` 83 → 0, all lint classes (2026-08-16)
 

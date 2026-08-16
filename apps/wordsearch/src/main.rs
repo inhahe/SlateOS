@@ -81,52 +81,23 @@ const DIRECTIONS: [(i32, i32); 8] = [
     (-1, -1), // up-left
 ];
 
-// ── LCG random number generator ────────────────────────────────────
-/// Simple linear congruential generator. Parameters from Numerical Recipes.
-struct Lcg {
-    state: u64,
-}
+// ── Random numbers ─────────────────────────────────────────────────
+// This crate used to carry its own LCG, whose `next_u64() % bound` handed
+// back the low bits of a power-of-two-modulus generator.  Both of this
+// game's bounds are even, and an even bound preserves the state's parity,
+// so the draw's parity alternated with the draw counter: consecutive
+// filler letters came from opposite halves of the alphabet (a row read
+// `TWNQVUBONQHMRMH` -- odd, even, odd, even), and the Fisher-Yates over
+// the 30-word category list dealt BISON into 14% of puzzles against
+// ZEBRA's 41%.
+use randrange::Rng;
 
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self {
-            state: if seed == 0 { 1 } else { seed },
-        }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    /// Returns a value in `0..bound` (exclusive upper bound).
-    fn next_bounded(&mut self, bound: usize) -> usize {
-        if bound == 0 {
-            return 0;
-        }
-        let val = self.next_u64();
-        (val % bound as u64) as usize
-    }
-
-    /// Returns a random uppercase ASCII letter ('A'..='Z').
-    fn next_letter(&mut self) -> u8 {
-        b'A' + self.next_bounded(26) as u8
-    }
-
-    /// Fisher-Yates shuffle of a mutable slice.
-    fn shuffle<T>(&mut self, slice: &mut [T]) {
-        let len = slice.len();
-        if len <= 1 {
-            return;
-        }
-        for i in (1..len).rev() {
-            let j = self.next_bounded(i + 1);
-            slice.swap(i, j);
-        }
-    }
+/// A random uppercase ASCII letter, `A..=Z`.
+///
+/// A free function rather than a `Rng` method because an alphabet is this
+/// game's unit, not the generator's.
+fn random_letter(rng: &mut Rng) -> u8 {
+    b'A'.saturating_add(u8::try_from(rng.below(26)).unwrap_or(0))
 }
 
 // ── Word categories ─────────────────────────────────────────────────
@@ -342,7 +313,7 @@ struct WordSearchApp {
     /// Hints remaining.
     hints_remaining: usize,
     /// RNG instance.
-    rng: Lcg,
+    rng: Rng,
     /// Cells that are part of found words (row, col) for highlighting.
     found_cells: Vec<(usize, usize)>,
     /// Active hint highlight.
@@ -366,7 +337,7 @@ impl WordSearchApp {
             status: GameStatus::Playing,
             elapsed_secs: 0,
             hints_remaining: MAX_HINTS,
-            rng: Lcg::new(seed),
+            rng: Rng::new(seed),
             found_cells: Vec::new(),
             hint_highlight: None,
             seed,
@@ -388,7 +359,7 @@ impl WordSearchApp {
             status: GameStatus::Playing,
             elapsed_secs: 0,
             hints_remaining: MAX_HINTS,
-            rng: Lcg::new(seed),
+            rng: Rng::new(seed),
             found_cells: Vec::new(),
             hint_highlight: None,
             seed,
@@ -411,7 +382,7 @@ impl WordSearchApp {
         self.hint_highlight = None;
         // Advance the seed for variety.
         self.seed = self.seed.wrapping_add(7);
-        self.rng = Lcg::new(self.seed);
+        self.rng = Rng::new(self.seed);
         self.generate_puzzle();
     }
 
@@ -450,7 +421,7 @@ impl WordSearchApp {
         // Fill remaining empty cells with random letters.
         for cell in &mut self.grid {
             if *cell == 0 {
-                *cell = self.rng.next_letter();
+                *cell = random_letter(&mut self.rng);
             }
         }
     }
@@ -480,7 +451,7 @@ impl WordSearchApp {
         }
 
         // Pick a random valid placement.
-        let pick = self.rng.next_bounded(placements.len());
+        let pick = self.rng.below(placements.len());
         let (row, col, dir_idx) = placements[pick];
         let (dr, dc) = DIRECTIONS[dir_idx];
 
@@ -1110,6 +1081,7 @@ fn main() {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     // ── Strikethrough width ─────────────────────────────────────────
 
@@ -1216,90 +1188,85 @@ mod tests {
         );
     }
 
-    // ── LCG tests ───────────────────────────────────────────────────
+    // ── Random-letter tests ─────────────────────────────────────────
+    //
+    // The generator's own behaviour -- determinism, bound respect, shuffle
+    // permutation -- is tested in `randrange`; what belongs here is the
+    // alphabet this game builds on top of it.
 
     #[test]
-    fn test_lcg_deterministic() {
-        let mut rng1 = Lcg::new(42);
-        let mut rng2 = Lcg::new(42);
-        for _ in 0..100 {
-            assert_eq!(rng1.next_u64(), rng2.next_u64());
-        }
-    }
-
-    #[test]
-    fn test_lcg_different_seeds() {
-        let mut rng1 = Lcg::new(1);
-        let mut rng2 = Lcg::new(2);
-        // Very unlikely to produce the same first value.
-        assert_ne!(rng1.next_u64(), rng2.next_u64());
-    }
-
-    #[test]
-    fn test_lcg_zero_seed_no_stuck() {
-        let mut rng = Lcg::new(0);
-        let first = rng.next_u64();
-        let second = rng.next_u64();
-        assert_ne!(first, 0);
-        assert_ne!(second, 0);
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn test_lcg_bounded_range() {
-        let mut rng = Lcg::new(99);
+    fn test_random_letter_in_range() {
+        let mut rng = Rng::new(12345);
         for _ in 0..200 {
-            let val = rng.next_bounded(10);
-            assert!(val < 10);
+            let ch = random_letter(&mut rng);
+            assert!(ch.is_ascii_uppercase(), "Letter out of range: {ch}");
         }
     }
 
+    /// The old `% 26` reduction handed back the low bits of a
+    /// power-of-two-modulus LCG.  26 is even, so it preserved the state's
+    /// parity, and consecutive letters alternated between the odd and even
+    /// halves of the alphabet: over 2000 draws, no letter ever equalled the
+    /// one before it, and each parity class held exactly 13 letters.
     #[test]
-    fn test_lcg_bounded_one() {
-        let mut rng = Lcg::new(1);
-        for _ in 0..10 {
-            assert_eq!(rng.next_bounded(1), 0);
+    fn consecutive_filler_letters_are_not_locked_to_opposite_halves() {
+        const DRAWS: usize = 2000;
+        let mut rng = Rng::new(42);
+        let letters: Vec<u8> = (0..DRAWS).map(|_| random_letter(&mut rng)).collect();
+
+        let repeats = letters.windows(2).filter(|w| w.first() == w.last()).count();
+        assert!(
+            repeats > 30,
+            "only {repeats} of {} consecutive letter pairs matched, expected about {}",
+            DRAWS - 1,
+            (DRAWS - 1) / 26
+        );
+
+        // Each half of the stream must reach the whole alphabet, not the 13
+        // letters of one parity class.
+        for (name, half) in [("even", 0usize), ("odd", 1usize)] {
+            let seen: BTreeSet<u8> = letters.iter().skip(half).step_by(2).copied().collect();
+            assert!(
+                seen.len() > 20,
+                "{name}-index draws produced only {} distinct letters, not the alphabet",
+                seen.len()
+            );
         }
     }
 
+    /// Every word in a category must be about as likely to be chosen as any
+    /// other.  Under the old reduction the Fisher-Yates bounds `i + 1` were
+    /// even for every odd `i`, and the bias compounded: over 5000 new games
+    /// BISON was picked 718 times against ZEBRA's 2053, where 1667 is fair.
     #[test]
-    fn test_lcg_bounded_zero() {
-        let mut rng = Lcg::new(1);
-        assert_eq!(rng.next_bounded(0), 0);
-    }
+    fn every_word_in_a_category_is_about_equally_likely() {
+        const GAMES: usize = 5000;
+        let words = Category::Animals.words();
+        let mut counts = vec![0usize; words.len()];
 
-    #[test]
-    fn test_lcg_next_letter() {
-        let mut rng = Lcg::new(12345);
-        for _ in 0..200 {
-            let ch = rng.next_letter();
-            assert!(ch >= b'A' && ch <= b'Z', "Letter out of range: {ch}");
+        // `new_game` advances the seed by 7, so this is the stream a player
+        // walking through puzzles actually sees.
+        for k in 0..GAMES {
+            let mut rng = Rng::new(42u64.wrapping_add(7 * k as u64));
+            let mut indices: Vec<usize> = (0..words.len()).collect();
+            rng.shuffle(&mut indices);
+            for &idx in indices.iter().take(Difficulty::Medium.word_count()) {
+                if let Some(slot) = counts.get_mut(idx) {
+                    *slot += 1;
+                }
+            }
         }
-    }
 
-    #[test]
-    fn test_lcg_shuffle_preserves_elements() {
-        let mut rng = Lcg::new(7);
-        let mut arr = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        rng.shuffle(&mut arr);
-        arr.sort();
-        assert_eq!(arr, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-    }
-
-    #[test]
-    fn test_lcg_shuffle_empty() {
-        let mut rng = Lcg::new(1);
-        let mut arr: Vec<i32> = Vec::new();
-        rng.shuffle(&mut arr);
-        assert!(arr.is_empty());
-    }
-
-    #[test]
-    fn test_lcg_shuffle_single() {
-        let mut rng = Lcg::new(1);
-        let mut arr = vec![42];
-        rng.shuffle(&mut arr);
-        assert_eq!(arr, vec![42]);
+        let expected = (GAMES * Difficulty::Medium.word_count()) as f64 / words.len() as f64;
+        for (idx, &count) in counts.iter().enumerate() {
+            let drift = (count as f64 - expected).abs() / expected;
+            assert!(
+                drift < 0.15,
+                "{} was chosen {count} times in {GAMES} games, {:.0}% off the fair share of {expected:.0}",
+                words.get(idx).copied().unwrap_or("?"),
+                drift * 100.0
+            );
+        }
     }
 
     // ── Category tests ──────────────────────────────────────────────

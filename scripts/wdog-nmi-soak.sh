@@ -18,6 +18,15 @@ for i in $(seq 1 "$MAX_ITERS"); do
         --timeout="$PER_BOOT_TIMEOUT" >"$CATCH_DIR/nmi-iter-$i.stdout" 2>&1
     rc=$?
     dur=$(( $(date +%s) - t0 ))
+    # rc=4: another lane's live run held the QEMU lock, so boot-test refused to
+    # start a second emulator and nothing booted.  Without this the iteration
+    # would land in the "no BOOT_OK and no NMI dump" arm and be saved for
+    # inspection as an anomaly it is not.
+    if [ "$rc" -eq 4 ]; then
+        echo "iter $i: boot lock held by another lane — no boot; retrying in 60s"
+        sleep 60
+        continue
+    fi
     if grep -q "NMI WATCHDOG FIRED" "$SERIAL_FILE" 2>/dev/null; then
         cp "$SERIAL_FILE" "$CATCH_DIR/NMI-FIRED-iter-$i.txt"
         echo "!!! iter $i: NMI WATCHDOG FIRED (rc=$rc dur=${dur}s) — backtrace captured !!!"

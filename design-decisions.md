@@ -10252,6 +10252,352 @@ directory opts out of by not having it.
 
 ---
 
+## §209 — Boot outcomes are recorded from one place and classified from evidence; an unvalidated fingerprint reports as unvalidated, never as a streak
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+**Where:** `scripts/boot-history.py`, `scripts/test-boot-history.py`,
+`scripts/boot-test.sh` (EXIT trap), `scripts/wedge-soak.sh` (`BOOT_LABEL`),
+`bench/boot-history.jsonl`
+
+**In short:** four of lane A's open kernel bugs are intermittent hangs whose
+closure condition is "N clean boots in a row" — and until now nothing counted
+the boots. W1's status line has said "clean streak **7**" since 2026-06-14
+while many dozens of boots have passed; the entry itself calls that "stale
+bookkeeping, not a real count." The boot test now writes one row per run to
+`bench/boot-history.jsonl`, and the streaks become a query instead of a number
+someone has to remember to edit. Two things were decided on the way, each with
+a real alternative: **where** the recorder is called from, and **what a
+fingerprint that has never matched is allowed to print**.
+
+### The problem the numbers were solving
+
+`bench/history.jsonl` already exists and is the precedent — `bench-history.py`
+opens with the same argument in its own voice: *"boot-test.sh already tells the
+reader to compare against prior runs — but nothing stored the prior runs, so
+that advice was unfollowable."* It stores numbers. It cannot store this: it only
+gains a record on a `--bench` run that reached its marker, so it is
+structurally blind to precisely the runs that matter here — the ones that never
+got there.
+
+Meanwhile the evidence for a failed boot lives in `build/serial-test.txt`, which
+is gitignored per-worktree scratch and is overwritten by the next run. So a hang
+is preserved only if a human pastes it into markdown before the next boot. That
+loss already cost an investigation once; `boot-test.sh`'s own comment says so at
+the tail-printing block: *"this exact loss bit the fork+exec-hang investigation."*
+
+### Decision 1 — one call site in the EXIT trap, verdict derived from `(exit code, serial log)`
+
+| Option | Why not |
+|---|---|
+| Call the recorder at each `exit` site | `boot-test.sh` has ~12. The thirteenth one someone adds is a **failure** site, and the omission reads downstream as a clean streak — the check silently disarms in the one direction that closes bugs on no evidence. |
+| Record from the callers (`wedge-soak.sh`, ad-hoc runs) | Only soaks would ever be recorded, and routine boots are the majority of the streak. The closure bars explicitly count routine boots. |
+| **One call in the EXIT trap, classifying from evidence** ✓ | Cannot be forgotten by construction: every exit path goes through it. |
+
+That forces the verdict to be *derived* rather than passed in, which turned out
+to be the better design anyway: exit 1 is reached from five distinct conditions
+and only the serial log distinguishes them, while the serial log alone cannot
+tell a stall (exit 2) from a plain timeout, since both end with no marker. Each
+source answers the half the other cannot.
+
+Two smaller calls fell out of it, both with a failure mode worth naming:
+
+- **`$?` is captured as the handler's first argument, before anything else
+  runs.** Reaping QEMU and running the recorder both clobber it otherwise.
+- **INT/TERM get a separate handler from EXIT, and record nothing.** An
+  operator's Ctrl-C is not a boot outcome; recording it would reset every hang
+  streak every time someone stopped a run early. A once-guard keeps the cleanup
+  single, since bash runs the signal handler *and then* the EXIT handler.
+- **A missing serial log is `NO_BOOT` and is not recorded at all.** It means the
+  build failed or the harness died before QEMU wrote anything. Compile errors
+  are far more common than hangs, so recording them as outcomes would reset
+  every streak faster than it could grow.
+
+### Decision 2 — `validated_by`, and the refusal to print a streak without it
+
+This is the one with a genuine cost. Each fingerprint (a predicate identifying a
+known issue in a failed boot's serial log) carries the list of real occurrences
+it is known to match. A fingerprint with an empty list prints a warning **in
+place of** its streak rather than alongside it.
+
+*Against:* a suppressed number is a number the reader wanted. Someone adding a
+fingerprint for a new bug gets no streak from it until they can point at an
+occurrence — which, for a bug seen once before the recorder existed, means
+reconstructing the sample from `known-issues.md`.
+
+*For, and decisive:* a matcher that can never fire produces a **perfect** clean
+streak, and a perfect clean streak is exactly what closes an issue. The number
+and the bug are then indistinguishable from the outside. This is the same rule
+`stamp-ancestry.py` adopted when a declared source path does not exist (§208) —
+*could not verify* must never render as *fine* — and the same lesson
+`test-bench-history.py`'s docstring records as the thing "the project keeps
+rediscovering."
+
+The validation is enforced by tests, not by the field: `test-boot-history.py`
+reconstructs a serial sample from the evidence quoted in `known-issues.md` for
+every occurrence named in `validated_by`, asserts each matches its own
+fingerprint **and no other**, and fails if a fingerprint claims validation
+without a sample. A comment claiming "this matches the 2026-06-12 hang" cannot
+fire either; a test can.
+
+### Two fingerprints that shaped the rest
+
+- **W1 is fingerprinted on the *silence*, not on the OOM self-test.** Its
+  2026-08-14 analysis argues the console-lock fixes mean a re-entry now *prints*
+  instead of spinning, and recommends retargeting the bar "from ~90 blind boots
+  to one observation." So the predicate is: no marker, log cut **mid-line**, no
+  exception and no panic anywhere. A match falsifies that analysis, which the
+  entry itself says is worth more than the 83 remaining clean boots.
+- **`B-PTHREAD-TEARDOWN-PF` is matched on `(address, task name)`, never on the
+  RIP.** The RIP moves with every kernel rebuild, so a RIP-keyed fingerprint
+  stops matching after any recompilation — and a streak that resets to *clean*
+  on recompilation is worse than no streak, because it looks like progress.
+
+### What this commits us to
+
+Every boot from `boot-test.sh` appends a row to a committed file, and failures
+carry a bounded serial tail (40 lines × 300 chars) so the freeze context
+survives the next run. Passes carry none — a passing tail is the same lines
+every time, and this file is appended to from three worktrees and merged as
+text. The known-issues streak numbers should now be *quoted from*
+`--streaks` rather than maintained by hand; the entries keep their prose, but
+the counts stop being something a session has to remember.
+
+---
+
+## §210 — NTFS is read-only by design, and its self-test carries its own volume so the parser is exercised on every boot
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+**Where:** `kernel/src/fs/ntfs/` (`source.rs`, `raw.rs`, `boot.rs`,
+`record.rs`, `attr.rs`, `index.rs`, `mod.rs`, `tests.rs`),
+`kernel/src/fs/mod.rs`, `kernel/src/main.rs` (self-test call site)
+
+**In short:** NTFS is the filesystem on every Windows disk, so a dual-boot
+machine's other partition is unreadable to us without a driver for it. This
+adds one that can *read* an NTFS volume but refuses every write, and that
+tests itself against a fake NTFS disk it builds in memory rather than needing
+a real one plugged in. Three calls were made along the way, each with a
+genuine alternative: read-only rather than read-write; a synthetic in-RAM
+volume rather than a device-gated test; and, for a filesystem whose names are
+case-insensitive on an OS whose names are case-sensitive, what
+`/HELLO.TXT` should open when the file on disk is `hello.txt`.
+
+### Decision 1 — read-only, and the mount says so
+
+NTFS keeps itself consistent through `$LogFile`, a write-ahead journal
+(a log of intended changes written before the changes themselves, so an
+interrupted write can be undone). Every Windows NTFS write goes through it.
+A driver that writes *without* it can leave a volume in a state `chkdsk`
+cannot repair — not "some lost data", but a directory tree Windows will
+refuse to mount. Implementing `$LogFile` correctly is a far larger job than
+the read path, and getting it subtly wrong is worse than not writing at all,
+because the damage is silent until the user next boots Windows.
+
+So `statvfs` reports `read_only: true` and every write path returns
+`ReadOnlyFilesystem`.
+
+*The consequence that needed a decision*: what `metadata()` should report for
+permissions. Inventing `0o644` — what almost every driver does — is a lie:
+userspace checks the mode, sees a writable file, opens it for writing and
+fails at the syscall. The driver reports `0o444` for files and `0o555` for
+directories, so the mode agrees with what the mount will actually do. The
+per-file DOS read-only bit deliberately does *not* narrow this further:
+while the whole mount refuses writes, reporting a narrower mode for the
+flagged files would imply the unflagged ones are writable.
+
+*Alternative rejected*: read-write with `$LogFile`. Not "too much work" — the
+issue is that a half-correct journal is indistinguishable from a correct one
+until the failure that tests it, and that failure destroys a user's Windows
+install. Revisit only with a full `$LogFile` implementation and a crash-
+injection test, not as an increment on this code.
+
+### Decision 2 — the self-test builds its own volume (`SectorSource`)
+
+The precedent to avoid is `fs::iso9660::self_test()`. It runs five pure unit
+tests and then prints *"No ISO 9660 filesystem mounted — skipping integration
+test"* — which, in the CI boot test, is every time. Its hard parts (volume
+descriptors, directory records, extents) have therefore never been executed by
+a test. NTFS is worse-shaped for that: **all** its hard parts are on-disk
+structures. A device-gated test would leave fixups, runlists, the `$I30`
+B+ tree and `$ATTRIBUTE_LIST` entirely uncovered.
+
+So the driver reads through a `SectorSource` trait with two implementations:
+`DeviceSource` (the block cache) and `MemorySource` (a `Vec<u8>`). The
+self-test hands it a synthetic volume built byte-by-byte by `tests.rs` and
+drives the *entire* parser — mount, directory listing, path resolution, file
+reads — with no device attached.
+
+Two properties of that builder were deliberate:
+
+- **It is written independently of the parser, not from shared code.** A
+  builder that reused the parser's notion of the layout would agree with it by
+  construction, including where both are wrong. `tests.rs` writes the fields
+  from the on-disk format documentation; `write_fixups` is a separate
+  implementation of the write side of `apply_fixups`.
+- **It covers each structural fork exactly once**, because NTFS's forks are
+  the kind where code that handles one branch passes on whichever volume it
+  was written against: resident vs. non-resident `$DATA` (a 100-byte file has
+  no clusters at all); an INDX-backed directory vs. a fully resident one (a
+  small directory has no `$INDEX_ALLOCATION`, a large one's `$INDEX_ROOT`
+  holds nothing but a child pointer — so a driver reading only the root lists
+  small directories perfectly and large ones as empty); a fragmented runlist;
+  a sparse run; `$ATTRIBUTE_LIST` with the `$DATA` in an extension record; an
+  8.3 DOS alias that must not be listed; a *negative* `clusters_per_mft_record`
+  (the signed power-of-two encoding a naive parser reads as 246); and a
+  non-zero MFT sequence number, so an unmasked 64-bit file reference shows up
+  as an absurd record number instead of silently working.
+
+*Alternative rejected*: shipping a real `.ntfs` image as a test fixture. It
+would be more authentic, but it is an opaque binary in git that nobody can
+review, it cannot be minimised to the cases above, and adding a new case means
+regenerating it on a Windows machine. The builder is readable, diffable, and
+each structure it emits sits next to a comment saying why that case exists.
+
+*Alternative rejected*: a `#[cfg(test)]` host-side test. The kernel's test
+story is the boot self-test; a host test would not run in CI at all.
+
+### Decision 3 — exact match first, then a *unique* case-insensitive match
+
+This OS is case-sensitive by design (`design.txt`); NTFS's `$I30` index
+collates case-**in**sensitively, which means a Windows-created volume cannot
+contain two names differing only in case. A path lookup therefore tries the
+exact name first, and only if that misses does it fold case — and if the fold
+matches **more than one** entry, the lookup fails with `NotFound` rather than
+picking one.
+
+The reasoning: `/HELLO.TXT` on a volume containing only `hello.txt` has
+exactly one plausible meaning, and refusing it makes a Windows disk unusable
+from a Windows-shaped path. But the collation guarantee is Windows's, not
+ours — a volume built by another tool (or a `POSIX`-namespace name, which NTFS
+does allow to be case-sensitive) can contain both. Where it does, opening
+*the wrong file* is a worse outcome than opening none, so ambiguity is
+refused rather than resolved.
+
+*Alternative rejected*: pure case-sensitivity. Consistent with the OS rule,
+but it makes half the paths a user types at a Windows disk fail for no reason
+the user can see.
+
+*Alternative rejected*: pure case-insensitivity (fold always, first match
+wins). Simple, matches Windows — but it silently picks between two real files
+when both exist, and it contradicts the OS-wide rule at the one place a user
+would notice.
+
+### Related refusals, for the same reason
+
+Three other places return an error rather than a plausible-looking answer, on
+the principle that a filesystem that guesses is worse than one that stops:
+
+| Situation | Response | Why not the alternative |
+|---|---|---|
+| Compressed or encrypted `$DATA` | `NotSupported` | Handing back the raw compressed bytes as file contents is data corruption that looks like success. |
+| A sector whose fixup does not match | `CorruptedData` | This is the *only* torn-write detector NTFS has. Downgrading it to a warning does not make the driver permissive, it makes it return half-old data. |
+| An `INDX` block whose VCN is not the one requested | `CorruptedData` | Fixups prove the block was written atomically, not that it is the block we asked for. A runlist bug yields a valid block from elsewhere *in the same directory* — real names in the wrong place, which passes every other check. |
+
+**How to reverse:** read-only is the load-bearing one; undoing it means
+implementing `$LogFile` and is a new project, not an edit. The `SectorSource`
+indirection costs one `dyn` call per sector read on a path that is already
+doing I/O, and could be removed by monomorphising `NtfsFs<S: SectorSource>` if
+that ever measures. The lookup rule is one function — `ntfs::lookup` in
+`mod.rs` — and switching to either pure policy is a few lines there.
+
+---
+
+## §211 — The QEMU boot lock queues, and a lane that cannot get a turn fails rather than booting anyway
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous), on lane B's request
+(`requests/b-a-the-boot-lock-has-no-queue-so-a-waiting-lane-can-starve.md`)
+
+**In short:** three copies of this project run on one PC, and only one of them
+can run the emulator at a time — two at once slow each other down so much that
+a healthy test looks broken. They coordinate with a "lock": whoever grabs it
+first goes, everyone else waits. The problem was that grabbing it was a pure
+race with no memory of who had been waiting, so a lane that finished and
+immediately started again beat the waiting lane *every single time* — one lane
+watched five consecutive runs of another go ahead of it across forty minutes.
+And when a wait finally timed out, the script's response was to start the
+emulator anyway, which is the exact thing the lock exists to prevent. Two
+decisions here: **wait in a line (first come, first served)**, and **when you
+still cannot get a turn, stop and say so rather than barging in**.
+
+### Decision 1 — a ticket queue in front of the `mkdir`, not a fairer race
+
+`mkdir` is atomic, which makes it a correct mutex and a useless scheduler: it
+records who *has* the lock and nothing about who has been waiting for it. Worse
+than "unfair" — it is *systematically* unfair here, because every waiter polls
+on the same 5-second period, so their probes are phase-locked and the one that
+entered the loop later probes later in every subsequent cycle, forever. There is
+no randomness for repeated attempts to average out. That is why the observed
+run was five straight losses rather than the coin-flip mix chance would predict.
+
+The alternative considered and rejected was **anti-barge**: after releasing, a
+lane declines to re-acquire for one poll interval if anyone is waiting. It is
+about a fifth of the code and fixes the exact observed case. It was rejected
+because it is a heuristic that *reduces the probability* of losing rather than
+bounding the wait — it converts "never gets a turn" into "usually gets a turn",
+and which of those you got is not visible from a log. A queue bounds it: with N
+lanes you wait at most N-1 turns, and the bound is a property of the mechanism
+rather than of the timing.
+
+Cost of the queue: tickets are state that can be orphaned. A run killed by
+`run-timeout.py`'s Job Object executes no exit path, so it leaves a ticket
+behind — and a dead ticket at the *head* blocks every lane, which is strictly
+worse than the starvation being fixed. This is paid for by sweeping tickets with
+the lock's own liveness rules (proven-alive never swept, provably-dead after
+60s, unjudgeable after 1200s) rather than inventing a second set of thresholds:
+two rules about "is that process still there?" that can disagree is how the
+next bug in this file gets written.
+
+### Decision 2 — expiry refuses (exit 4) instead of booting anyway
+
+This is the genuine tradeoff, and it reverses a prior default. `BOOT_LOCK_WAIT`
+expiry used to proceed without the lock, on the reasoning that a bounded wait
+that *proceeds* is friendlier than one that fails. That reasoning holds only if
+the wait normally ends by acquiring. Under starvation it ends by doing the
+forbidden thing — two emulators under TCG — an hour later, unattended, with the
+resulting slowdown then attributed to the code under test. A false slow/failed
+boot is a worse outcome than a refusal, because a refusal is *true* and a reader
+(or a retry loop) can act on it, whereas a contention-induced phantom failure
+sends someone to debug a kernel that is fine.
+
+Against: a refusal is a non-zero exit, so any wrapper that treats non-zero as "a
+kernel problem" now has a new way to be wrong. That is why it is exit **4**,
+documented in the script header beside 1/2/3, rather than folded into 1 — and
+why the five loop callers were taught about it explicitly rather than left to
+infer it.
+
+"Something live is ahead of us" is deliberately **two** conditions, not one: a
+live lock owner, *or* a live waiter at the head of the queue. Checking only the
+owner was the first implementation and the test harness caught it: when the lock
+is free but a live lane holds the head ticket there is no owner to check, so an
+owner-only rule boots anyway — beside the process most likely to enter the
+emulator seconds later. The escalation would have survived the fix, relocated.
+Where *nothing* live can be demonstrated (an ownerless lock, a queue of
+processes we cannot see), expiry still proceeds, preserving the original
+conservative default for genuinely unknowable states.
+
+### Decision 3 — the refuse path deletes the serial log
+
+Follows from decision 2 rather than standing alone, but it is the part most
+likely to be undone by someone who does not see why. `boot-test.sh` truncates
+the serial log *after* the lock, so on the refuse path it still holds the
+previous run's output — and every soak wrapper greps that file the instant the
+script returns. Deleting it makes "nothing was booted" self-evident to callers
+that never heard of exit 4, including ones written later. The alternative —
+relying on each caller to check the status — was rejected for the same reason
+the exit-code recorder is wired into one trap rather than twelve exit sites: the
+caller nobody remembered to update fails *silently and in the wrong direction*,
+scoring a stale log as this run's result.
+
+**How to reverse:** the queue is ~40 lines in the `BOOT-LOCK-REGION` and could
+be deleted wholesale to return to the bare race. Decision 2 is one `if` at the
+expiry branch. Both are covered by `scripts/test-boot-lock.sh`, which runs 15
+cases in ~6s with no kernel build — reverse either and the tests say which
+property you gave up.
+
+---
+
 ## §300 — A NULL pointer is `EFAULT` only where the kernel would see it; glibc's own pre-checks keep their `EINVAL`
 
 **Date:** 2026-08-13

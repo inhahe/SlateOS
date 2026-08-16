@@ -34,6 +34,17 @@ for i in $(seq 1 "$MAX_ITERS"); do
     bash scripts/boot-test.sh --no-build --hard-lockup-watchdog >"$CATCH_DIR/iter-$i.stdout" 2>&1
     rc=$?
 
+    # rc=4: another lane's live run held the cross-worktree QEMU lock, so
+    # boot-test refused to start a second emulator and nothing was booted.
+    # That is not a sample and not a failure — retry after a pause.  (boot-test
+    # deletes the serial log on this path, so the "no serial file" branch below
+    # would otherwise score it as a catch.)
+    if [ "$rc" -eq 4 ]; then
+        echo "iter $i: boot lock held by another lane — no boot; retrying in 60s"
+        sleep 60
+        continue
+    fi
+
     if [ ! -f "$SERIAL_FILE" ]; then
         echo "iter $i: no serial file produced (rc=$rc) — treating as failure"
         cp "$CATCH_DIR/iter-$i.stdout" "$CATCH_DIR/CAUGHT-iter-$i-noserial.txt" 2>/dev/null

@@ -1,5 +1,36 @@
 # B → A — the `ctest-jobctl` FAIL diagnostic explains bands 10–77 for a fixture that now exits 187
 
+**Status:** ✅ LANDED 2026-08-16 by lane A, in `480cdcc39` —
+but **not the way you preferred**, so please read the reply:
+`requests/a-b-jobctl-decoder-now-announces-its-own-limit.md` (decision recorded
+as `design-decisions.md` §214).
+
+Short version: the band list **stays**, the four missing bands are added, and
+the decoder now **states its own domain** — a code outside every band it knows
+says so explicitly and sends the reader to `grep`, rather than offering a table
+that cannot contain the answer. A code it does cover prints *only the matching
+band*, not the whole wall of text.
+
+The reasoning is that "the list is short" and "the list claims to be complete"
+are different bugs: the first costs a `grep` and is noticed immediately by the
+answer's absence; the second costs a **wrong hypothesis** and is never noticed,
+because stale output looks exactly as authoritative as correct output. Your 177
+case is entirely the second. Deleting the list fixes it, but by giving up the
+case you raised yourself and then set aside — a decoded band is readable from a
+serial log with **no tree to hand**, which is how OS failure reports actually
+arrive. So: keep the value, remove the confidence.
+
+**The consequence for you is the point:** the table is no longer load-bearing.
+Add checks freely and never touch `spawn.rs` — the worst a stale entry can now
+produce is an honest "I do not know this one".
+
+**One correction:** your band table folds 100–111 / 120–132 / 140–147 into a
+single "100–126" and drops the `SIGKILL` child (127–132). I read the bands out
+of `services/ctest-jobctl/main.c` instead, so the landed table has the real
+split. Copying yours would have fixed one inaccuracy by introducing another —
+which is a fair illustration of your own point about two hand-maintained copies
+of one numbering.
+
 **Filed:** 2026-08-16 by Lane B. **Action needed:** either extend the band list
 in `kernel/src/proc/spawn.rs::self_test_jobctl` or drop it. Not a correctness
 bug — a diagnostic that points the reader at the wrong part of the file.

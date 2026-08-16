@@ -25165,3 +25165,209 @@ go and read §83. The mitigation used here is the one available: §207 and §312
 are now cited *in the syscall's own doc comment* at the point where the check
 happens, so the next reader of the gate meets the history without going looking
 for it.
+
+---
+
+## A-CRYPTO-BENCHMARKS-STEPPED-58-PERCENT-WITH-BYTE-IDENTICAL-CRYPTO-SOURCE (lane A, 2026-08-16)
+
+**Status: RESOLVED 2026-08-16 — not a regression. A QEMU/TCG code-layout
+artifact, proven mechanically (see "Verdict" at the end). No kernel change is
+warranted and the range must NOT be bisected. Not a boot failure; all 18 boots
+green.**
+
+**What happened.** Three crypto benchmarks stepped up by a near-uniform ~1.58x
+between the last benchmarked commit (`86a923fe1`) and `9ecef3188`, and stayed
+there across two runs of the *same binary*:
+
+| benchmark | historical range (11 runs) | run 1 | run 2 (`--no-stage`, identical image) |
+|---|---|---|---|
+| `crypto_chacha20_1KiB` | 11749–12178 ns | 19105 | 19187 |
+| `crypto_poly1305_1KiB` | 4976–5166 ns | 8102 | 8257 |
+| `crypto_aead_1KiB` | 18922–19366 ns | 29386 | 29543 |
+
+The historical range is *tight* — chacha20 varied by 3.6% across eleven runs
+spanning many commits — so 19105 is not a tail of the old distribution. The
+ratios are 1.590 / 1.573 / 1.569, and `aead` is chacha20+poly1305, so this
+reads as **one cause appearing three times**, not three findings.
+
+**Why this is not the usual bench flakiness.** The same pair of runs also
+flagged `pick_next` (+150%), `ipc_pipe` (+42%) and `ipc_channel_sync` (+30%),
+and those *did* revert on the second run — 1613→820 ns and 1277→872 ns, back
+inside their own ranges. That is the documented
+`B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY` behaviour and it
+was almost certainly self-inflicted: this agent was running `git fetch`,
+`git merge`, file edits and a `cargo clippy` on the host *while run 1 was
+measuring*, which the canary is documented as unable to see
+(`B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING` — it counts guest cycles, which do
+not advance while the host runs something else). Run 2 was executed with the
+agent deliberately idle. **The crypto trio survived that control and the other
+three did not**, which is what promotes it from noise to a finding.
+
+Note the reporting subtlety that nearly hid this: the *run-over-run* half of the
+suite stopped flagging the trio the moment the elevated value became the
+previous run. It was found by reading `bench/history.jsonl` directly, not from
+the run verdict, which said `RUN CLEAN`.
+
+**Correction (same day, before acting on it).** An earlier version of this
+paragraph went on to claim the comparator "can only ever report edges, never
+levels" and called that a defect worth fixing separately. **That is wrong, and
+the error is worth recording because it was about to cost a redundant fix.**
+`scripts/bench-history.py::level_shifts` already exists for exactly this case —
+its docstring opens with the same miss, found on `http_build_response_1KiB` on
+2026-08-15 — and it reports under `SUSTAINED SHIFT`, measured against a baseline
+drawn from *before* the last `LEVEL_SHIFT_SKIP = 3` runs so a new step cannot
+enter its own reference.
+
+Why it was silent here is not a bug but a threshold: it requires the shift in
+the run being judged **and** in `LEVEL_SHIFT_PERSIST = 2` runs before it — three
+consecutive elevated runs — and this step has been measured twice. Replaying it
+against the real history confirms both halves:
+
+```
+level_shifts(records excluding current run) -> NOTHING
+level_shifts(records including current run) -> crypto_poly1305 +63.2%,
+                                               crypto_chacha20 +59.6%,
+                                               crypto_aead     +56.0%
+```
+
+(`report()` is called at line ~2598 with history loaded at ~2574, and
+`append_record` runs at ~2723 — *after* — so `records` correctly excludes the
+run being judged. The two-line replay above is the honest test of the detector,
+not evidence against it.) Persistence is deliberate and measured: without it the
+check fired on 11 of 26 replayed runs, nearly all single-run host excursions.
+
+**So the third consecutive bench run at or after `9ecef3188` will print
+`SUSTAINED SHIFT` for these three unprompted.** The tooling is not blind to
+this, and this entry is not the only thing standing between the finding and
+silent acceptance — which is what the closing paragraph originally claimed.
+
+**What is ruled out.** `kernel/src/crypto.rs` and `kernel/src/bench.rs` are
+**byte-identical** across the range (`git diff 86a923fe1..HEAD --` on both is
+empty). No crypto-related file changed anywhere in the tree. Nothing in the
+build profile changed; the only root `Cargo.toml` edit is lane C adding the
+`byteread` workspace member, which is not in the kernel's dependency graph.
+
+**Leading hypothesis, unconfirmed: code layout under TCG.** The range adds
+~5,400 lines to the kernel image, almost all of it NTFS
+(`kernel/src/fs/ntfs/*`, §210). QEMU's TCG is sensitive to code placement and
+translation-block behaviour in ways real hardware is not, so a hot loop can
+shift substantially without its own source changing. This would make the number
+an emulation artifact rather than a real slowdown — but that is a hypothesis,
+and "probably the emulator" is exactly the reasoning that lets a real
+regression sit unexamined.
+
+**Explicitly considered and rejected:** that the new NTFS self-test perturbs
+machine state before the benchmarks. It does run on every boot, before the
+suite (`kernel/src/main.rs`, `fs::ntfs::self_test()`), but its synthetic volume
+is `TOTAL_CLUSTERS(24) * CLUSTER(4096)` ≈ 98 KiB in a dropped `Vec` — far too
+small to matter, and a memory-pressure effect would move the whole suite rather
+than three benchmarks (whole-suite drift was +0.0%).
+
+**How to settle it — cheapest test FIRST, which is not the one that was
+started.** The layout hypothesis has a mechanical, no-boot test that this
+project already built for precisely this situation:
+
+```
+python scripts/straddle-check.py --compare <86a923fe1-kernel-elf> <9ecef3188-kernel-elf>
+```
+
+It disassembles both, locates each hot loop's backward branch, and compares
+`addr >> 12` at the two ends: a loop whose branch crosses a 4 KiB guest page
+cannot stay one directly-chained translation block and pays a dispatcher
+round-trip every iteration, measured on this project at **~1.7x**
+(`B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x`). The observed ratios here are
+1.590 / 1.573 / 1.569.
+
+That number being *that* close to the documented penalty, in three benchmarks
+whose source is byte-identical, in a range that added ~5,400 lines of unrelated
+NTFS, is the single most likely explanation — and the straddle check settles it
+in seconds against two ELFs, with no boot at all.
+
+**Do not bisect before that check.** `bench-history.py::mode_structure` exists
+to ask whether a fence separates *binaries* (code layout — no guilty commit
+exists and bisecting is the wrong tool) or *runs* (noise), and the precedent is
+recorded in its own docstring: `http_build_response_1KiB` "was bisected across
+three commits before anyone asked; the answer was 'binaries', and there was no
+guilty commit." The `SUSTAINED SHIFT` report prints the straddle-check command
+as its first suggested action for this reason.
+
+I started the expensive path first — a throwaway worktree at `86a923fe1`, full
+rebuild and bench (~40 min) — before finding the above. That run is still worth
+having, because it measures the *old binary on today's host* and so separates
+"binary-dependent" from "host-dependent", which the straddle check cannot do.
+But it should have been step 2. Do **not** run anything else on the host during
+a measuring run.
+
+**Why it is filed rather than fixed.** The cause is unknown and the honest
+options differ by an order of magnitude in effort. If the straddle check shows
+a page-crossing difference in the chacha20/poly1305 inner loops, this is an
+emulation artifact, gets recorded as one, and no kernel change is warranted.
+
+---
+
+## Verdict (2026-08-16): code layout under TCG. Not a regression.
+
+The straddle check predicted above was run, and it lands exactly on the two
+functions that drive the three benchmarks. `--compare` between the `86a923fe1`
+and post-`9ecef3188` kernel ELFs reports **`recompiled: 0`** — the machine code
+of these functions is byte-identical and only their *addresses* moved:
+
+```
+STRADDLE GAINED (expect these to be SLOWER): 4
+  kernel::fs::encrypt::chacha20_crypt   760 B  ffffffff804fb860 -> ffffffff80507fe0
+  kernel::fs::encrypt::chacha20_crypt   712 B  ffffffff804fb860 -> ffffffff80507fe0
+  kernel::crypto::poly1305              616 B  ffffffff80a07770 -> ffffffff80a13ef0
+  kernel::crypto::chacha20_block        344 B  ffffffff809fd7c0 -> ffffffff80a09f40
+STRADDLE LOST (expect these to be FASTER): 1
+  kernel::rng::ChaCha20State::generate_block  335 B  ffffffff808a2fb0 -> ffffffff808af730
+```
+
+**Five independent lines of evidence agree:**
+
+1. **Source is byte-identical** — `git diff 86a923fe1..HEAD` on `crypto.rs` and
+   `bench.rs` is empty, and the tool independently confirms it (`recompiled: 0`).
+2. **The mapping is exact.** `chacha20_block` drives `crypto_chacha20_1KiB`;
+   `poly1305` drives `crypto_poly1305_1KiB`; **both** gained a page crossing
+   (0 → 1). `crypto_aead_1KiB` is those two composed, which is why the third
+   benchmark moved and why it moved by the composed amount.
+3. **The magnitude matches the documented penalty.** Measured ratios
+   1.590 / 1.573 / 1.569 against the ~1.7x per-iteration cost recorded in
+   `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x`.
+4. **It is binary-dependent, not host-dependent.** `86a923fe1` was rebuilt and
+   re-benched on the same host *after* the step was observed and returned to
+   baseline in all three: chacha20 **12045 ns**, poly1305 **5098 ns**, aead
+   **19193 ns** — every one inside its historical band. So the host is not the
+   variable; the image is.
+5. **Benchmarks moved in both directions**, which is a layout re-roll's
+   signature and not a regression's: `net_veth_recv` −25.1%, `net_arp_lookup`
+   −17.3%, `crypto_ed25519_sign` −17.1%, `vfs_stat_root` −11.3%.
+
+**A second finding, same cause.** `page_alloc_free` (+44.9%, 457 → 662 ns) is
+the same artifact: `mm::frame::alloc_frame` gained a straddle on all three of
+its loops (878 B, 491 B, 464 B) with `recompiled: 0`, while `free_frame` lost
+one. This matters more than the crypto trio, because `page_alloc_free` is on the
+performance-critical list with a **< 1 µs** target — worth stating plainly that
+662 ns still meets it, and that the true cost is unchanged.
+
+**Left unexplained, deliberately.** `cp_try_wait_empty` (+104.6%, 131 → 268 ns)
+is *not* accounted for by this: `ipc::semaphore::try_wait` moved the favourable
+way (1 → 0 crossings), so layout predicts it faster and it measured slower. At
+131 ns the absolute movement is ~137 ns and the benchmark is near the floor
+where run noise dominates, so the likeliest reading is noise — but that is a
+guess, and it is recorded as unexplained rather than folded into a tidy story.
+
+**What NOT to do.** Do not bisect `86a923fe1..9ecef3188` for these. There is no
+guilty commit — the ~5,400 lines of NTFS (§210) shifted addresses, which is what
+every commit does. This is precisely the trap `mode_structure()` documents:
+`http_build_response_1KiB` "was bisected across three commits before anyone
+asked; the answer was 'binaries', and there was no guilty commit."
+
+**Process lesson worth more than the finding.** Two rules paid off and one cost
+~40 minutes:
+- Re-benching the old commit was worth it — it is the only step that separated
+  binary-dependent from host-dependent, which static analysis cannot do.
+- The straddle check should have run **first**: seconds, no boot, and it was
+  already named as the first suggested action in the `SUSTAINED SHIFT` report.
+- The near-miss to remember: this was one step away from being "fixed" as a
+  comparator defect that did not exist, and one step away from a bisect for a
+  commit that does not exist.

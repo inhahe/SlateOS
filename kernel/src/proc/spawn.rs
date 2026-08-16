@@ -7500,10 +7500,22 @@ pub fn self_test_cpgroup() -> KernelResult<()> {
 ///   numbering on purpose: a parent code colliding with a child code would make
 ///   a failing exit status ambiguous to read.
 ///
-/// This function needs no change as the fixture grows — it prints the failing
-/// exit code and points at `main.c` rather than duplicating a per-code table,
-/// which is why 33 new checks cost the kernel side nothing.  (Filed by lane B
-/// as `requests/b-a-jobctl-fixture-now-covers-waitid.md`.)
+/// The 150s through 180s are the `WaitInfo` round: a full-size request and its
+/// truncation, `WNOWAIT` peeks that must not reap, and `WPGID`.
+///
+/// **On the exit-code table in the failure branch below.**  An earlier version
+/// of this comment claimed this function "needs no change as the fixture grows
+/// … rather than duplicating a per-code table", which was the right principle
+/// sitting directly above a violation of it: the `exit_code != EXPECTED` branch
+/// *is* a per-code table, and it silently fell two rounds behind twice.  What
+/// makes growth cheap is not a promise to maintain that table — it is that the
+/// table now knows its own domain and says so when handed a code outside it, so
+/// the worst a stale entry can produce is "I do not know this one" rather than a
+/// confident wrong answer.  Updating it remains worthwhile (a decoded band is
+/// readable from a serial log with no tree to hand, which is how failure reports
+/// usually arrive) but is no longer load-bearing.  See `design-decisions.md`
+/// §214, and lane B's
+/// `requests/b-a-jobctl-fail-diagnostic-lists-code-bands-that-stop-two-rounds-ago.md`.
 ///
 /// No capabilities are granted, and none are needed even though the parent
 /// makes a *real* cross-process send: the kernel authorises a signal whose
@@ -7588,20 +7600,126 @@ pub fn self_test_jobctl() -> KernelResult<()> {
     }
 
     if exit_code != Some(EXPECTED) {
-        serial_println!(
-            "[spawn]   FAIL: ctest-jobctl (ring 3) — reached Zombie but exit code was {:?}, \
-             expected {}. Code bands: 10-11 = setup (pipe/fork), 52-57 = a blocking \
-             waitpid(WUNTRACED) saw the child's self-stop, of which 53-54 are load-bearing \
-             (WIFSTOPPED and WSTOPSIG == SIGTSTP, so the kernel named the signal that actually \
-             stopped it) and 55-57 pin the status predicates as mutually exclusive, 58 = the \
-             report was consumed once, 59 = a stop is not a death (the child still exists and was \
-             not reaped), 60-65 = the parent resumed the child and observed it, of which 62 \
-             (WIFCONTINUED) is load-bearing, 70-77 = the resumed child ran to completion and was \
-             reaped exactly once (74 specifically means the child's own raise(SIGTSTP) failed \
-             rather than stopping it). See services/ctest-jobctl/main.c",
-            exit_code,
-            EXPECTED
-        );
+        // The fixture names its failing check by choosing its exit code, so this
+        // is a decoder for a numbering that lives in another lane's file and gains
+        // entries every round.  It has fallen behind twice without anyone
+        // noticing, because a short table and a complete one look identical in a
+        // log.  The `None` arm is therefore the load-bearing part: a code outside
+        // every known band announces itself instead of sitting next to a
+        // plausible-looking neighbour (177 printed beside explanations of 74 and
+        // 77 is what prompted this — they are three digits apart and two rounds
+        // apart).  See design-decisions.md §214.
+        //
+        // Bands are half-inclusive of nothing: both ends are inclusive, and they
+        // are searched in order, so overlapping entries would resolve to the
+        // first — there are none, and the fixture's numbering is designed to keep
+        // it that way (the child's 80-99 are skipped by the parent on purpose).
+        const BANDS: &[(i32, i32, &str)] = &[
+            (10, 11, "setup — pipe() or fork() failed before any check ran"),
+            (
+                52,
+                57,
+                "a blocking waitpid(WUNTRACED) saw the child's self-stop; 53-54 are load-bearing \
+                 (WIFSTOPPED and WSTOPSIG == SIGTSTP, so the kernel named the signal that actually \
+                 stopped it), 55-57 pin the status predicates as mutually exclusive",
+            ),
+            (58, 58, "the stop report was consumed exactly once"),
+            (
+                59,
+                59,
+                "a stop is not a death — the child still exists and was not reaped",
+            ),
+            (
+                60,
+                65,
+                "the parent resumed the child and observed it; 62 (WIFCONTINUED) is load-bearing",
+            ),
+            (
+                70,
+                77,
+                "the resumed child ran to completion and was reaped exactly once (74 = the child's \
+                 own raise(SIGTSTP) failed rather than stopping it)",
+            ),
+            (
+                80,
+                99,
+                "the CHILD's own codes, deliberately skipped by the parent's numbering so a status \
+                 is never ambiguous: 91 = its first raise(SIGTSTP) failed, 92 = its second",
+            ),
+            (
+                100,
+                111,
+                "waitid over the stop/continue cycle — CLD_STOPPED/SIGTSTP, then a WNOHANG that \
+                 must report si_pid == 0 to prove the report was consumed, then \
+                 CLD_CONTINUED/SIGCONT",
+            ),
+            (
+                120,
+                132,
+                "waitid over terminations on fresh short-lived children — CLD_EXITED carrying the \
+                 exit code in si_status, ECHILD on a re-wait, CLD_KILLED/SIGKILL",
+            ),
+            (
+                140,
+                147,
+                "waitid argument validation — every one of the four rejections must be EINVAL",
+            ),
+            (
+                150,
+                163,
+                "a full-size WaitInfo request: the value, pid, wstatus, uid, both zero pads, the \
+                 zero-filled tail past 72 bytes, and six bounds checks proving the counters were \
+                 written",
+            ),
+            (
+                164,
+                169,
+                "WaitInfo truncation at arg4 = 24; 169 = bytes 24..128 must be left untouched",
+            ),
+            (
+                170,
+                177,
+                "WNOWAIT peeks twice without reaping, then a real reap, then ECHILD",
+            ),
+            (178, 187, "WPGID, including group 1, and waitid(P_PGID)"),
+        ];
+
+        match exit_code {
+            Some(code) => {
+                match BANDS.iter().find(|(lo, hi, _)| code >= *lo && code <= *hi) {
+                    Some((lo, hi, what)) => serial_println!(
+                        "[spawn]   FAIL: ctest-jobctl (ring 3) — reached Zombie but exit code was \
+                         {}, expected {}. That is band {}-{}: {}. For the exact line and its \
+                         comment, grep for `rc = {}` in services/ctest-jobctl/main.c",
+                        code,
+                        EXPECTED,
+                        lo,
+                        hi,
+                        what,
+                        code
+                    ),
+                    None => serial_println!(
+                        "[spawn]   FAIL: ctest-jobctl (ring 3) — reached Zombie but exit code was \
+                         {}, expected {}. This kernel's decoder does NOT cover that code (it knows \
+                         up to {}), so it is almost certainly a check added to the fixture since \
+                         the decoder was last updated — do NOT read it as related to any band with \
+                         similar digits. Grep for `rc = {}` in services/ctest-jobctl/main.c for the \
+                         authoritative answer, and add the band to BANDS in \
+                         kernel/src/proc/spawn.rs::self_test_jobctl while you are there",
+                        code,
+                        EXPECTED,
+                        BANDS.last().map_or(0, |b| b.1),
+                        code
+                    ),
+                }
+            }
+            None => serial_println!(
+                "[spawn]   FAIL: ctest-jobctl (ring 3) — reached Zombie with NO exit code at all, \
+                 which no check in the fixture can produce: it was reaped or destroyed by \
+                 something other than its own exit(), so read this as a kernel-side lifecycle bug \
+                 rather than a failed assertion in the fixture"
+            ),
+        }
         return Err(KernelError::InternalError);
     }
 

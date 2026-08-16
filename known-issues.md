@@ -226,8 +226,8 @@ character — a panic. Call `textfind`; do not write the loop.
 This was a targeted pass at one defect family, not a full sweep of those five
 crates; their remaining `indexing_slicing` counts are `rssreader` 93,
 `spreadsheet` 42, `filediff` 17, `ebook` 16, `pdfviewer` 13. (`rssreader`,
-`spreadsheet` and `filediff` have since been swept to zero; `ebook` and
-`pdfviewer` remain.)
+`spreadsheet`, `filediff` and `ebook` have since been swept to zero; only
+`pdfviewer` remains.)
 
 ### Sweep progress: `explorer` 264 → 55, `indexing_slicing` 0 (2026-08-16)
 
@@ -521,6 +521,112 @@ Other findings worth keeping:
   the path of addresses being visited, so a depth failure is never one; the
   depth backstop used to report `#CIRC!`, which pointed at a cycle that was not
   there.
+
+### Sweep progress: `ebook` 20 → 0, all lint classes (2026-08-16)
+
+Tenth crate, fifth to reach **zero warnings of every class** across
+`--all-targets`. Tests 114 → 119. As with `filediff`, the lint work was small
+and the finding was not a lint: **the reader's position in a book was stored as
+a page number**, and a page number is a fact about a *pagination*, which
+depends on the font size and the window size. Pressing `+` once moved the
+reader from page 2 of four to page 2 of six — backwards through the book, by
+about a fifth of it, on one keystroke.
+
+The shape is one already recorded in this sweep — *an index into a derived
+layout stored across a rebuild of that layout* — and this is its third
+appearance (after `filediff`'s edit-index-as-display-row and the stale search
+matches). The fix is always the same: **store the stable thing and derive the
+volatile one.**
+
+What makes this instance worth recording separately is that the codebase
+already contained the right answer. `Chapter` stored a `byte_offset`, with a
+comment saying why. The reading position and the bookmarks were simply the two
+places that had never been given the same treatment — so this was not a design
+that needed inventing, it was a design that had not been applied uniformly.
+That is a cheaper class of bug to look for than it sounds: *find the type that
+already got it right, then check its siblings.*
+
+| Was | Is |
+|---|---|
+| `ReadingState { current_page: usize }` | `ReadingState { offset: usize }`, with `current_page()` derived from the live pagination |
+| `bookmarks: Vec<usize>` of page numbers | `Vec<usize>` of byte offsets; `is_page_bookmarked` is a containment test against the page's range, not an equality test |
+| `jump_to_chapter` converted the chapter's offset to a page and jumped to that | jumps to the offset directly, so it no longer rounds the reader to the top of whichever page happens to contain the chapter |
+| `repaginate` needed a fix-up for the stored page | needs none, which is the point |
+
+## The reading position and bookmarks in `apps/ebook` were page numbers (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Verified by reverting each half
+separately: restoring the page-preserving font change fails
+`changing_the_font_size_keeps_the_reader_where_they_were` and
+`shrinking_the_font_keeps_the_reader_where_they_were`; restoring page-number
+bookmarks fails three, including two that predate this work.
+
+Reproduced before fixing, on sample book 3: at page 2 the reader is at
+`"True determinism would mean we're living in a sim…"`; press `+`; the same
+page number now shows `"2. Calibration"`. The book got longer in pages, the
+stored number did not move, so the reader was thrown backwards. `-` threw them
+forwards by the same mechanism. Bookmarks had it too — a bookmark set at one
+font size marked different words at another — and because bookmarks persist,
+that one is silent and permanent rather than merely startling.
+
+The two tests are written to be independent rather than as a round trip. The
+first draft *was* a round trip (`increase` then `decrease`, assert the offset
+came back), and it **passed with the bug reverted**: both directions repaginate
+by the same rule, so two page-preserving errors cancel exactly. The
+replacement grows the font *before* measuring, leaving the shrink as the only
+operation under test. Same lesson as `filediff`'s stale-match test, in a
+different disguise: a test that exercises an operation and its inverse together
+cannot see a bug that is symmetric in them.
+
+The bookmark test carries a `assert_ne!` premise for the same reason —
+comparing the stored bookmark list before and after a font change proves
+nothing, because nothing writes to it. The test only says something once the
+bookmarked text is known to have landed on a *different page number*.
+
+## The `apps/ebook` library list reported 0% for every book but one (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Verified by reverting; the test then
+reports `a book read to its last page reports 0, not near 1.0`.
+
+The shelf showed `… | 12 min | 0%` against every book. Progress was
+`current_page / total_pages`, and **a pagination exists only for the book that
+is currently open** — every other row divided a page number that was never
+updated by a total that was zero. A reader who had finished nine of ten books
+saw a shelf of untouched ones.
+
+Now `EbookApp::book_progress(index)`, measured in bytes of the text, which is
+the only measure available for a book that is not open. Deliberately a separate
+method from `reading_progress`, not a generalisation of it: that one answers
+"which page of how many", which is the right thing for the status bar of an
+open book and is unavailable everywhere else. Bytes rather than characters is
+fine here and the doc comment says why — it is a ratio of two lengths of the
+same text, rounded to a whole percent.
+
+Extracting the method was itself part of the fix rather than tidying. The
+computation had lived inline in the render loop, so the only way to test it was
+to recompute the ratio in the test — which would have proved that the test and
+the fix agreed with each other and nothing more.
+
+### Negative result: the wrapping-cursor rule does not want a shared crate
+
+Recorded so the analysis is not repeated. The `if !v.is_empty() { i = (i + 1) %
+v.len() }` shape appears about **59 times** tree-wide, and unifying it into a
+shared helper looked like the obvious follow-up to `filediff`'s `wrap_next` /
+`wrap_prev`. A scan (`build/scratch/wrapscan.py`) flagged 32 as unguarded;
+reading all 32 found **none that can actually divide by zero**. Nearly all take
+the modulus of a `const` array's length, which cannot be zero, or derive the
+index from a `position()` call, which implies the collection is non-empty. The
+two that looked genuinely dangerous — `gui/toolkit/src/svg.rs:2279` and
+`apps/crossword/src/main.rs:866` — are both guarded, the second by an
+`is_empty` early return sitting exactly twelve lines up, which is what the
+scanner's window missed.
+
+So the shape is common but the *bug* is not, and a shared crate would be
+churn across sixteen files to prevent nothing. Keep `wrap_next`/`wrap_prev`
+local to `filediff`, where they earned their place by collapsing three copies
+that were genuinely reachable. The general point: **a repeated shape is a
+reason to look, not a reason to refactor** — the refactor needs its own
+evidence.
 
 ### Sweep progress: `filediff` 23 → 0, all lint classes (2026-08-16)
 

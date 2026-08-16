@@ -226,8 +226,8 @@ character — a panic. Call `textfind`; do not write the loop.
 This was a targeted pass at one defect family, not a full sweep of those five
 crates; their remaining `indexing_slicing` counts are `rssreader` 93,
 `spreadsheet` 42, `filediff` 17, `ebook` 16, `pdfviewer` 13. (`rssreader`,
-`spreadsheet`, `filediff` and `ebook` have since been swept to zero; only
-`pdfviewer` remains.)
+`spreadsheet`, `filediff`, `ebook` and `pdfviewer` have since all been swept
+to zero, so this list is now closed.)
 
 ### Sweep progress: `explorer` 264 → 55, `indexing_slicing` 0 (2026-08-16)
 
@@ -521,6 +521,116 @@ Other findings worth keeping:
   the path of addresses being visited, so a depth failure is never one; the
   depth backstop used to report `#CIRC!`, which pointed at a cycle that was not
   there.
+
+### Sweep progress: `pdfviewer` 94 → 0, all lint classes (2026-08-16)
+
+Eleventh crate, sixth to reach **zero warnings of every class** across
+`--all-targets`, and the last of the five crates listed as outstanding in the
+`textfind` note near the top of this file. Tests 110 → 118.
+
+The split is worth recording because it is unlike the other ten: of 94
+warnings, **67 were in the test module** and only 27 in production code, and
+all 27 were `arithmetic_side_effects` — not one `indexing_slicing` in shipping
+code. The crate is a plain data model over `Vec<PdfPage>` and it already goes
+through `get()` almost everywhere. The defects were therefore not where the
+warnings were, which is the usual finding by now: four of the five below are in
+a subsystem that produced five warnings between them.
+
+## Four defects in `apps/pdfviewer`'s print range, and one in its annotations
+
+**Status: all FIXED 2026-08-16** (lane C). Each verified by reverting it alone
+and watching the specific tests fail.
+
+`PrintSettings::resolve_pages` turns a page range into the list of pages to
+print, and `parse_page_range` turns what the user typed into that range. Both
+clamped against the page count — *the same bound written in two places*, the
+shape this sweep keeps finding — and the two copies disagreed:
+
+- **A range naming no pages printed the whole document.** `parse_page_range`
+  dropped the parts it could not use, found itself holding an empty list, and
+  fell back to `All`. So typing `50-60` into a ten-page document — a plain typo
+  — printed all ten pages. Now `Custom(vec![])`, which prints nothing. Blank
+  input and the word `all` are handled before that point, so reaching it means
+  the user named specific pages; if none of them exist, the honest answer is
+  "none". Of the two ways to be wrong about a range nobody asked for, printing
+  everything is the expensive one.
+- **A range beyond the end was dragged onto the last page.** The parser clamped
+  the range's *start* as well as its end, so `50-60` of a ten-page document
+  became `(9, 9)` — "print page 10". Now the start is a validity test (drop the
+  range) and only the end is clamped, at print time, by the one function that
+  knows how many pages the document has *now* rather than when it was typed.
+- **`Custom` returned `[0]` for a document with no pages.** The end clamp is
+  `page_count - 1`, saturating to `0`, so every range collapsed to `start..=0`
+  and one starting at zero yielded page zero — an index into an empty document,
+  handed to a caller with every reason to trust it. The `All` and `CurrentPage`
+  arms both return nothing there; this arm being the odd one out is the tell.
+  For a document that *has* pages the bug was masked, because `49..=9` is an
+  empty `RangeInclusive` — and it is exactly that accidental reasoning which
+  stopped holding at zero pages, so the precondition is now stated outright
+  rather than left to emerge from the range type.
+- **Overlapping ranges were deduplicated in quadratic time**, by a `contains`
+  scan per page, on a list that was sorted on the way out anyway. Now
+  `sort_unstable` + `dedup`.
+
+And separately, in the annotation layer:
+
+- **A failed annotation consumed an id.** `add_highlight`, `add_note` and
+  `add_freehand` were three copies of one routine, and each took an id from the
+  counter *before* looking for a page to put the annotation on — the guard
+  running downstream of the operation it guards, another shape already in this
+  sweep. Every call on a tab with no document returned `None` having burnt an
+  id. The ids stayed unique so nothing broke visibly; they simply grew gaps,
+  which is the kind of thing noticed only by whoever later assumes they are
+  dense. Now one private `add_annotation` that allocates after the page is in
+  hand, with the three public methods differing only in the `AnnotationType`
+  they build.
+
+Both id counters (`next_annotation_id` and `IdGenerator::next_id`) also moved
+from `+= 1` to `saturating_add`. The reasoning in the comments is deliberately
+not about overflow being reachable — it is that *wrapping* is the one failure
+mode that would be silent and wrong, because a wrapped id collides with a live
+object and makes `remove_annotation(id)` delete something else. Saturating
+turns that into a stuck feature rather than a corrupted document.
+
+## `apps/pdfviewer` can print nothing at all — the whole model is unwired (lane C)
+
+**Status: OPEN.** Recorded 2026-08-16 by lane C. *How* to wire it is `C-Q4` in
+`open-questions.md`, because it is an architecture choice rather than a repair.
+
+`PrintSettings`, `PrintPageRange`, `parse_page_range` and `resolve_pages` are
+complete, and as of today correct and tested. **Nothing outside the test module
+calls any of them.** `PdfViewerApp` holds a `print_settings` field written once
+at construction and never read. There is no print dialog, no Ctrl+P handler,
+and no path from the viewer to any output.
+
+This is the `filediff` find-in-diff shape again — a feature fully modelled and
+never connected — with a twist that makes it an architecture question rather
+than a missing render pass: **`gui/desktop/src/print_manager.rs` already
+contains a full printing stack**, 1409 lines of it, with `Printer`,
+`PrinterCapabilities`, a `PrintManager` job queue offering submit/cancel/pause/
+resume, a spooler flag, and a `PrintDialog`. It is used only by
+`gui/desktop/src/main.rs`. No application in `apps/**` submits a print job.
+
+So the tree has two print models that do not know about each other, and each is
+richer than the other in a different dimension:
+
+| | `pdfviewer` | `gui/desktop` |
+|---|---|---|
+| Page range | discontiguous list — `1-3, 5, 7-9` | one `(start, end)` pair |
+| Copies, paper, duplex, quality, scale | absent | present, with capability validation |
+| Job queue, spooler, cancel/pause | absent | present |
+| Reachable from an app | no | no |
+
+Neither is wrong; they were written for different halves of the problem. The
+range belongs with the document, which is the only thing that knows its page
+count and the reader's current page; everything else belongs with the system,
+which is the only thing that knows what printers exist. What is missing is the
+seam between them, and choosing it is the open question — an `apps/**` crate
+depending on the desktop shell crate would be the cheap answer and the wrong
+shape.
+
+Until that is answered, the honest description is that **the PDF viewer has no
+print command**, and the tested range logic is a component waiting for one.
 
 ### Sweep progress: `ebook` 20 → 0, all lint classes (2026-08-16)
 

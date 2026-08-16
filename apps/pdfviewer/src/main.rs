@@ -24,8 +24,8 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
-use guitk::textfind;
 use guitk::text;
+use guitk::textfind;
 
 use std::path::{Path, PathBuf};
 
@@ -289,7 +289,10 @@ impl Bookmark {
 
     /// Count total entries including children recursively.
     pub fn total_count(&self) -> usize {
-        1 + self.children.iter().map(|c| c.total_count()).sum::<usize>()
+        self.children
+            .iter()
+            .map(Bookmark::total_count)
+            .fold(1, usize::saturating_add)
     }
 
     /// Flatten the bookmark tree into a list of (depth, bookmark_ref).
@@ -297,7 +300,7 @@ impl Bookmark {
         let mut result = vec![(depth, self)];
         if self.expanded {
             for child in &self.children {
-                result.extend(child.flatten(depth + 1));
+                result.extend(child.flatten(depth.saturating_add(1)));
             }
         }
         result
@@ -353,12 +356,12 @@ impl PdfDocument {
         doc.metadata.author = Some("Slate OS PDF Viewer".to_string());
         doc.metadata.pdf_version = Some("1.7".to_string());
         doc.metadata.page_count = page_count;
-        doc.metadata.file_size_bytes = (page_count as u64) * 4096;
+        doc.metadata.file_size_bytes = (page_count as u64).saturating_mul(4096);
 
         for i in 0..page_count {
             let mut page = PdfPage::new(DEFAULT_PAGE_WIDTH, DEFAULT_PAGE_HEIGHT);
             page.text_spans.push(TextSpan {
-                text: format!("Page {}", i + 1),
+                text: format!("Page {}", i.saturating_add(1)),
                 rect: PageRect::new(72.0, 72.0, 200.0, 24.0),
                 font_size: 18.0,
             });
@@ -400,7 +403,7 @@ impl PdfDocument {
         self.pages
             .get(index)
             .and_then(|p| p.label.clone())
-            .unwrap_or_else(|| format!("{}", index + 1))
+            .unwrap_or_else(|| format!("{}", index.saturating_add(1)))
     }
 
     /// Search for text across all pages. Returns (page_index, rect) for each match.
@@ -428,7 +431,8 @@ impl PdfDocument {
                 // and then advanced by the *unfolded* needle's byte length
                 // inside the folded copy, which for a query of `İ` lands inside
                 // a character and panics.
-                for (start, end) in textfind::matches(&span.text, query, textfind::Case::Insensitive)
+                for (start, end) in
+                    textfind::matches(&span.text, query, textfind::Case::Insensitive)
                 {
                     let chars_before = span.text.get(..start).map_or(0, |p| p.chars().count());
                     let match_chars = span.text.get(start..end).map_or(0, |m| m.chars().count());
@@ -614,22 +618,44 @@ impl PrintSettings {
                 }
             }
             PrintPageRange::Custom(ranges) => {
-                let mut pages = Vec::new();
-                for &(start, end) in ranges {
-                    let clamped_end = end.min(page_count.saturating_sub(1));
-                    for p in start..=clamped_end {
-                        if !pages.contains(&p) {
-                            pages.push(p);
-                        }
-                    }
-                }
-                pages.sort();
+                let mut pages: Vec<usize> = ranges
+                    .iter()
+                    // A range that begins past the last page names no pages.
+                    //
+                    // For a document that *has* pages the `end.min(..)` below
+                    // already handled this by accident -- `49..=9` is empty --
+                    // but on a document with **no** pages the clamp saturates
+                    // to `0`, so every range became `start..=0` and a range
+                    // starting at zero yielded `[0]`: a page index into an
+                    // empty document, handed to a caller with every reason to
+                    // trust it. `All` and `CurrentPage` both return nothing
+                    // there; this arm was the odd one out. Saying the
+                    // precondition outright is better than relying on an empty
+                    // `RangeInclusive` to express it, because that reasoning is
+                    // exactly what stopped holding at zero pages.
+                    .filter(|&&(start, _)| start < page_count)
+                    .flat_map(|&(start, end)| start..=end.min(page_count.saturating_sub(1)))
+                    .collect();
+                // Sort-then-dedup rather than a `contains` check per page: the
+                // list is sorted on the way out regardless, and the linear scan
+                // made overlapping ranges over a long document quadratic.
+                pages.sort_unstable();
+                pages.dedup();
                 pages
             }
         }
     }
 
     /// Parse a user-entered page range string (e.g. "1-3, 5, 7-9").
+    ///
+    /// Returns 0-based, inclusive ranges. Ranges that begin past the end of the
+    /// document are dropped; ranges that merely *extend* past it are kept whole
+    /// and clamped later by [`Self::resolve_pages`], which is the only place
+    /// that knows the page count at the moment of printing rather than at the
+    /// moment of typing. Clamping in both places is the same bound written
+    /// twice, and the two copies disagreed: this one used to clamp the range's
+    /// *start* as well, which turned "50-60" of a ten-page document into
+    /// "page 10" instead of into nothing.
     pub fn parse_page_range(input: &str, page_count: usize) -> PrintPageRange {
         if input.trim().is_empty() || input.trim().eq_ignore_ascii_case("all") {
             return PrintPageRange::All;
@@ -647,21 +673,34 @@ impl PrintSettings {
                     .next()
                     .and_then(|s| s.trim().parse::<usize>().ok())
                     .unwrap_or(start);
-                // Convert from 1-based to 0-based
-                let s = start.saturating_sub(1).min(page_count.saturating_sub(1));
-                let e = end.saturating_sub(1).min(page_count.saturating_sub(1));
-                if s <= e {
+                // Convert from 1-based to 0-based.
+                let s = start.saturating_sub(1);
+                let e = end.saturating_sub(1);
+                if s <= e && s < page_count {
                     ranges.push((s, e));
                 }
-            } else if let Ok(n) = part.parse::<usize>()
-                && n >= 1
-            {
-                let idx = (n - 1).min(page_count.saturating_sub(1));
-                ranges.push((idx, idx));
+            } else if let Ok(n) = part.parse::<usize>() {
+                // `checked_sub` rather than a `n >= 1` guard: page "0" does not
+                // exist in the 1-based numbering the user is typing in, and
+                // failing the subtraction *is* that case.
+                if let Some(idx) = n.checked_sub(1)
+                    && idx < page_count
+                {
+                    ranges.push((idx, idx));
+                }
             }
         }
+        // `Custom(vec![])`, deliberately, and not `All`.
+        //
+        // Blank input and the word "all" are already handled above, so reaching
+        // here means the user named specific pages. If none of them exist, the
+        // honest answer is "no pages", which prints nothing and shows as such in
+        // the dialog. Falling back to `All` here meant that typing "50-60" into
+        // a ten-page document -- a plain typo -- printed the entire document.
+        // Of the two ways to be wrong about a range nobody asked for, printing
+        // everything is the expensive one.
         if ranges.is_empty() {
-            PrintPageRange::All
+            PrintPageRange::Custom(Vec::new())
         } else {
             PrintPageRange::Custom(ranges)
         }
@@ -790,27 +829,35 @@ impl DocumentTab {
         self.document.as_ref().map_or(0, |d| d.page_count())
     }
 
+    /// The index of the last page, or `None` when no document is loaded.
+    ///
+    /// Every navigation method below is a clamp against this, and each of them
+    /// used to write the clamp out itself as `if count > 0 { … count - 1 }` --
+    /// the emptiness test and the subtraction stated separately, four times
+    /// over, when `checked_sub(1)` failing *is* the empty case.
+    fn last_page_index(&self) -> Option<usize> {
+        self.page_count().checked_sub(1)
+    }
+
     /// Navigate to a specific page.
     pub fn go_to_page(&mut self, page: usize) {
-        let count = self.page_count();
-        if count > 0 {
-            self.current_page = page.min(count - 1);
+        if let Some(last) = self.last_page_index() {
+            self.current_page = page.min(last);
         }
     }
 
     /// Go to the next page.
     pub fn next_page(&mut self) {
-        let count = self.page_count();
-        if count > 0 && self.current_page + 1 < count {
-            self.current_page += 1;
+        if let Some(last) = self.last_page_index()
+            && self.current_page < last
+        {
+            self.current_page = self.current_page.saturating_add(1);
         }
     }
 
     /// Go to the previous page.
     pub fn prev_page(&mut self) {
-        if self.current_page > 0 {
-            self.current_page -= 1;
-        }
+        self.current_page = self.current_page.saturating_sub(1);
     }
 
     /// Go to the first page.
@@ -820,9 +867,8 @@ impl DocumentTab {
 
     /// Go to the last page.
     pub fn last_page(&mut self) {
-        let count = self.page_count();
-        if count > 0 {
-            self.current_page = count - 1;
+        if let Some(last) = self.last_page_index() {
+            self.current_page = last;
         }
     }
 
@@ -927,26 +973,35 @@ impl SearchState {
         };
     }
 
-    /// Navigate to the next search result.
+    /// Navigate to the next search result, wrapping at the end.
+    ///
+    /// `checked_sub(1)` failing on the length *is* the empty-list case, so the
+    /// emptiness test and the last-index it guards are one expression rather
+    /// than a separate `is_empty` guard that a later edit could move away from
+    /// the arithmetic it protects.
     pub fn next_match(&mut self) {
-        if self.results.is_empty() {
+        let Some(last) = self.results.len().checked_sub(1) else {
             return;
-        }
+        };
+        // `i >= last` rather than `i == last`: a cursor left over from a search
+        // that returned more hits than this one wraps to the start instead of
+        // stepping to an index the list does not reach.
         self.current_match = Some(match self.current_match {
-            Some(i) => (i + 1) % self.results.len(),
             None => 0,
+            Some(i) if i >= last => 0,
+            Some(i) => i.saturating_add(1),
         });
     }
 
-    /// Navigate to the previous search result.
+    /// Navigate to the previous search result, wrapping at the start.
     pub fn prev_match(&mut self) {
-        if self.results.is_empty() {
+        let Some(last) = self.results.len().checked_sub(1) else {
             return;
-        }
+        };
         self.current_match = Some(match self.current_match {
-            Some(0) => self.results.len() - 1,
-            Some(i) => i - 1,
             None => 0,
+            Some(0) => last,
+            Some(i) => i.saturating_sub(1).min(last),
         });
     }
 
@@ -958,7 +1013,7 @@ impl SearchState {
             "No matches".to_string()
         } else {
             match self.current_match {
-                Some(i) => format!("{} of {}", i + 1, self.results.len()),
+                Some(i) => format!("{} of {}", i.saturating_add(1), self.results.len()),
                 None => format!("{} matches", self.results.len()),
             }
         }
@@ -996,7 +1051,12 @@ impl IdGenerator {
 
     pub fn next_id(&mut self) -> u64 {
         let id = self.next;
-        self.next += 1;
+        // Saturating rather than wrapping: a wrapped id would collide with a
+        // live tab and make "close tab 3" close a different one. Sticking at
+        // `u64::MAX` hands out one id forever instead, which is a stuck feature
+        // rather than a mix-up -- and 2^64 tabs is a proof it cannot happen,
+        // not a case anyone will meet.
+        self.next = self.next.saturating_add(1);
         id
     }
 }
@@ -1055,7 +1115,10 @@ impl PdfViewerApp {
         let id = self.id_gen.next_id();
         let tab = DocumentTab::new(id);
         self.tabs.push(tab);
-        self.active_tab = self.tabs.len() - 1;
+        // The push guarantees a last element, so the saturation is unreachable
+        // -- but it states the bound once instead of asserting non-emptiness a
+        // line after relying on it.
+        self.active_tab = self.tabs.len().saturating_sub(1);
         id
     }
 
@@ -1066,10 +1129,14 @@ impl PdfViewerApp {
         }
         if index < self.tabs.len() {
             self.tabs.remove(index);
+            // Order matters and is not obvious: a tab to the *left* of the
+            // active one shifts the active one down by one, whereas closing the
+            // last tab leaves the index past the end. Checking the past-the-end
+            // case first means the shift never needs to consider it.
             if self.active_tab >= self.tabs.len() {
-                self.active_tab = self.tabs.len() - 1;
+                self.active_tab = self.tabs.len().saturating_sub(1);
             } else if self.active_tab > index {
-                self.active_tab -= 1;
+                self.active_tab = self.active_tab.saturating_sub(1);
             }
         }
     }
@@ -1093,50 +1160,50 @@ impl PdfViewerApp {
         self.recent_files.add(path, title, 0, 0);
     }
 
+    /// Attach an annotation to the current page of the active tab.
+    ///
+    /// The one place that adds an annotation, because the three public wrappers
+    /// below differ only in which [`AnnotationType`] they build. Written out
+    /// three times, they each took an id from the counter *before* looking for
+    /// a page to put it on, so every call on a tab with no document -- an empty
+    /// tab, or a click that arrived while one was closing -- returned `None`
+    /// having already burnt an id. The ids stayed unique, so nothing broke
+    /// visibly; they simply developed gaps, which is the kind of thing that is
+    /// only ever noticed by whoever later assumes they are dense.
+    ///
+    /// Here the id is allocated after the page is in hand, so a failure costs
+    /// nothing.
+    fn add_annotation(&mut self, rect: PageRect, annotation_type: AnnotationType) -> Option<u64> {
+        let ann_id = self.next_annotation_id;
+        let tab = self.active_tab_mut()?;
+        let page_idx = tab.current_page;
+        let page = tab.document.as_mut()?.pages.get_mut(page_idx)?;
+        page.annotations.push(Annotation {
+            id: ann_id,
+            page_index: page_idx,
+            rect,
+            annotation_type,
+            author: String::new(),
+            created_timestamp: 0,
+        });
+        // Saturating rather than wrapping: an id that wraps would collide with
+        // a live annotation and make `remove_annotation` delete the wrong one.
+        // Sticking at `u64::MAX` instead refuses to issue new ids, which is a
+        // stuck feature rather than a corrupted document -- and it takes 2^64
+        // annotations to reach, so it is a proof of impossibility rather than a
+        // behaviour anyone will meet.
+        self.next_annotation_id = self.next_annotation_id.saturating_add(1);
+        Some(ann_id)
+    }
+
     /// Add a highlight annotation to the current page of the active tab.
     pub fn add_highlight(&mut self, rect: PageRect, color: Color) -> Option<u64> {
-        let ann_id = self.next_annotation_id;
-        self.next_annotation_id += 1;
-        if let Some(tab) = self.active_tab_mut() {
-            let page_idx = tab.current_page;
-            if let Some(doc) = &mut tab.document
-                && let Some(page) = doc.pages.get_mut(page_idx)
-            {
-                page.annotations.push(Annotation {
-                    id: ann_id,
-                    page_index: page_idx,
-                    rect,
-                    annotation_type: AnnotationType::Highlight { color },
-                    author: String::new(),
-                    created_timestamp: 0,
-                });
-                return Some(ann_id);
-            }
-        }
-        None
+        self.add_annotation(rect, AnnotationType::Highlight { color })
     }
 
     /// Add a sticky note annotation.
     pub fn add_note(&mut self, rect: PageRect, content: String) -> Option<u64> {
-        let ann_id = self.next_annotation_id;
-        self.next_annotation_id += 1;
-        if let Some(tab) = self.active_tab_mut() {
-            let page_idx = tab.current_page;
-            if let Some(doc) = &mut tab.document
-                && let Some(page) = doc.pages.get_mut(page_idx)
-            {
-                page.annotations.push(Annotation {
-                    id: ann_id,
-                    page_index: page_idx,
-                    rect,
-                    annotation_type: AnnotationType::Note { content },
-                    author: String::new(),
-                    created_timestamp: 0,
-                });
-                return Some(ann_id);
-            }
-        }
-        None
+        self.add_annotation(rect, AnnotationType::Note { content })
     }
 
     /// Add a freehand annotation.
@@ -1147,29 +1214,14 @@ impl PdfViewerApp {
         color: Color,
         width: f32,
     ) -> Option<u64> {
-        let ann_id = self.next_annotation_id;
-        self.next_annotation_id += 1;
-        if let Some(tab) = self.active_tab_mut() {
-            let page_idx = tab.current_page;
-            if let Some(doc) = &mut tab.document
-                && let Some(page) = doc.pages.get_mut(page_idx)
-            {
-                page.annotations.push(Annotation {
-                    id: ann_id,
-                    page_index: page_idx,
-                    rect,
-                    annotation_type: AnnotationType::Freehand {
-                        points,
-                        color,
-                        width,
-                    },
-                    author: String::new(),
-                    created_timestamp: 0,
-                });
-                return Some(ann_id);
-            }
-        }
-        None
+        self.add_annotation(
+            rect,
+            AnnotationType::Freehand {
+                points,
+                color,
+                width,
+            },
+        )
     }
 
     /// Remove an annotation by id from the active tab's current page.
@@ -1276,7 +1328,11 @@ impl PdfViewerApp {
 
         // Page indicator
         if let Some(tab) = self.active_tab() {
-            let page_text = format!("Page {} / {}", tab.current_page + 1, tab.page_count());
+            let page_text = format!(
+                "Page {} / {}",
+                tab.current_page.saturating_add(1),
+                tab.page_count()
+            );
             tree.push(RenderCommand::Text {
                 x: btn_x,
                 y: btn_y + 9.0,
@@ -1865,7 +1921,7 @@ impl PdfViewerApp {
             tree.push(RenderCommand::Text {
                 x: 30.0,
                 y: y + 2.0,
-                text: format!("{} - Page {}", type_label, ann.page_index + 1),
+                text: format!("{} - Page {}", type_label, ann.page_index.saturating_add(1)),
                 color: TEXT_COLOR,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
@@ -1968,7 +2024,7 @@ impl PdfViewerApp {
                 tree.push(RenderCommand::Text {
                     x: cx + 8.0,
                     y: ry,
-                    text: format!("{}. {}", i + 1, name),
+                    text: format!("{}. {}", i.saturating_add(1), name),
                     color: BLUE,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
@@ -2437,7 +2493,11 @@ impl PdfViewerApp {
             tree.push(RenderCommand::Text {
                 x: sx,
                 y: y + 7.0,
-                text: format!("Page {} / {}", tab.current_page + 1, tab.page_count()),
+                text: format!(
+                    "Page {} / {}",
+                    tab.current_page.saturating_add(1),
+                    tab.page_count()
+                ),
                 color: SUBTEXT0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
@@ -2574,6 +2634,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // -- Search highlight placement -------------------------------------------
@@ -3041,6 +3113,96 @@ mod tests {
         assert!(pages.is_empty());
     }
 
+    // -- Print ranges that name pages the document does not have --------------
+
+    /// A document with no pages has no page zero.
+    ///
+    /// `All` and `CurrentPage` both returned nothing here already; the `Custom`
+    /// arm clamped its range's end to `page_count - 1`, which saturates to `0`,
+    /// so every range collapsed to `0..=0` and it returned `[0]` -- a page
+    /// index handed to a caller with every reason to trust it.
+    #[test]
+    fn a_custom_range_over_an_empty_document_names_no_pages() {
+        let ps = PrintSettings {
+            page_range: PrintPageRange::Custom(vec![(0, 4)]),
+            ..Default::default()
+        };
+        assert!(ps.resolve_pages(0, 0).is_empty());
+    }
+
+    /// A range that begins past the last page prints nothing, rather than
+    /// being dragged down onto the last page: "print 50-60" of a ten-page
+    /// document is a typo, and the answer to it is not "print page ten".
+    #[test]
+    fn a_range_beyond_the_end_prints_nothing() {
+        let ps = PrintSettings {
+            page_range: PrintPageRange::Custom(vec![(49, 59)]),
+            ..Default::default()
+        };
+        assert!(ps.resolve_pages(10, 0).is_empty());
+
+        // A range that merely *extends* past the end still prints the part
+        // that exists -- the two cases are different and used to be conflated.
+        let ps = PrintSettings {
+            page_range: PrintPageRange::Custom(vec![(8, 59)]),
+            ..Default::default()
+        };
+        assert_eq!(ps.resolve_pages(10, 0), vec![8, 9]);
+    }
+
+    /// Overlapping ranges name each page once, in order.
+    #[test]
+    fn overlapping_ranges_are_merged() {
+        let ps = PrintSettings {
+            page_range: PrintPageRange::Custom(vec![(4, 6), (0, 2), (5, 8)]),
+            ..Default::default()
+        };
+        assert_eq!(ps.resolve_pages(10, 0), vec![0, 1, 2, 4, 5, 6, 7, 8]);
+    }
+
+    /// Typing a page range that names nothing must not print the whole
+    /// document. It used to: the parser dropped the out-of-range parts, found
+    /// itself with an empty list, and fell back to `All`. Of the two ways to
+    /// be wrong about a range nobody asked for, printing everything is the
+    /// expensive one.
+    #[test]
+    fn a_page_range_naming_nothing_does_not_print_everything() {
+        let parsed = PrintSettings::parse_page_range("50-60", 10);
+        let ps = PrintSettings {
+            page_range: parsed,
+            ..Default::default()
+        };
+        assert!(
+            ps.resolve_pages(10, 0).is_empty(),
+            "a typo in the page box printed the whole document"
+        );
+    }
+
+    /// Page "0" does not exist in the 1-based numbering the user types in.
+    #[test]
+    fn page_zero_is_not_a_page() {
+        let ps = PrintSettings {
+            page_range: PrintSettings::parse_page_range("0", 10),
+            ..Default::default()
+        };
+        assert!(ps.resolve_pages(10, 0).is_empty());
+    }
+
+    /// The end of a range is clamped when the document is printed, not when the
+    /// range is typed, because only the first of those knows how many pages the
+    /// document has *now*.
+    #[test]
+    fn the_end_of_a_range_is_clamped_at_print_time() {
+        let parsed = PrintSettings::parse_page_range("1-100", 10);
+        assert_eq!(parsed, PrintPageRange::Custom(vec![(0, 99)]));
+        let ps = PrintSettings {
+            page_range: parsed,
+            ..Default::default()
+        };
+        assert_eq!(ps.resolve_pages(3, 0), vec![0, 1, 2]);
+        assert_eq!(ps.resolve_pages(10, 0), (0..10).collect::<Vec<_>>());
+    }
+
     #[test]
     fn test_parse_page_range_all() {
         let result = PrintSettings::parse_page_range("all", 10);
@@ -3475,6 +3637,45 @@ mod tests {
         let pts = vec![(10.0, 10.0), (50.0, 50.0), (90.0, 10.0)];
         let id = app.add_freehand(rect, pts, RED, 2.0);
         assert!(id.is_some());
+    }
+
+    /// An annotation that could not be placed must not consume an id.
+    ///
+    /// The three `add_*` methods each took an id from the counter before
+    /// looking for a page to put the annotation on, so every failed call --
+    /// an empty tab, or a click arriving while a document was closing -- burnt
+    /// one. The ids stayed unique, so nothing broke visibly; they just grew
+    /// gaps, which is the sort of thing only noticed by whoever later assumes
+    /// they are dense.
+    #[test]
+    fn a_failed_annotation_does_not_consume_an_id() {
+        let mut app = PdfViewerApp::new(1280.0, 720.0);
+        // A fresh app has one tab and no document in it.
+        assert!(app.active_tab().unwrap().document.is_none());
+        let rect = PageRect::new(10.0, 10.0, 20.0, 20.0);
+        assert!(app.add_highlight(rect, YELLOW).is_none());
+        assert!(app.add_note(rect, "n".to_string()).is_none());
+        assert!(app.add_freehand(rect, vec![(0.0, 0.0)], RED, 1.0).is_none());
+
+        // Now give it a document: the first annotation that lands should get
+        // the first id, not the fourth.
+        app.load_document(PdfDocument::create_sample(PathBuf::from("/t.pdf"), 1));
+        assert_eq!(app.add_highlight(rect, YELLOW), Some(1));
+    }
+
+    /// The three wrappers share one counter, so their ids interleave without
+    /// colliding -- which is what makes `remove_annotation(id)` unambiguous.
+    #[test]
+    fn annotation_ids_are_unique_across_the_three_kinds() {
+        let mut app = PdfViewerApp::new(1280.0, 720.0);
+        app.load_document(PdfDocument::create_sample(PathBuf::from("/t.pdf"), 1));
+        let rect = PageRect::new(10.0, 10.0, 20.0, 20.0);
+        let ids = [
+            app.add_highlight(rect, YELLOW),
+            app.add_note(rect, "n".to_string()),
+            app.add_freehand(rect, vec![(0.0, 0.0)], RED, 1.0),
+        ];
+        assert_eq!(ids, [Some(1), Some(2), Some(3)]);
     }
 
     #[test]

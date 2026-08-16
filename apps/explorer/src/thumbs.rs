@@ -1622,6 +1622,25 @@ mod tests {
     }
 
     #[test]
+    fn the_one_height_that_has_no_positive_counterpart_is_still_just_declined() {
+        // A top-down BMP stores its height negated, so reading it means taking
+        // a magnitude -- and `i32::MIN.abs()` panics, because +2147483648 is
+        // not an i32. `unsigned_abs` returns it as the u32 it fits in. The
+        // dimension is then rejected for being far too large by the caller,
+        // which is what should have happened all along; the point is that it
+        // is rejected rather than aborting the file manager.
+        let mut header = vec![0u8; 54];
+        header[0] = b'B';
+        header[1] = b'M';
+        header[18..22].copy_from_slice(&100u32.to_le_bytes());
+        header[22..26].copy_from_slice(&i32::MIN.to_le_bytes());
+
+        let dims = parse_bmp_dimensions(&header).expect("a magnitude, not a panic");
+        assert_eq!(dims.width, 100);
+        assert_eq!(dims.height, 2_147_483_648);
+    }
+
+    #[test]
     fn parse_png_valid() {
         let mut header = vec![0u8; 24];
         header[0..8].copy_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);

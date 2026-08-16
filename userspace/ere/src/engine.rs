@@ -890,6 +890,16 @@ impl Regex {
         self.ngroups
     }
 
+    /// Number of instructions in the compiled program.
+    ///
+    /// Exposed for callers that decide how much work to allow: a search costs
+    /// `O(len(subject) × len(prog))`, and a program near [`MAX_PROG`] on a
+    /// large file is the one shape that is slow without being wrong.
+    #[must_use]
+    pub fn program_len(&self) -> usize {
+        self.prog.len()
+    }
+
     /// `true` if the pattern matches anywhere in `text`.
     #[must_use]
     pub fn is_match(&self, text: BStr<'_>) -> bool {
@@ -906,7 +916,7 @@ impl Regex {
     #[must_use]
     pub fn captures(&self, text: BStr<'_>) -> Option<Vec<Option<Str>>> {
         let chars: Vec<Ch> = bytes::chars(text).collect();
-        let slots = self.run(&chars)?;
+        let slots = self.run(&chars, 0)?;
         let mut out = Vec::with_capacity(self.ngroups.saturating_add(1));
         for g in 0..=self.ngroups {
             // The open and close slots of group `g`. A group is an opening paren
@@ -925,9 +935,111 @@ impl Regex {
         Some(out)
     }
 
-    /// Run the Pike VM over `input`, returning the winning thread's capture
-    /// slots (`2 × (ngroups + 1)` positions) or `None` if no match.
-    fn run(&self, input: &[Ch]) -> Option<Vec<Option<usize>>> {
+    /// Where the leftmost match begins and ends, as **byte** offsets into
+    /// `text`, or `None` if the pattern does not match.
+    ///
+    /// [`Regex::captures`] hands back the matched *bytes*, which answers "what
+    /// did it match" but not "where" — and `grep -o`, `sed`'s `s///` and awk's
+    /// `sub`/`gsub`/`match` all need the position, because they have to rebuild
+    /// the subject around the match.
+    #[must_use]
+    pub fn find(&self, text: BStr<'_>) -> Option<(usize, usize)> {
+        self.find_at(text, 0)
+    }
+
+    /// The leftmost match at or after byte offset `from`.
+    ///
+    /// `^` still means the start of `text`, not the start of the search — a
+    /// continued search is looking for the *next* match in one subject, not
+    /// matching a new subject that happens to begin at `from`. (POSIX spells
+    /// this `REG_NOTBOL`.) So `sed 's/^a//g'` removes one leading `a` and not
+    /// one per position, which is what every other implementation does.
+    ///
+    /// `from` is rounded forward to a character boundary, so a caller that
+    /// resumes from an arbitrary byte cannot start a match inside a character.
+    ///
+    /// Prefer [`Regex::find_iter`] for a scan: this decodes `text` on every
+    /// call, so stepping through a long subject with it is quadratic.
+    #[must_use]
+    pub fn find_at(&self, text: BStr<'_>, from: usize) -> Option<(usize, usize)> {
+        let scan = Scan::new(text);
+        let slots = self.run(&scan.chars, scan.char_index(from))?;
+        scan.span(slots.first().copied().flatten()?, slots.get(1).copied().flatten()?)
+    }
+
+    /// Every non-overlapping match, left to right, as byte offsets.
+    ///
+    /// Decodes `text` once and reuses it, which is the difference between a
+    /// linear `gsub` and a quadratic one. An *empty* match advances the scan by
+    /// one character rather than staying put, so a pattern that can match
+    /// nothing — `x*`, `()` — yields a match at each position and terminates.
+    pub fn find_iter(&self, text: BStr<'_>) -> Matches<'_> {
+        Matches {
+            re: self,
+            cur: Cursor::new(text),
+        }
+    }
+
+    /// Every non-overlapping match's capture groups, left to right, as byte
+    /// spans — [`Regex::find_iter`] for a caller that needs the groups.
+    ///
+    /// `sed`'s `s/\(a\)\(b\)/\2\1/g` needs both halves of this at once: where
+    /// each match sits in the subject, and where its groups sit inside it.
+    /// Getting them by calling [`Regex::capture_spans_at`] in a loop re-decodes
+    /// the subject for every match, which turns a linear substitution into a
+    /// quadratic one on exactly the files where it matters.
+    pub fn capture_spans_iter(&self, text: BStr<'_>) -> CaptureMatches<'_> {
+        CaptureMatches {
+            re: self,
+            cur: Cursor::new(text),
+        }
+    }
+
+    /// The leftmost match's capture groups as **byte** spans: index `0` is the
+    /// whole match, `i` is group `i`, `None` for a group that did not
+    /// participate.
+    ///
+    /// This is what a replacement text needs. `sed`'s `s/\(a*\)b/[\1]/` has to
+    /// splice group 1 into the output *and* know which bytes of the subject the
+    /// whole match consumed; [`Regex::captures`] gives the first and not the
+    /// second.
+    #[must_use]
+    pub fn capture_spans(&self, text: BStr<'_>) -> Option<Vec<Option<(usize, usize)>>> {
+        self.capture_spans_at(text, 0)
+    }
+
+    /// [`Regex::capture_spans`], resumed at byte offset `from`. `^` keeps
+    /// meaning the start of `text` — see [`Regex::find_at`].
+    #[must_use]
+    pub fn capture_spans_at(
+        &self,
+        text: BStr<'_>,
+        from: usize,
+    ) -> Option<Vec<Option<(usize, usize)>>> {
+        let scan = Scan::new(text);
+        let slots = self.run(&scan.chars, scan.char_index(from))?;
+        Some(self.spans_from_slots(&scan, &slots))
+    }
+
+    /// Turn a winning thread's character slots into byte spans, one per group.
+    fn spans_from_slots(&self, scan: &Scan, slots: &[Option<usize>]) -> Vec<Option<(usize, usize)>> {
+        let mut out = Vec::with_capacity(self.ngroups.saturating_add(1));
+        for g in 0..=self.ngroups {
+            let (open, close) = (g.saturating_mul(2), g.saturating_mul(2).saturating_add(1));
+            let span = match (slots.get(open).copied().flatten(), slots.get(close).copied().flatten())
+            {
+                (Some(s), Some(e)) => scan.span(s, e),
+                _ => None,
+            };
+            out.push(span);
+        }
+        out
+    }
+
+    /// Run the Pike VM over `input` starting at character index `start`,
+    /// returning the winning thread's capture slots (`2 × (ngroups + 1)`
+    /// positions) or `None` if no match.
+    fn run(&self, input: &[Ch], start: usize) -> Option<Vec<Option<usize>>> {
         // Two slots — open and close — for every group plus the whole match.
         let nslots = self.ngroups.saturating_add(1).saturating_mul(2);
         let mut clist = ThreadList::new(self.prog.len());
@@ -935,9 +1047,12 @@ impl Regex {
         let mut matched: Option<Vec<Option<usize>>> = None;
 
         let mut caps = vec![None; nslots];
-        self.add_thread(&mut clist, 0, 0, &mut caps, input);
+        // `start` past the end is not an error — it is a scan that has run off
+        // the subject, which `find_iter` does on its last step.
+        let start = start.min(input.len());
+        self.add_thread(&mut clist, 0, start, &mut caps, input);
 
-        for sp in 0..=input.len() {
+        for sp in start..=input.len() {
             if clist.threads.is_empty() {
                 break;
             }
@@ -1054,6 +1169,141 @@ impl Regex {
                 caps: caps.clone(),
             }),
         }
+    }
+}
+
+/// A subject decoded once, with the map back to its bytes.
+///
+/// The engine counts in *characters* — that is what makes `.` match an
+/// undecodable byte as one thing rather than as however many bytes it spans —
+/// but every caller of this crate counts in bytes, because that is what it
+/// will slice the subject with. This is the translation, and it is built once
+/// per scan rather than once per match.
+struct Scan {
+    chars: Vec<Ch>,
+    /// Byte offset of each character, then the subject's length. Holding that
+    /// extra final entry is what makes `offs[s]..offs[e]` right for *every*
+    /// `s <= e <= chars.len()`, including a match that ends at the end.
+    offs: Vec<usize>,
+}
+
+impl Scan {
+    fn new(text: BStr<'_>) -> Scan {
+        let mut chars = Vec::new();
+        let mut offs = Vec::new();
+        for (at, c) in bytes::char_positions(text) {
+            offs.push(at);
+            chars.push(c);
+        }
+        offs.push(text.len());
+        Scan { chars, offs }
+    }
+
+    /// The character index at or after byte offset `at`.
+    ///
+    /// Rounding *forward* is what keeps a resumed search from starting inside a
+    /// character: a caller that computed `at` by adding a byte count can land
+    /// mid-character, and the alternative — rounding back — would let the scan
+    /// re-match text it had already consumed and loop.
+    fn char_index(&self, at: usize) -> usize {
+        self.offs.partition_point(|&o| o < at)
+    }
+
+    /// The bytes a character span covers, or `None` if either end is not a
+    /// character boundary this subject has.
+    fn span(&self, start: usize, end: usize) -> Option<(usize, usize)> {
+        Some((*self.offs.get(start)?, *self.offs.get(end)?))
+    }
+}
+
+/// Where a scan of one subject has got to. Shared by the two iterators so they
+/// cannot disagree about what "the next match" means.
+struct Cursor {
+    scan: Scan,
+    /// Character index the next search starts from.
+    next: usize,
+    done: bool,
+}
+
+impl Cursor {
+    fn new(text: BStr<'_>) -> Cursor {
+        Cursor {
+            scan: Scan::new(text),
+            next: 0,
+            done: false,
+        }
+    }
+
+    /// Advance to the next match and return its capture slots.
+    fn step(&mut self, re: &Regex) -> Option<Vec<Option<usize>>> {
+        if self.done {
+            return None;
+        }
+        let Some(slots) = re.run(&self.scan.chars, self.next) else {
+            self.done = true;
+            return None;
+        };
+        let (start, end) = match (
+            slots.first().copied().flatten(),
+            slots.get(1).copied().flatten(),
+        ) {
+            (Some(s), Some(e)) => (s, e),
+            // A match that did not record its own extent cannot be stepped
+            // past, so continuing would return it for ever. It is unreachable —
+            // every program is wrapped in the `Save(0) … Save(1)` pair — and
+            // ending the scan is the one answer that cannot hang the caller.
+            _ => {
+                self.done = true;
+                return None;
+            }
+        };
+        // An empty match is at a position, not over one, so it would be found
+        // again at the same place. Stepping one character past it is what
+        // `sed 's/x*/-/g'` does: a replacement between every pair of
+        // characters, and then an end.
+        self.next = if end > start {
+            end
+        } else {
+            end.saturating_add(1)
+        };
+        if self.next > self.scan.chars.len() {
+            self.done = true;
+        }
+        Some(slots)
+    }
+}
+
+/// Every non-overlapping match of one pattern in one subject, as byte spans.
+/// Built by [`Regex::find_iter`].
+pub struct Matches<'r> {
+    re: &'r Regex,
+    cur: Cursor,
+}
+
+impl Iterator for Matches<'_> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<(usize, usize)> {
+        let slots = self.cur.step(self.re)?;
+        let start = slots.first().copied().flatten()?;
+        let end = slots.get(1).copied().flatten()?;
+        self.cur.scan.span(start, end)
+    }
+}
+
+/// Every non-overlapping match's groups, as byte spans. Built by
+/// [`Regex::capture_spans_iter`].
+pub struct CaptureMatches<'r> {
+    re: &'r Regex,
+    cur: Cursor,
+}
+
+impl Iterator for CaptureMatches<'_> {
+    type Item = Vec<Option<(usize, usize)>>;
+
+    fn next(&mut self) -> Option<Vec<Option<(usize, usize)>>> {
+        let slots = self.cur.step(self.re)?;
+        Some(self.re.spans_from_slots(&self.cur.scan, &slots))
     }
 }
 
@@ -1341,5 +1591,126 @@ mod tests {
         let re = Regex::new(b"(a{100}){10}").expect("10 * 100 copies is 1000 instructions");
         assert!(re.is_match(&b"a".repeat(1000)));
         assert!(!re.is_match(&b"a".repeat(999)));
+    }
+
+    // ---- byte offsets ----------------------------------------------------
+    //
+    // `captures` answers "what did it match"; these answer "where", which is
+    // what `grep -o`, `sed`'s `s///` and awk's `sub`/`gsub` need in order to
+    // rebuild the subject around the match rather than just report it.
+
+    fn re(pat: &str) -> Regex {
+        Regex::new(pat.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn a_match_reports_the_bytes_it_covers() {
+        assert_eq!(re("b+").find(b"aabbbcc"), Some((2, 5)));
+        assert_eq!(re("^a").find(b"aab"), Some((0, 1)));
+        assert_eq!(re("c$").find(b"abc"), Some((2, 3)));
+        assert_eq!(re("z").find(b"abc"), None);
+        // The span is a slice of the subject, which is the whole point of
+        // returning it rather than the text.
+        let (s, e) = re("b.d").find(b"xxabcdyy").unwrap();
+        assert_eq!(&b"xxabcdyy"[s..e], b"bcd");
+    }
+
+    #[test]
+    fn an_offset_is_measured_in_bytes_not_characters() {
+        // é is two bytes, so a character count and a byte count disagree from
+        // the second character on — the bug this API exists to make impossible.
+        let hay = "aébé".as_bytes();
+        let (s, e) = re("b").find(hay).unwrap();
+        assert_eq!((s, e), (3, 4));
+        assert_eq!(&hay[s..e], b"b");
+        // And a match *of* a multi-byte character spans all of its bytes.
+        assert_eq!(re("é").find(hay), Some((1, 3)));
+    }
+
+    #[test]
+    fn a_resumed_search_still_anchors_to_the_start_of_the_subject() {
+        // POSIX spells this REG_NOTBOL. It is why `sed 's/^a//g'` strips one
+        // leading `a` rather than one at every position it resumes from.
+        let bol = re("^a");
+        assert_eq!(bol.find_at(b"aaa", 0), Some((0, 1)));
+        assert_eq!(bol.find_at(b"aaa", 1), None);
+        // The end anchor is the mirror image: still the end of the subject.
+        assert_eq!(re("a$").find_at(b"aaa", 1), Some((2, 3)));
+    }
+
+    #[test]
+    fn a_resume_point_inside_a_character_rounds_forward() {
+        // Landing mid-character is what a caller that adds byte counts does;
+        // rounding back would re-match text already consumed and loop.
+        let hay = "éab".as_bytes();
+        assert_eq!(re("a").find_at(hay, 1), Some((2, 3)));
+        assert_eq!(re("é").find_at(hay, 1), None, "the character at 0..2 is behind us");
+    }
+
+    #[test]
+    fn a_scan_yields_every_match_left_to_right() {
+        let hay = b"ab12cd345ef";
+        let spans: Vec<_> = re("[0-9]+").find_iter(hay).collect();
+        assert_eq!(spans, vec![(2, 4), (6, 9)]);
+        let texts: Vec<&[u8]> = spans.iter().map(|&(s, e)| &hay[s..e]).collect();
+        assert_eq!(texts, vec![&b"12"[..], &b"345"[..]]);
+    }
+
+    #[test]
+    fn a_scan_of_a_pattern_that_can_match_nothing_terminates() {
+        // `sed 's/x*/-/g'` on "axb" is "-a-b-": a match at each position, plus
+        // the one at the end, and then a stop. A scan that did not step past an
+        // empty match would hang instead.
+        let spans: Vec<_> = re("x*").find_iter(b"axb").collect();
+        assert_eq!(spans, vec![(0, 0), (1, 2), (2, 2), (3, 3)]);
+        // (An *empty* pattern is a compile error here, as it is in glibc, so
+        // the pattern that matches nothing has to be spelled with a `*`.)
+        assert_eq!(re("z*").find_iter(b"ab").count(), 3);
+    }
+
+    #[test]
+    fn a_scan_does_not_overlap_its_own_matches() {
+        assert_eq!(re("aa").find_iter(b"aaaa").collect::<Vec<_>>(), vec![(0, 2), (2, 4)]);
+    }
+
+    #[test]
+    fn group_spans_locate_the_parts_of_a_match() {
+        let hay = b"key=value";
+        let spans = re("([a-z]+)=([a-z]+)").capture_spans(hay).unwrap();
+        assert_eq!(spans, vec![Some((0, 9)), Some((0, 3)), Some((4, 9))]);
+        // A group that did not participate has no span — as distinct from an
+        // empty one, which does.
+        let spans = re("(a)|(b)").capture_spans(b"b").unwrap();
+        assert_eq!(spans, vec![Some((0, 1)), None, Some((0, 1))]);
+        assert_eq!(re("(x*)y").capture_spans(b"y").unwrap()[1], Some((0, 0)));
+    }
+
+    #[test]
+    fn group_spans_are_reported_for_every_match_of_a_scan() {
+        let hay = b"a1 b22 c3";
+        let got: Vec<_> = re("([a-z])([0-9]+)")
+            .capture_spans_iter(hay)
+            .map(|g| (g[1].unwrap(), g[2].unwrap()))
+            .collect();
+        assert_eq!(got, vec![((0, 1), (1, 2)), ((3, 4), (4, 6)), ((7, 8), (8, 9))]);
+    }
+
+    #[test]
+    fn a_span_can_end_at_the_end_of_the_subject() {
+        // The off-by-one this API is easiest to get wrong at: the byte-offset
+        // table needs one entry more than there are characters.
+        assert_eq!(re("c$").find(b"abc"), Some((2, 3)));
+        assert_eq!(re("$").find(b"ab"), Some((2, 2)));
+        assert_eq!(re("x*").find(b""), Some((0, 0)));
+        assert_eq!(re("x*").find_iter(b"").collect::<Vec<_>>(), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn an_undecodable_byte_is_one_character_wide() {
+        // 0xFF begins no valid UTF-8 sequence, so it is its own character and
+        // a span must not split it or skip it.
+        let hay: &[u8] = &[b'a', 0xFF, b'b'];
+        assert_eq!(re("b").find(hay), Some((2, 3)));
+        assert_eq!(re("a.b").find(hay), Some((0, 3)));
     }
 }

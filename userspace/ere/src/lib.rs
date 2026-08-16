@@ -68,4 +68,4 @@ pub mod ch;
 pub mod engine;
 
 pub use ch::{BStr, Ch, Str, chars, from_chars};
-pub use engine::{EreError, Regex};
+pub use engine::{CaptureMatches, EreError, Matches, Regex};

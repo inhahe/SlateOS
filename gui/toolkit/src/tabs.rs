@@ -924,10 +924,7 @@ mod tests {
         let mut t = abc();
         t.set_active(0);
         t.close(0);
-        assert_eq!(
-            t.iter().map(String::as_str).collect::<Vec<_>>(),
-            ["b", "c"]
-        );
+        assert_eq!(t.iter().map(String::as_str).collect::<Vec<_>>(), ["b", "c"]);
         assert_eq!(t.active(), "b");
     }
 

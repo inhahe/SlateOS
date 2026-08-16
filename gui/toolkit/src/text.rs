@@ -957,7 +957,11 @@ mod tests {
         let mut offset = 0.0_f32;
         while offset <= full {
             let cursor = cursor_at(text, offset, 16.0, FontWeightHint::Regular);
-            assert!(text.is_char_boundary(cursor.byte), "byte {} splits a character", cursor.byte);
+            assert!(
+                text.is_char_boundary(cursor.byte),
+                "byte {} splits a character",
+                cursor.byte
+            );
             let x = caret_x(text, cursor, 16.0, FontWeightHint::Regular);
             assert!(
                 (x - offset).abs() <= 16.0,
@@ -979,8 +983,14 @@ mod tests {
         assert_eq!(TextCursor::default(), TextCursor::from(0));
         // On single-direction text the two affinities name the same point, so
         // the choice cannot go wrong there — which is most of the UI.
-        let down = TextCursor { byte: 3, affinity: Affinity::Downstream };
-        let up = TextCursor { byte: 3, affinity: Affinity::Upstream };
+        let down = TextCursor {
+            byte: 3,
+            affinity: Affinity::Downstream,
+        };
+        let up = TextCursor {
+            byte: 3,
+            affinity: Affinity::Upstream,
+        };
         let dx = caret_x(text, down, 16.0, FontWeightHint::Regular);
         let ux = caret_x(text, up, 16.0, FontWeightHint::Regular);
         assert!((dx - ux).abs() < 0.001, "{dx} vs {ux}");
@@ -998,7 +1008,10 @@ mod tests {
             let lo = caret_x(text, from.into(), 16.0, FontWeightHint::Regular);
             let hi = caret_x(text, to.into(), 16.0, FontWeightHint::Regular);
             let (bx, bw) = boxes[0];
-            assert!((bx - lo).abs() < 0.001 && (bx + bw - hi).abs() < 0.001, "{boxes:?} vs {lo}..{hi}");
+            assert!(
+                (bx - lo).abs() < 0.001 && (bx + bw - hi).abs() < 0.001,
+                "{boxes:?} vs {lo}..{hi}"
+            );
         }
     }
 

@@ -2456,7 +2456,13 @@ impl RichTextView {
                         SEARCH_MATCH_COLOR
                     };
                     for (bx, bw) in self.selection_boxes_of_cols(wl, ms, me) {
-                        tree.fill_rect(gutter_w + wl.indent + bx, render_y, bw, wl.line_height, color);
+                        tree.fill_rect(
+                            gutter_w + wl.indent + bx,
+                            render_y,
+                            bw,
+                            wl.line_height,
+                            color,
+                        );
                     }
                 }
             }
@@ -3085,13 +3091,13 @@ mod tests {
         let all = view.selection_boxes_of_cols(&wl, 0, 10);
         assert_eq!(all.len(), 1, "{all:?}");
         // …and it covers the whole line, both spans included.
-        let total: f32 = wl
-            .spans
-            .iter()
-            .map(|s| view.span_width(s, None))
-            .sum();
+        let total: f32 = wl.spans.iter().map(|s| view.span_width(s, None)).sum();
         assert!((all[0].0).abs() < 0.001, "starts at {}", all[0].0);
-        assert!((all[0].1 - total).abs() < 0.01, "width {} vs line {total}", all[0].1);
+        assert!(
+            (all[0].1 - total).abs() < 0.01,
+            "width {} vs line {total}",
+            all[0].1
+        );
 
         // Splitting the range in two tiles the same ground: the box for the
         // second half begins exactly where the box for the first half ends.

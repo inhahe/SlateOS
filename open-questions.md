@@ -430,6 +430,65 @@ and the per-glyph bidi levels a visual walk would use), `gui/toolkit/src/text.rs
 `guitk::modal::InputDialog` and `apps/editor`. Tracked in `known-issues.md` →
 `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`.
 
+## C-Q3 — [C] `CLAUDE.md` tells all three lanes to publish finished work through one shared folder, and two of them collided in it today. Change the instruction? — Status: OPEN
+
+**In short:** Each of the three agents works in its own private copy of the
+source tree, which is what stops them overwriting each other. But the last step
+of every finished task sends all three back into **one shared copy** — the
+`os` folder — to publish the work. Today two agents were in there at the same
+moment and their publish steps tangled; git printed a "a git process may have
+crashed in this repository earlier" error and one agent's step ended up
+discarded. Nothing was lost this time, because a discarded publish can simply
+be re-run. There is a way to publish that never touches the shared folder at
+all, and the question is whether to make that the instruction.
+
+**Why the shared folder is there.** Publishing means combining your work with
+whatever the other two have published since you started. Combining normally
+needs a folder to do it in — somewhere the files from both sides can sit while
+differences are reconciled. `CLAUDE.md` nominates `os` as that folder. The
+catch is that a folder can only be in one state at a time, so two agents
+reconciling in it simultaneously are editing the same thing, which is precisely
+the failure the private copies were created to prevent.
+
+**Why it can be avoided.** The rules *already* require each agent to pull in
+everyone else's published work and re-run the tests **before** publishing —
+in its own private copy. Once that is done, publishing has nothing left to
+reconcile: the shared side has no changes the agent's copy lacks. Git can then
+publish with a single server-side command that needs no folder at all
+(`git push origin lane-c:main`, a "fast-forward"). If another agent published
+in the meantime the command is simply **refused**; you pull their work in,
+re-test, and try again. It cannot half-succeed and it cannot interleave with
+anyone else's.
+
+**The options.**
+
+| | *What changes:* |
+|---|---|
+| **A. Leave `CLAUDE.md` as it is** | Nothing changes. Agents keep meeting in `os`; collisions stay rare but keep happening, and each one costs a re-run and looks alarming in the transcript. |
+| **B. Change step 11 to the folderless publish** | Agents stop entering `os` to publish. `os` becomes a read-only window onto the combined result. Collisions become impossible rather than rare; a clash surfaces as a clean "refused, try again" instead of a tangle. |
+| **C. Add a lock around `os`** | Agents still meet in `os` but queue for it, the way they already queue for the emulator. Collisions become impossible too, but an agent can now be made to *wait*, and a lock left behind by a crashed agent blocks the others until someone clears it. |
+
+**My recommendation: B.** It removes the shared resource instead of scheduling
+access to it, needs no new machinery, and is what I did today after the
+collision — it worked, and `main` still only ever advanced to a commit whose
+tests had been run. C solves the same problem by adding a lock that can itself
+get stuck. The one thing B gives up is the ability to resolve a genuine
+conflict *during* publication, but that was never wanted here: the rules
+already say resolve-then-test-then-publish, and B just makes that order
+mandatory instead of conventional.
+
+**Why this is a question and not a change I made:** `CLAUDE.md` is yours. Its
+own text says not to edit it except on an explicit instruction, so this is
+written up rather than acted on.
+
+**If this is never answered:** nothing breaks. I will keep publishing the safe
+way regardless — the instruction permits it, it just does not prescribe it —
+so the exposure is limited to the other two lanes continuing to follow the
+letter of step 11. The cost is an occasional tangled publish that has to be
+re-run, and it neither grows nor worsens with time. Full detail in
+`known-issues.md` → "Two lanes merging up at once race in the shared `os`
+worktree".
+
 
 ---
 

@@ -58,6 +58,19 @@ fn alloc_pid() -> ProcessId {
     NEXT_PID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// The PID [`alloc_pid`] would hand out next, without consuming it.
+///
+/// Exists for `cap::verify_resource_id_zero_is_class_wide`, which needs to
+/// prove that 0 is not a reachable PID — the capability ABI uses
+/// `resource_id == 0` to mean "the resource class, not one instance", and
+/// that sentinel is only unambiguous while no process can be numbered 0.
+/// Reading the counter rather than allocating keeps the self-test free of a
+/// side effect on the very sequence it is checking.
+#[must_use]
+pub fn peek_next_pid() -> ProcessId {
+    NEXT_PID.load(Ordering::Relaxed)
+}
+
 /// Cumulative number of processes created since boot.
 ///
 /// Backs `/proc/stat`'s `processes` field.  Counts every successful

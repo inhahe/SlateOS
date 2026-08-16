@@ -71,8 +71,18 @@ fi
 echo "=== wedge-soak run $RUNSTAMP: up to $MAX_ITERS armed boots, timeout=${TIMEOUT}s each ==="
 [ -n "${SLATE_CMDLINE:-}" ] && echo "=== hunt armed via cmdline: $SLATE_CMDLINE ==="
 
+# `while` rather than `for i in $(seq …)` because an iteration that never
+# booted must not consume one of the MAX_ITERS samples — see the rc=4 handler
+# below.  `done_iters` counts real samples; `skipped` counts lock refusals.
 caught=0
-for i in $(seq 1 "$MAX_ITERS"); do
+done_iters=0
+skipped=0
+# A cap on consecutive lock refusals, so a host where another lane soaks all
+# night does not leave this script retrying silently forever.  At the 60s pause
+# below, 30 refusals is half an hour of trying.
+MAX_LOCK_SKIPS="${MAX_LOCK_SKIPS:-30}"
+while [ "$done_iters" -lt "$MAX_ITERS" ]; do
+    i=$(( done_iters + 1 ))
     n="$(printf '%02d' "$i")"
     echo ""
     echo "########## soak iter $n/$MAX_ITERS ($(date +%H:%M:%S)) ##########"
@@ -90,6 +100,26 @@ for i in $(seq 1 "$MAX_ITERS"); do
         --timeout="$TIMEOUT" --stall-secs="$STALL_SECS" \
         > "$stdout_log" 2>&1
     rc=$?
+    # rc=4: boot-test refused to start because another lane's live run holds the
+    # cross-worktree QEMU lock, or is queued ahead of us for it.  NOTHING was
+    # booted this iteration, which makes it dangerous as well as useless:
+    # boot-test only truncates $SERIAL once it is past the lock, so the file
+    # still holds the PREVIOUS iteration's log, and every classifier below reads
+    # $SERIAL.  Feeding a stale log to them would either re-report an old catch
+    # as a new one or manufacture one outright.  So: no archive, no
+    # classification, and no sample spent — wait and try the same iteration
+    # again.
+    if [ "$rc" -eq 4 ]; then
+        skipped=$(( skipped + 1 ))
+        echo "iter $n: boot lock unavailable (another lane is running) — no boot, not a sample (skip $skipped/$MAX_LOCK_SKIPS)"
+        if [ "$skipped" -ge "$MAX_LOCK_SKIPS" ]; then
+            echo "=== SOAK ABORTED: could not get the boot lock in $skipped attempts ==="
+            break
+        fi
+        sleep 60
+        continue
+    fi
+    done_iters=$i
     # Archive this iteration's serial log + any register dump.
     [ -f "$SERIAL" ] && cp -f "$SERIAL" "$OUTDIR/soak-$RUNSTAMP-iter$n.serial.txt"
     if [ -f "$REGS" ] && [ -s "$REGS" ]; then
@@ -214,6 +244,10 @@ echo ""
 if [ "$caught" -eq 1 ]; then
     echo "=== SOAK DONE: wedge caught (see hang-catches soak-$RUNSTAMP-*) ==="
 else
-    echo "=== SOAK DONE: no wedge caught in $MAX_ITERS iters (race did not fire) ==="
+    # Report the iterations actually BOOTED, not MAX_ITERS: a run cut short by
+    # lock contention proves much less than a full one, and a summary that
+    # cannot tell the two apart is how "10 clean boots" gets claimed for three.
+    echo "=== SOAK DONE: no wedge caught in $done_iters/$MAX_ITERS iters (race did not fire) ==="
 fi
-echo "WEDGE_SOAK_DONE rc_caught=$caught"
+[ "$skipped" -gt 0 ] && echo "=== (skipped $skipped attempt(s) that could not get the boot lock) ==="
+echo "WEDGE_SOAK_DONE rc_caught=$caught iters=$done_iters skipped=$skipped"

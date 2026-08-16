@@ -25,6 +25,18 @@
 #                                       # use this for soaks so a concurrent
 #                                       # `cargo build` cannot swap the kernel
 #                                       # mid-run
+#   ./scripts/boot-test.sh --profile=debug|release
+#                                       # force the build profile, independently
+#                                       # of --bench.  Without it, --bench means
+#                                       # release and everything else means
+#                                       # debug.  `--bench --profile=debug` is
+#                                       # the only way to run the benchmark
+#                                       # suite on a debug build, which is what
+#                                       # exercises the debug branch of the
+#                                       # per-profile budgets in bench.rs.
+#                                       # An unrecognised value is an error, not
+#                                       # a fallback: a typo must not silently
+#                                       # measure the other profile.
 #   ./scripts/boot-test.sh --bench      # wait for BENCH_OK and print benchmark
 #                                       # numbers (the micro-benchmarks run in a
 #                                       # deferred background task AFTER BOOT_OK,
@@ -331,8 +343,10 @@ to_win_path() {
     fi
 }
 
-# Default (debug) artefact path.  --bench overrides this to the release path
-# after arg parsing — see the CARGO_PROFILE_ARGS block below for why.
+# Default (debug) artefact path.  Reassigned unconditionally after arg parsing
+# from the resolved BENCH_PROFILE (--profile=, else --bench's default) — see the
+# CARGO_PROFILE_ARGS block below for why.  This initial value therefore only
+# matters if that block is ever bypassed; it is kept in sync deliberately.
 KERNEL_BIN="$PROJECT_ROOT/target/x86_64-unknown-none/debug/kernel"
 ESP_DIR="$PROJECT_ROOT/build/esp"
 SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
@@ -437,6 +451,9 @@ HARD_LOCKUP_WATCHDOG=0
 # BOOT_OK (the fast path); --bench switches it to BENCH_OK so we wait for the
 # deferred micro-benchmark task to finish and can scrape its numbers.
 WAIT_MARKER="BOOT_OK"
+# Explicit build-profile override, empty unless --profile=... is given.  See the
+# profile-selection block below for why this exists separately from --bench.
+PROFILE_REQ=""
 # What the caller asserts the host was doing during the QEMU window.  Default
 # "unknown" deliberately: "nobody said" must never be silently upgraded to "the
 # host was quiet", which is the error that let a run taking 2.3x as long as its
@@ -481,6 +498,23 @@ for arg in "$@"; do
         # note on B-KNULLJUMP-SIGNAL).
         --no-stage) NO_BUILD=1; NO_STAGE=1 ;;
         --bench) BENCH=1; WAIT_MARKER="BENCH_OK" ;;
+        # --profile decouples "which build to measure" from "how long to wait".
+        # Those are independent questions that --bench used to answer jointly,
+        # which left one combination unreachable: a DEBUG build waited on to
+        # BENCH_OK.  That gap was not academic -- bench.rs carries per-profile
+        # budgets whose debug branch could not be exercised at all, so a
+        # mis-sized debug constant would go unnoticed until it fired on someone
+        # else's ordinary boot.  Rejecting an unknown value rather than falling
+        # back to a default: a typo'd --profile=relese must not silently measure
+        # the other profile and label the record with it.
+        --profile=*)
+            PROFILE_REQ="${arg#*=}"
+            case "$PROFILE_REQ" in
+                debug|release) ;;
+                *) echo "ERROR: --profile must be 'debug' or 'release', got '$PROFILE_REQ'" >&2
+                   exit 1 ;;
+            esac
+            ;;
         --timeout=*) TIMEOUT="${arg#*=}"; TIMEOUT_EXPLICIT=1 ;;
         --stall-secs=*) STALL_SECS="${arg#*=}" ;;
         --hard-lockup-watchdog) HARD_LOCKUP_WATCHDOG=1 ;;
@@ -558,7 +592,8 @@ if [ "$BENCH" = "1" ] && [ "$TIMEOUT_EXPLICIT" = "0" ]; then
     TIMEOUT="$BENCH_TIMEOUT"
 fi
 
-# --bench builds --release; every other run stays on the debug profile.
+# --bench DEFAULTS to --release; every other run defaults to debug.  Either can
+# be overridden with --profile=<debug|release>.
 #
 # WHY: a benchmark that does not measure the shipped build is not a benchmark.
 # Until 2026-08-14 this script ran a bare `cargo build` for every mode, so all
@@ -582,13 +617,26 @@ fi
 # readable panics matter most when a boot *fails*, and --bench already roughly
 # doubles the cycle.  Whether that split is right is Q46 in open-questions.md;
 # if it is resolved toward "release everywhere", collapse these two branches.
-if [ "$BENCH" = "1" ]; then
-    CARGO_PROFILE_ARGS=("--release")
-    KERNEL_BIN="$PROJECT_ROOT/target/x86_64-unknown-none/release/kernel"
+#
+# --profile=<debug|release> overrides the choice below.  --bench selects the
+# *default* profile; it no longer dictates it.  The combination that override
+# unlocks -- `--bench --profile=debug`, i.e. wait for BENCH_OK on a debug build
+# -- is the only way to exercise the debug branch of the per-profile budgets in
+# bench.rs, which are otherwise dead code no test can reach.
+if [ -n "$PROFILE_REQ" ]; then
+    BENCH_PROFILE="$PROFILE_REQ"
+elif [ "$BENCH" = "1" ]; then
     BENCH_PROFILE="release"
 else
-    CARGO_PROFILE_ARGS=()
     BENCH_PROFILE="debug"
+fi
+
+if [ "$BENCH_PROFILE" = "release" ]; then
+    CARGO_PROFILE_ARGS=("--release")
+    KERNEL_BIN="$PROJECT_ROOT/target/x86_64-unknown-none/release/kernel"
+else
+    CARGO_PROFILE_ARGS=()
+    KERNEL_BIN="$PROJECT_ROOT/target/x86_64-unknown-none/debug/kernel"
 fi
 
 # Optional hard-lockup NMI watchdog device (see --hard-lockup-watchdog above and

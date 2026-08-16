@@ -427,8 +427,7 @@ impl Yahtzee {
     /// Returns whether the Yahtzee category has already been scored with
     /// a non-zero value.
     fn yahtzee_already_scored_nonzero(&self) -> bool {
-        self.scores[Category::Yahtzee.index()]
-            .is_some_and(|s| s > 0)
+        self.scores[Category::Yahtzee.index()].is_some_and(|s| s > 0)
     }
 
     /// Check and award Yahtzee bonus: if the player already scored a Yahtzee
@@ -464,9 +463,7 @@ impl Yahtzee {
         // Small Straight, and Large Straight score their face values
         // (25, 30, 40 respectively) even though the dice wouldn't normally
         // qualify. This function applies the Joker scoring adjustment.
-        let score = if self.is_yahtzee()
-            && self.scores[Category::Yahtzee.index()].is_some()
-        {
+        let score = if self.is_yahtzee() && self.scores[Category::Yahtzee.index()].is_some() {
             // Joker rule for lower-section categories
             match cat {
                 Category::FullHouse => FULL_HOUSE_SCORE,
@@ -548,10 +545,7 @@ impl Yahtzee {
 
     /// Grand total score.
     fn grand_total(&self) -> u16 {
-        self.upper_total()
-            + self.upper_bonus()
-            + self.lower_total()
-            + self.yahtzee_bonus_total()
+        self.upper_total() + self.upper_bonus() + self.lower_total() + self.yahtzee_bonus_total()
     }
 
     /// Number of categories that have been scored.
@@ -567,10 +561,9 @@ impl Yahtzee {
         }
 
         match key {
-            Key::R
-                if self.phase != GamePhase::GameOver => {
-                    self.roll();
-                }
+            Key::R if self.phase != GamePhase::GameOver => {
+                self.roll();
+            }
             Key::N => {
                 self.new_game();
             }
@@ -581,24 +574,21 @@ impl Yahtzee {
                     FocusRegion::Scorecard => FocusRegion::Dice,
                 };
             }
-            Key::Left
-                if self.focus == FocusRegion::Dice && self.selected_die > 0 => {
-                    self.selected_die -= 1;
-                }
-            Key::Right
-                if self.focus == FocusRegion::Dice && self.selected_die < NUM_DICE - 1 => {
-                    self.selected_die += 1;
-                }
-            Key::Up
-                if self.focus == FocusRegion::Scorecard && self.selected_category > 0 => {
-                    self.selected_category -= 1;
-                }
+            Key::Left if self.focus == FocusRegion::Dice && self.selected_die > 0 => {
+                self.selected_die -= 1;
+            }
+            Key::Right if self.focus == FocusRegion::Dice && self.selected_die < NUM_DICE - 1 => {
+                self.selected_die += 1;
+            }
+            Key::Up if self.focus == FocusRegion::Scorecard && self.selected_category > 0 => {
+                self.selected_category -= 1;
+            }
             Key::Down
                 if self.focus == FocusRegion::Scorecard
-                    && self.selected_category < NUM_CATEGORIES - 1
-                => {
-                    self.selected_category += 1;
-                }
+                    && self.selected_category < NUM_CATEGORIES - 1 =>
+            {
+                self.selected_category += 1;
+            }
             Key::Space | Key::Enter => match self.focus {
                 FocusRegion::Dice => {
                     self.toggle_hold(self.selected_die);
@@ -1063,7 +1053,11 @@ impl Yahtzee {
             } else {
                 String::from("-")
             },
-            color: if self.upper_bonus() > 0 { GREEN } else { OVERLAY0 },
+            color: if self.upper_bonus() > 0 {
+                GREEN
+            } else {
+                OVERLAY0
+            },
             font_size: SCORE_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1614,10 +1608,7 @@ mod tests {
 
     #[test]
     fn test_potential_score_four_of_a_kind() {
-        assert_eq!(
-            potential_score(&[5, 5, 5, 5, 2], Category::FourOfAKind),
-            22
-        );
+        assert_eq!(potential_score(&[5, 5, 5, 5, 2], Category::FourOfAKind), 22);
     }
 
     #[test]
@@ -1654,10 +1645,7 @@ mod tests {
 
     #[test]
     fn test_potential_score_chance() {
-        assert_eq!(
-            potential_score(&[1, 2, 3, 4, 5], Category::Chance),
-            15
-        );
+        assert_eq!(potential_score(&[1, 2, 3, 4, 5], Category::Chance), 15);
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2174,7 +2162,10 @@ mod tests {
         g.dice = [4, 4, 4, 4, 4];
         g.roll_number = 1;
         g.score_category(Category::FullHouse.index());
-        assert_eq!(g.scores[Category::FullHouse.index()], Some(FULL_HOUSE_SCORE));
+        assert_eq!(
+            g.scores[Category::FullHouse.index()],
+            Some(FULL_HOUSE_SCORE)
+        );
     }
 
     #[test]
@@ -2676,9 +2667,21 @@ mod tests {
         let mut g = test_game();
         // Fire a bunch of random events to ensure no panics.
         let keys = [
-            Key::R, Key::N, Key::Tab, Key::Left, Key::Right,
-            Key::Up, Key::Down, Key::Space, Key::Enter, Key::Escape,
-            Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5,
+            Key::R,
+            Key::N,
+            Key::Tab,
+            Key::Left,
+            Key::Right,
+            Key::Up,
+            Key::Down,
+            Key::Space,
+            Key::Enter,
+            Key::Escape,
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Num4,
+            Key::Num5,
         ];
         for &k in &keys {
             press_key(&mut g, k);

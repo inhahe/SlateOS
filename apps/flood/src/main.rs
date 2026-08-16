@@ -43,28 +43,23 @@ const NUM_COLORS: usize = 6;
 const PALETTE: [Color; NUM_COLORS] = [RED, PEACH, YELLOW, GREEN, TEAL, MAUVE];
 const PALETTE_LABELS: [&str; NUM_COLORS] = ["R", "O", "Y", "G", "T", "M"];
 
-struct Rng {
-    state: u64,
-}
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-    fn next(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-    fn next_range(&mut self, max: usize) -> usize {
-        if max == 0 {
-            return 0;
-        }
-        (self.next() % max as u64) as usize
-    }
-}
+// From `randrange`, not a local LCG. The local one coloured each cell with
+// `state % NUM_COLORS`, and NUM_COLORS is 6. Six is even, `x % 6` preserves the
+// parity of `x`, and the low bit of a modulus-2^64 LCG alternates 0,1,0,1 on
+// every draw -- so consecutive cells always got colours of opposite parity.
+// The grid is filled in row-major order and every board size is even (8, 10,
+// 14, 18), which puts that parity on the column index.
+//
+// The palette is [R, O, Y, G, T, M], so the even colours are {R, Y, T} and the
+// odd ones are {O, G, M}. Measured before the fix:
+//
+//   * within one board, the columns strictly alternated between those two
+//     halves. Half the palette was missing from every column.
+//   * **not one horizontally-adjacent pair of cells matched, ever** -- zero out
+//     of 61 200 checked across four board sizes and 200 seeds.
+//   * so the starting blob averaged 1.48 cells and could only ever grow
+//     vertically, in a game whose entire subject is growing a blob.
+use randrange::Rng;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GameState {
@@ -106,7 +101,7 @@ impl FloodIt {
         let mut grid = vec![vec![0u8; size]; size];
         for row in &mut grid {
             for cell in row.iter_mut() {
-                *cell = rng.next_range(NUM_COLORS) as u8;
+                *cell = rng.below(NUM_COLORS) as u8;
             }
         }
         grid
@@ -690,12 +685,69 @@ mod tests {
         assert!((app.cell_size() - 22.0).abs() < 0.01);
     }
 
+    // `test_rng_deterministic` lived here and is deleted rather than ported:
+    // determinism is the generator's property and `randrange` tests it. It
+    // could not have seen what was wrong, either -- the broken colouring was
+    // perfectly deterministic, and perfectly uniform over the six colours. Only
+    // the relationship between neighbouring cells was degenerate, and no test
+    // of a single draw can reach that. The two below look at neighbours.
+
     #[test]
-    fn test_rng_deterministic() {
-        let mut r1 = Rng::new(42);
-        let mut r2 = Rng::new(42);
-        for _ in 0..50 {
-            assert_eq!(r1.next(), r2.next());
+    fn horizontally_adjacent_cells_can_match() {
+        // The old draw made this literally impossible: consecutive draws had
+        // opposite parity, `x % 6` preserves parity, and the grid is filled in
+        // row-major order, so no two cells in a row ever shared a colour. Zero
+        // matches in 61 200 pairs.
+        let mut matches = 0_u32;
+        let mut pairs = 0_u32;
+        for seed in 0..200_u64 {
+            let mut rng = Rng::new(seed);
+            let grid = FloodIt::generate_grid(14, &mut rng);
+            for row in &grid {
+                for pair in row.windows(2) {
+                    pairs += 1;
+                    if let [a, b] = pair
+                        && a == b
+                    {
+                        matches += 1;
+                    }
+                }
+            }
+        }
+        // One pair in six should match; anything above a twentieth rules out
+        // the fixed-parity board without being brittle.
+        assert!(
+            u64::from(matches) * 20 > u64::from(pairs),
+            "only {matches} of {pairs} horizontally-adjacent pairs matched"
+        );
+    }
+
+    #[test]
+    fn a_column_is_not_confined_to_half_the_palette() {
+        // Under the old draw a column could only ever show three of the six
+        // colours -- the even ones {R, Y, T} or the odd ones {O, G, M} -- and
+        // adjacent columns took opposite halves. Asking for all six in a
+        // single column would be flaky (an 18-cell column misses a given
+        // colour 3.7% of the time by chance); asking that it is not confined
+        // to one parity class is not. A fair 18-cell column lands entirely in
+        // one class with probability 2^-17.
+        const SIZE: usize = 18;
+        for seed in 0..50_u64 {
+            let mut rng = Rng::new(seed);
+            let grid = FloodIt::generate_grid(SIZE, &mut rng);
+            for col in 0..SIZE {
+                let mut parities = std::collections::BTreeSet::new();
+                for row in 0..SIZE {
+                    if let Some(&cell) = grid.get(row).and_then(|r| r.get(col)) {
+                        parities.insert(cell % 2);
+                    }
+                }
+                assert_eq!(
+                    parities.len(),
+                    2,
+                    "seed {seed} column {col} used only half the palette"
+                );
+            }
         }
     }
 

@@ -420,6 +420,58 @@ is a useful data point for the open question of whether that lint earns its keep
 tree-wide: the game-logic arithmetic was all genuinely `saturating_*` or
 `checked_*` in meaning, and the float layout arithmetic the lint does not flag.
 
+### Sweep progress: `rssreader` 112 → 0, all lint classes (2026-08-16)
+
+Seventh crate, and the second to reach **zero warnings of every class**. Tests
+152 → 162. Four defects fell out, all recorded below, and this is the crate
+that named a **new failure class for the sweep: unbounded work driven by remote
+data.**
+
+The six patterns the sweep had been finding until now are all about a bound
+that is *stated* somewhere and then not honoured at the point of use. This
+crate has those too — but three of its four defects are the opposite shape:
+**no bound was ever stated at all**, because the quantity being bounded is not
+an index. A recursion depth, a loop trip count and a stack frame are not things
+`indexing_slicing` looks at, and none of the three failures is a `Result` the
+caller could have handled:
+
+| What was unbounded | Set by | Failure |
+|---|---|---|
+| XML nesting depth | the feed's bytes | stack overflow → process abort |
+| calendar year loop | a `<pubDate>` field | hang |
+| `wrap_text` break loop | a word's length in an article body | quadratic time |
+
+An RSS reader is the first crate in this sweep whose *entire input* is remote
+and unauthenticated — the user subscribes to a URL, and everything after that
+is the publisher's choice. That makes "how big can this get?" a security
+question rather than a robustness one, and the answer was "as big as the
+publisher likes" in three places.
+
+Structurally, the parser rewrite is the same move that `byteread` was for
+`imageviewer`: **six cursor primitives** (`rest`, `peek_at`, `looking_at`,
+`skip`, `eat`, `take_past`) now carry every read of the input, each stating its
+bound at the point of the read. The methods above them used to restate it —
+`if self.pos + 3 < self.input.len() && self.input[self.pos] == b'<' && …`,
+which is one bound written twice, several statements apart, and in two cases a
+nine-byte slice guarded by `pos + 8 < len`. That is correct (it implies
+`pos + 9 <= len`) but not in a form a reader can check against the slice beside
+it. Five methods collapsed to one line each on top of the primitives.
+
+The calendar is now two closed forms (Howard Hinnant's civil-from-days and
+days-from-civil) instead of two year-by-year loops, pinned by
+`the_two_calendar_directions_are_inverses_over_the_whole_year_range`, which
+round-trips all 385,536 dates from 1970-01-01 to 9999-12-31 in 0.08 s and also
+asserts monotonicity and the rejection of each month's `last + 1`. Removing the
+loops fixed correctness as well as termination: `2023-02-29`, month 13, day 0,
+hour 25 and minute 60 used to roll silently into the next real date, and now
+each is refused.
+
+Two `#[expect(clippy::arithmetic_side_effects, reason = "…")]` remain, both on
+the Hinnant forms, and both reasons carry the proof: the operands are bounded
+three lines above by the era decomposition and by `YEAR_RANGE`. Saturating
+arithmetic there would return an `Option` no input can make `None`, which is a
+worse thing to hand a reader than a stated bound.
+
 ## A BMP declaring a height of `i32::MIN` panics the file explorer (lane C)
 
 **Status: FIXED 2026-08-16** (lane C). Verified by reverting the fix and
@@ -577,6 +629,116 @@ short) and cut at an arbitrary byte, which the subsequent `&text[head..tail]`
 slice panicked on whenever the cut landed inside a character. Rewritten to
 walk `char_indices` outwards from the match, so the window is in the unit it
 claims. Pinned by `a_snippet_window_lands_on_character_boundaries`.
+
+## Four bugs in `apps/rssreader` reachable from a subscribed feed's bytes (lane C)
+
+**Status: FIXED 2026-08-16** (lane C), commits `9a5b33aa9`, `bfeab0bfe` and the
+`wrap_text` commit below. Each was verified by reverting the fix and watching
+the named test fail with the message quoted here — none is argued from reading
+the diff.
+
+All four are reachable from **remote data**: an RSS reader's input is a URL the
+user subscribed to and everything the publisher serves from it. There is no
+crafted-file step, no privilege boundary to cross and nothing for the user to
+click. Three of the four are denial of service against the reader process
+rather than memory unsafety, but the first one is an abort with no unwinding,
+so nothing at any call site can turn it into an error message.
+
+### 1. Unbounded XML recursion — a feed can abort the process
+
+`XmlParser::parse_element` recursed once per level of element nesting with no
+cap. Measured in a debug build on a 2 MiB thread, nesting overflowed the stack
+somewhere between 512 and 1024 levels, so roughly **seven kilobytes** of
+`<a><a><a>…` is enough. A stack overflow is not a `Result` and not a panic: on
+Windows the test binary died with `STATUS_STACK_OVERFLOW` (exit `0xc00000fd`),
+no unwinding, nothing to catch.
+
+Fixed with `MAX_XML_DEPTH = 100` and a `parse_child` wrapper that owns both the
+increment and the decrement — kept in its own three-line function specifically
+so the two cannot drift apart behind one of `parse_element`'s six early
+returns. 100 is far below the cliff and unreachable by accident: RSS and Atom
+nest four or five deep, and the deepest thing this program parses is an OPML
+folder tree.
+
+Pinned by `deeply_nested_elements_are_refused_rather_than_overflowing_the_stack`
+(depth 2000), plus `nesting_within_the_limit_still_parses` and
+`many_siblings_do_not_count_as_depth` (5000 siblings under one `<channel>`) so
+the cap cannot be satisfied by a parser that simply refuses more than 100 of
+anything. Reverting the guard takes the whole test binary down rather than
+reporting a failure — which is as visible as a failure gets.
+
+### 2. Two unbounded calendar loops — a `<pubDate>` can hang the reader
+
+Date parsing ran `for y in 1970..year` to convert a year to days, and
+`format_timestamp` ran the mirror loop back down. `year` was parsed straight out
+of `<pubDate>` into a `u64` with no range check. Measured:
+`"4000000-01-01"` took 107 ms for a single date; `"18446744073709551615-01-01"`
+never returned. Both directions are reachable — a merely large year parses
+slowly into a huge timestamp, which the formatter then walks back down on every
+frame that draws the article.
+
+Replaced with the two Hinnant closed forms, a `YEAR_RANGE` of `1970..=9999`,
+and an `Option` return so an out-of-range date is refused rather than
+approximated. Pinned by `an_absurd_year_is_refused_instead_of_hanging_the_parser`;
+reverting the bound makes that test time out at 60 s.
+
+Fixed as a side effect: impossible dates and clock readings
+(`2023-02-29`, month 13, day 0, hour 25, minute 60) used to roll forward
+silently, and pre-1970 dates answered as though the year were 1970. Leap
+second 60 is still accepted, deliberately — it is a real reading, and folding
+it into the following minute is closer than discarding the article's date.
+
+### 3. `wrap_text` split a `&str` at a byte offset — a long word aborts the view
+
+```rust
+let max_chars = (max_width / char_width) as usize;
+…
+while remaining.len() > max_chars {
+    let (chunk, rest) = remaining.split_at(max_chars);
+```
+
+`max_chars` is a count of characters, derived from a pixel width; `str::len`
+and `str::split_at` are both in bytes. `split_at` does not truncate or round to
+a boundary — it panics:
+
+```
+end byte index 77 is not a char boundary; it is inside '本' (bytes 75..78)
+```
+
+The caller is the article content view, drawing the article body, so any feed
+containing one long non-ASCII word aborted the render on every frame that
+reached it. Fixed by measuring in characters throughout, with a `split_at_chars`
+helper that converts a character count to a byte offset via `char_indices`.
+
+The same confusion was a **display** bug independent of the panic: the fit test
+`current_line.len() + 1 + word.len() <= max_chars` compared bytes to a
+character budget, so text wrapped at a fraction of its intended width whenever
+it was not ASCII. `wrapping_counts_characters_not_bytes` wraps the same shape
+of text in Latin and Greek and demands identical line widths; against the old
+code it reports Latin `[23, 7]` against Greek `[11, 11, 7]` — under half.
+
+A third defect was found while fixing these and is guarded by the same rewrite:
+the break loop re-measured the untaken remainder on every pass, which is
+quadratic in a word whose length the feed chooses. The loop now ends on the
+emptiness of the tail, which is linear.
+Pinned by `a_long_non_ascii_word_is_wrapped_rather_than_panicking`,
+`wrapping_counts_characters_not_bytes` and
+`a_very_long_word_wraps_without_dropping_text`.
+
+### 4. `OfflineCache::cache_article` emptied the cache and then stored nothing
+
+Not a panic — a plain logic defect, and the sweep's "the guard is downstream of
+what it guards" pattern with a user-visible cost. The check rejecting an
+article larger than the entire cache ran *after* the eviction loop, so an
+oversized article drove that loop until the cache was empty and was then
+declined. One oversized article in a feed therefore wiped the user's whole
+offline cache on **every refresh** and cached nothing in its place.
+
+Underneath it, a second one: the previous copy of an article was not removed
+before making room, so re-caching an article — which a refresh does for every
+article it re-reads — evicted as though the old and new copies had to coexist.
+Both fixed by moving the size check to the first line and removing the old
+entry before the loop.
 
 ## Six reachable bugs in `apps/explorer`, found by the lint sweep (lane C)
 

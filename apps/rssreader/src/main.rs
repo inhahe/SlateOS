@@ -908,6 +908,22 @@ pub fn format_timestamp(ts: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}")
 }
 
+/// The instant the bundled sample articles are dated from, so that the sample
+/// data reads as a week of activity rather than a column of epoch seconds.
+const SAMPLE_BASE_TS: u64 = 1_700_000_000;
+
+/// A sample article's timestamp: `days` days and `secs` seconds after
+/// [`SAMPLE_BASE_TS`].
+///
+/// The sample data spelled each of these out as `base_ts + 86400 * 7 + 3600`,
+/// which is the same seconds-per-day conversion written by hand sixteen
+/// times -- sixteen chances to type 8640.
+const fn sample_ts(days: u64, secs: u64) -> u64 {
+    SAMPLE_BASE_TS
+        .saturating_add(days.saturating_mul(86_400))
+        .saturating_add(secs)
+}
+
 /// Convert days since the Unix epoch to (year, month, day).
 ///
 /// Closed form, after Howard Hinnant's `civil_from_days`
@@ -1025,10 +1041,9 @@ fn try_parse_iso8601(s: &str) -> Option<u64> {
     let month: u64 = base.get(1)?.parse().ok()?;
 
     let day_part = *base.get(2)?;
-    let (day_str, time_str) = if let Some(t_pos) = day_part.find('T') {
-        (&day_part[..t_pos], Some(&day_part[t_pos + 1..]))
-    } else {
-        (day_part, None)
+    let (day_str, time_str) = match day_part.split_once('T') {
+        Some((day, time)) => (day, Some(time)),
+        None => (day_part, None),
     };
 
     let day: u64 = day_str.parse().ok()?;
@@ -1064,14 +1079,21 @@ fn try_parse_rfc822(s: &str) -> Option<u64> {
         return None;
     }
 
-    // Skip day name if present (e.g. "Mon,")
-    let offset = if parts.first()?.ends_with(',') { 1 } else { 0 };
+    // Drop the day name if present (e.g. "Mon,") so that the fields below are
+    // counted from the date rather than from the start of the string. Taking
+    // the tail once is what lets them be read as first/second/third instead of
+    // as `offset + 1`, `offset + 2`, `offset + 3` against the original.
+    let fields = if parts.first()?.ends_with(',') {
+        parts.get(1..)?
+    } else {
+        parts.as_slice()
+    };
 
-    let day: u64 = parts.get(offset)?.parse().ok()?;
-    let month = month_name_to_number(parts.get(offset + 1)?)?;
-    let year: u64 = parts.get(offset + 2)?.parse().ok()?;
+    let day: u64 = fields.first()?.parse().ok()?;
+    let month = month_name_to_number(fields.get(1)?)?;
+    let year: u64 = fields.get(2)?.parse().ok()?;
 
-    let (hours, minutes, seconds) = if let Some(time_str) = parts.get(offset + 3) {
+    let (hours, minutes, seconds) = if let Some(time_str) = fields.get(3) {
         parse_time_components(time_str)
     } else {
         (0, 0, 0)
@@ -1867,19 +1889,25 @@ impl OfflineCache {
     pub fn cache_article(&mut self, article_id: ArticleId, content: &str, timestamp: u64) {
         let size = content.len();
 
-        // Evict old entries if we'd exceed the limit
-        while self.current_size + size > self.max_size && !self.entries.is_empty() {
-            self.evict_oldest();
-        }
-
+        // First, before anything is thrown away. This check used to sit *after*
+        // the eviction loop, so an article too large ever to be stored still
+        // drove that loop until the cache was empty — and was then skipped.
+        // One oversized article in a feed emptied the user's entire offline
+        // cache on every refresh and cached nothing in its place.
         if size > self.max_size {
-            // Single article exceeds cache — skip it
             return;
         }
 
-        // Remove existing entry if present
+        // Drop any previous copy of this article before making room, so its
+        // bytes are not counted against the space the new copy needs. Re-caching
+        // an article — which a refresh does for every article it re-reads —
+        // used to evict as though the old and new copies had to coexist.
         if let Some(old) = self.entries.remove(&article_id) {
             self.current_size = self.current_size.saturating_sub(old.size_bytes);
+        }
+
+        while self.current_size.saturating_add(size) > self.max_size && !self.entries.is_empty() {
+            self.evict_oldest();
         }
 
         let entry = CacheEntry {
@@ -1889,7 +1917,7 @@ impl OfflineCache {
             size_bytes: size,
         };
 
-        self.current_size += size;
+        self.current_size = self.current_size.saturating_add(size);
         self.entries.insert(article_id, entry);
     }
 
@@ -2128,7 +2156,7 @@ impl RssReaderApp {
     /// Add a new folder and return its ID.
     pub fn add_folder(&mut self, name: &str) -> FolderId {
         let id = self.next_folder_id;
-        self.next_folder_id += 1;
+        self.next_folder_id = self.next_folder_id.saturating_add(1);
         self.folders.push(Folder::new(id, name));
         id
     }
@@ -2136,7 +2164,7 @@ impl RssReaderApp {
     /// Add a new feed and return its ID.
     pub fn add_feed(&mut self, title: &str, url: &str, folder_id: Option<FolderId>) -> FeedId {
         let id = self.next_feed_id;
-        self.next_feed_id += 1;
+        self.next_feed_id = self.next_feed_id.saturating_add(1);
         let mut feed = Feed::new(id, title, url);
         feed.folder_id = folder_id;
         self.feeds.push(feed);
@@ -2189,7 +2217,7 @@ impl RssReaderApp {
     /// Add an article to the store and cache it.
     pub fn add_article(&mut self, feed_id: FeedId, title: &str, content: &str) -> ArticleId {
         let id = self.next_article_id;
-        self.next_article_id += 1;
+        self.next_article_id = self.next_article_id.saturating_add(1);
         let mut article = Article::new(id, feed_id, title);
         article.content = content.to_string();
         article.cached_text = html_to_text(content);
@@ -2338,8 +2366,9 @@ impl RssReaderApp {
     /// Navigate to the next article.
     pub fn next_article(&mut self) {
         let count = self.filtered_article_indices().len();
-        if count > 0 && self.selected_article_index + 1 < count {
-            self.selected_article_index += 1;
+        let next = self.selected_article_index.saturating_add(1);
+        if next < count {
+            self.selected_article_index = next;
             self.content_scroll_offset = 0.0;
         }
     }
@@ -2347,7 +2376,7 @@ impl RssReaderApp {
     /// Navigate to the previous article.
     pub fn prev_article(&mut self) {
         if self.selected_article_index > 0 {
-            self.selected_article_index -= 1;
+            self.selected_article_index = self.selected_article_index.saturating_sub(1);
             self.content_scroll_offset = 0.0;
         }
     }
@@ -2364,9 +2393,9 @@ impl RssReaderApp {
     /// Import feeds from OPML data.
     pub fn import_opml(&mut self, opml_xml: &str) -> Result<usize, String> {
         let outlines = parse_opml(opml_xml)?;
-        let mut count = 0;
+        let mut count: usize = 0;
         for outline in &outlines {
-            count += self.import_opml_outline(outline, None);
+            count = count.saturating_add(self.import_opml_outline(outline, None));
         }
         Ok(count)
     }
@@ -2377,7 +2406,7 @@ impl RssReaderApp {
         outline: &OpmlOutline,
         parent_folder: Option<FolderId>,
     ) -> usize {
-        let mut count = 0;
+        let mut count: usize = 0;
 
         if let Some(ref url) = outline.xml_url {
             // This is a feed
@@ -2387,12 +2416,12 @@ impl RssReaderApp {
             {
                 feed.link = html_url.clone();
             }
-            count += 1;
+            count = count.saturating_add(1);
         } else if !outline.children.is_empty() {
             // This is a folder
             let folder_id = self.add_folder(&outline.text);
             for child in &outline.children {
-                count += self.import_opml_outline(child, Some(folder_id));
+                count = count.saturating_add(self.import_opml_outline(child, Some(folder_id)));
             }
         }
 
@@ -2425,7 +2454,7 @@ impl RssReaderApp {
                 .any(|a| a.feed_id == feed_id && a.title == pa.title && a.link == pa.link);
             if !already_exists {
                 let id = self.next_article_id;
-                self.next_article_id += 1;
+                self.next_article_id = self.next_article_id.saturating_add(1);
                 let mut article = Article::new(id, feed_id, &pa.title);
                 article.link = pa.link.clone();
                 article.author = pa.author.clone();
@@ -2501,13 +2530,12 @@ impl RssReaderApp {
         }
 
         // Create sample articles
-        let base_ts: u64 = 1_700_000_000;
 
         self.create_sample_article(
             rust_feed,
             "This Week in Rust 520",
             "TWiR Team",
-            base_ts + 86400 * 7,
+            sample_ts(7, 0),
             "This week's crate is ratatui, a library for building terminal UIs. \
              Rust 1.74 was released with return-position impl Trait in traits, \
              better async diagnostics, and improved const generics.",
@@ -2518,7 +2546,7 @@ impl RssReaderApp {
             rust_feed,
             "This Week in Rust 519",
             "TWiR Team",
-            base_ts + 86400 * 6,
+            sample_ts(6, 0),
             "Highlights include the new async working group roadmap, \
              improvements to cargo's dependency resolution, and a new RFC \
              for pattern types. Community spotlight on axum web framework.",
@@ -2529,7 +2557,7 @@ impl RssReaderApp {
             rust_feed,
             "This Week in Rust 518",
             "TWiR Team",
-            base_ts + 86400 * 5,
+            sample_ts(5, 0),
             "Feature spotlight: edition 2024 planning, proc-macro improvements, \
              and the Rust Foundation's engineering update. Notable crate: \
              polars for high-performance DataFrames.",
@@ -2541,7 +2569,7 @@ impl RssReaderApp {
             hn_feed,
             "Show HN: A Microkernel OS Written Entirely by AI",
             "rustdev42",
-            base_ts + 86400 * 7 + 3600,
+            sample_ts(7, 3600),
             "An ambitious project to build a complete desktop OS using AI pair programming. \
              Features include a custom GUI toolkit, package manager, and full POSIX compatibility. \
              The kernel uses 16KiB pages and a capability-based security model.",
@@ -2552,7 +2580,7 @@ impl RssReaderApp {
             hn_feed,
             "SQLite Considers Adding a Native Vector Search Extension",
             "databasenews",
-            base_ts + 86400 * 6 + 7200,
+            sample_ts(6, 7200),
             "The SQLite team is exploring built-in vector similarity search, \
              potentially making it the simplest path to vector database functionality. \
              Discussion around performance characteristics and API design.",
@@ -2563,7 +2591,7 @@ impl RssReaderApp {
             hn_feed,
             "Why WebAssembly Is the Future of Server-Side Rendering",
             "webdevtimes",
-            base_ts + 86400 * 5 + 1800,
+            sample_ts(5, 1800),
             "A deep dive into using WebAssembly for server-side rendering, \
              with benchmarks showing 3x improvement over V8 for certain workloads. \
              Covers WASI, component model, and toolchain maturity.",
@@ -2574,7 +2602,7 @@ impl RssReaderApp {
             hn_feed,
             "The Hidden Costs of Microservices Nobody Talks About",
             "archdigest",
-            base_ts + 86400 * 4 + 5400,
+            sample_ts(4, 5400),
             "An honest retrospective on microservices at scale: observability overhead, \
              distributed transaction complexity, cold start latency, and the cognitive \
              load on developers. Includes cost analysis from a Fortune 500 migration.",
@@ -2586,7 +2614,7 @@ impl RssReaderApp {
             bbc_feed,
             "Major Climate Agreement Reached at Summit",
             "BBC Correspondents",
-            base_ts + 86400 * 7 + 7200,
+            sample_ts(7, 7200),
             "World leaders have agreed on a landmark climate package that includes \
              binding emissions targets for developing nations. The agreement covers \
              carbon markets, deforestation limits, and a $100 billion adaptation fund.",
@@ -2597,7 +2625,7 @@ impl RssReaderApp {
             bbc_feed,
             "Space Agency Announces New Mars Mission Timeline",
             "Science Desk",
-            base_ts + 86400 * 6 + 3600,
+            sample_ts(6, 3600),
             "The European Space Agency has revealed an accelerated timeline for its \
              Mars sample return mission, with launch now planned for 2028. The mission \
              will work in conjunction with NASA's Perseverance rover samples.",
@@ -2608,7 +2636,7 @@ impl RssReaderApp {
             bbc_feed,
             "Global Chip Shortage Shows Signs of Easing",
             "Tech Editor",
-            base_ts + 86400 * 3 + 9000,
+            sample_ts(3, 9000),
             "Semiconductor supply chains are stabilizing as new fabrication plants \
              come online in Arizona and Dresden. Lead times have dropped significantly \
              for automotive and consumer electronics chipsets.",
@@ -2620,7 +2648,7 @@ impl RssReaderApp {
             arxiv_feed,
             "Scaling Laws for Neural Architecture Search",
             "Chen, Li, et al.",
-            base_ts + 86400 * 7 + 1200,
+            sample_ts(7, 1200),
             "We present empirical scaling laws for neural architecture search (NAS) \
              that predict search cost and final model performance as functions of \
              search space size and compute budget. Our findings suggest that current \
@@ -2632,7 +2660,7 @@ impl RssReaderApp {
             arxiv_feed,
             "Efficient Attention Mechanisms for Long Sequences",
             "Wang, Johnson, et al.",
-            base_ts + 86400 * 5 + 4800,
+            sample_ts(5, 4800),
             "We propose a novel attention mechanism that achieves O(n log n) complexity \
              while maintaining comparable performance to standard O(n^2) attention. \
              Evaluations on document understanding and genomics tasks show strong results.",
@@ -2644,7 +2672,7 @@ impl RssReaderApp {
             lobsters_feed,
             "Writing a Tree-Walking Interpreter in Rust",
             "compiler_nerd",
-            base_ts + 86400 * 6 + 5400,
+            sample_ts(6, 5400),
             "A tutorial series on building a complete interpreter for a small language, \
              covering lexing, parsing, type checking, and evaluation. Uses Rust's enums \
              and pattern matching for clean AST representation.",
@@ -2655,7 +2683,7 @@ impl RssReaderApp {
             lobsters_feed,
             "The State of Linux Desktop in 2024",
             "pinguin",
-            base_ts + 86400 * 4 + 2700,
+            sample_ts(4, 2700),
             "A comprehensive review of the Linux desktop ecosystem: Wayland adoption, \
              Flatpak maturity, gaming via Proton, and the ongoing fragmentation debate. \
              Includes user satisfaction survey results from 50,000 respondents.",
@@ -2667,7 +2695,7 @@ impl RssReaderApp {
             planet_feed,
             "Async Rust: A Practical Guide to Pitfalls",
             "Alice Ryhl",
-            base_ts + 86400 * 7 + 2400,
+            sample_ts(7, 2400),
             "Common mistakes in async Rust code and how to avoid them: accidental blocking, \
              cancellation safety, select! gotchas, and async drop. Includes real-world \
              examples from the Tokio maintainer team.",
@@ -2678,7 +2706,7 @@ impl RssReaderApp {
             planet_feed,
             "Introducing Bevy 0.14: A Game Engine Update",
             "Bevy Contributors",
-            base_ts + 86400 * 5 + 6000,
+            sample_ts(5, 6000),
             "Bevy 0.14 brings deferred rendering, screen-space ambient occlusion, \
              a revamped asset system, and significantly improved compile times. \
              The ECS system now supports component hooks and observers.",
@@ -2699,7 +2727,7 @@ impl RssReaderApp {
         is_starred: bool,
     ) {
         let id = self.next_article_id;
-        self.next_article_id += 1;
+        self.next_article_id = self.next_article_id.saturating_add(1);
         let mut article = Article::new(id, feed_id, title);
         article.author = author.to_string();
         article.published = published;
@@ -4329,9 +4357,34 @@ impl RssReaderApp {
 // Text wrapping utility
 // ============================================================================
 
+/// Split `s` after at most `max_chars` characters, never inside one.
+///
+/// `str::split_at` takes a *byte* offset and panics if that offset lands in the
+/// middle of a multi-byte character, so it cannot be handed a character count
+/// directly. `char_indices().nth(n)` converts the one into the other, and
+/// returning `None` when the string is shorter than `n` is exactly the
+/// "nothing left to split off" case.
+fn split_at_chars(s: &str, max_chars: usize) -> (&str, &str) {
+    match s.char_indices().nth(max_chars) {
+        Some((byte, _)) => s.split_at(byte),
+        None => (s, ""),
+    }
+}
+
 /// Simple word-wrap that breaks text into lines fitting within `max_width`.
 ///
 /// Assumes an approximate character width based on font size.
+///
+/// Every length here is measured in **characters**, not bytes. It used to be
+/// bytes, compared against a character budget derived from the pixel width,
+/// which was wrong in two ways at once. The visible one: a line of Japanese or
+/// Greek or accented Latin wrapped at a third to a half of its intended width,
+/// because `str::len` counts the UTF-8 encoding rather than what is drawn. The
+/// fatal one: the over-long-word branch called `split_at(max_chars)` with that
+/// byte offset, and `split_at` panics when the offset is inside a character —
+/// so a single long non-ASCII word in an article body aborted the content view
+/// on every frame that tried to draw it. Article bodies come from whatever feed
+/// the user subscribed to, so that panic was reachable from remote data.
 pub fn wrap_text(text: &str, max_width: f32, font_size: f32) -> Vec<String> {
     let char_width = font_size * 0.55; // Approximate average character width
     let max_chars = (max_width / char_width) as usize;
@@ -4342,27 +4395,46 @@ pub fn wrap_text(text: &str, max_width: f32, font_size: f32) -> Vec<String> {
 
     let mut lines = Vec::new();
     let mut current_line = String::new();
+    // Kept alongside `current_line` rather than recomputed, so that the fit
+    // test below is a comparison of two counts and not a scan of the line.
+    let mut current_chars: usize = 0;
 
     for word in text.split_whitespace() {
+        let word_chars = word.chars().count();
         if current_line.is_empty() {
-            if word.len() > max_chars {
-                // Word is longer than the line — break it
+            if word_chars > max_chars {
+                // Word is longer than the line — break it. The loop condition
+                // is the emptiness of the tail rather than a fresh count of
+                // it: re-measuring the remainder on every pass would walk the
+                // whole word once per line, which is quadratic in a word the
+                // feed chose the length of.
                 let mut remaining = word;
-                while remaining.len() > max_chars {
-                    let (chunk, rest) = remaining.split_at(max_chars);
+                loop {
+                    let (chunk, rest) = split_at_chars(remaining, max_chars);
+                    if rest.is_empty() {
+                        break;
+                    }
                     lines.push(chunk.to_string());
                     remaining = rest;
                 }
                 current_line = remaining.to_string();
+                current_chars = remaining.chars().count();
             } else {
                 current_line = word.to_string();
+                current_chars = word_chars;
             }
-        } else if current_line.len() + 1 + word.len() <= max_chars {
+        // The `+ 1` is the space that joining would insert. Saturating
+        // addition rather than a bare `+` because these are two lengths of
+        // caller-supplied text: neither can realistically overflow, but the
+        // check that says so belongs in the code and not in a reader's head.
+        } else if current_chars.saturating_add(1).saturating_add(word_chars) <= max_chars {
             current_line.push(' ');
             current_line.push_str(word);
+            current_chars = current_chars.saturating_add(1).saturating_add(word_chars);
         } else {
             lines.push(current_line);
             current_line = word.to_string();
+            current_chars = word_chars;
         }
     }
 
@@ -6035,6 +6107,65 @@ mod tests {
         let word = "a".repeat(200);
         let lines = wrap_text(&word, 50.0, 14.0);
         assert!(lines.len() > 1);
+    }
+
+    #[test]
+    fn a_long_non_ascii_word_is_wrapped_rather_than_panicking() {
+        // 120 characters, 360 bytes. Splitting this at a *byte* offset of 77
+        // lands in the middle of the encoding of a character, and `split_at`
+        // panics when it does -- it does not truncate or round. The text
+        // reaching here is an article body, i.e. whatever the subscribed feed
+        // served, so before the fix a feed could decide whether the content
+        // view rendered at all.
+        let word = "\u{65e5}\u{672c}\u{8a9e}".repeat(40);
+        let lines = wrap_text(&word, 600.0, 14.0);
+        assert!(lines.len() > 1, "120 characters must not fit one line here");
+        assert_eq!(lines.concat(), word, "wrapping must not lose or add text");
+        // The first line is a full one, so it is the budget; nothing may exceed it.
+        let budget = lines.first().map_or(0, |line| line.chars().count());
+        assert!(budget > 0);
+        for line in &lines {
+            assert!(
+                line.chars().count() <= budget,
+                "line of {} characters exceeds the {budget}-character budget",
+                line.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn wrapping_counts_characters_not_bytes() {
+        // The same shape of text in two alphabets, one of which encodes to two
+        // bytes per character. Wrapping answers a question about what is
+        // drawn, so the two must wrap identically. Measured against
+        // `str::len` the Greek wrapped at half the width of the Latin -- a
+        // silent display bug, separate from the panic above, that affected
+        // every feed not written in ASCII.
+        let latin = "abc def ghi jkl mno pqr stu vwx";
+        let greek = "\u{3b1}\u{3b2}\u{3b3} \u{3b4}\u{3b5}\u{3b6} \u{3b7}\u{3b8}\u{3b9} \
+                     \u{3ba}\u{3bb}\u{3bc} \u{3bd}\u{3be}\u{3bf} \u{3c0}\u{3c1}\u{3c3} \
+                     \u{3c4}\u{3c5}\u{3c6} \u{3c7}\u{3c8}\u{3c9}";
+        let latin_lines = wrap_text(latin, 200.0, 14.0);
+        let greek_lines = wrap_text(greek, 200.0, 14.0);
+        assert!(
+            latin_lines.len() > 1,
+            "the sample must actually wrap or this test asserts nothing"
+        );
+        let widths = |lines: &[String]| -> Vec<usize> {
+            lines.iter().map(|line| line.chars().count()).collect()
+        };
+        assert_eq!(widths(&latin_lines), widths(&greek_lines));
+    }
+
+    #[test]
+    fn a_very_long_word_wraps_without_dropping_text() {
+        // A word the feed chose the length of. The break loop must be linear
+        // in that length -- re-measuring the untaken remainder on every pass
+        // would walk the whole word once per line produced.
+        let word = "\u{3bb}".repeat(50_000);
+        let lines = wrap_text(&word, 200.0, 14.0);
+        assert!(lines.len() > 100);
+        assert_eq!(lines.concat(), word);
     }
 
     // -----------------------------------------------------------------------

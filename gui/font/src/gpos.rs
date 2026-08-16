@@ -124,7 +124,10 @@ const KINDS: [u16; 8] = [
 /// positional features must reach only the glyphs the shaper marked eligible,
 /// a positioning feature is gated by its own glyph coverage — a face's `abvm`
 /// simply does not cover glyphs that have nothing above them.
-const FEATURES: [&[u8; 4]; 14] = [
+///
+/// Visible to the crate so that `the_two_tables_ask_for_the_same_features` in
+/// [`otl`](crate::otl) can pin the "one feature map" claim above.
+pub(crate) const FEATURES: [&[u8; 4]; 14] = [
     b"abvm", b"blwm", b"calt", b"ccmp", b"clig", b"curs", b"dist", b"kern", b"liga", b"locl",
     b"mark", b"mkmk", b"rclt", b"rlig",
 ];

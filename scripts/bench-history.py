@@ -1829,6 +1829,19 @@ def report(previous, current_entries, threshold_pct,
                 f"({adjusted:+.0f}% vs suite); pre-window baseline "
                 f"{lo:.0f}-{hi:.0f}ns over {n} runs"
             )
+        # Name the first thing to rule out. Under TCG a loop that lands across
+        # a 4 KiB guest page costs ~1.7x per iteration, and any commit that
+        # shifts a function's address re-rolls that -- so a sustained shift in
+        # a benchmark whose code nobody touched is code layout until shown
+        # otherwise. It is also the cheapest hypothesis to test (no boot, two
+        # disassemblies), which is the argument for checking it *before*
+        # reading diffs rather than after. See known-issues.md
+        # B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x.
+        print(
+            "    -> rule out code layout before reading the diff:\n"
+            "       python scripts/straddle-check.py --compare "
+            "<old-kernel-elf> <new-kernel-elf>"
+        )
 
     if added:
         print("  NEW:")

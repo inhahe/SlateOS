@@ -57,7 +57,7 @@ use super::attr::{AttributeType, DataRun, NameSpace, decode_runlist};
 use super::boot::BootSector;
 use super::raw::{filetime_to_unix_ns, utf16le_at};
 use super::record::{FILE_MAGIC, apply_fixups, mft_ref_record, mft_ref_sequence};
-use super::source::MemorySource;
+use crate::fs::blocksrc::MemorySource;
 use super::NtfsFs;
 
 // ---------------------------------------------------------------------------

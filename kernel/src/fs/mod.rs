@@ -51,6 +51,7 @@ pub mod autostart;
 pub mod backup;
 pub mod backupsched;
 pub mod batch;
+pub mod blocksrc;
 pub mod battery;
 pub mod bench;
 pub mod binfmt;

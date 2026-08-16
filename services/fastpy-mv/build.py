@@ -31,10 +31,13 @@ the destination exists with the original contents byte-for-byte.  The
 before/after VFS check means a no-op `os.rename` that merely returned 0
 without renaming could not false-pass.
 
-Run from the fastpy repo root so `compiler` is importable, e.g.:
+Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
+the worktree you are actually working in. There are four checkouts of this
+repo, and naming one of them in a command is how a lane ends up building
+another lane's artifact -- see `scripts/lib/worktree.sh`:
 
     PYTHONPATH="D:/visual studio projects/fastpy" \
-        python "D:/visual studio projects/os/services/fastpy-mv/build.py"
+        python services/fastpy-mv/build.py
 
 The posix sysroot (`libc.a`) must already be built; see
 `toolchain/build-sysroot.ps1`.

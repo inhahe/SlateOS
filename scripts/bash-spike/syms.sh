@@ -24,7 +24,7 @@ echo "provided total:    $(wc -l < "$SLATE_TMP/provided.txt")"
 if [ ! -d "$BASHDIR" ]; then
     echo "ERROR: $BASHDIR does not exist."
     echo "       bash's source tree is not unpacked in this worktree ($SLATE_LANE)."
-    echo "       See scripts/bash-spike/README for the fetch + configure + make step."
+    echo "       See scripts/bash-spike/README.md for the fetch + configure + make step."
     exit 1
 fi
 cd "$BASHDIR" || exit 1

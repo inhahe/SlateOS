@@ -5,7 +5,7 @@
 # Regenerate with: scripts/ctest-fixtures.py build
 #   (run it with `python` on Windows, `python3` under WSL/Linux)
 version 1
-input  build.py sha256 5de0a248cb66d9ba82e3654b6d9d68d8b1722667e26d68331bb9d963f3a8d239
+input  build.py sha256 930f0a0337b3342e2fc3cdef7b247c28a761da869e4aa731d79a27d2d1fd62e9
 input  main.c sha256 fcdc165fc7abb0c5fe224320668ef43b15485c3aa8e14eacc3d0e1eaf0cb4a3c
 input  toolchain/sysroot/lib/libc.a sha256 4b14549d0295552e89b8c63a062a369f3e0fb5be55c439d70569dabc600789f0
 output ctest-fortify.elf sha256 902b4ad604c594948966fc2e96e6768744b45d5f83a58f6ac801902486254f97 size 2627048

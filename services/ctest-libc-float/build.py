@@ -21,10 +21,13 @@ flag: SSE2 is baseline for x86-64, so `zig cc` already uses the hard-float
 SysV ABI.  That is exactly the point — the caller was always right; it was
 the sysroot that had to be fixed.
 
-Run from the fastpy repo root so `compiler` is importable, e.g.:
+Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
+the worktree you are actually working in. There are four checkouts of this
+repo, and naming one of them in a command is how a lane ends up building
+another lane's artifact -- see `scripts/lib/worktree.sh`:
 
     PYTHONPATH="D:/visual studio projects/fastpy" \
-        python "D:/visual studio projects/os/services/ctest-libc-float/build.py"
+        python services/ctest-libc-float/build.py
 
 The posix sysroot (`libc.a`) must already be built and must be *current*
 with `posix/src/` and with `toolchain/build-sysroot.ps1`'s RUSTFLAGS — the

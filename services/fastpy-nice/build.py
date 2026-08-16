@@ -71,10 +71,13 @@ and runs it as a ring-3 self-test (`self_test_fastpy_slateos_nice`).  Only
 CAP_SYS_NICE, which the root spawn supplies (checked in the userspace posix
 wrapper — the kernel mutation syscall itself takes no capability token).
 
-Run from the fastpy repo root so `compiler` is importable, e.g.:
+Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
+the worktree you are actually working in. There are four checkouts of this
+repo, and naming one of them in a command is how a lane ends up building
+another lane's artifact -- see `scripts/lib/worktree.sh`:
 
     PYTHONPATH="D:/visual studio projects/fastpy" \
-        python "D:/visual studio projects/os/services/fastpy-nice/build.py"
+        python services/fastpy-nice/build.py
 
 The posix sysroot (`libc.a`) must already be built; see
 `toolchain/build-sysroot.ps1`.

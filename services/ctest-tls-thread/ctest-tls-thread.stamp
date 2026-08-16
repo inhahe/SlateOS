@@ -5,7 +5,7 @@
 # Regenerate with: scripts/ctest-fixtures.py build
 #   (run it with `python` on Windows, `python3` under WSL/Linux)
 version 1
-input  build.py sha256 54f48c7b8a15e552f2706baa5bcb269cdaa56cd60915da7022a9e9b139fea8c0
+input  build.py sha256 3c8d01bde5fb2a9b722f73a4df0eabd4b1aa9a076340f7480c455c205f1ef485
 input  main.c sha256 25792f81bd44ab78746e0e22533b08ac694c355e4d6e688fe834319329c27675
 input  toolchain/sysroot/lib/libc.a sha256 4b14549d0295552e89b8c63a062a369f3e0fb5be55c439d70569dabc600789f0
 output ctest-tls-thread.elf sha256 8fb74fad9341182c7bf5d704e59e74db32be4c754fc32302a1250eb3d32f38f6 size 2621384

@@ -172,6 +172,23 @@ impl Language {
     }
 }
 
+/// The nearest character boundary in `line` at or before byte offset `col`.
+///
+/// A column carried from one line to another — pressing Down, or re-clamping
+/// after the document shrinks — is a byte offset that meant something on the
+/// *old* line. On the new one it may land in the middle of a multi-byte
+/// character, and every subsequent `String::insert`/`remove` at that offset
+/// panics. Moving *back* to the boundary rather than forward keeps the cursor
+/// on the character the user was over rather than skipping past it.
+fn snap_to_boundary(line: &str, col: usize) -> usize {
+    let mut col = col.min(line.len());
+    // Terminates: offset 0 is always a boundary.
+    while !line.is_char_boundary(col) {
+        col -= 1;
+    }
+    col
+}
+
 impl Default for Document {
     fn default() -> Self {
         Self::new()
@@ -402,13 +419,13 @@ impl Document {
         if self.cursor_line > last_line {
             self.cursor_line = last_line;
         }
-        let line_len = self
+        // Snapped rather than merely clamped to the length: the line the cursor
+        // has been moved to may hold a multi-byte character straddling the old
+        // column, and a `cursor_col` inside one panics the next edit.
+        self.cursor_col = self
             .lines
             .get(self.cursor_line)
-            .map_or(0, std::string::String::len);
-        if self.cursor_col > line_len {
-            self.cursor_col = line_len;
-        }
+            .map_or(0, |line| snap_to_boundary(line, self.cursor_col));
         if self.scroll_line > last_line {
             self.scroll_line = last_line;
         }
@@ -464,19 +481,21 @@ impl Document {
 
     /// Delete the character before the cursor (backspace).
     pub fn backspace(&mut self) {
-        if self.cursor_col > 0 {
+        if let Some(ch) = self.char_before_cursor() {
             let line = self.cursor_line;
+            // Step back by the character's width in bytes, not by one:
+            // `cursor_col` is a byte offset, and `String::remove` panics on an
+            // offset that is not a character boundary.
+            self.cursor_col -= ch.len_utf8();
+            let col = self.cursor_col;
             let current_line = self.lines.get_mut(line).unwrap();
-            if self.cursor_col <= current_line.len() {
-                let removed = current_line.remove(self.cursor_col - 1);
-                self.cursor_col -= 1;
-                self.modified = true;
-                self.push_undo(EditAction::Delete {
-                    line,
-                    col: self.cursor_col,
-                    text: removed.to_string(),
-                });
-            }
+            let removed = current_line.remove(col);
+            self.modified = true;
+            self.push_undo(EditAction::Delete {
+                line,
+                col,
+                text: removed.to_string(),
+            });
         } else if self.cursor_line > 0 {
             // Join with previous line
             let current_text = self.lines.remove(self.cursor_line);
@@ -596,9 +615,36 @@ impl Document {
     // Cursor movement
     // ======================================================================
 
+    /// The character immediately before the cursor, if the cursor is not at the
+    /// start of its line.
+    ///
+    /// `cursor_col` is a *byte* offset — `String::insert` and `String::remove`
+    /// index by bytes — so every backward step must be the width of a character
+    /// in bytes and never one byte. A one-byte step lands inside a `é` and the
+    /// next edit panics, because both of those methods reject an offset that is
+    /// not on a character boundary.
+    fn char_before_cursor(&self) -> Option<char> {
+        self.lines
+            .get(self.cursor_line)?
+            .get(..self.cursor_col)?
+            .chars()
+            .next_back()
+    }
+
+    /// The character the cursor sits on, if it is not at the end of its line.
+    /// The forward counterpart of [`Document::char_before_cursor`], and byte
+    /// offsets for the same reason.
+    fn char_at_cursor(&self) -> Option<char> {
+        self.lines
+            .get(self.cursor_line)?
+            .get(self.cursor_col..)?
+            .chars()
+            .next()
+    }
+
     pub fn move_left(&mut self) {
-        if self.cursor_col > 0 {
-            self.cursor_col -= 1;
+        if let Some(ch) = self.char_before_cursor() {
+            self.cursor_col -= ch.len_utf8();
         } else if self.cursor_line > 0 {
             self.cursor_line -= 1;
             self.cursor_col = self.lines[self.cursor_line].len();
@@ -606,9 +652,8 @@ impl Document {
     }
 
     pub fn move_right(&mut self) {
-        let line_len = self.lines[self.cursor_line].len();
-        if self.cursor_col < line_len {
-            self.cursor_col += 1;
+        if let Some(ch) = self.char_at_cursor() {
+            self.cursor_col += ch.len_utf8();
         } else if self.cursor_line + 1 < self.lines.len() {
             self.cursor_line += 1;
             self.cursor_col = 0;
@@ -618,14 +663,14 @@ impl Document {
     pub fn move_up(&mut self) {
         if self.cursor_line > 0 {
             self.cursor_line -= 1;
-            self.cursor_col = self.cursor_col.min(self.lines[self.cursor_line].len());
+            self.cursor_col = snap_to_boundary(&self.lines[self.cursor_line], self.cursor_col);
         }
     }
 
     pub fn move_down(&mut self) {
         if self.cursor_line + 1 < self.lines.len() {
             self.cursor_line += 1;
-            self.cursor_col = self.cursor_col.min(self.lines[self.cursor_line].len());
+            self.cursor_col = snap_to_boundary(&self.lines[self.cursor_line], self.cursor_col);
         }
     }
 
@@ -1704,6 +1749,69 @@ mod caret_tests {
             "a scrolled line put the caret at {}, not {expected}",
             caret_x(&editor)
         );
+    }
+
+    /// `cursor_col` is a byte offset, and every move used to step by one byte.
+    /// One step into a multi-byte character armed a crash that the *next* edit
+    /// fired, because `String::insert`/`remove` panic on an offset that is not
+    /// a character boundary. Any non-ASCII file — a comment in Russian, a
+    /// string literal holding `é` — was one keystroke from taking the editor
+    /// down with unsaved work in it.
+    #[test]
+    fn editing_around_a_multi_byte_character_does_not_panic() {
+        let mut doc = Document::new();
+        doc.lines = vec!["café au lait".to_string()];
+        doc.cursor_line = 0;
+        // Four characters in, five bytes in: `é` is two bytes.
+        doc.cursor_col = 5;
+
+        // One press crosses the whole character, in both directions.
+        doc.move_left();
+        assert_eq!(doc.cursor_col, 3);
+        doc.move_right();
+        assert_eq!(doc.cursor_col, 5);
+
+        // Backspace removes the character, not one of its bytes.
+        doc.backspace();
+        assert_eq!(doc.lines[0], "caf au lait");
+        assert_eq!(doc.cursor_col, 3);
+
+        // …and typing it back leaves the line as it was.
+        doc.insert_char('é');
+        assert_eq!(doc.lines[0], "café au lait");
+        assert_eq!(doc.cursor_col, 5);
+
+        // Delete takes the whole character from in front of the cursor.
+        doc.cursor_col = 3;
+        doc.delete_forward();
+        assert_eq!(doc.lines[0], "caf au lait");
+    }
+
+    /// A column carried between lines is a byte offset that meant something on
+    /// the *old* line. Moving down onto a line whose byte 3 is inside a
+    /// character must snap back to a boundary, not sit inside it.
+    #[test]
+    fn a_column_carried_between_lines_lands_on_a_character() {
+        let mut doc = Document::new();
+        // Byte 3 of the second line is the middle of the three-byte `日`.
+        doc.lines = vec!["abcdef".to_string(), "ab日本".to_string()];
+        doc.cursor_line = 0;
+        doc.cursor_col = 3;
+
+        doc.move_down();
+        assert_eq!(doc.cursor_line, 1);
+        assert!(
+            doc.lines[1].is_char_boundary(doc.cursor_col),
+            "column {} is inside a character of {:?}",
+            doc.cursor_col,
+            doc.lines[1]
+        );
+        // Snapping goes back to the character the user was over, not past it.
+        assert_eq!(doc.cursor_col, 2);
+
+        // And the edit that used to panic now works.
+        doc.insert_char('x');
+        assert_eq!(doc.lines[1], "abx日本");
     }
 }
 

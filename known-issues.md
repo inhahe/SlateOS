@@ -21443,7 +21443,46 @@ names this entry.
 
 ## TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL
 
-**Status:** OPEN
+**Status: FIXED 2026-08-16.** All four steps of the proper fix below landed.
+`gui/toolkit/src/text.rs` gained `TextCursor { byte, affinity }`, `caret_x`,
+`selection_boxes` and `cursor_at` (each with a `_in` sibling taking a
+`FontFamily`, for callers drawing inside a `PushFont` scope);
+`gui/font/src/shape.rs` gained `ShapedRun::selection_rects`; `pathbar`'s
+`width_before` and `textview`'s `x_of_col` are deleted, along with `pathbar`'s
+`byte_to_char_offset`/`char_to_byte_offset`, which existed only to bridge the
+character-index hit test to the byte-index cursor.
+
+Three things came out differently from the plan written below:
+
+* **`selection_rects` returns a `Vec`, not an `impl Iterator`.** The whole
+  logical→selected map has to exist before the first box can be emitted,
+  because the glyph drawn first may be the last one logically. Laziness would
+  buy a caller nothing and cost the signature its clarity.
+* **`TextCursor` is deliberately not `Ord`.** Two cursors at one offset with
+  different affinities are one place in the text and two on the screen, so
+  neither "comes first". Code wanting an order compares `.byte`.
+* **`textview` needed the *selection* half, not the caret half.** It is a
+  read-only view: it has selection and search highlights and no insertion
+  caret at all, so `x_of_col` was replaced by `selection_boxes_of_cols`, which
+  emits one box per span-and-direction run and merges the ones that abut.
+  Its sibling `col_at_x` was left counting characters, which is correct — a
+  selection endpoint is a logical position, and the affinity is a question for
+  whoever draws, which for a selection is `selection_boxes_of_cols`.
+
+Two further sites turned up that hold a text cursor but never draw one —
+`widget.rs`'s `TextInput` and `modal.rs`'s `InputDialog` — so neither needed an
+affinity. Both did, however, hold a *byte* offset and move it by *one byte* per
+keypress, which is a separate and worse bug; see
+`GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES` below.
+
+Still not done, and still deliberately out of scope: **visual-order arrow-key
+motion** (left arrow moving left on the screen whichever way the text runs).
+The affinity is a prerequisite for it, not a solution to it, and it wants its
+own entry when someone picks it up.
+
+The original entry follows.
+
+**Status:** ~~OPEN~~ FIXED
 
 **What.** The font layer now places a caret correctly in bidirectional text
 (`TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL`, fixed 2026-08-16): `ShapedRun::x_of`
@@ -21512,6 +21551,51 @@ than a solution to it.
 `gui/toolkit/src/textview.rs` — `x_of_col`, `col_at_x`;
 `gui/toolkit/src/text.rs` — `char_index_at`; `gui/font/src/shape.rs` —
 `x_of`/`offset_at`/`Affinity`, which is everything the fix needs from the font.
+
+## GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES
+
+**Status: FIXED 2026-08-16**, found while auditing the widgets that hold a text
+cursor for `TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL`.
+
+**What.** `gui/toolkit/src/widget.rs` (`WidgetKind::TextInput`) and
+`gui/toolkit/src/modal.rs` (`InputDialog`) both store the cursor as a *byte*
+offset — they must, because `String::insert` and `String::remove` index by
+bytes — but moved it by **one** on every Left, Right, Backspace and (in
+`InputDialog`) every character typed.
+
+**Symptom: a panic, not a misplacement.** `String::insert`/`remove` panic when
+the offset is not on a character boundary. So one byte-sized step into a
+multi-byte character armed the crash and the *next* edit fired it. Typing
+`café` into an `InputDialog` and pressing Backspace was enough: the cursor
+landed at byte 4, in the middle of the two-byte `é`, and `remove(4)` aborted.
+Every non-ASCII input — an accented file name, any Cyrillic, Greek, Hebrew,
+Arabic, CJK or emoji text — was a crash one keystroke away. `InputDialog`'s
+insert path was worse still: it advanced by one per character typed, so the
+cursor drifted further from a boundary with every non-ASCII letter.
+
+This is the same class of bug as the caret entry above (a byte offset treated
+as though it counted characters) but strictly more serious: the caret bug drew
+in the wrong place, this one took the process down.
+
+**Fix.** Every move now steps by the width in bytes of the character being
+crossed, obtained from the string itself:
+`value.get(..cursor).and_then(|before| before.chars().next_back())` for a
+leftward step and `value.get(cursor..).and_then(|after| after.chars().next())`
+for a rightward one. Both return `None` at the ends, which replaces the
+`> 0` / `< len` guards and removes the underflow with them. `Delete` needs no
+arithmetic — `String::remove` takes the whole character at the offset — only
+the guard that the offset is inside the string.
+
+**Tests.** `widget::tests::a_text_input_survives_a_multi_byte_character` and
+`modal::tests::a_multi_byte_character_can_be_typed_moved_over_and_deleted`,
+which type `café`, step over the `é` in both directions, and delete it from
+both sides. Both panicked before the fix.
+
+**Not audited beyond the toolkit.** `apps/**` has its own text-entry code
+(`editor`, `spreadsheet`, `terminal`, `hexeditor`, `launcher`, and others all
+have a `cursor`/`cursor_pos`). Whether any of them repeats this is unchecked;
+the pattern to grep for is a `cursor` used as a `String` index that is moved by
+a literal `1`.
 
 ## B-WORKSPACE-TEST-IS-RED-SLATEOS-COREUTILS-SHADOW-THE-HOSTS (lane B's tree; filed by lane C, 2026-08-16)
 

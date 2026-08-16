@@ -26,6 +26,29 @@ are the build recipe for a shipped artifact, and
 `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc` guards the result on
 every boot. Q41 is closed; read §305 before doing any osh parity work.
 
+## Prerequisites
+
+Run everything from WSL (`wsl -d Ubuntu -- bash scripts/bash-spike/<script>.sh`).
+
+The only prerequisite is **zig 0.13.0**, used as the cross-compiler
+(`zig cc --target=x86_64-linux-musl`). You do not need to install it yourself:
+sourcing `scripts/lib/worktree.sh` gives you `slate_ensure_zig`, which downloads
+the pinned tarball to `~/.cache/slateos/`, checks it against a hash recorded in
+that file, and only then extracts. `slate_make_zig_wrappers` calls it for you,
+so in practice the scripts here just work.
+
+The version and the hash are pinned rather than floating because `zig cc`
+compiles the objects that get linked against our `libc.a`, so a different zig
+is a different shipped binary — and per §305 `bash-slateos.elf` *is* shipped.
+
+> Until 2026-08-16 this section did not exist, and neither did the download
+> step. zig had been dropped by hand into one worktree's gitignored
+> `build/spike/`, with the version and the URL recorded nowhere. These scripts
+> therefore could not run in the other three checkouts, or in a fresh clone —
+> while appearing perfectly healthy in the one tree that happened to have the
+> missing piece lying around. If you are ever tempted to leave a prerequisite
+> "just sitting there", this is what that looks like two weeks later.
+
 ## Run order
 
 | Script | What it does |

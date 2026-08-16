@@ -23576,6 +23576,14 @@ releasing and a new lane A run re-taking the lock, with lane B's waiter never
 once winning the `mkdir`. The wait counter keeps climbing straight across the
 handover, so in a log the only tell is the owner string.
 
+It then happened again to the re-queued run, so the full sequence one lane B
+waiter saw is **three different lane A runs** handing off at 14:36:12 →
+14:42:12 → 14:48:09 — about six minutes apart, one healthy boot each — over
+roughly twenty minutes in which lane B never once won the `mkdir`. That is what
+makes this "the waiter does not participate" rather than "an unlucky
+interleaving". At ~6 min per boot, the 3600s `BOOT_LOCK_WAIT` is ten
+consecutive losses, which is reachable in one unattended stretch.
+
 ### Why the existing backstops miss it
 
 Both are liveness rules, and the owner here is genuinely alive. The pid check

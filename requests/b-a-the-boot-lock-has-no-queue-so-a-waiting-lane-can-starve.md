@@ -40,7 +40,25 @@ releasing, and a *new* lane A run taking the lock, with my waiter sitting in
 kept climbing across the handover, which is why the transition is easy to miss
 in a log — the only tell is the owner string.
 
-I re-queued behind the new holder and it is still waiting as I write this.
+I re-queued behind the new holder — and lost that one too, the same way:
+
+```
+=== Waiting for boot lock, held by lane-A/pid-1099717/1786905732 (240s) ===
+=== Waiting for boot lock, held by lane-A/pid-1102031/1786906089 (300s) ===
+```
+
+So the full sequence of holders seen by one lane B waiter is **three different
+lane A runs**, handing off to each other at 14:36:12 → 14:42:12 → 14:48:09,
+roughly six minutes apart — one healthy boot each — across about twenty minutes
+in which lane B never once won the `mkdir`. That is what moves this from "an
+unlucky interleaving" to "the waiter does not participate": the incumbent's
+successor is at the `mkdir` the instant the directory disappears, and the
+waiter is somewhere in a 5-second sleep every time. Lane B is still waiting as
+I finish writing this.
+
+The rate matters for the escalation, too. At ~6 minutes per lane A boot, the
+3600s `BOOT_LOCK_WAIT` is ten consecutive losses — entirely reachable in an
+unattended stretch, and its expiry starts the second QEMU.
 
 ## Why the existing mitigations don't help
 

@@ -10,8 +10,10 @@
 # a.c defines a function; b.c (main) calls it across the TU boundary. This is
 # strictly more than Parts 36/37 (single-file compile+link): it requires tcc's
 # -c object emission AND tcc-as-linker combining multiple relocatable inputs.
+. "$(dirname "${BASH_SOURCE[0]}")/lib/worktree.sh" || exit 1
+
 set -u
-R="/mnt/d/visual studio projects/os/rootfs.ext4"
+R="$SLATE_ROOTFS"
 W=/tmp/tccx
 rm -rf "$W"
 mkdir -p "$W/usr/lib/x86_64-linux-gnu" "$W/lib" "$W/lib64" "$W/install/lib/tcc"

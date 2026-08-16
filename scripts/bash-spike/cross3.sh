@@ -11,8 +11,10 @@
 # Fix: drop strtoimax from libsh.a. For a fresh configure the equivalent is to
 # pass the cache var `bash_cv_func_strtoimax=no`, which skips the LIBOBJS
 # branch entirely.
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/worktree.sh" || exit 1
+
 set -x
-SPIKE="/mnt/d/visual studio projects/os/build/spike"
+SPIKE="$SLATE_SPIKE"
 BUILD="/tmp/bash-cross"
 cd "$BUILD" || exit 1
 

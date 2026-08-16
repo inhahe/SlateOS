@@ -1,5 +1,7 @@
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/worktree.sh" || exit 1
+
 set -x
-cd "/mnt/d/visual studio projects/os/build/spike/bash-5.2"
+cd "$SLATE_SPIKE/bash-5.2" || exit 1
 ./configure --without-bash-malloc >configure.log 2>&1
 echo "CONFIGURE_EXIT=$?"
 tail -5 configure.log

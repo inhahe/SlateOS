@@ -275,6 +275,23 @@ the workspace config reads as though the guarantee is in force.
 
 ## `apps/editor`'s syntax highlighter is complete, tested, and not connected (lane C)
 
+**Status: FIXED 2026-08-16** (lane C). The highlighter now draws the editor.
+`render_editor` tokenizes each visible line and emits one `tree.text` per token
+in the token's theme colour, and the `HighlightState` entering the first visible
+line comes from `Document::entry_state`, a per-line memo (`hl_entry:
+RefCell<Vec<HighlightState>>`) that every mutating operation truncates from the
+first line it touched. The memo is what makes a block comment opened on line 3
+colour line 4000 without re-tokenizing 4000 lines every frame. `#![allow(dead_
+code)]` is gone from `highlight.rs`, and `detect_language` became
+`language_of_path`, the one place an extension maps to a `Language`. Seven new
+tests in `main.rs`'s `highlight_render_tests` cover it, the load-bearing one
+being `the_syntax_cache_agrees_with_a_recomputation_after_every_edit`: it runs
+all ten editing operations and asserts the cached entry state equals a
+from-scratch recomputation, which is the assertion that fails if someone later
+adds an edit path and forgets to invalidate. 97 tests pass, clippy clean.
+
+*Original report follows.*
+
 **Status: OPEN 2026-08-15** (lane C). Found while sweeping for byte-at-a-time
 text walkers — `highlight.rs`'s tokenizers step bytes, so it was on the list to
 audit, and the audit turned up something larger: the module is not reachable
@@ -21986,3 +22003,49 @@ reason this survived is the familiar one: the failure mode was a SKIP, and a
 skipped rung inside a passing boot test reads as success
 (`B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`). The Path-Z coverage banner is what
 eventually made it visible, which is an argument for that banner existing.
+
+
+## `apps/editor` undo removed characters where it had inserted bytes (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Found while wiring up syntax
+highlighting; pre-existing, and independent of that work.
+
+`EditAction::Insert { line, col, text }` records the *bytes* inserted at a byte
+offset. Undo reverted it with `for _ in 0..text.len() { current.remove(col) }` —
+but `String::remove` removes one **character**, so undoing an inserted `e`-acute
+(two bytes) deleted two characters: the accented one and whatever followed it.
+Redo of a `Delete` had the identical loop and the identical bug. On an ASCII
+document the two counts coincide and nothing looks wrong, which is why it
+survived; the first non-ASCII character in a file made undo silently eat a
+neighbour, and if the offset landed mid-character `remove` panicked outright.
+
+Fixed by `remove_bytes(&mut String, at, len)`, which checks both ends are char
+boundaries and the range is in bounds before `replace_range(at..end, "")`, and
+does nothing if not — a no-op undo is recoverable, a panic in an editor is not.
+Covered by `undoing_a_multi_byte_insertion_removes_only_that_character`.
+
+## `EditAction::InsertLine`/`DeleteLine` are matched but never constructed, so undo of Enter is wrong (lane C)
+
+**Status: OPEN 2026-08-16** (lane C). Found while fixing the entry above.
+
+`apps/editor/src/main.rs` defines four `EditAction` variants and `undo`/`redo`
+handle all four, but `grep` finds no `Self::InsertLine` or `Self::DeleteLine`
+constructor anywhere: nothing ever pushes them. Splitting a line with Enter
+pushes `Insert { text: "
+" }` instead, and `undo` reverts that by removing one
+byte *from that line* — a line which no longer contains the newline, because
+the split already moved the tail into a new `lines` entry. So undoing Enter
+deletes an unrelated byte and leaves the document split. Joining two lines with
+Backspace-at-column-0 has the mirror problem.
+
+**Reproduce:** open the editor, type `abcd`, put the caret between `b` and `c`,
+press Enter, press Ctrl+Z. Expected `abcd` on one line; actual is two lines with
+a character missing.
+
+**Proper fix:** make the split/join paths push the variants that exist —
+`InsertLine { line, text }` when Enter splits, `DeleteLine { line, text }` when
+Backspace/Delete joins — recording the text that moved, so `undo` can rejoin or
+re-split exactly. The `undo`/`redo` arms for both are already written and are
+what the fix should be validated against; add a round-trip test that types a
+mixed ASCII/non-ASCII document, performs every edit operation, then undoes all
+of them and asserts the buffer is byte-identical to the original.

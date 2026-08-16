@@ -398,6 +398,60 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT. `waitid` cannot express process group 1, cannot honour `WNOWAIT`, and reports `si_uid` as 0 — all three because `SYS_PROCESS_WAIT_STATUS` is `waitpid`-shaped — LOGGED 2026-08-16 by lane B
+
+**In short:** `waitid()` is the modern replacement for `waitpid()`, and it exists
+because `waitpid()`'s arguments cannot express some perfectly reasonable waits.
+libc's `waitid` is now real rather than a stub — it fills the caller's
+`siginfo_t` and supports process-group waits, both of which it previously did
+not — but it is built on the same kernel call `waitpid` uses, so it inherits
+exactly the limits `waitid` was invented to escape. Three remain. None breaks
+anything we ship; each is now *reported* honestly instead of faked.
+
+**Where it lives.** `posix/src/process.rs::waitid` and `siginfo_for_wstatus`;
+the kernel side is `kernel/src/syscall/handlers.rs::sys_process_wait_status`
+(~3993) and `wait_pgid_filter` (~3771).
+
+| Gap | libc's behaviour today | Why libc cannot fix it alone |
+|---|---|---|
+| `waitid(P_PGID, 1, …)` from a caller not in group 1 | `ENOSYS` | `waitpid`'s selector uses `-1` for "any child", so group 1 has no encoding. The kernel infers the group filter from that one signed integer. |
+| `WNOWAIT` (observe a child without reaping it) | accepted, **not honoured** — the child is reaped anyway | The syscall's option mask is `WNOHANG\|WUNTRACED\|WCONTINUED` and the wait path reaps unconditionally. There is no peek mode to ask for. |
+| `siginfo_t.si_uid` (the child's real uid) | always `0` | The child is reaped by the time the call returns; `SYS_PROCESS_GET_CREDENTIALS` takes no pid and reports only the caller's own. |
+
+Also zero for the same "nothing can source it" reason: `si_utime`/`si_stime` —
+there is no per-process CPU accounting, which is why `wait3`/`wait4` have always
+zeroed their `rusage` too.
+
+**Why `si_uid` is 0 rather than the caller's uid.** Substituting `getuid()`
+would be correct for a child that never changed credentials and wrong for
+precisely the case in which a caller would bother to read the field — a child
+that dropped privilege. That is the same rule design-decisions.md **§314** sets
+for capabilities: libc must not invent an answer it does not have. A zero is
+visibly unsourced; a plausible wrong uid is not.
+
+**Why the group-1 case is `ENOSYS` rather than a silent `waitpid(-1, …)`.** A
+wait for any child *reaps* some child, consuming its status permanently. A
+caller that asked for a group wait and got an arbitrary child has no way to
+detect the substitution and has lost the status of a child it was not managing.
+Refusing is recoverable; guessing is not.
+
+**Proper fix — all three are kernel-side**, and filed as
+`requests/b-a-waitid-needs-an-explicit-idtype-wait.md`:
+
+1. An option bit (e.g. `WPGID = 1 << 16`) that makes `arg0` an unsigned pgid,
+   bypassing `wait_pgid_filter`'s inference. Currently rejected by the mask, so
+   no existing caller is affected.
+2. A `WNOWAIT` bit that finds the eligible child and encodes its `wstatus` but
+   skips the reap. `poll_any_child_event` already separates "find" from
+   "consume" for stop/continue; this applies the same split to exits.
+3. Return the child's uid — the PCB already carries it (`pcb.rs:88`). Widening
+   the `arg2` out-parameter from a bare `i32 wstatus` to a small struct is
+   probably cleaner than a second return register, and leaves room for the CPU
+   times if accounting ever lands.
+
+Until then the divergences are documented on `waitid`'s doc comment, which is
+where someone debugging a `WNOWAIT` that reaped will actually look.
+
 ### TD-POSIX-TIMES-FLAKE. `posix::sys_times::tests::test_times_increments_each_call` fails intermittently under a full-workspace run — 2026-08-15 — ✅ FIXED 2026-08-15 by lane B (`posix/src/sys_times.rs`), and the triage found a second, worse bug underneath it
 
 **Status: FIXED 2026-08-15** (lane B, `posix/src/sys_times.rs`). Stays here

@@ -50,6 +50,7 @@ regressed by more than the threshold.
 from __future__ import annotations
 
 import argparse
+import collections
 import datetime
 import json
 import math
@@ -1533,6 +1534,188 @@ def level_shifts(records, host, profile, current, threshold_pct=LEVEL_SHIFT_PCT)
     return rows
 
 
+#: Verdicts from `mode_structure()`.
+#:
+#: `MODE_STRUCTURED` -- the split separates *binaries*: every commit measured
+#: more than once sits wholly on one side, and both sides are occupied. The
+#: "shift" is then a property of the compiled image (code layout), not of the
+#: code's speed, and bisecting for a guilty commit is the wrong tool.
+#: `MODE_RUN_NOISE` -- some single commit's own repeats span the split, so the
+#: split is inside run-to-run noise and cannot mark a durable change.
+#: `MODE_UNDECIDED` -- not enough repeat measurements to say either way.
+MODE_STRUCTURED = "mode-structured"
+MODE_RUN_NOISE = "run-noise"
+MODE_UNDECIDED = "undecided"
+
+#: How many commits must have been measured more than once before the check
+#: will return anything but `MODE_UNDECIDED`.
+#:
+#: Two, because one is not enough to demonstrate *both* sides: a single
+#: repeated commit can show that it does not straddle the split, but not that
+#: any binary ever lands on the other side, and "all repeats are below the
+#: fence" is equally consistent with the fence simply being too high to reach.
+MODE_MIN_REPEAT_COMMITS = 2
+
+ModeVerdict = collections.namedtuple(
+    "ModeVerdict", "verdict repeats straddling below above"
+)
+
+
+def repeats_by_commit(records, host, profile, name):
+    """`{commit: [values]}` for commits measured more than once.
+
+    Ordered by first appearance so the report is stable across runs.
+    """
+    by_commit = collections.OrderedDict()
+    for record in comparable_records(records, host, profile):
+        value = record.get("entries", {}).get(name)
+        commit = record.get("commit")
+        if value is None or not commit:
+            continue
+        by_commit.setdefault(commit, []).append(value)
+    return collections.OrderedDict(
+        (commit, values) for commit, values in by_commit.items() if len(values) > 1
+    )
+
+
+def mode_structure(records, host, profile, name, split):
+    """Does `split` separate *binaries*, or merely *runs*?
+
+    This is the question a "sustained shift" report cannot answer on its own,
+    and getting it wrong costs a bisect. Returns a `ModeVerdict`.
+
+    Why this exists (a real miss, not a hypothetical)
+    -------------------------------------------------
+    `http_build_response_1KiB` was reported as a sustained 2x regression and
+    bisected across three commits. It is not a regression. Over 20 release
+    records it is cleanly bimodal -- 11 runs averaging 6055 ns and 9 averaging
+    10806 ns, with an *empty* gap between 6396 and 8546 and a ratio of 1.78x,
+    which is the TCG page-straddle penalty. The mode is a deterministic
+    property of the compiled image: it re-rolls when unrelated code moves a
+    function's address, and it had already flipped back and forth five times
+    across the recorded history. There was no guilty commit to find.
+
+    What makes that decidable is **repeat measurements of the same commit**.
+    Three commits had been measured more than once (seven runs in total) and
+    not one of them straddled the gap, while host noise moved values by up to
+    1.47x *within* a mode. Same binary, same mode, every time.
+
+    Why not a gap test
+    ------------------
+    The obvious detector -- "is there a suspiciously large gap in the sorted
+    values" -- was implemented and measured first, and it does not
+    discriminate. Scoring the largest gap against the median spacing of the
+    sorted values gives 12.9x for `http_build_response_1KiB`, but 13.3x for
+    `vfs_stat_root`, 30x for `ipc_eventfd` and 113x for `page_alloc_free`.
+    Every benchmark looks bimodal by that measure, because 20 samples drawn
+    from a tight distribution are densely spaced and *any* outlier dwarfs the
+    median spacing. A check that fires on everything is as useless as one that
+    fires on nothing; the repeat-commit test is used instead because it was
+    measured to separate these same four series correctly.
+
+    Choice of `split`
+    -----------------
+    This function answers the question *for the split it is given*; choosing a
+    good one is `mode_split_search`'s job, and it matters more than it looks.
+    Two plausible fixed choices were tried against the real history and both
+    give the wrong answer for `http_build_response_1KiB`: the midpoint between
+    baseline and current (~9200) and the report's own pre-window Tukey fence
+    (9103) both land *inside* the HIGH mode's run-to-run spread, so commit
+    `26c1c7330` (8818, 11381, 12934) straddles them and the verdict comes back
+    `run-noise` for a series that is genuinely mode-structured. The gap that
+    actually separates the modes is at ~7500, between 6396 and 8546, and only a
+    search over observed values finds it.
+    """
+    repeats = repeats_by_commit(records, host, profile, name)
+    straddling = collections.OrderedDict(
+        (commit, values)
+        for commit, values in repeats.items()
+        if min(values) < split <= max(values)
+    )
+    below = [c for c, v in repeats.items() if max(v) < split]
+    above = [c for c, v in repeats.items() if min(v) >= split]
+
+    if len(repeats) < MODE_MIN_REPEAT_COMMITS:
+        verdict = MODE_UNDECIDED
+    elif straddling:
+        verdict = MODE_RUN_NOISE
+    elif below and above:
+        verdict = MODE_STRUCTURED
+    else:
+        # No repeat straddles the split, but they all sit on one side of it, so
+        # nothing has been shown about the other side.
+        verdict = MODE_UNDECIDED
+    return ModeVerdict(verdict, repeats, straddling, below, above)
+
+
+def mode_split_search(records, host, profile, name, low, high):
+    """Best `(split, ModeVerdict)` separating `low` from `high`, or `None`.
+
+    Searches every split that could separate the baseline from the current
+    value and returns one that is `MODE_STRUCTURED`, preferring the widest gap.
+
+    Why a search rather than the report's own fence
+    -----------------------------------------------
+    Passing the pre-window Tukey fence looks principled and fails on the real
+    data, which is why it is not what happens. For `http_build_response_1KiB`
+    that fence is 9103 ns, because the baseline window had itself already
+    absorbed runs from *both* modes and widened accordingly. 9103 sits inside
+    the HIGH mode's own run-to-run spread, so commit `26c1c7330`
+    (8818, 11381, 12934) straddles it and the answer comes back `run-noise` --
+    true of that fence, but not the fact worth reporting. The series really is
+    mode-structured; the fence was simply in the wrong place to see it.
+
+    Splits are taken at the midpoint of each adjacent pair of observed values,
+    restricted to `(low, high]` so that only splits which actually separate the
+    baseline from the current reading are considered. The widest gap is
+    preferred because that is the split least likely to be an artefact of where
+    a single sample happened to land.
+    """
+    values = sorted({
+        record["entries"][name]
+        for record in comparable_records(records, host, profile)
+        if name in record.get("entries", {})
+    })
+    candidates = []
+    for lower, upper in zip(values, values[1:]):
+        split = (lower + upper) / 2.0
+        if not low < split <= high:
+            continue
+        candidates.append((upper - lower, split))
+    # Widest gap first, so a tie between splits resolves to the most separated.
+    for _gap, split in sorted(candidates, reverse=True):
+        verdict = mode_structure(records, host, profile, name, split)
+        if verdict.verdict == MODE_STRUCTURED:
+            return split, verdict
+    return None
+
+
+def describe_mode_verdict(name, verdict):
+    """Lines to print under a shift report, or `[]` when there is nothing to say."""
+    if verdict.verdict == MODE_STRUCTURED:
+        sides = (
+            f"{len(verdict.below)} commit(s) always below it, "
+            f"{len(verdict.above)} always above"
+        )
+        return [
+            f"    -> {name}: NOT a regression to bisect. Every commit measured "
+            f"more than once sits wholly on one side of this fence "
+            f"({sides}), so the fence separates BINARIES, not runs.",
+            "       This is the code-layout lottery: the mode re-rolls when "
+            "unrelated code shifts an address. Bisecting will name an "
+            "innocent commit.",
+        ]
+    if verdict.verdict == MODE_RUN_NOISE:
+        commit = next(iter(verdict.straddling))
+        values = verdict.straddling[commit]
+        return [
+            f"    -> {name}: treat with suspicion. Commit {commit[:9]} alone "
+            f"produced {sorted(values)} -- one binary spanning this fence, so "
+            f"the fence is inside run-to-run noise.",
+        ]
+    return []
+
+
 def band_position(value, band, worse):
     """Is `value` outside `band` in the direction that matters?
 
@@ -1815,6 +1998,9 @@ def report(previous, current_entries, threshold_pct,
     # -- including on runs where the run-over-run lists are empty, which is
     # exactly when it is most needed.
     shifts = level_shifts(records, host, profile, current) if records else []
+    # Shifts that survive the mode-structure check -- i.e. the ones actually
+    # worth bisecting for. Only these fail the build; see the return below.
+    bisectable_shifts = []
     if shifts:
         print(
             f"  SUSTAINED SHIFT (>{LEVEL_SHIFT_PCT:g}% off a baseline from "
@@ -1822,6 +2008,7 @@ def report(previous, current_entries, threshold_pct,
             f"baseline's own spread -- these do NOT show up run-over-run once "
             f"they persist):"
         )
+        any_structured = False
         for name, median, value, adjusted, band, n in shifts:
             lo, hi, _med, _n = band
             print(
@@ -1829,6 +2016,20 @@ def report(previous, current_entries, threshold_pct,
                 f"({adjusted:+.0f}% vs suite); pre-window baseline "
                 f"{lo:.0f}-{hi:.0f}ns over {n} runs"
             )
+            # Before pointing anyone at a bisect, ask whether this fence
+            # separates binaries or runs. `http_build_response_1KiB` was
+            # bisected across three commits before anyone asked; the answer was
+            # "binaries", and there was no guilty commit. See mode_structure().
+            found = mode_split_search(records, host, profile, name,
+                                      median, value)
+            verdict = found[1] if found else mode_structure(
+                records, host, profile, name, hi)
+            for line in describe_mode_verdict(name, verdict):
+                print(line)
+            if verdict.verdict == MODE_STRUCTURED:
+                any_structured = True
+            else:
+                bisectable_shifts.append(name)
         # Name the first thing to rule out. Under TCG a loop that lands across
         # a 4 KiB guest page costs ~1.7x per iteration, and any commit that
         # shifts a function's address re-rolls that -- so a sustained shift in
@@ -1842,6 +2043,11 @@ def report(previous, current_entries, threshold_pct,
             "       python scripts/straddle-check.py --compare "
             "<old-kernel-elf> <new-kernel-elf>"
         )
+        if any_structured:
+            print(
+                "    -> at least one shift above is mode-structured and is "
+                "NOT counted as a regression by --fail-on-regression."
+            )
 
     if added:
         print("  NEW:")
@@ -1885,7 +2091,15 @@ def report(previous, current_entries, threshold_pct,
     # baseline's Tukey fence), so anything reaching this point is better
     # evidenced than the reports that already fail the build -- and a
     # regression that persists is the one most worth failing on, not least.
-    return bool(reg_out or reg_unjudged or shifts)
+    #
+    # `bisectable_shifts`, not `shifts`: a mode-structured shift is not a
+    # regression at all (see mode_structure()), and failing the build on one
+    # would gate merges on a coin flip -- `http_build_response_1KiB` re-rolled
+    # between its two modes five times across the recorded history without any
+    # commit making it slower. Note that only a *positively evidenced*
+    # mode-structured verdict is excused; MODE_UNDECIDED still fails, so the
+    # absence of repeat measurements can never silence the report.
+    return bool(reg_out or reg_unjudged or bisectable_shifts)
 
 
 def cmd_list(history_path):

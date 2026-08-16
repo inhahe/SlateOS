@@ -1578,6 +1578,175 @@ def test_baselines_is_valid_toml():
           names_a_target("tcg_target_ns"), True)
 
 
+def _mode_records(pairs, name="b"):
+    """Records carrying one benchmark, from `[(commit, value), ...]`."""
+    return [
+        {"host": "H", "profile": "release", "commit": commit,
+         "entries": {name: value}}
+        for commit, value in pairs
+    ]
+
+
+def test_mode_structure_separates_binaries_from_runs(bh):
+    """The check must fire on a mode-structured series -- and only on one.
+
+    Both directions are asserted here because this check replaced one that
+    could not tell the two cases apart, and a detector that answers
+    "mode-structured" for everything would silence `--fail-on-regression`
+    entirely -- a strictly worse failure than the false bisect it fixes.
+    """
+    # Every repeated commit sits wholly on one side of the split, and both
+    # sides are occupied: the split separates binaries.
+    structured = _mode_records([
+        ("aaa", 6000), ("aaa", 6200),      # always below
+        ("bbb", 11000), ("bbb", 12500),    # always above
+    ])
+    verdict = bh.mode_structure(structured, "H", "release", "b", 7500)
+    check("a split no repeat crosses is mode-structured",
+          verdict.verdict, bh.MODE_STRUCTURED)
+    check("...and it names both sides",
+          (len(verdict.below), len(verdict.above)), (1, 1))
+
+    # One binary spanning the split means the split is inside run noise.
+    noisy = _mode_records([
+        ("aaa", 6000), ("aaa", 6200),
+        ("bbb", 6500), ("bbb", 12500),     # same commit, both sides
+    ])
+    verdict = bh.mode_structure(noisy, "H", "release", "b", 7500)
+    check("a single commit spanning the split is run noise",
+          verdict.verdict, bh.MODE_RUN_NOISE)
+
+    # Guard: the "run noise" record set must really contain a straddling
+    # commit, or the assertion above would pass for the wrong reason.
+    check("...and the straddling commit is identified",
+          list(verdict.straddling), ["bbb"])
+
+
+def test_mode_structure_abstains_without_evidence(bh):
+    """No repeats, or repeats on only one side, must both be UNDECIDED.
+
+    The one-sided case is the subtle one. "Every repeated commit is below the
+    fence" is exactly what a series that simply never got slower looks like,
+    so reading it as evidence of two modes would excuse a genuine regression
+    the first time it appeared. UNDECIDED still fails the build.
+    """
+    single = _mode_records([("aaa", 6000), ("bbb", 12000)])
+    check("one measurement per commit decides nothing",
+          bh.mode_structure(single, "H", "release", "b", 7500).verdict,
+          bh.MODE_UNDECIDED)
+
+    one_sided = _mode_records([
+        ("aaa", 6000), ("aaa", 6200),
+        ("bbb", 6100), ("bbb", 6300),
+    ])
+    verdict = bh.mode_structure(one_sided, "H", "release", "b", 7500)
+    check("repeats all on one side decide nothing", verdict.verdict,
+          bh.MODE_UNDECIDED)
+    # Guard: this really is the one-sided shape, not an empty-repeats accident.
+    check("...though the repeats were found", len(verdict.repeats), 2)
+
+    # A record from another profile must not supply the missing evidence.
+    mixed = _mode_records([("aaa", 6000), ("aaa", 6200)])
+    mixed += [{"host": "H", "profile": "debug", "commit": "bbb",
+               "entries": {"b": 12000}},
+              {"host": "H", "profile": "debug", "commit": "bbb",
+               "entries": {"b": 12400}}]
+    check("another profile's repeats are not evidence here",
+          bh.mode_structure(mixed, "H", "release", "b", 7500).verdict,
+          bh.MODE_UNDECIDED)
+
+
+def test_mode_structure_on_the_real_history(bh):
+    """Positive control on this project's own data, both ways.
+
+    `http_build_response_1KiB` is the series that was bisected across three
+    commits for a regression that did not exist; `vfs_stat_root` is the series
+    from the same runs that is *not* mode-structured. The check has to
+    separate them, on the real file, or it has not earned the right to
+    suppress a build failure.
+    """
+    records = bh.load_history(os.path.join(REPO_ROOT, "bench", "history.jsonl"))
+    if not records:
+        print("SKIP  mode structure on real history (no history file)")
+        return
+
+    http = bh.mode_structure(
+        records, "Logoplex3", "release", "http_build_response_1KiB", 7500)
+    check("the real bimodal series is mode-structured",
+          http.verdict, bh.MODE_STRUCTURED)
+    # Guard: the verdict must rest on real repeat evidence, not on an empty set.
+    check("...on at least the documented three repeated commits",
+          len(http.repeats) >= 3, True)
+
+    vfs = bh.mode_structure(
+        records, "Logoplex3", "release", "vfs_stat_root", 4200)
+    check("the continuously-spread series is NOT mode-structured",
+          vfs.verdict == bh.MODE_STRUCTURED, False)
+
+
+def test_mode_split_search_finds_what_a_fixed_fence_misses(bh):
+    """The search must find the separating gap the report's own fence misses.
+
+    This is a regression test for a real, measured failure of the first
+    implementation, not a hypothetical. Using the pre-window Tukey fence as the
+    split returned `run-noise` for `http_build_response_1KiB` -- because that
+    fence (9103 ns) had been widened by the baseline window already containing
+    both modes, landing it inside the HIGH mode's spread where commit
+    `26c1c7330` straddles it. The build kept failing on a layout re-roll.
+    """
+    records = bh.load_history(os.path.join(REPO_ROOT, "bench", "history.jsonl"))
+    if not records:
+        print("SKIP  mode split search on real history (no history file)")
+        return
+    args = (records, "Logoplex3", "release", "http_build_response_1KiB")
+
+    # Guard: the fence really must give the wrong answer, or this test is
+    # asserting nothing and would keep passing if the search were deleted.
+    fence = bh.mode_structure(*args, 9103)
+    check("the old fixed fence really does miss it",
+          fence.verdict == bh.MODE_STRUCTURED, False)
+
+    found = bh.mode_split_search(*args, 6004, 12191)
+    check("the search finds a separating split", found is not None, True)
+    if found:
+        split, verdict = found
+        check("...and it is mode-structured there",
+              verdict.verdict, bh.MODE_STRUCTURED)
+        check("...at the gap between the two modes",
+              6396 < split <= 8546, True)
+
+    # A series that is not mode-structured must yield no split at all.
+    none_found = bh.mode_split_search(
+        records, "Logoplex3", "release", "vfs_stat_root", 3600, 4488)
+    check("no split is invented for a non-bimodal series",
+          none_found, None)
+
+
+def test_mode_structured_shift_does_not_fail_the_build(bh):
+    """A mode-structured shift must be reported but must not fail the build.
+
+    This is the behavioural half of the fix and the part most likely to be
+    broken by a later refactor: `report()`'s return value drives
+    `--fail-on-regression`, and it previously counted every sustained shift.
+    """
+    lines = []
+    verdict = bh.ModeVerdict(bh.MODE_STRUCTURED, {"aaa": [1, 2]}, {},
+                             ["aaa"], ["bbb"])
+    lines = bh.describe_mode_verdict("b", verdict)
+    check("a mode-structured verdict says not to bisect",
+          any("NOT a regression to bisect" in line for line in lines), True)
+
+    noise = bh.ModeVerdict(bh.MODE_RUN_NOISE, {"aaa": [1, 9]},
+                           {"aaa": [1, 9]}, [], [])
+    lines = bh.describe_mode_verdict("b", noise)
+    check("a run-noise verdict names the offending commit",
+          any("aaa" in line for line in lines), True)
+
+    check("an undecided verdict says nothing",
+          bh.describe_mode_verdict(
+              "b", bh.ModeVerdict(bh.MODE_UNDECIDED, {}, {}, [], [])), [])
+
+
 def main():
     """Run every `test_*` in this file, in definition order.
 
@@ -1604,9 +1773,9 @@ def main():
     ]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes, which is the bug this docstring is about. Assert a floor.
-    if len(tests) < 15:
+    if len(tests) < 38:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 15. Discovery is broken, not the code.")
+              f"suite has at least 38. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

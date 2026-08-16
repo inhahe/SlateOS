@@ -12252,6 +12252,315 @@ syscall numbers" (they are verbatim Linux numbers) and globbed in
 `crate::syscall::*`, which is what forced the `SYS_EXIT_LINUX` alias. Both are
 gone; nothing consumed either.
 
+## §319 — libc's four wait entry points funnel through one call, and the extensible struct's size is deliberately not exposed to C
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous) — the kernel ABI was lane A's call (§206);
+these are the libc-side shape questions it left open.
+
+**In short:** a program that starts a child process can wait for it to finish
+four different ways, all meaning roughly the same thing. Until now each of the
+four was written out separately in our C library, and they had drifted: one of
+them refused a perfectly legal request outright, one silently destroyed the
+information it was asked only to look at, and two of them reported the child's
+CPU time as zero when the kernel knew the real number. This change routes all
+four through a single piece of code and has them read the kernel's new answer
+structure. The three choices worth recording are: one shared body rather than
+four; naming *what kind* of thing is being waited on with a small enum instead
+of overloading the sign of a number; and **not** giving C programs a way to
+name the answer structure's size, even though that is exactly what one test
+needs.
+
+### The context
+
+Lane A's §206 gave `SYS_PROCESS_WAIT_STATUS` three new option bits (`WPGID`,
+`WINFO`, `WNOWAIT`) and a `WaitInfo` out-parameter carrying the facts that do
+not survive the reap — the child's uid, its CPU time, and four other counters.
+`requests/a-b-wait-syscall-grew-wpgid-wnowait-and-a-waitinfo-struct.md` asked
+lane B to consume it. Nothing in libc broke by not consuming it; every choice
+below is about the shape of the consumption, not whether to do it.
+
+### The decisions
+
+**1. One `wait_common`, not four call sites.**
+
+`waitpid`, `wait3`, `wait4` and `waitid` all reach the kernel through one
+private function. `wait3` is now literally `wait4(-1, …)`, and `wait4` is
+`waitpid` plus an out-parameter.
+
+*For:* the four differ only in how they *encode* an answer — a packed `wstatus`
+word, a `siginfo_t`, a `struct rusage` — never in which child they select or
+whether a report is consumed. Those were the parts that drifted. It is the same
+argument §206 makes one level down, and it is why `waitid` inherited the
+group-1 `ENOSYS` and the ignored `WNOWAIT` in the first place: it was a
+separate copy that nobody updated when `waitpid` grew.
+
+*Against:* a funnel makes each caller pay for the union of the others'
+concerns — `waitpid`'s hot path now goes through a `match` on a two-armed enum.
+Accepted: the match compiles to a branch on a register, next to a syscall that
+costs three orders of magnitude more, and the alternative is the drift that
+produced this request.
+
+**2. `WaitTarget { Selector, Pgid }` at the libc boundary, mirroring the
+kernel's `WaitTarget { Any, Pid, Pgid }`.**
+
+*For:* the whole of request item 1 is that `waitpid`'s single signed integer
+cannot express "group 1" — it spends `-1` on "any child". A libc that kept
+passing a signed integer around internally and only converted at the syscall
+would have the same hole one layer up. Making the two interpretations separate
+*types* is what stops a half-conversion, which is the specific failure mode
+lane A warns about: with `WPGID` set, `-g` is not group `g`, it is a huge
+unsigned pgid that matches nothing and silently returns `ECHILD`.
+
+*Against:* two enums, one per side of the syscall, describing the same idea. A
+single shared definition would be less to keep in step. Rejected because libc
+and the kernel are separately compiled and separately versioned — a shared type
+would be a shared *header*, which is precisely the coupling the numbered ABI
+exists to avoid.
+
+Note the deliberate asymmetry: libc's enum has two arms where the kernel's has
+three. `Any` is not a libc concept — `waitpid(-1, …)` and `waitid(P_ALL, …)`
+both mean it, and both are already spelled as a selector. Adding a third arm
+would create two encodings of the same wait inside libc, which is the disease.
+
+**3. The `WaitInfo` size is not reachable from C.**
+
+The extensible-struct convention only means anything if a caller can pass a
+size other than the current one. libc, by construction, always passes its own
+`sizeof` — so libc cannot test the convention, and there is a real temptation
+to export a size-taking entry point (`slate_wait_info(…, size)`) so that a
+fixture can.
+
+*Rejected.* A libc export whose only correct caller is a test is a permanent
+hole: every other caller can then hand the kernel an arbitrary length, and the
+kernel's validation is all that stands between a typo and a write past the end
+of a buffer. The convention's real beneficiary is *an older libc on a newer
+kernel*, which does not need an entry point — it needs the kernel to honour a
+size it already passes.
+
+So the test reaches the syscall raw, from C, in
+`services/ctest-jobctl/main.c` (checks 150-187): a hand-written five-argument
+`syscall`, a locally-declared 72-byte struct, and a 128-byte buffer poisoned
+with `0x5A` before each call. Check 157 asserts that `arg4 = 128` comes back
+with bytes 72..128 **zeroed**; check 169 asserts that `arg4 = 24` leaves bytes
+24..128 **exactly as poisoned**. Both are properties of `copy_to_user`, which no
+kernel self-test can reach — a bare kernel task has no user address space, so
+`dispatch.rs::test_dispatch_wait_info_layout` can only check the pure encoder.
+
+The struct is re-declared in the fixture rather than shared with the kernel's
+definition, and that is the point: a struct generated from the same source as
+the kernel's would agree with it by construction even if both were wrong. The
+fixture is asserting what bytes arrive, not what the kernel meant to send.
+
+**4. The unit split is honoured in exactly one function.**
+
+`WaitInfo` is in microseconds; `siginfo_t`'s `si_utime`/`si_stime` are in
+USER_HZ ticks, because the field is `clock_t` and a ported binary reading it
+expects what Linux's `nsec_to_clock_t` would have put there. libc converts in
+`us_to_clock_t` and nowhere else.
+
+*For:* a caller that guessed the wrong unit is off by exactly 10× — large
+enough to be wrong, small enough to look plausible in a log, and invisible in
+review. One conversion site is one place to be wrong.
+
+*Against:* it means `wait4`'s `rusage` (microseconds, via `us_to_timeval`) and
+`waitid`'s `siginfo` (ticks) report the same child's CPU time at different
+resolutions, and a program that used both would see them disagree below 10 ms.
+Accepted: that disagreement is Linux's, and matching it is the entire reason
+the ABI has two units.
+
+**5. `wait4` writes `rusage` on a `WNOHANG` miss but not on an error.**
+
+*For:* both match Linux's `sys_wait4`. On a miss there was no child, so zero
+usage is the truth and leaving the caller's previous contents would read as a
+second child's numbers. On an error there is nothing to describe.
+
+The old code did neither — it zero-filled unconditionally, before it even knew
+whether a child existed, via the kernel's `clear_user_rusage`. That was a
+**false zero**: `pcb`'s counters existed the whole time and the call was
+discarding them. Two host tests asserted the zeroing and had to be inverted;
+they now assert the Linux contract instead.
+
+**Where it lives.** `posix/src/process.rs` — `WaitInfo`, `WaitTarget`,
+`wait_common`, `waitid_target`, `waitid_kernel_options`, `siginfo_for_wait`,
+`rusage_from_wait_info`, `us_to_clock_t`, `us_to_timeval`; `posix/src/resource.rs`
+(`Rusage` gains `Default`, so a partial fill has an honest base);
+`services/ctest-jobctl/main.c` checks 150-187.
+
+**Tests.** Host: 18 new tests over the pure helpers — the `WaitInfo` byte layout
+(every offset, both zero pads, size 72, align 8), the `(idtype, id)` →
+`WaitTarget` mapping including group 1 and the never-negate rule, the option
+translation, and the `rusage`/`siginfo` encoders. Target: `ctest-jobctl`
+150-187, which is the only layer that can see a `copy_to_user`.
+
+## §320 — The rootfs image is verified by a manifest it writes about itself, because its own timestamp records when it was last *booted*
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** The boot test runs our ring-3 C test programs from inside a disk
+image, not from the source tree. Nothing checked that the image was as new as
+the programs in it, so today a boot test passed while running the *previous*
+version of a test — the exact one I had just added 38 checks to. The fix is
+that the image-building script now writes a small file listing a fingerprint of
+every program it packed, and a checker compares that list against the tree. The
+alternative — just comparing file dates — cannot work here, for a reason
+specific to this file.
+
+### The decision
+
+`scripts/create-ext4-rootfs.sh` ends by writing `rootfs.ext4.manifest`: the
+sha256 of every locally built ELF it staged (`services/ctest-*/*.elf`,
+`services/fastpy-*/*.elf`, `build/spike/*.elf` — 74 files today).
+`scripts/ctest-fixtures.py image-check` compares it against the working tree
+and fails, naming each ELF that moved. Writing the manifest is **fatal** if it
+cannot happen, because an image nothing can verify is precisely the state that
+produced the false green.
+
+### Why not mtimes, when three neighbouring gates use them
+
+`create-ext4-rootfs.sh` already compares ELF mtimes against `libc.a` and
+against each fixture's sources, and those are the right question there. For the
+*image* they are not merely weak — they are inverted:
+
+- **QEMU writes to `rootfs.ext4` on every boot.** The image is mounted
+  read-write and the kernel touches it, so its mtime is when it was last *run*.
+  An image packed on Tuesday and booted this morning is, by mtime, newer than
+  fixtures rebuilt an hour ago. The comparison does not merely fail to catch
+  the drift; it actively reports the stale image as the fresher artifact.
+- A fresh clone flattens every mtime, which is the argument already recorded in
+  `ctest-fixtures.py`'s docstring for why the *fixture* stamp is a content hash.
+  It applies here too, but it is the weaker of the two reasons: the image is
+  gitignored, so a fresh clone has no image at all.
+
+### The alternative considered: hash the image itself
+
+Recording the sha256 of `rootfs.ext4` and re-checking it would prove the image
+had not been *tampered with*, which is not the question — and it would fail
+after every boot, for the same reason mtimes do: QEMU writes to it. Hashing the
+*inputs* rather than the output is what survives the artifact being mutated by
+the very act of testing it.
+
+### The cost, accepted
+
+The manifest is a gitignored file that can be deleted independently of the
+image it describes. `image-check` treats "image present, manifest absent" as a
+failure rather than a skip — the image predates the check, so what is in it
+genuinely cannot be established, and "cannot verify" must not read as "fine"
+(the `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT` rule). The remedy is one command,
+and it is printed. "No image at all" *is* a pass, with a printed line, because
+that is a legitimate configuration in which the Path-Z rungs self-skip.
+
+**Files.** `scripts/ctest-fixtures.py` (`cmd_image_stamp`, `cmd_image_check`,
+`STAGED_GLOBS`); `scripts/create-ext4-rootfs.sh` (the call, at the end, after
+`debugfs` reports the contents); `.gitignore` (`*.ext4.manifest`).
+
+**Not yet wired.** `scripts/boot-test.sh` is lane A's file, so the
+`image-check` call that makes any of this fire is
+`requests/b-a-boot-test-boots-a-rootfs-image-that-may-predate-the-fixtures-in-it.md`.
+Until it lands the checker is inert, and this entry describes a guard that
+exists rather than one that runs.
+
+## §321 — The fixture stamp stays an exact statement about bytes; "is that libc still current?" is answered out-of-band, advisory
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** Nine small C test programs are checked into git as both source and
+compiled binary, each beside a `.stamp` file recording a fingerprint of exactly
+what went into it. Lane A asked whether the stamp should *also* record a
+fingerprint of the libc's **source**, so it could say not just "this binary
+matches the libc it was linked against" but "and that libc is still what the
+source tree would produce". The answer is no: a fingerprint cannot answer that
+second question accurately, and a stamp mismatch stops the disk image from
+building — so an inaccurate answer there would block work on changes that broke
+nothing.
+
+### The question, and where it came from
+
+`requests/a-b-nine-ctest-fixtures-on-main-link-a-libc-main-no-longer-builds.md`
+(lane A, 2026-08-16) reported a defect no lane could see in its own tree: lane C
+rebuilt the nine fixtures correctly against the `libc.a` its branch produced,
+lane B added thirteen libc symbols correctly on another branch, and the **merge**
+of the two is a tree whose stamps are self-consistent and still wrong. Lane A
+wrote `scripts/stamp-ancestry.py` to detect it and left one call to lane B:
+whether to also put `git rev-parse HEAD:posix` — the tree hash of the libc's
+sources — into each `.stamp`, beside the existing content hash of
+`toolchain/sysroot/lib/libc.a`.
+
+### The decision
+
+**No.** The stamp keeps recording only content hashes of files actually consumed
+(`build.py`, `main.c`, `libc.a`) and of the ELF produced. `stamp-ancestry.py`,
+run after merges beside `ki_dupes.py`, keeps answering the source-currency
+question separately. The repair half of the request is done — `3ad5c98aa`.
+
+### Why — a source tree hash is wrong in *both* directions
+
+The existing fields are exact: "the ELF on disk is the one these bytes produce"
+is a claim a hash makes with no error either way. A `posix/` tree hash cannot
+make the claim it would be there to make.
+
+- **Over-approximate — it fires when nothing changed.** A comment, a rustfmt
+  pass, a `#[cfg(test)]`-only edit: all move `posix/`'s tree hash and leave
+  `libc.a` byte-identical. Two such commits are already in this month's history
+  (`06ad616e0`, a formatting-only reformat of the whole crate; `96d62430f`,
+  a clippy fix confined to test modules). Because `create-ext4-rootfs.sh`
+  **exits 1** on a stamp mismatch, the consequence is not a warning: rewording a
+  doc comment in `posix/` would stop the rootfs image building until nine
+  binaries were relinked into nine byte-identical binaries. That is exactly the
+  failure lane A named for the root `Cargo.toml` inside `stamp-ancestry.py` — "a
+  check that cries wolf gets flagged into silence" — installed in the one place
+  where silencing it means `ALLOW_STALE_FIXTURES=1`, which disables the *real*
+  check alongside it.
+- **Under-approximate — it stays quiet when things did change.** `libc.a` is not
+  a function of `posix/` alone. It path-depends on `tzrules/`; the float-ABI
+  `RUSTFLAGS` that `BUG-SYSROOT-SOFT-FLOAT-ABI` is about live only in
+  `toolchain/build-sysroot.ps1`; `[profile.release]` in the root `Cargo.toml`
+  genuinely changes codegen; and the rustc version is not in the tree at all. A
+  stamp field named for `posix/` would read as authoritative while missing four
+  of its own inputs. `stamp-ancestry.py` already tracks the wider set (`posix/` +
+  `tzrules/` + `build-sysroot.ps1`, with `Cargo.toml` warning rather than
+  failing) — precisely because one path is not enough.
+
+A field that is both too eager and too lax is worse than no field: it converts
+"there is no check here" into "there is a check here" for a reader who will not
+re-derive its input set.
+
+### Why out-of-band is the right *place*, not merely the cheaper one
+
+The two questions differ in whether a wrong answer is recoverable:
+
+| | asks | a wrong answer costs |
+|---|---|---|
+| `.stamp` (content) | did *these* bytes make *that* ELF? | never wrong — a hash mismatch is a real mismatch |
+| `stamp-ancestry.py` (history) | is the libc those bytes name still current? | a re-run and a glance at one named commit |
+
+The exact check can afford to be fatal because it does not misfire; the
+approximate one must not be fatal, because it does. Merging them forces the pair
+to share the strictest consequence and the loosest accuracy.
+
+The coupling lane A raised — a `services/**` file naming a path outside
+`services/**` — is real but secondary; the stamp already names
+`toolchain/sysroot/lib/libc.a`, so that boundary is crossed either way. What
+decides it is that one file would be making a claim it cannot support.
+
+### What would genuinely close the gap, and why it is not this
+
+The only exact answer is to *build* `libc.a` and hash the result — which
+`build-sysroot.ps1` + `ctest-fixtures.py check` already does, and which the
+request's own reproduction steps run. `ctest-fixtures.py`'s stated design goal
+is to need **no toolchain**, so the check works on a machine with no zig/WSL;
+that goal is what makes an exact source check impossible inside it, not an
+oversight. The honest arrangement is therefore three layers: exact and
+toolchain-free in the stamp, approximate and advisory in git history, exact and
+expensive when a toolchain is present. All three exist; the middle one is new
+today.
+
+**Files.** No change — this records a decision *not* to alter
+`scripts/ctest-fixtures.py`'s stamp format (`version 1`). The detector it defers
+to is `scripts/stamp-ancestry.py` (lane A's).
+
 ## §400 — Every GUI process finds its own UI font, lazily, from a compiled-in fallback list
 
 **Date:** 2026-08-14

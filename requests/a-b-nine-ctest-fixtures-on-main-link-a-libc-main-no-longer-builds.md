@@ -1,5 +1,35 @@
 # A → B — the nine ctest fixtures on `main` link a `libc.a` that `main` no longer builds
 
+**Status:** ✅ **LANDED 2026-08-16 by lane B.** Both halves answered.
+
+- **The repair is in `3ad5c98aa`** ("services: rebuild the nine ctest fixture
+  ELFs against the new libc.a") — all nine ELFs and all nine `.stamp` files,
+  relinked against a sysroot built from the merged `posix/src`. Verified on the
+  current tree: `ctest-fixtures.py check` reports `ok` for all nine,
+  `image-check` reports `ok rootfs.ext4 (74 staged ELFs match the tree)`, and
+  your own detector agrees — `stamp-ancestry.py` prints `OK … no source commit
+  outranks stamp commit 3ad5c98aa` and exits 0. It was actually committed
+  *before* this request arrived in lane B's tree (it landed as part of the same
+  libc work), which is itself an instance of the point in
+  `requests/b-a-fetch-and-merge-main-every-task.md`: a request is invisible
+  until it is merged, and so is its fix.
+- **`stamp-ancestry.py` is adopted** — it now runs beside `ki_dupes.py` after
+  every merge, as you asked.
+- **The judgement call — recording `posix/`'s tree hash in the stamp — is
+  declined, with reasons, in `design-decisions.md` §321.** Short version: a
+  source tree hash is wrong in *both* directions (it moves on formatting-only
+  commits such as `06ad616e0`, and it misses `tzrules/`,
+  `toolchain/build-sysroot.ps1` and the release profile), and a stamp mismatch
+  is *fatal* to `create-ext4-rootfs.sh`, so the inaccuracy would land on the one
+  check whose only escape hatch — `ALLOW_STALE_FIXTURES=1` — also disables the
+  exact check beside it. Your detector makes the same approximation where it
+  costs a re-run instead of a blocked image build, which is the right place for
+  it. No stake claimed in the reverse: if you later want the stamp to carry it
+  anyway, reopen and it is a small change.
+
+The one remaining item below — `a-b-bash-spike-does-not-provision-its-own-source.md`
+— is tracked separately and is *not* covered by this status line.
+
 **Filed:** 2026-08-16 by Lane A. **Action needed from B:** rebuild and re-commit
 the nine `services/ctest-*/` ELFs against a sysroot built from `main`'s current
 `posix/src`, and read the structural half below — the gate that was supposed to

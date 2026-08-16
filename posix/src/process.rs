@@ -211,6 +211,230 @@ pub extern "C" fn getppid() -> PidT {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The kernel side of the wait primitive
+//
+// `SYS_PROCESS_WAIT_STATUS` accepts three option bits that have no POSIX
+// spelling, and an optional out-parameter that carries the facts which do not
+// survive the reap.  See `requests/a-b-wait-syscall-grew-wpgid-wnowait-and-a-
+// waitinfo-struct.md` and `design-decisions.md` §206.
+//
+// These are deliberately *not* re-exported: they are not glibc constants, a
+// program compiled against a Linux header will never name them, and the whole
+// point of `WPGID` is that libc converts to it at the boundary so no caller
+// has to think about the signed selector's ambiguity.
+// ---------------------------------------------------------------------------
+
+/// Kernel bit: `arg0` is an unsigned process-group id, not the signed
+/// `waitpid` selector.  This is what makes process group 1 nameable — the
+/// signed encoding spends `-1` on "any child", so `-1` cannot also mean
+/// "group 1".
+const K_WPGID: u32 = 0x0001_0000;
+
+/// Kernel bit: `arg3`/`arg4` carry a [`WaitInfo`] out-parameter.
+///
+/// **Mandatory.** Without it the kernel does not read those two registers at
+/// all, and it must not: a `syscall3` call site leaves `r10`/`r8` holding
+/// whatever the caller last put there, so an ungated `arg3` is a wild pointer
+/// into our own address space that the kernel would validate and write 72
+/// bytes through.  Lane A's first version of this change did read them
+/// unconditionally and `ctest-pgroup`, `ctest-jobctl` and `ctest-ctty` all
+/// failed within one boot.  The size field cannot substitute for the bit —
+/// `arg4 == 0` does mean "no thanks", but a register that was never written
+/// is zero with probability 2⁻⁶⁴.
+const K_WINFO: u32 = 0x0002_0000;
+
+/// Kernel bit: report the transition but leave it unconsumed — a zombie is
+/// peeked rather than reaped, a stop/continue report read without clearing.
+/// Per-call, not sticky.  This is what `waitid`'s `WNOWAIT` means, and until
+/// this bit existed we accepted the flag and silently reaped anyway.
+const K_WNOWAIT: u32 = 0x0100_0000;
+
+/// The facts about a child that stop existing the moment it is reaped.
+///
+/// Returned by the wait itself rather than by a companion syscall precisely
+/// because there is no one left to ask afterwards: once the PCB is gone, the
+/// child's UID and its CPU time are unrecoverable.  That is why `waitid`'s
+/// `si_uid` was zero here for as long as it was.
+///
+/// # Layout
+///
+/// 72 bytes, little-endian, every field naturally aligned.  This is an ABI
+/// promise shared with `kernel/src/syscall/handlers.rs::wait_info_image`;
+/// `test_wait_info_layout` pins every offset, including both zero pads.
+///
+/// # Growth
+///
+/// We pass `size_of::<WaitInfo>()` in `arg4` and the kernel writes
+/// `min(ours, its)` bytes, zero-filling any tail it does not recognise —
+/// Linux's `clone3`/`sched_setattr` convention.  So an older libc on a newer
+/// kernel gets the prefix it understands and is never written past, and this
+/// libc on an older kernel gets zeros in fields that kernel cannot fill.
+/// Zero is the right unknown for every counter here: an unknown count reads
+/// as none rather than as garbage.  **This is why the struct must only ever
+/// be extended at the end, and why no field may change meaning.**
+///
+/// # Units
+///
+/// `utime_us`/`stime_us` are **microseconds**, deliberately unlike
+/// `siginfo_t`'s `si_utime`/`si_stime`, which are `clock_t` and therefore
+/// `USER_HZ` ticks.  A caller that guessed wrong would be off by exactly 10×,
+/// which is the kind of bug that survives review, so libc converts in exactly
+/// one place: [`us_to_clock_t`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WaitInfo {
+    /// The child whose state changed.
+    pub pid: u64,
+    /// That child's real UID — POSIX's `si_uid`.
+    pub uid: u32,
+    /// Explicit pad; the kernel writes zero here.
+    _uid_pad: u32,
+    /// The same word written through `arg2`.
+    pub wstatus: i32,
+    /// Explicit pad; the kernel writes zero here.
+    _wstatus_pad: u32,
+    /// User CPU time, microseconds.
+    pub utime_us: u64,
+    /// System CPU time, microseconds.
+    pub stime_us: u64,
+    /// Minor faults.
+    pub minflt: u64,
+    /// Major faults.
+    pub majflt: u64,
+    /// Voluntary context switches.
+    pub nvcsw: u64,
+    /// Involuntary context switches.
+    pub nivcsw: u64,
+}
+
+/// Microseconds in one `clock_t` tick at `USER_HZ == 100`.
+///
+/// The kernel's `wait_info_image` multiplies by this same constant going the
+/// other way, and `sys_getrusage` consumes the same counters, so all three
+/// must agree.
+const US_PER_CLOCK_TICK: u64 = 10_000;
+
+/// Convert [`WaitInfo`]'s microseconds to the `clock_t` ticks `siginfo_t`
+/// wants.
+///
+/// Truncating division, matching Linux's `nsec_to_clock_t`: a child that ran
+/// for less than one tick reports zero, not one.  Saturating rather than
+/// wrapping on the `i64` conversion, because a wrapped CPU time would read as
+/// negative and no caller checks for that.
+#[inline]
+#[must_use]
+fn us_to_clock_t(us: u64) -> i64 {
+    i64::try_from(us / US_PER_CLOCK_TICK).unwrap_or(i64::MAX)
+}
+
+/// Split microseconds into a `timeval`, saturating rather than wrapping.
+#[inline]
+#[must_use]
+fn us_to_timeval(us: u64) -> crate::time::Timeval {
+    const US_PER_SEC: u64 = 1_000_000;
+    crate::time::Timeval {
+        tv_sec: i64::try_from(us / US_PER_SEC).unwrap_or(i64::MAX),
+        // `% 1_000_000` is < 2^20, so this conversion cannot fail.
+        tv_usec: i64::try_from(us % US_PER_SEC).unwrap_or(0),
+    }
+}
+
+/// Render a [`WaitInfo`] as the `struct rusage` that `wait3`/`wait4` promise.
+///
+/// Only the six fields the kernel can source are filled; the rest stay zero.
+/// That is not the "false zero" this replaced — `ru_maxrss`, `ru_inblock` and
+/// friends have no counter behind them anywhere in the system, whereas CPU
+/// time and fault counts did and were being thrown away.
+///
+/// Split out from [`wait4`] so the arithmetic can be tested on the host,
+/// where no syscall reaches a kernel.
+#[must_use]
+fn rusage_from_wait_info(info: &WaitInfo) -> crate::resource::Rusage {
+    crate::resource::Rusage {
+        ru_utime: us_to_timeval(info.utime_us),
+        ru_stime: us_to_timeval(info.stime_us),
+        ru_minflt: i64::try_from(info.minflt).unwrap_or(i64::MAX),
+        ru_majflt: i64::try_from(info.majflt).unwrap_or(i64::MAX),
+        ru_nvcsw: i64::try_from(info.nvcsw).unwrap_or(i64::MAX),
+        ru_nivcsw: i64::try_from(info.nivcsw).unwrap_or(i64::MAX),
+        // Every remaining field: no counter exists behind it anywhere in the
+        // system, so zero is the honest answer rather than a discarded one.
+        ..crate::resource::Rusage::default()
+    }
+}
+
+/// How a wait names what it is waiting for.
+///
+/// The kernel has had a three-armed `WaitTarget` enum since `design-decisions.md`
+/// §206; this is libc's half of that boundary.  Keeping the two arms separate
+/// here is what stops a caller half-converting: with `WPGID` set, `-g` is not
+/// group `g`, it is a huge unsigned pgid that matches nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WaitTarget {
+    /// `waitpid`'s overloaded signed selector, forwarded verbatim:
+    /// `< -1` = group `-pid`, `-1` = any, `0` = my group, `> 0` = that pid.
+    Selector(PidT),
+    /// An explicit process group.  `0` still means "my own group".
+    Pgid(u32),
+}
+
+/// The one place libc issues `SYS_PROCESS_WAIT_STATUS`.
+///
+/// `waitpid`, `wait3`, `wait4` and `waitid` all funnel through here so they
+/// cannot drift about which child a selector names or whether a report was
+/// consumed — the divergence that cost `waitid` its signal handling on the
+/// kernel side.
+///
+/// `kernel_options` must already be masked to bits the kernel knows;
+/// `WPGID`/`WINFO` are added here, since only this function knows whether a
+/// group or an out-parameter is in play.
+fn wait_common(
+    target: WaitTarget,
+    kernel_options: u32,
+    wstatus_out: &mut i32,
+    info: Option<&mut WaitInfo>,
+) -> PidT {
+    let (arg0, mut options) = match target {
+        // Sign-extend: the kernel reads this arm as a signed selector, so
+        // -1 must arrive as all-ones and not as 0x0000_0000_FFFF_FFFF.
+        #[allow(clippy::cast_sign_loss)]
+        WaitTarget::Selector(pid) => (i64::from(pid) as u64, kernel_options),
+        WaitTarget::Pgid(pgid) => (u64::from(pgid), kernel_options | K_WPGID),
+    };
+
+    let ret = match info {
+        None => syscall3(
+            SYS_PROCESS_WAIT_STATUS,
+            arg0,
+            u64::from(options),
+            core::ptr::from_mut(wstatus_out) as u64,
+        ),
+        Some(slot) => {
+            // Zero first: on any path where the kernel declines to write
+            // (WNOHANG miss, error), the caller must see "no data" rather
+            // than our stack.
+            *slot = WaitInfo::default();
+            options |= K_WINFO;
+            syscall5(
+                SYS_PROCESS_WAIT_STATUS,
+                arg0,
+                u64::from(options),
+                core::ptr::from_mut(wstatus_out) as u64,
+                core::ptr::from_mut(slot) as u64,
+                core::mem::size_of::<WaitInfo>() as u64,
+            )
+        }
+    };
+
+    if ret < 0 {
+        return errno::translate(ret) as PidT;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let changed = ret as PidT;
+    changed
+}
+
 /// Wait for a child process to change state.
 ///
 /// # Parameters
@@ -255,18 +479,19 @@ pub extern "C" fn waitpid(pid: PidT, status: *mut i32, options: i32) -> PidT {
     // __WNOTHREAD/__WALL/__WCLONE are accepted here for Linux source
     // compatibility but not forwarded: the kernel has no clone-vs-fork child
     // distinction to filter on, and passing an unknown bit would be EINVAL.
-    let kernel_options = options & (WNOHANG | WUNTRACED | WCONTINUED);
-    let mut wstatus: i32 = 0;
     #[allow(clippy::cast_sign_loss)]
-    let ret = syscall3(
-        SYS_PROCESS_WAIT_STATUS,
-        pid as u64,
-        kernel_options as u32 as u64,
-        core::ptr::addr_of_mut!(wstatus) as u64,
+    let kernel_options = (options & (WNOHANG | WUNTRACED | WCONTINUED)) as u32;
+    let mut wstatus: i32 = 0;
+    let ret = wait_common(
+        WaitTarget::Selector(pid),
+        kernel_options,
+        &mut wstatus,
+        None,
     );
 
     if ret < 0 {
-        return errno::translate(ret) as PidT;
+        // errno already set by wait_common.
+        return -1;
     }
     // POSIX: WNOHANG with no child state change returns 0 and writes no
     // status.  The kernel reports that as a 0 return, so there is nothing to
@@ -283,9 +508,7 @@ pub extern "C" fn waitpid(pid: PidT, status: *mut i32, options: i32) -> PidT {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    let changed = ret as PidT;
-    changed
+    ret
 }
 
 /// Wait for any child process (convenience wrapper).
@@ -294,36 +517,48 @@ pub extern "C" fn wait(status: *mut i32) -> PidT {
     waitpid(-1, status, 0)
 }
 
-/// Wait for a child process with resource usage.
+/// Wait for any child process, reporting its resource usage.
 ///
-/// Like `waitpid(-1, status, options)` but also fills `rusage` with
-/// resource usage data (zeroed — no kernel accounting yet).
+/// `wait3(status, options, rusage)` is `wait4(-1, status, options, rusage)`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn wait3(
     status: *mut i32,
     options: i32,
     rusage: *mut crate::resource::Rusage,
 ) -> PidT {
-    // Linux validates options BEFORE touching rusage (see sys_wait4
-    // in kernel/exit.c).  Match that ordering: a buggy caller passing
-    // garbage options sees EINVAL with rusage untouched.
-    if options & !WAITPID_VALID_OPTIONS != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    // Zero the rusage if provided.
-    if !rusage.is_null() {
-        // SAFETY: Caller guarantees rusage is valid.
-        unsafe {
-            core::ptr::write_bytes(rusage, 0, 1);
-        }
-    }
-    waitpid(-1, status, options)
+    wait4(-1, status, options, rusage)
 }
 
-/// Wait for a specific child process with resource usage.
+/// Wait for a child process, reporting its resource usage.
 ///
-/// Like `waitpid` but also fills `rusage`.
+/// Like [`waitpid`], but `rusage` (when non-NULL) receives the reaped child's
+/// CPU time, fault counts and context-switch counts.
+///
+/// # These numbers are real now
+///
+/// Until 2026-08-16 this function zero-filled `rusage` and said "no kernel
+/// accounting yet".  That was a **false zero**: the counters existed
+/// (`pcb`'s `acct_*`/`child_*`, `thread::process_cpu_ticks`), the kernel's
+/// `clear_user_rusage` was simply discarding them.  Lane A removed it and
+/// added the [`WaitInfo`] out-parameter; a zero from here now means the
+/// child genuinely used no measurable time.
+///
+/// Six fields are filled — `ru_utime`, `ru_stime`, `ru_minflt`, `ru_majflt`,
+/// `ru_nvcsw`, `ru_nivcsw`.  The rest stay zero because nothing in this
+/// system counts them, which is a different thing from throwing away a
+/// number we have.
+///
+/// The counters are `RUSAGE_BOTH`: the child's own usage plus that of
+/// descendants *it* had already reaped, which is what Linux's `wait4`
+/// reports.
+///
+/// # Ordering
+///
+/// Options are validated before `rusage` is touched, matching Linux's
+/// `sys_wait4`: a caller passing garbage options sees `EINVAL` with its
+/// buffer untouched.  On a `WNOHANG` miss `rusage` is zeroed, not left
+/// stale — there was no child, so there is no usage, and leaving the
+/// caller's previous contents in place would read as a second child's.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn wait4(
     pid: PidT,
@@ -337,13 +572,51 @@ pub extern "C" fn wait4(
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if !rusage.is_null() {
-        // SAFETY: Caller guarantees rusage is valid.
+
+    // No rusage wanted: this is waitpid exactly, and asking the kernel for a
+    // WaitInfo we would discard costs a five-argument syscall for nothing.
+    if rusage.is_null() {
+        return waitpid(pid, status, options);
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    let kernel_options = (options & (WNOHANG | WUNTRACED | WCONTINUED)) as u32;
+    let mut wstatus: i32 = 0;
+    let mut info = WaitInfo::default();
+    let ret = wait_common(
+        WaitTarget::Selector(pid),
+        kernel_options,
+        &mut wstatus,
+        Some(&mut info),
+    );
+    if ret < 0 {
+        // errno already set.  Leave rusage alone: Linux does not write it on
+        // an error return either, and a caller that reads it after -1 is
+        // reading its own uninitialised memory whatever we do.
+        return -1;
+    }
+
+    // Both the hit and the WNOHANG-miss paths write: on a miss `info` is
+    // still the zeroed value wait_common installed, which is the truthful
+    // "no child, no usage".
+    let usage = rusage_from_wait_info(&info);
+    // SAFETY: caller guarantees `rusage` is a valid writable `*mut Rusage`
+    // or null, and null was excluded above.
+    unsafe {
+        core::ptr::write(rusage, usage);
+    }
+
+    if ret == 0 {
+        return 0;
+    }
+    if !status.is_null() {
+        // SAFETY: caller guarantees `status` is a valid writable `*mut i32`
+        // or null, and null was just excluded.
         unsafe {
-            core::ptr::write_bytes(rusage, 0, 1);
+            *status = wstatus;
         }
     }
-    waitpid(pid, status, options)
+    ret
 }
 
 // ---------------------------------------------------------------------------
@@ -359,40 +632,50 @@ pub const P_PGID: i32 = 2;
 
 /// Extended wait for a child process.
 ///
-/// Implemented on top of [`waitpid`], which is the same kernel primitive
-/// (`SYS_PROCESS_WAIT_STATUS`) Linux's `waitid` and `wait4` also share.
+/// Issues `SYS_PROCESS_WAIT_STATUS` — the same kernel primitive `waitpid` and
+/// `wait4` use, which is why all three agree about which child a selector
+/// names and whether a report was consumed.
 ///
 /// # What `infop` receives
 ///
 /// On a state change, the `siginfo_t` at `infop` (if non-NULL) is zeroed and
 /// then filled as POSIX requires: `si_signo = SIGCHLD`, `si_pid` = the child,
-/// `si_code` = one of `CLD_EXITED`/`CLD_KILLED`/`CLD_DUMPED`/`CLD_STOPPED`/
-/// `CLD_CONTINUED`, and `si_status` = the exit code for `CLD_EXITED` or the
-/// signal number otherwise.  On a `WNOHANG` miss it is zeroed and nothing
-/// else — matching Linux, which leaves `si_pid == 0` as the way to tell "no
-/// child changed state" from "a child did" when both return 0.
+/// `si_uid` = that child's real UID, `si_code` = one of
+/// `CLD_EXITED`/`CLD_KILLED`/`CLD_DUMPED`/`CLD_STOPPED`/`CLD_CONTINUED`,
+/// `si_status` = the exit code for `CLD_EXITED` or the signal number
+/// otherwise, and `si_utime`/`si_stime` = the child's CPU time in `clock_t`
+/// ticks.  On a `WNOHANG` miss it is zeroed and nothing else — matching
+/// Linux, which leaves `si_pid == 0` as the way to tell "no child changed
+/// state" from "a child did" when both return 0.
 ///
-/// Two fields are left zero because nothing in this system can source them,
-/// and inventing a plausible value is worse than reporting none:
+/// # Three limitations that are gone as of 2026-08-16
 ///
-/// - **`si_uid`** — POSIX wants the child's *real* UID.  The child is reaped
-///   by the time `waitpid` returns, and `SYS_PROCESS_GET_CREDENTIALS` reports
-///   only the caller's own, so there is no one left to ask.  Using the
-///   caller's UID would be right for a child that never changed credentials
-///   and wrong for exactly the case a caller would check it — a child that
-///   dropped privilege.  Tracked as
-///   `TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT`.
-/// - **`si_utime`/`si_stime`** — no per-process CPU accounting exists yet;
-///   `wait3`/`wait4` zero their `rusage` for the same reason.
+/// All three were consequences of the kernel wait taking a single signed
+/// selector and returning nothing but a status word.  Lane A's `WaitInfo` /
+/// `WPGID` / `WNOWAIT` work (`design-decisions.md` §206) removed the cause,
+/// so the workarounds are removed here:
 ///
-/// # Divergences from Linux
+/// - **`si_uid` was always zero.** There was no one left to ask once the
+///   child was reaped, and reporting the *caller's* UID would have been
+///   right for a child that never changed credentials and wrong for exactly
+///   the case a caller checks it — a child that dropped privilege.  The
+///   kernel now hands it back in the reap itself.
+/// - **`si_utime`/`si_stime` were always zero.** Not for want of counters:
+///   the kernel had them and `clear_user_rusage` was discarding them.
+/// - **`WNOWAIT` was accepted and silently ignored**, so a peek reaped the
+///   child and the second `waitid` for it reported `ECHILD`.  It is a real
+///   kernel bit now.
+/// - **`P_PGID` for group 1 was `ENOSYS`** unless the caller was itself in
+///   group 1, because `waitpid`'s selector spends `-1` on "any child" and so
+///   cannot also spell "group 1".  `WPGID` names the group explicitly, and
+///   every group — 1 included — is now reachable.
 ///
-/// - `WNOWAIT` (leave the child waitable) is accepted but **not honoured** —
-///   the kernel wait primitive has no non-reaping mode, so the child is
-///   reaped anyway and a second `waitid` for it reports `ECHILD`.
+/// # Divergences from Linux that remain
+///
 /// - `P_PIDFD` is not accepted (`EINVAL`); pidfds are not wired into wait.
-/// - `P_PGID` for process group 1 is `ENOSYS` unless the caller is itself in
-///   group 1 — see the comment at the `P_PGID` arm.
+/// - `si_utime`/`si_stime` are in `USER_HZ` ticks, as `clock_t` requires, so
+///   a child that ran for under 10 ms reports 0.  `wait4`'s `rusage` carries
+///   the same numbers at microsecond resolution.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn waitid(
     idtype: i32,
@@ -420,101 +703,124 @@ pub extern "C" fn waitid(
         return -1;
     }
 
-    // Translate the (idtype, id) pair into waitpid's single overloaded pid
-    // selector.  Linux keeps them separate (a `type` plus a `struct pid`), so
-    // its id validation is per-idtype and stricter than waitpid's; reproduce
-    // it here rather than letting a bad id fall through to a wait that means
-    // something else entirely.  See kernel/exit.c::SYSCALL_DEFINE5(waitid).
-    let pid = match idtype {
-        P_ALL => -1, // id is ignored, per POSIX.
-        P_PID => {
-            // Linux: `if (upid <= 0) return -EINVAL;`.  Without this, id 0
-            // would reach waitpid as "my process group" and id -5 as "process
-            // group 5" — two silent reinterpretations of a caller's mistake.
-            if id <= 0 {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            id
-        }
-        P_PGID => {
-            // Linux: `if (upid < 0) return -EINVAL;` and `upid == 0` means the
-            // caller's own group.
-            if id < 0 {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            if id == 0 || id == getpgrp() {
-                // 0 is waitpid's unambiguous "my process group" encoding.
-                // Preferring it whenever it applies is what makes the group-1
-                // case below reachable only for a caller outside group 1.
-                0
-            } else if id == 1 {
-                // waitpid's selector cannot express "process group 1": -1 is
-                // already spoken for as "any child".  That ambiguity is in
-                // POSIX's waitpid interface itself, and is part of why waitid
-                // exists — so the honest answer is to refuse rather than to
-                // wait for any child and call it a group wait.  Reaping the
-                // wrong child here would be unrecoverable: the status is
-                // consumed and the caller's group bookkeeping is silently
-                // wrong.  Lifting this needs a kernel wait that takes the
-                // idtype explicitly; see
-                // requests/b-a-waitid-needs-an-explicit-idtype-wait.md.
-                errno::set_errno(errno::ENOSYS);
-                return -1;
-            } else {
-                // waitpid: pid < -1 selects process group -pid.  `id >= 2`
-                // here, so the negation cannot overflow; `checked_neg` says
-                // that to the compiler rather than to a reader, and the
-                // unreachable arm costs one branch on a blocking syscall.
-                match id.checked_neg() {
-                    Some(neg) => neg,
-                    None => {
-                        errno::set_errno(errno::EINVAL);
-                        return -1;
-                    }
-                }
-            }
-        }
-        _ => {
-            // Includes P_PIDFD, which we do not accept.
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
+    let Some(target) = waitid_target(idtype, id) else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
     };
+    let kernel_options = waitid_kernel_options(options);
 
-    // Strip waitid-only bits before delegating to waitpid (which only
-    // accepts WAITPID_VALID_OPTIONS).  WSTOPPED == WUNTRACED is
-    // already shared; WEXITED/WNOWAIT are not.  WEXITED is implied by
-    // waitpid always reporting exits; WNOWAIT we cannot honour at all
-    // (see the divergence note in the doc comment).
-    let pid_options = options & WAITPID_VALID_OPTIONS;
     let mut wstatus: i32 = 0;
-    let ret = waitpid(pid, core::ptr::addr_of_mut!(wstatus), pid_options);
+    // Only ask for the WaitInfo if the caller can receive it.  A NULL infop
+    // is a legitimate "just wait for it", and the extra out-parameter would
+    // be pure cost.
+    let mut info = WaitInfo::default();
+    let want_info = !infop.is_null();
+    let ret = wait_common(
+        target,
+        kernel_options,
+        &mut wstatus,
+        if want_info { Some(&mut info) } else { None },
+    );
     if ret < 0 {
-        // errno is already set by waitpid.  Leave *infop alone: POSIX only
-        // specifies it on success, and a caller that inspects it after an
-        // error is reading its own uninitialised memory either way.
+        // errno is already set.  Leave *infop alone: POSIX only specifies it
+        // on success, and a caller that inspects it after an error is reading
+        // its own uninitialised memory either way.
         return -1;
     }
-    if !infop.is_null() {
-        let info = infop.cast::<crate::signal::SiginfoT>();
+    if want_info {
+        let dst = infop.cast::<crate::signal::SiginfoT>();
         let filled = if ret == 0 {
             // WNOHANG miss.  Linux zeroes the whole structure so that
             // `si_pid == 0` distinguishes this from a real state change,
             // both of which return 0 from waitid.
             crate::signal::SiginfoT::default()
         } else {
-            siginfo_for_wstatus(ret, wstatus)
+            siginfo_for_wait(ret, wstatus, &info)
         };
         // SAFETY: the caller contract for `infop` is a writable
         // `siginfo_t *` (128 bytes) or NULL, and NULL was just excluded.
         // `SiginfoT` is `repr(C)` and exactly that size and layout.
         unsafe {
-            core::ptr::write(info, filled);
+            core::ptr::write(dst, filled);
         }
     }
     0
+}
+
+/// Translate `waitid`'s `(idtype, id)` pair into the kernel's wait target.
+///
+/// `None` means `EINVAL`.  Linux keeps the two apart (a `type` plus a
+/// `struct pid *`), so its id validation is per-idtype and stricter than
+/// `waitpid`'s; reproduce it here rather than letting a bad id fall through
+/// to a wait that means something else entirely.  See
+/// `kernel/exit.c::SYSCALL_DEFINE5(waitid)`.
+///
+/// Split out from [`waitid`] because it is the part with no I/O in it and the
+/// part where a mistake is a *silent reinterpretation of a caller's mistake*
+/// rather than an error — exactly what a host test can pin.
+fn waitid_target(idtype: i32, id: PidT) -> Option<WaitTarget> {
+    match idtype {
+        P_ALL => Some(WaitTarget::Selector(-1)), // id is ignored, per POSIX.
+        P_PID => {
+            // Linux: `if (upid <= 0) return -EINVAL;`.  Without this, id 0
+            // would reach the kernel as "my process group" and id -5 as
+            // "process group 5".
+            if id <= 0 { None } else { Some(WaitTarget::Selector(id)) }
+        }
+        // Linux: `if (upid < 0) return -EINVAL;` and `upid == 0` means the
+        // caller's own group.  0 goes straight through — under `WPGID` the
+        // kernel reads it as "my own group" exactly as everywhere else, so
+        // there is nothing for libc to resolve, and *not* resolving it is
+        // what makes this correct across a `setpgid` racing the wait.
+        //
+        // Note the sign: under `WPGID` a negative id is not group `-id`, it
+        // is a huge unsigned pgid that matches nothing. `u32::try_from`
+        // rejecting it is what stops a caller half-converting into that.
+        P_PGID => u32::try_from(id).ok().map(WaitTarget::Pgid),
+        // Includes P_PIDFD, which we do not accept.
+        _ => None,
+    }
+}
+
+/// Map `waitid`'s option word onto the kernel wait primitive's.
+///
+/// `WSTOPPED == WUNTRACED` is shared, so it needs no translation.  `WNOWAIT`
+/// has a kernel bit at the same numeric value but a different *namespace*, so
+/// it is translated explicitly rather than forwarded — the two agreeing today
+/// is a coincidence this function is here to survive.
+///
+/// `WEXITED` has no kernel bit because the primitive always reports exits.
+/// A `waitid` without `WEXITED` that sees only an exit therefore still
+/// reports it, which is the one place this wrapper is laxer than Linux;
+/// tracked in `known-issues.md` →
+/// `TD-POSIX-WAITID-CANNOT-SUPPRESS-EXIT-REPORTS`.
+///
+/// `__WNOTHREAD`/`__WALL`/`__WCLONE` are accepted for Linux source
+/// compatibility and dropped: the kernel has no clone-vs-fork distinction to
+/// filter on, and forwarding an unknown bit would be `EINVAL`.
+#[allow(clippy::cast_sign_loss)]
+fn waitid_kernel_options(options: i32) -> u32 {
+    let mut kernel = (options & (WNOHANG | WUNTRACED | WCONTINUED)) as u32;
+    if options & WNOWAIT != 0 {
+        kernel |= K_WNOWAIT;
+    }
+    kernel
+}
+
+/// Build the `SIGCHLD` `siginfo_t` `waitid` reports, including the fields
+/// that only the kernel's [`WaitInfo`] can source.
+///
+/// The UID and the CPU times come from `info`; everything else is derived
+/// from the status word by [`siginfo_for_wstatus`].  Kept separate from
+/// [`waitid`] so the whole mapping is testable on the host, where no syscall
+/// reaches a kernel.
+fn siginfo_for_wait(child: PidT, wstatus: i32, info: &WaitInfo) -> crate::signal::SiginfoT {
+    let mut out = siginfo_for_wstatus(child, wstatus);
+    out.si_uid = info.uid;
+    // Microseconds to clock_t ticks, in the one place libc converts.
+    out.si_utime = us_to_clock_t(info.utime_us);
+    out.si_stime = us_to_clock_t(info.stime_us);
+    out
 }
 
 /// Build the `SIGCHLD` `siginfo_t` that POSIX says `waitid` reports for a
@@ -4018,22 +4324,266 @@ mod tests {
         }
     }
 
+    // -- the (idtype, id) -> WaitTarget mapping --
+
     #[test]
-    fn test_waitid_pgid_one_is_enosys_when_not_our_group() {
-        // Process group 1 is the one group waitpid's selector cannot name:
-        // -1 already means "any child".  We refuse rather than reap the
-        // wrong child.  The guard keeps the test honest if the host double
-        // ever does put us in group 1 — then the request is expressible via
-        // the unambiguous 0 encoding and ENOSYS would be wrong.
-        if getpgrp() == 1 {
-            return;
+    fn test_waitid_target_group_one_is_nameable() {
+        // The regression this whole request existed for.  waitpid's signed
+        // selector spends -1 on "any child", so group 1 was unnameable and
+        // libc returned ENOSYS rather than reap the wrong child.  Under
+        // WPGID the group is named directly and no group is special.
+        assert_eq!(waitid_target(P_PGID, 1), Some(WaitTarget::Pgid(1)));
+    }
+
+    #[test]
+    fn test_waitid_target_pgid_is_never_negated() {
+        // Under WPGID, arg0 is unsigned.  The old code converted `id` to
+        // waitpid's `-id` encoding; doing that *and* setting WPGID would
+        // send the kernel a huge pgid matching nothing (ECHILD) — the
+        // half-conversion the two disjoint interpretations exist to prevent.
+        for g in [2, 5, 4242, i32::MAX] {
+            let unsigned = u32::try_from(g).expect("positive by construction");
+            assert_eq!(
+                waitid_target(P_PGID, g),
+                Some(WaitTarget::Pgid(unsigned)),
+                "group {g}"
+            );
         }
-        errno::set_errno(0);
-        assert_eq!(waitid(P_PGID, 1, core::ptr::null_mut(), WEXITED), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_waitid_target_pgid_zero_is_passed_through_not_resolved() {
+        // 0 means "my own group" to the kernel under WPGID, as everywhere
+        // else.  Resolving it here to getpgrp() would be wrong across a
+        // setpgid racing the wait, and would make the wait name a group the
+        // caller had just left.
+        assert_eq!(waitid_target(P_PGID, 0), Some(WaitTarget::Pgid(0)));
+    }
+
+    #[test]
+    fn test_waitid_target_rejects_bad_ids_and_idtypes() {
+        // Linux: P_PID rejects id <= 0, P_PGID rejects id < 0, and every
+        // idtype outside {P_ALL, P_PID, P_PGID} is EINVAL — including
+        // P_PIDFD (3), which is real but which we do not accept.
+        assert_eq!(waitid_target(P_PID, 0), None);
+        assert_eq!(waitid_target(P_PID, -5), None);
+        assert_eq!(waitid_target(P_PGID, -1), None);
+        assert_eq!(waitid_target(P_PGID, i32::MIN), None);
+        for bad in [3, 4, 99, -1] {
+            assert_eq!(waitid_target(bad, 1), None, "idtype {bad}");
+        }
+    }
+
+    #[test]
+    fn test_waitid_target_pid_and_all() {
+        assert_eq!(waitid_target(P_PID, 77), Some(WaitTarget::Selector(77)));
+        // P_ALL ignores id entirely, per POSIX — including a nonsense one.
+        assert_eq!(waitid_target(P_ALL, 0), Some(WaitTarget::Selector(-1)));
+        assert_eq!(waitid_target(P_ALL, -999), Some(WaitTarget::Selector(-1)));
+    }
+
+    // -- waitid's option translation --
+
+    #[test]
+    fn test_waitid_kernel_options_translates_wnowait() {
+        // WNOWAIT was accepted and silently ignored until the kernel grew a
+        // bit for it, so a "peek" reaped the child and the second waitid
+        // reported ECHILD.  It must now reach the kernel.
+        assert_eq!(waitid_kernel_options(WEXITED | WNOWAIT), K_WNOWAIT);
+        assert_eq!(waitid_kernel_options(WEXITED), 0);
+    }
+
+    #[test]
+    fn test_waitid_kernel_options_drops_bits_the_kernel_would_reject() {
+        // WEXITED has no kernel bit (the primitive always reports exits) and
+        // __WNOTHREAD/__WALL/__WCLONE have nothing to filter on.  Forwarding
+        // any of them would be EINVAL from the kernel, turning a valid
+        // Linux-source call into a failure.
+        let all = WEXITED | __WNOTHREAD | __WALL | __WCLONE;
+        assert_eq!(waitid_kernel_options(all), 0);
+    }
+
+    #[test]
+    fn test_waitid_kernel_options_passes_the_shared_bits() {
+        #[allow(clippy::cast_sign_loss)]
+        let shared = (WNOHANG | WUNTRACED | WCONTINUED) as u32;
+        assert_eq!(
+            waitid_kernel_options(WEXITED | WNOHANG | WSTOPPED | WCONTINUED),
+            shared,
+            "WSTOPPED == WUNTRACED, so it needs no translation"
+        );
+    }
+
+    // -- WaitInfo: the ABI shared with kernel/src/syscall/handlers.rs --
+
+    #[test]
+    fn test_wait_info_layout() {
+        // These offsets are an ABI promise, pinned on the kernel side by
+        // dispatch.rs::test_dispatch_wait_info_layout.  If the two ever
+        // disagree, every field after the first divergence is garbage — and
+        // silently so, since the struct is a flat block of integers with no
+        // tag to check.
+        use core::mem::{align_of, offset_of, size_of};
+        assert_eq!(size_of::<WaitInfo>(), 72, "kernel's WAIT_INFO_SIZE");
+        assert_eq!(align_of::<WaitInfo>(), 8);
+        assert_eq!(offset_of!(WaitInfo, pid), 0);
+        assert_eq!(offset_of!(WaitInfo, uid), 8);
+        assert_eq!(offset_of!(WaitInfo, wstatus), 16);
+        assert_eq!(offset_of!(WaitInfo, utime_us), 24);
+        assert_eq!(offset_of!(WaitInfo, stime_us), 32);
+        assert_eq!(offset_of!(WaitInfo, minflt), 40);
+        assert_eq!(offset_of!(WaitInfo, majflt), 48);
+        assert_eq!(offset_of!(WaitInfo, nvcsw), 56);
+        assert_eq!(offset_of!(WaitInfo, nivcsw), 64);
+    }
+
+    #[test]
+    fn test_wait_info_pads_are_where_the_kernel_writes_zero() {
+        // The kernel writes uid and wstatus as the low half of a u64 store,
+        // so bytes 12..16 and 20..24 are zero on the wire.  Decoding a
+        // kernel-shaped image must therefore leave both pads zero and must
+        // not read uid or wstatus as 8-byte fields.
+        let mut image = [0u8; 72];
+        image[8..16].copy_from_slice(&u64::from(1234u32).to_le_bytes());
+        #[allow(clippy::cast_sign_loss)]
+        let ws = ((42i32) << 8) as u32;
+        image[16..24].copy_from_slice(&u64::from(ws).to_le_bytes());
+        // SAFETY: WaitInfo is repr(C), 72 bytes, and every field is a plain
+        // integer, so every 72-byte pattern is a valid value.
+        let info: WaitInfo = unsafe { core::ptr::read_unaligned(image.as_ptr().cast()) };
+        assert_eq!(info.uid, 1234);
+        assert_eq!(info._uid_pad, 0);
+        assert_eq!(info.wstatus, 42 << 8);
+        assert_eq!(info._wstatus_pad, 0);
+    }
+
+    // -- unit conversion, in the one place libc does it --
+
+    #[test]
+    fn test_us_to_clock_t_truncates_like_linux() {
+        // nsec_to_clock_t truncates: a child that ran for less than one tick
+        // reports 0, not 1.  USER_HZ is 100, so a tick is 10 000 us.
+        assert_eq!(us_to_clock_t(0), 0);
+        assert_eq!(us_to_clock_t(1), 0);
+        assert_eq!(us_to_clock_t(9_999), 0);
+        assert_eq!(us_to_clock_t(10_000), 1);
+        assert_eq!(us_to_clock_t(19_999), 1);
+        assert_eq!(us_to_clock_t(1_000_000), 100, "one second == 100 ticks");
+    }
+
+    #[test]
+    fn test_us_to_clock_t_is_never_negative_even_at_the_extreme() {
+        // The `unwrap_or(i64::MAX)` in `us_to_clock_t` is a guard that can
+        // never fire, and it is worth pinning down *why* rather than leaving
+        // a reader to assume it fires: dividing by 10 000 first shrinks the
+        // whole u64 range below `i64::MAX`, so the conversion is total.  What
+        // matters to a caller is only that the answer is never negative — a
+        // wrapped CPU time reads as negative and nothing downstream checks.
+        assert_eq!(us_to_clock_t(u64::MAX), (u64::MAX / 10_000) as i64);
+        assert!(us_to_clock_t(u64::MAX) > 0);
+        assert!(u64::MAX / 10_000 < i64::MAX as u64, "guard is unreachable");
+    }
+
+    #[test]
+    fn test_us_to_timeval_splits_and_never_goes_negative() {
+        let tv = us_to_timeval(0);
+        assert_eq!((tv.tv_sec, tv.tv_usec), (0, 0));
+        let tv = us_to_timeval(1_500_000);
+        assert_eq!((tv.tv_sec, tv.tv_usec), (1, 500_000));
+        let tv = us_to_timeval(999_999);
+        assert_eq!((tv.tv_sec, tv.tv_usec), (0, 999_999), "no carry below 1s");
+        // Same reasoning as above: /1 000 000 makes the seconds conversion
+        // total, and `% 1 000 000` is < 2^20 by construction.
+        let tv = us_to_timeval(u64::MAX);
+        assert_eq!(tv.tv_sec, (u64::MAX / 1_000_000) as i64);
+        assert!(tv.tv_sec > 0 && (0..1_000_000).contains(&tv.tv_usec));
+    }
+
+    // -- rusage, which used to be a false zero --
+
+    #[test]
+    fn test_rusage_from_wait_info_fills_the_six_sourced_fields() {
+        let info = WaitInfo {
+            pid: 5,
+            uid: 1000,
+            utime_us: 2_500_000,
+            stime_us: 750_000,
+            minflt: 11,
+            majflt: 2,
+            nvcsw: 33,
+            nivcsw: 44,
+            ..WaitInfo::default()
+        };
+        let u = rusage_from_wait_info(&info);
+        assert_eq!((u.ru_utime.tv_sec, u.ru_utime.tv_usec), (2, 500_000));
+        assert_eq!((u.ru_stime.tv_sec, u.ru_stime.tv_usec), (0, 750_000));
+        assert_eq!(u.ru_minflt, 11);
+        assert_eq!(u.ru_majflt, 2);
+        assert_eq!(u.ru_nvcsw, 33);
+        assert_eq!(u.ru_nivcsw, 44);
+    }
+
+    #[test]
+    fn test_rusage_from_wait_info_leaves_unsourced_fields_zero() {
+        // Nothing in this system counts these, which is a different thing
+        // from having a number and discarding it — the failure the kernel's
+        // clear_user_rusage was.
+        let info = WaitInfo {
+            utime_us: 1,
+            stime_us: 1,
+            minflt: 1,
+            majflt: 1,
+            nvcsw: 1,
+            nivcsw: 1,
+            ..WaitInfo::default()
+        };
+        let u = rusage_from_wait_info(&info);
+        assert_eq!(u.ru_maxrss, 0);
+        assert_eq!(u.ru_ixrss, 0);
+        assert_eq!(u.ru_idrss, 0);
+        assert_eq!(u.ru_isrss, 0);
+        assert_eq!(u.ru_nswap, 0);
+        assert_eq!(u.ru_inblock, 0);
+        assert_eq!(u.ru_oublock, 0);
+        assert_eq!(u.ru_msgsnd, 0);
+        assert_eq!(u.ru_msgrcv, 0);
+        assert_eq!(u.ru_nsignals, 0);
     }
 
     // -- waitid's siginfo_t fill --
+
+    #[test]
+    fn test_siginfo_for_wait_carries_uid_and_cpu_time() {
+        // si_uid and the CPU times used to be structurally unavailable: the
+        // child was gone by the time waitpid returned.  They now arrive with
+        // the reap itself.
+        let info = WaitInfo {
+            uid: 4242,
+            utime_us: 30_000, // 3 ticks
+            stime_us: 5_000,  // under one tick
+            ..WaitInfo::default()
+        };
+        let si = siginfo_for_wait(99, 7 << 8, &info);
+        assert_eq!(si.si_pid, 99);
+        assert_eq!(si.si_uid, 4242);
+        assert_eq!(si.si_status, 7, "the status mapping is unaffected");
+        assert_eq!(si.si_code, crate::signal::CLD_EXITED);
+        assert_eq!(si.si_utime, 3, "microseconds -> USER_HZ ticks");
+        assert_eq!(si.si_stime, 0, "truncation, not rounding");
+    }
+
+    #[test]
+    fn test_siginfo_for_wait_zero_info_is_indistinguishable_from_the_old_zero() {
+        // An older kernel that cannot fill WaitInfo leaves it zeroed, and
+        // the extensible-struct convention says a zero counter reads as
+        // "none".  So a new libc on an old kernel must degrade to exactly
+        // the previous behaviour rather than to garbage.
+        let si = siginfo_for_wait(3, 0, &WaitInfo::default());
+        assert_eq!(si.si_uid, 0);
+        assert_eq!(si.si_utime, 0);
+        assert_eq!(si.si_stime, 0);
+        assert_eq!(si.si_code, crate::signal::CLD_EXITED);
+    }
 
     #[test]
     fn test_siginfo_exited() {
@@ -4313,36 +4863,27 @@ mod tests {
     }
 
     #[test]
-    fn test_wait3_zeroes_rusage() {
+    fn test_wait3_leaves_rusage_alone_on_error() {
+        // Until 2026-08-16 this test asserted the opposite — that `rusage`
+        // came back zeroed — because `wait3` unconditionally ran the kernel's
+        // `clear_user_rusage` before it even knew whether there was a child.
+        // That was wrong twice over: the zero was false (the counters existed
+        // and were being discarded, see §206), and writing on the *error*
+        // path is not what Linux does.  `sys_wait4` writes `rusage` only when
+        // it has a child to describe.  On the host every syscall is stubbed
+        // to ENOSYS, so this exercises exactly that error path.
         let mut rusage = crate::resource::Rusage {
             ru_utime: crate::time::Timeval {
                 tv_sec: 99,
                 tv_usec: 99,
             },
-            ru_stime: crate::time::Timeval {
-                tv_sec: 99,
-                tv_usec: 99,
-            },
             ru_maxrss: 99,
-            ru_ixrss: 0,
-            ru_idrss: 0,
-            ru_isrss: 0,
-            ru_minflt: 0,
-            ru_majflt: 0,
-            ru_nswap: 0,
-            ru_inblock: 0,
-            ru_oublock: 0,
-            ru_msgsnd: 0,
-            ru_msgrcv: 0,
-            ru_nsignals: 0,
-            ru_nvcsw: 0,
-            ru_nivcsw: 0,
+            ..crate::resource::Rusage::default()
         };
-        let _ = wait3(core::ptr::null_mut(), WNOHANG, &raw mut rusage);
-        // rusage should have been zeroed.
-        assert_eq!(rusage.ru_utime.tv_sec, 0);
-        assert_eq!(rusage.ru_stime.tv_sec, 0);
-        assert_eq!(rusage.ru_maxrss, 0);
+        let ret = wait3(core::ptr::null_mut(), WNOHANG, &raw mut rusage);
+        assert_eq!(ret, -1, "host has no kernel; this must be the error path");
+        assert_eq!(rusage.ru_utime.tv_sec, 99, "untouched on error");
+        assert_eq!(rusage.ru_maxrss, 99, "untouched on error");
     }
 
     // -- wait4 --
@@ -4354,34 +4895,22 @@ mod tests {
     }
 
     #[test]
-    fn test_wait4_zeroes_rusage() {
+    fn test_wait4_leaves_rusage_alone_on_error() {
+        // See `test_wait3_leaves_rusage_alone_on_error` — same contract, and
+        // `wait3` is literally `wait4(-1, …)`, so this pins the pid-selector
+        // path rather than the "any child" one.
         let mut rusage = crate::resource::Rusage {
             ru_utime: crate::time::Timeval {
                 tv_sec: 77,
                 tv_usec: 77,
             },
-            ru_stime: crate::time::Timeval {
-                tv_sec: 77,
-                tv_usec: 77,
-            },
             ru_maxrss: 77,
-            ru_ixrss: 0,
-            ru_idrss: 0,
-            ru_isrss: 0,
-            ru_minflt: 0,
-            ru_majflt: 0,
-            ru_nswap: 0,
-            ru_inblock: 0,
-            ru_oublock: 0,
-            ru_msgsnd: 0,
-            ru_msgrcv: 0,
-            ru_nsignals: 0,
-            ru_nvcsw: 0,
-            ru_nivcsw: 0,
+            ..crate::resource::Rusage::default()
         };
-        let _ = wait4(1, core::ptr::null_mut(), WNOHANG, &raw mut rusage);
-        assert_eq!(rusage.ru_utime.tv_sec, 0);
-        assert_eq!(rusage.ru_maxrss, 0);
+        let ret = wait4(1, core::ptr::null_mut(), WNOHANG, &raw mut rusage);
+        assert_eq!(ret, -1, "host has no kernel; this must be the error path");
+        assert_eq!(rusage.ru_utime.tv_sec, 77, "untouched on error");
+        assert_eq!(rusage.ru_maxrss, 77, "untouched on error");
     }
 
     // -- setsid --

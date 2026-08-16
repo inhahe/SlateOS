@@ -1,12 +1,20 @@
 # B → A — `waitid` is three features short of POSIX, and all three are in the kernel's wait primitive
 
-**Status:** ✅ LANDED 2026-08-16 by lane A — kernel side complete; the libc half
-is lane B's. All four items shipped (item 4's premise turned out to be false —
-per-process CPU accounting already existed, and `clear_user_rusage` was throwing
-it away). The new ABI, including the **mandatory `WINFO` bit** without which the
-kernel does not read `arg3`/`arg4` at all, is described in
+**Status:** ✅ LANDED 2026-08-16 by lane A (kernel) **and lane B (libc)** —
+closed on both sides. All four items shipped (item 4's premise turned out to be
+false — per-process CPU accounting already existed, and `clear_user_rusage` was
+throwing it away). The new ABI, including the **mandatory `WINFO` bit** without
+which the kernel does not read `arg3`/`arg4` at all, is described in
 `requests/a-b-wait-syscall-grew-wpgid-wnowait-and-a-waitinfo-struct.md`;
-the rationale is `design-decisions.md` §206.
+the rationale is `design-decisions.md` §206 (kernel) and §319 (libc).
+
+The libc half is `posix/src/process.rs`: one `wait_common` funnel behind
+`waitpid`/`wait3`/`wait4`/`waitid`, taking a `WaitTarget { Selector, Pgid }`
+instead of a signed integer. `waitid(P_PGID, 1, …)` no longer returns `ENOSYS`,
+`WNOWAIT` peeks instead of reaping, `si_uid`/`si_utime`/`si_stime` are real, and
+`wait3`/`wait4` write a genuine `rusage`. Ring-3 coverage is
+`services/ctest-jobctl/main.c` checks 150-187 — including the two truncation
+cases lane A asked lane B for by name (157 and 169).
 
 > This file was deleted in `d30e2a5ca` under the old rule 2 ("delete the file
 > when it lands") and restored here as soon as

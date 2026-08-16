@@ -485,8 +485,8 @@ fn reported_caps_effective() -> (u32, u32) {
 /// [`current_caps_effective`].
 pub mod kernel_view {
     use super::{
-        CAP_KILL, CAP_NET_RAW, CAP_SYS_ADMIN, CAP_SYS_NICE, CAP_SYS_PTRACE, CAP_SYS_RAWIO,
-        CAP_LAST_CAP, store,
+        CAP_KILL, CAP_NET_RAW, CAP_SETGID, CAP_SETUID, CAP_SYS_ADMIN, CAP_SYS_NICE, CAP_SYS_PTRACE,
+        CAP_SYS_RAWIO, CAP_LAST_CAP, store,
     };
 
     /// Kernel `ResourceType` discriminants.
@@ -513,9 +513,17 @@ pub mod kernel_view {
 
     /// Kernel `Rights` bits.
     ///
-    /// Mirrors `kernel/src/cap/rights.rs`. `Rights` is a **`u64`** — twelve
-    /// bits are defined today, which is exactly why nothing here may narrow it
-    /// to `u32`: the width is the ABI, not the current occupancy.
+    /// Mirrors `kernel/src/cap/rights.rs`. `Rights` is a **`u64`** — thirteen
+    /// bits are defined there today, which is exactly why nothing here may
+    /// narrow it to `u32`: the width is the ABI, not the current occupancy.
+    ///
+    /// **This mirror is partial by design, and the gap is not a TODO.** Only
+    /// the bits some rule in [`project`] actually tests appear here — nine of
+    /// the thirteen. A bit that is projected onto no Linux capability has
+    /// nothing to say to this file, and copying it over anyway would invite
+    /// the reader to assume the absent ones are unimplemented rather than
+    /// simply irrelevant. Add a bit here when, and only when, a predicate
+    /// starts asking about it.
     pub mod rights {
         /// Read data from the resource.
         pub const READ: u64 = 1 << 0;
@@ -533,6 +541,14 @@ pub mod kernel_view {
         pub const IO_REALTIME: u64 = 1 << 16;
         /// Unilateral introspection authority over a process.
         pub const DEBUG: u64 = 1 << 17;
+        /// Authority to change a process's own uid/gid credentials.
+        ///
+        /// Its own bit rather than [`METADATA`] on purpose: `METADATA` is the
+        /// generic "modify an attribute" bit, so the next Process grant that
+        /// reaches for it would silently confer root-capability, with the
+        /// grant site in `kernel/` and this projection in `posix/` and no
+        /// single diff showing both halves. See design-decisions.md §207.
+        pub const SET_CREDENTIALS: u64 = 1 << 18;
     }
 
     /// One capability, as `SYS_CAP_QUERY` writes it.
@@ -675,6 +691,23 @@ pub mod kernel_view {
         // right to ask for, so type alone is the predicate.
         if holds(entries, res::NET_RAW) {
             m.set(CAP_NET_RAW);
+        }
+        // Changing your own uid/gid is what CAP_SETUID/CAP_SETGID gate, and
+        // SET_CREDENTIALS is the kernel's name for permission to do so.
+        //
+        // Both caps from one predicate is deliberate: the credential model is
+        // flat — one real uid, one real gid, and `SYS_PROCESS_SET_CREDENTIALS`
+        // writes both in a single call — so there is no state in which a
+        // process may set one and not the other. Splitting the predicate would
+        // claim a distinction the kernel cannot enforce; if they ever do
+        // diverge, split the *right* instead.
+        //
+        // Unlike SIGNAL below, this bit is never granted automatically: no
+        // spawn or fork path confers it, so holding it is always a deliberate
+        // act and the predicate needs no `resource_id` qualification.
+        if holds_with(entries, res::PROCESS, rights::SET_CREDENTIALS) {
+            m.set(CAP_SETUID);
+            m.set(CAP_SETGID);
         }
 
         if project_sys_admin(entries) {
@@ -1170,6 +1203,59 @@ mod projection_tests {
         // NetRaw is the one predicate keyed on type alone: the handle *is*
         // the authority, there is no narrower right to ask for.
         assert!(is_set(project(&[cap(res::NET_RAW, 0)]), CAP_NET_RAW));
+        // Both credential caps come from the one right, because the kernel
+        // writes uid and gid in a single call and cannot enforce a split.
+        let w = project(&[cap(res::PROCESS, rights::SET_CREDENTIALS)]);
+        assert!(is_set(w, CAP_SETUID));
+        assert!(is_set(w, CAP_SETGID));
+    }
+
+    #[test]
+    fn test_set_credentials_is_not_reachable_from_any_other_right() {
+        // This is the one projected right that gates a *libc-side* check with
+        // no kernel fallback: `SYS_PROCESS_SET_CREDENTIALS` performs no
+        // capability test of its own (handlers.rs — "the cap/identity
+        // permission check is performed by the userspace posix wrappers"), so
+        // a predicate that fired too easily would not merely mis-report, it
+        // would hand out uid 0.  Every other Process right must leave it
+        // clear, and METADATA especially: choosing a dedicated bit over
+        // METADATA is the whole of design-decisions.md §207, and this is the
+        // test that would fail if someone later "simplified" it back.
+        for r in [
+            rights::READ,
+            rights::WRITE,
+            rights::CREATE,
+            rights::METADATA,
+            rights::TRANSFER,
+            rights::SIGNAL,
+            rights::DEBUG,
+            rights::IO_REALTIME,
+        ] {
+            let w = project(&[cap(res::PROCESS, r)]);
+            assert!(
+                !is_set(w, CAP_SETUID) && !is_set(w, CAP_SETGID),
+                "Process right {r:#x} projected a credential capability"
+            );
+        }
+        // Nor from the same right on a different object type.
+        for ty in [res::THREAD, res::FILE, res::NAMESPACE, res::NET_RAW] {
+            let w = project(&[cap(ty, rights::SET_CREDENTIALS)]);
+            assert!(
+                !is_set(w, CAP_SETUID) && !is_set(w, CAP_SETGID),
+                "SET_CREDENTIALS on resource type {ty} projected a credential capability"
+            );
+        }
+    }
+
+    #[test]
+    fn test_set_credentials_does_not_join_the_sys_admin_union() {
+        // CAP_SYS_ADMIN is a hand-maintained list; a new right must not slip
+        // into it by resembling a member.  (Process, DEBUG) is a member, and
+        // SET_CREDENTIALS sits on the same resource type.
+        assert!(!is_set(
+            project(&[cap(res::PROCESS, rights::SET_CREDENTIALS)]),
+            CAP_SYS_ADMIN
+        ));
     }
 
     #[test]

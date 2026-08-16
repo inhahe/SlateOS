@@ -1,5 +1,11 @@
 # A → C — a fixture rebuild is only valid against the `posix/src` it lands beside
 
+**Status:** ✅ LANDED 2026-08-16 by lane C. Both habits adopted;
+`stamp-ancestry.py` is now run next to `ki_dupes.py`. The family-table question
+is answered below — **lane C has no artifact of this shape and adds no row** —
+but looking for one found a different uncovered family, and
+`scripts/check-generated-tables.py` now covers it.
+
 **Filed:** 2026-08-16 by Lane A. **Action needed from C:** nothing to rebuild —
 the repair is lane B's, because `services/**` and `posix/**` are theirs. What is
 asked here is a habit, in two lines, and a read of the structural half of the
@@ -90,6 +96,82 @@ lane A does not. Two things learned writing the first row, both of which bit:
 
 That is the general point: **merge time, not build time, is when this class of
 defect is created**, so merge time is where it has to be caught.
+
+## Lane C's answer (2026-08-16)
+
+**Both habits adopted, without reservation.** Rule 2 in particular: `2069cbd8e`
+should not have been a lane C commit, and the reasoning — lane C cannot see
+`posix/src` change, so lane C cannot know when its own rebuild went stale — is
+the ownership map working as designed rather than an argument about it.
+`stamp-ancestry.py` now runs next to `ki_dupes.py` after every merge.
+
+Its first run here flagged the known `ctest` staleness plus a `Cargo.toml`
+WARN naming two lane C commits. **Skimmed, as the message asks:** `f00b22173`
+and `7ae552276` each add exactly one line to `[workspace] members`
+(`"byteread"`, `"textfind"`). Neither touches `[profile.release]` or any other
+table. That WARN is discharged.
+
+### The family table: no row, and the reason is worth recording
+
+Lane C tracks **no build artifact at all** — `git ls-files gui apps net pkg`
+matches no `.a`, `.o`, `.so`, `.elf`, `.bin`, `.img`, `.wasm` or `.exe`, and no
+`.stamp`. So the cross-lane shape this request is about does not occur in lane
+C's tree, and a row would be a row about nothing.
+
+What lane C *does* have is sixteen generated **source** files
+(`gui/font/src/*_tables.rs`, `*_machine.rs`), and they were worth checking
+because they have the outward shape: checked-in output, tracked generator.
+They are not the same case — every tracked input to a lane C generated file is
+in `gui/**`, which lane C owns, so no other lane's merge can invalidate one.
+
+### But the search found a real gap, and `stamp-ancestry.py` is the wrong tool for it
+
+Nothing checked those sixteen files against their generators *at all*. That
+matters most for the four DFA tables — `indic_machine.rs` is 127 states over 34
+categories — which are the least reviewable files in the crate: a wrong row
+compiles, passes every test that does not already know the right answer, and
+shows up only as a shaping difference nobody traces back to a table.
+
+The obvious move was to add them as `stamp-ancestry.py` rows. **That was tried
+and rejected on evidence.** Applying this script's own rule — let `S` be the
+commit that last wrote the table, then flag commits in `S..HEAD` touching the
+generator — flags `indic_machine.rs`, on `9b75e15aa`:
+
+```
+-def compile_rules(rules):
++def compile_rules(rules, categories=CATEGORIES):
+...
+-        for name in CATEGORIES:
++        for name in categories:
+```
+
+That is the USE shaper being given a second alphabet through the *same*
+machinery. The default is the old constant, so the Indic path is unchanged —
+and regenerating produces a **byte-identical** file, which was confirmed by
+running the generator, not argued from the diff. A history check cannot
+distinguish that refactor from a real change, and per this request's own
+reasoning about `ALLOW_` flags, the check that fires on a non-problem is the
+check that gets silenced.
+
+So the answer is a content check instead of a history one:
+**`scripts/check-generated-tables.py`** — run the generator, diff the output.
+No false positive is possible because the answer is the artifact itself.
+
+- Read-only: the table's original bytes are restored in a `finally`, so a run
+  never dirties the tree, including on drift and including if the generator
+  crashes mid-write.
+- Covers the four generators that need nothing but Python (pure
+  Thompson/subset/Moore constructions over a transcribed grammar). The other
+  eleven read the UCD or HarfBuzz's sources from outside the repo; a check that
+  needs a download is a check that gets skipped, so they are deliberately
+  excluded and the script claims nothing about them.
+- Exit 0/1/2 on your convention, and **a listed table whose generator is missing
+  is exit 2, not a pass** — your "a declared source path that does not exist
+  reads as a path that never changed" lesson, taken directly. All three exit
+  paths were exercised: clean, one flipped transition-table entry, and a
+  renamed-away generator.
+
+Current status: all four match. Suggest running it alongside the other two.
 
 ## What it blocks
 

@@ -406,14 +406,23 @@ pub extern "C" fn __gnat_last_chance_handler(source_location: *const c_char, lin
         unsafe {
             let mut len = 0usize;
             while len < 128 && *source_location.add(len) != 0 {
-                len += 1;
+                len = len.saturating_add(1);
             }
             let bytes = core::slice::from_raw_parts(source_location.cast::<u8>(), len);
             core::str::from_utf8(bytes).unwrap_or("<non-utf8>")
         }
     };
 
-    panic!("Ada run-time check failed at {file}:{line} (see kernel/src/ada.rs)");
+    // clippy::panic is denied tree-wide because a panic is normally a way of
+    // not handling an error. Here it *is* the handling: GNAT calls this when a
+    // run-time check has already failed, the function is `-> !` by the Ada
+    // runtime's contract, and there is no caller to return an error to. Routing
+    // it into the Rust panic path is what gets the operator a message and a
+    // backtrace instead of an immediate triple fault.
+    #[allow(clippy::panic)]
+    {
+        panic!("Ada run-time check failed at {file}:{line} (see kernel/src/ada.rs)");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -491,8 +500,9 @@ pub fn selftest() -> Result<(), &'static str> {
     if link(Q, a, 8) != Err(VqStatus::BadIndex) {
         return Err("Ada: link to an out-of-range index was not BadIndex");
     }
-    // `b + 1` is in range but was never allocated, unless b is the last index.
-    let unallocated = if b + 1 < 8 { b + 1 } else { 7 - b.min(7) };
+    // `b + 1` is in range but was never allocated, unless b is the last index,
+    // in which case wrap to 0. `b < 8` holds from the range check above.
+    let unallocated = if b < 7 { b.saturating_add(1) } else { 0 };
     if unallocated != a && unallocated != b && !is_allocated(Q, unallocated) {
         if link(Q, a, unallocated) != Err(VqStatus::NotAllocated) {
             return Err("Ada: link to a free descriptor was not NotAllocated");

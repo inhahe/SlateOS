@@ -21222,7 +21222,7 @@ SPARK and moves the chain links out of device-visible memory:
   chain on the free list.
 * The walk is a bounded `for` loop over `1 .. Size`, so termination is
   structural. A cycle cannot hang the kernel even if one were somehow built.
-* `gnatprove` discharges 97/97 checks — no overflow, no index outside its
+* `gnatprove` discharges 106/106 checks — no overflow, no index outside its
   range, on every path for every input. Because the exported operations take
   raw `U16` rather than a constrained subtype, "the device sent nonsense" is
   not a special case; it is the same proof.
@@ -21234,7 +21234,116 @@ write can land in the middle of those arrays — a proof resting on the
 invariant would be sound about the code and wrong about the machine. See the
 body's notes.
 
-**Remaining work at the time of writing:** `queue.rs` still contains the code
-above; the Rust side is being rewired to ask the Ada component for every index
-decision. Until that lands, the bug is fixed in the sense that the correct
-implementation exists and is proved, not in the sense that the driver uses it.
+### How `queue.rs` uses it (completed 2026-08-16)
+
+The rewire is done — the driver now uses the proved component rather than
+merely coexisting with it:
+
+* `Virtqueue` owns a slot in the Ada pool (`queue_id`), claimed at `new` and
+  released on `Drop`. `Drop` resets the slot first, so a stale index arriving
+  after a device goes away is answered as invalid rather than against whichever
+  driver claims the slot next.
+* The free list is **gone from the descriptor table**. `new` no longer builds a
+  `next` chain, and `free_desc` no longer writes one. `desc.next` is now
+  written only when a chain is submitted, and read only by the device.
+* `alloc_desc` is `vqd_allocate`; `free_chain` is `vqd_free_chain` and returns
+  the number freed, logging a warning on the 0 that means "rejected".
+* `submit` records chain topology with `vqd_link` / and rolls the whole chain
+  back if any step is refused.
+* **`poll_used` validates at the boundary.** `elem.id` is checked for width
+  (a `u32` id of `0x1_0000` would otherwise truncate onto descriptor 0, a
+  plausible-looking index for a completion that never happened) and then
+  against `vqd_is_allocated`; a failure is logged and the completion dropped.
+  Validating here rather than in each driver is deliberate: there are ten call
+  sites across four drivers, and every one of them immediately uses the value
+  to look something up.
+* `desc` / `desc_mut` are bounds-checked and return `Option`. The false SAFETY
+  comment quoted above is gone — the check at the dereference is now what makes
+  the claim true, rather than an assertion about callers that was never
+  enforced. `desc_phys_addr` returns `Option<u64>` for the same reason.
+
+**A flaw found in the SPARK component itself while wiring this up**, worth
+recording because it is the failure mode proof does *not* catch. `Allocate`
+handled a damaged free-list link by setting `Head := 0` while leaving
+`Free_Cnt` positive — and its own comment claimed this "truncates the free list
+rather than aiming it somewhere." It did not truncate; it aimed at descriptor
+0. The next `Allocate` would hand out descriptor 0 while it was still
+allocated, aliasing two chains onto one descriptor. `gnatprove` was perfectly
+happy: every array access was in range, which is all absence-of-run-time-errors
+asserts. The proof bounds the *indices*, not the *meaning*. Fixed by making
+truncation real (`Free_Cnt := 0`), so the queue reports exhausted until
+`Initialize` or `Reset` rebuilds the list; re-proved at 106/106.
+
+---
+
+## B-VIRTIO-CTRLQ-DESC-LEAK — GPU and sound control commands never freed their descriptors (lane A, 2026-08-16)
+
+**Status:** FIXED 2026-08-16, same change as B-VIRTIO-UNVALIDATED-USED-ID.
+
+**In short.** Sending a command to the virtual GPU or sound card used up two
+slots from a small fixed pool, and never gave them back. The pool holds 64.
+The screen-update path sends two such commands per frame, so after about
+sixteen screen updates the pool was empty and the display stopped updating —
+with no error message, because the driver treated "no slots" as "try again
+later" and simply never succeeded again.
+
+### Where it was
+
+`kernel/src/virtio/gpu.rs` — `send_ctrl_cmd` and `attach_backing`;
+`kernel/src/virtio/sound.rs` — the three control-command helpers. All five had
+the same shape:
+
+```rust
+dev.controlq.submit(&[ (req, len, 0), (resp, len, VRING_DESC_F_WRITE) ])?;
+dev.transport.notify_queue(0);
+loop {
+    if dev.controlq.poll_used().is_some() { break; }   // <-- head discarded
+    ...
+}
+```
+
+`poll_used` returns the head descriptor index of the completed chain, and that
+index is the only handle by which the chain can be returned to the free list.
+Discarding it with `.is_some()` leaked the whole chain. `blk.rs` and `net.rs`
+did call `free_chain`; the GPU and sound drivers did not, and nothing tied the
+two halves together.
+
+### Why it mattered more than it looks
+
+The GPU init sequence issues a handful of commands, which is survivable. But
+`flush_rect` and `flush_full` — the per-frame display update path — each call
+`transfer_to_host_2d` **and** `resource_flush`, so a single screen update costs
+four descriptors. At a queue size of 64 that is sixteen updates before
+`submit` starts returning `WouldBlock` permanently. The control queue is only
+rebuilt by a device reset, and nothing resets it on this path.
+
+### Why it was not caught
+
+The same reason as the entry above, from the other direction: the tests drive
+a well-behaved QEMU device and check that a command *succeeds*. A leak does
+not make any individual command fail — it makes the *seventeenth* one fail, and
+no test issued seventeen.
+
+### How it is fixed
+
+Each site now binds the head out of `poll_used` and calls `free_chain` after
+the response has been read. The response lives in the DMA control frame rather
+than in the descriptors, so freeing first is safe.
+
+The timeout paths deliberately **do not** free: a chain that timed out is still
+owned by the device, which may yet write into it, so returning it to the
+allocator would hand out a live DMA target. Those paths leak two descriptors
+by design, which is the right trade — and the leak is now bounded by how often
+a device times out rather than by how often it succeeds.
+
+### Related, deliberately left alone
+
+`net.rs`'s TX timeout path *does* free a timed-out chain, which is the opposite
+choice. It is safe against the double-free it used to risk — a later completion
+for that chain is now rejected by `poll_used`'s `is_allocated` check rather
+than corrupting the free list — but it can still let the device read a
+descriptor whose buffer has been reused. The proper fix is what `blk.rs` does:
+reset the device on timeout (`recover_after_timeout`) rather than reclaiming
+descriptors underneath it. Left as tech debt: changing it to leak instead
+would trade a rare wrong-packet for a permanent queue drain on a flaky device,
+and neither is right without the reset path.

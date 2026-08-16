@@ -455,16 +455,24 @@ fn query_stream_info(dev: &mut VirtioSndDevice, num_streams: u32) -> KernelResul
 
     // Poll for completion.
     let mut attempts = 0u32;
-    loop {
-        if let Some((_head, _len)) = dev.controlq.poll_used() {
-            break;
+    let head = loop {
+        if let Some((head, _len)) = dev.controlq.poll_used() {
+            break head;
         }
         attempts = attempts.wrapping_add(1);
         if attempts > 1_000_000 {
+            // A timed-out chain is still owned by the device, so it is
+            // deliberately not returned to the free list here.
             return Err(KernelError::TimedOut);
         }
         core::hint::spin_loop();
-    }
+    };
+
+    // Return the chain to the free list.  The response is in the DMA control
+    // frame, not the descriptors, so it stays readable below.  Every control
+    // command used to leak its descriptors; the control queue is only drained
+    // by a device reset, so repeated stream setup would eventually exhaust it.
+    dev.controlq.free_chain(head);
 
     // Read response status.
     // SAFETY: resp_offset is within the DMA frame.  Volatile read because
@@ -544,16 +552,18 @@ fn control_stream_cmd(dev: &mut VirtioSndDevice, code: u32, stream_id: u32) -> K
 
     // Poll for completion.
     let mut attempts = 0u32;
-    loop {
-        if dev.controlq.poll_used().is_some() {
-            break;
+    let head = loop {
+        if let Some((head, _len)) = dev.controlq.poll_used() {
+            break head;
         }
         attempts = attempts.wrapping_add(1);
         if attempts > 1_000_000 {
+            // Timed out: the chain is still the device's, so it is not freed.
             return Err(KernelError::TimedOut);
         }
         core::hint::spin_loop();
-    }
+    };
+    dev.controlq.free_chain(head);
 
     // SAFETY: resp_offset is within the DMA frame.  Volatile read because
     // the device writes this asynchronously via DMA.
@@ -621,16 +631,18 @@ fn set_params(
 
     // Poll.
     let mut attempts = 0u32;
-    loop {
-        if dev.controlq.poll_used().is_some() {
-            break;
+    let head = loop {
+        if let Some((head, _len)) = dev.controlq.poll_used() {
+            break head;
         }
         attempts = attempts.wrapping_add(1);
         if attempts > 1_000_000 {
+            // Timed out: the chain is still the device's, so it is not freed.
             return Err(KernelError::TimedOut);
         }
         core::hint::spin_loop();
-    }
+    };
+    dev.controlq.free_chain(head);
 
     // SAFETY: resp_offset is within the DMA frame.  Volatile read because
     // the device writes this asynchronously.

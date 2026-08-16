@@ -233,18 +233,33 @@ is
             H : constant Desc_Index := Desc_Index (Head);
          begin
             --  Advance the free list before handing the descriptor out.  The
-            --  successor is only adopted if it is itself in range or the
-            --  terminator, so a damaged link truncates the free list rather
-            --  than aiming it somewhere.
+            --  successor is only adopted if it is a real descriptor of this
+            --  queue; otherwise the list is truncated here.
+            --
+            --  Truncation means Free_Cnt drops to zero, not merely down by one.
+            --  That is the whole difference between truncating the list and
+            --  redirecting it: leaving a positive count while resetting Head to
+            --  0 would let the *next* Allocate hand out descriptor 0 a second
+            --  time -- Head = 0 passes the `Head >= Size` test above, and
+            --  nothing else re-checks whether it is already in use -- aliasing
+            --  two chains onto one descriptor, so freeing either would mark it
+            --  free while the other still pointed at it.  Refusing to allocate
+            --  at all is the fail-closed answer; the queue then reports
+            --  exhausted until Initialize or Reset rebuilds the list.
+            --
+            --  In the ordinary case -- H is the last free descriptor, so its
+            --  link is the terminator -- Free_Cnt is already 1 and this is
+            --  exactly a decrement, so the common path is unchanged.
             if Q.Links (H) = No_Descriptor or else Q.Links (H) >= Size then
-               Q.Head := 0;
+               Q.Head     := 0;
+               Q.Free_Cnt := 0;
             else
-               Q.Head := Q.Links (H);
+               Q.Head     := Q.Links (H);
+               Q.Free_Cnt := Q.Free_Cnt - 1;
             end if;
 
             Q.States (H) := Allocated;
             Q.Links  (H) := No_Descriptor;
-            Q.Free_Cnt   := Q.Free_Cnt - 1;
             Index        := Head;
          end;
       end;

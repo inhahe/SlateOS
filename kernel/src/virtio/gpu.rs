@@ -931,16 +931,32 @@ fn send_ctrl_cmd(
 
     // Poll for completion.
     let mut attempts = 0u32;
-    loop {
-        if dev.controlq.poll_used().is_some() {
-            break;
+    let head = loop {
+        if let Some((head, _len)) = dev.controlq.poll_used() {
+            break head;
         }
         attempts = attempts.wrapping_add(1);
         if attempts > 5_000_000 {
+            // Timing out leaves this chain owned by the device, so its
+            // descriptors are deliberately *not* freed here — the device may
+            // still write to them.  The queue is down two descriptors until
+            // something resets it, which is the right trade against handing a
+            // live DMA target back to the allocator.
             return Err(KernelError::TimedOut);
         }
         core::hint::spin_loop();
-    }
+    };
+
+    // Return the chain to the free list.  The response lives in the DMA
+    // control frame, not in the descriptors, so it is still readable below.
+    //
+    // Without this, every control command leaked its two descriptors.  That
+    // was survivable for the handful issued at init, but flush_rect and
+    // flush_full each run two commands per screen update, so the control queue
+    // lost four descriptors per frame and submit() started returning WouldBlock
+    // after roughly sixteen flushes — the display would come up and then
+    // freeze.
+    dev.controlq.free_chain(head);
 
     // Read response type.
     // SAFETY: The device has written the response at resp_offset within
@@ -1095,16 +1111,21 @@ fn attach_backing(dev: &mut VirtioGpuDevice, resource_id: u32) -> KernelResult<(
 
     // Poll.
     let mut attempts = 0u32;
-    loop {
-        if dev.controlq.poll_used().is_some() {
-            break;
+    let head = loop {
+        if let Some((head, _len)) = dev.controlq.poll_used() {
+            break head;
         }
         attempts = attempts.wrapping_add(1);
         if attempts > 5_000_000 {
+            // As in send_ctrl_cmd: a timed-out chain is still the device's, so
+            // it is not returned to the free list.
             return Err(KernelError::TimedOut);
         }
         core::hint::spin_loop();
-    }
+    };
+
+    // Return the chain to the free list; the response is in the DMA frame.
+    dev.controlq.free_chain(head);
 
     // SAFETY: Device wrote the response at resp_offset within the DMA
     // frame.  Volatile read because the device writes asynchronously.

@@ -23292,15 +23292,17 @@ inputs owned by one lane and derived from another lane's source has this shape.
 Today that is `services/ctest-*` (lane B's, derived from `posix/src`); lane C's
 `gui/**` binaries with recorded inputs are the next candidates.
 
-**Proper fix — a pure-git check, no toolchain, milliseconds, runnable in any
-checkout, and exactly the shape of the `ki_dupes.py`-after-merges rule already
-agreed in `requests/a-b-run-ki-dupes-after-merges.md`:**
+**Detection half: FIXED 2026-08-16 — `scripts/stamp-ancestry.py`.** A pure-git
+check, no toolchain, ~40 ms, same answer in a fresh clone as on the machine that
+merged. **Run it after every merge, beside `python scripts/ki_dupes.py`;** the
+two are the same kind of check — both catch things that are wrong only in a
+merge — and belong in the same habit.
 
-> Let `S` = the commit that last touched any `services/ctest-*/*.stamp`
-> (`git log --format=%H -1 -- 'services/ctest-*/*.stamp'`).
-> If any commit touching `posix/src/**` is **not** an ancestor of `S`
-> (`git merge-base --is-ancestor`), the stamps are suspect — the libc they name
-> predates source that is now in the tree.
+> Let `S` = the commit that last touched any of a family's stamps
+> (`git log --format=%H -1 -- ':(glob)services/ctest-*/*.stamp'`). Any commit
+> reachable from HEAD but not from `S` that touches the family's sources
+> (`git log S..HEAD -- posix tzrules toolchain/build-sysroot.ps1`) is a commit
+> whose effect on the artifact was never recorded.
 
 It is *exactly* sensitive to the merge-induced case, because it asks a question
 about **history** rather than about the working tree, which is the property both
@@ -23308,11 +23310,48 @@ mtime and the content stamp lack. It belongs at **merge time**, not image-build
 time: merge is when the defect is created, and an image build is a lane-local
 event that may not happen for hours.
 
-The alternative — record the libc's **source** identity in the stamp (the tree
-hash of `posix/src`, alongside the existing `libc.a` content hash) — makes the
-stamp answer the right question directly, at the cost of coupling a file under
-`services/` to a path outside it. Either is sufficient; lane A has a stake only
-in one of them existing.
+Four design points worth keeping if it is ever rewritten, each because the
+one-line rule as first stated was wrong in a way that mattered:
+
+- **The source set is `posix/` + `tzrules/` + `toolchain/build-sysroot.ps1`, not
+  `posix/src/**`.** `libc.a` is the `posix` staticlib; `posix` path-depends on
+  `tzrules`; and the `RUSTFLAGS` that pick the float ABI — the ones
+  `BUG-SYSROOT-SOFT-FLOAT-ABI` is about — live in the build script and nowhere
+  else. A `tzrules` change would have walked straight through the rule as
+  originally written.
+- **Named commits are confirmed against trees.** A source touched and then
+  reverted produces commits in `S..HEAD` but no change to the artifact's inputs.
+  Listing commits gives a useful message; comparing `S:posix` against
+  `HEAD:posix` gives the correct verdict; neither alone does both.
+- **The root `Cargo.toml` warns rather than fails.** Its `[profile.release]`
+  genuinely can change `libc.a`, but it far more often just gains a workspace
+  member from an unrelated lane (`byteread` did, the same day). A check that
+  cries wolf gets `ALLOW_`-flagged into silence, so this is a deliberate,
+  documented hole — an opt-level change passes as a warning — and not an
+  oversight. The alternative was parsing the manifest to see which table moved,
+  which is fragile in a way that fails silently.
+- **A family whose stamps match nothing, and a typo in a declared source path,
+  both exit 2 rather than reporting clean.** A path that does not exist reads as
+  a path that never changed, cheerfully and in green — so a typo in the config
+  would have *widened* the silence the script exists to end. That is the fifth
+  instance in this file of "the check did not run" wearing the costume of "the
+  check passed", and it was written in from the start for that reason.
+
+**Verified in both directions.** Positive: on the merged tree it names
+`5531f816c` and nothing else. Negative: `--rev 2069cbd8e` — lane C's tree, where
+the rebuild *was* correct — reports `OK`, so it is not a check that simply always
+fires. The stale-config and missing-family branches were exercised directly and
+both exit 2. The `:(glob)` pathspec magic is deliberate and load-bearing: plain
+git globbing lets `*` cross `/`, which would silently widen the stamp pathspec.
+
+**Still open: the repair** (lane B rebuilds and re-commits the nine ELFs), and
+one judgement call the detector does not settle — whether to also record the
+libc's **source** identity in the stamp (the tree hash of `posix/`, alongside
+the existing `libc.a` content hash). That would make the stamp answer the right
+question directly rather than have a second script answer it alongside, at the
+cost of coupling a file under `services/` to a path outside it. The detector
+makes that optional rather than urgent; lane A has a stake only in the class
+being detectable, which it now is.
 
 **What it blocks right now.** `create-ext4-rootfs.sh` exits 1 on the stamp
 mismatch, correctly, so no worktree can rebuild `rootfs.ext4`. That leaves the

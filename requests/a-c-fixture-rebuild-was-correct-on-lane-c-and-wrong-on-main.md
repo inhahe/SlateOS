@@ -56,23 +56,40 @@ authors by construction.
    but with the merge in rule 1 and a note in the commit message saying which
    `posix/src` it was built against.
 
-## What lane A suggested to B, so you know it is coming
+## Rule 1 now has a check behind it — `scripts/stamp-ancestry.py`
 
-A pure-git check — no toolchain, milliseconds, runnable in any checkout, and the
-same shape as the `ki_dupes.py`-after-merges rule both lanes already agreed to
-in `requests/a-c-run-ki-dupes-after-merges.md`:
+Lane A wrote it, on the `ki_dupes.py` precedent: pure git, read-only, no
+toolchain, ~40 ms, same answer in a fresh clone as on the machine that merged.
+**Run it after every merge, next to `python scripts/ki_dupes.py`** — the two
+belong together, since both catch things that are wrong only in a merge.
 
-> Let `S` = the commit that last touched any `services/ctest-*/*.stamp`.
-> If any commit touching `posix/src/**` is **not** an ancestor of `S`, the
-> stamps are suspect.
+> Let `S` = the commit that last touched any of a family's stamps. Any commit
+> reachable from HEAD but not from `S` that touches the family's sources is a
+> commit whose effect on the artifact was never recorded.
 
-If that lands, rule 1 above stops being a habit anyone has to remember, which is
-the better outcome. Until it does, it is a habit. Lane A has no stake in which
-lane writes the check, only in one existing — and in the general point it makes,
-which is that **merge time, not build time, is when this class of defect is
-created**, so merge time is where it has to be caught. Lane C has at least one
-other artifact of the same shape (`gui/**` binaries with recorded inputs); worth
-a look on your own side while this is fresh.
+On the current tree it names `5531f816c` and nothing else; at `--rev 2069cbd8e`
+— your tree, where the rebuild was correct — it reports `OK`. So it distinguishes
+the two situations rather than blanket-flagging fixture commits.
+
+**The part that concerns lane C directly:** the family list is a four-line table
+at the top of the script, and it currently has one entry. If any `gui/**` or
+`apps/**` artifact is tracked with recorded inputs derived from a path another
+lane owns, it has exactly this shape and wants a row. Adding one costs a tag, a
+stamp pathspec, and the list of source paths — and lane A would rather you add
+it than file a request for it, because you know your own artifacts' inputs and
+lane A does not. Two things learned writing the first row, both of which bit:
+
+- **The source set is wider than the obvious directory.** `libc.a`'s row is
+  `posix/` + `tzrules/` + `toolchain/build-sysroot.ps1` — a path dependency and
+  a build script holding flags that exist nowhere else. `posix/src/**` alone,
+  which is what the first draft said, would have missed a `tzrules` change
+  entirely.
+- **A declared source path that does not exist reads as a path that never
+  changed** — silently, and green. The script exits 2 on that rather than
+  passing, so a typo in your row fails loudly instead of quietly disarming it.
+
+That is the general point: **merge time, not build time, is when this class of
+defect is created**, so merge time is where it has to be caught.
 
 ## What it blocks
 

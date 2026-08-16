@@ -84,30 +84,60 @@ that *that* libc matches the `posix/src` in the tree — and it cannot cheaply,
 because the whole design goal of the stamp check is to need no toolchain
 (line 1219), while answering this question requires actually building `libc.a`.
 
-## Suggested fix, structural half
+## The structural half is done — `scripts/stamp-ancestry.py`
 
-A pure-git check, no toolchain, runnable in any checkout, and exactly the shape
-of the `ki_dupes.py`-after-merges rule already agreed in
-`requests/a-b-run-ki-dupes-after-merges.md`:
+Lane A wrote it rather than asking you to, on the `ki_dupes.py` precedent: it is
+a pure-git, read-only detector for a merge-only defect class, it writes nothing
+into `services/**` or `posix/**`, and leaving it as a request would have meant
+the one check that could have caught this waiting on the lane that could not
+see it. **Run it after every merge, next to `python scripts/ki_dupes.py`.**
 
-> Let `S` = the commit that last touched any `services/ctest-*/*.stamp`.
-> If any commit touching `posix/src/**` is **not** an ancestor of `S`, the
-> stamps are suspect — the libc they name predates source that is now in the
-> tree.
+On the current merged tree it prints, in ~40 ms:
 
-That is decidable with `git log --format=%H -1 -- 'services/ctest-*/*.stamp'`
-and `git merge-base --is-ancestor`, costs milliseconds, and — unlike both mtime
-and the content stamp — is *exactly* sensitive to the merge-induced case,
-because it asks a question about history rather than about the working tree.
-Worth running at merge time rather than image-build time, since merge is when
-the defect is created and image build is a lane-local event that may not happen
-for hours.
+```
+$ python scripts/stamp-ancestry.py
+[stamp:ctest] STALE services/ctest-* fixtures -- the ELFs link toolchain/sysroot/lib/libc.a, built from posix/
+[stamp:ctest]       stamps last written by 2069cbd8e
+[stamp:ctest]       1 commit(s) since then change posix:
+[stamp:ctest]         5531f816c  posix: implement the thirteen libc symbols CPython 3.12 was missing
+[stamp:ctest]       Confirm and repair:
+[stamp:ctest]         powershell -File toolchain/build-sysroot.ps1
+[stamp:ctest]         …/python.exe scripts/ctest-fixtures.py check
+```
 
-Whether to also record the libc's **source** identity in the stamp (e.g. the
-tree hash of `posix/src`, alongside the existing `libc.a` content hash) is
-yours to judge. It would make the stamp answer the right question directly, at
-the cost of coupling it to a path outside `services/`. Lane A has no stake in
-which of the two you pick, only in one of them existing.
+— one offender, named, and nothing else. Verified in the negative direction too:
+`--rev 2069cbd8e` (lane C's tree, where the rebuild was correct) reports `OK`,
+so it is not a check that simply always fires.
+
+Three things it does that the one-line rule in the first draft of this request
+did not, each because the naive version was wrong in a way worth knowing:
+
+- **The source set is `posix/` + `tzrules/` + `toolchain/build-sysroot.ps1`, not
+  `posix/src/**`.** `libc.a` is the `posix` staticlib, `posix` path-depends on
+  `tzrules`, and the `RUSTFLAGS` that pick the float ABI (the ones
+  `BUG-SYSROOT-SOFT-FLOAT-ABI` is about) live in the build script and nowhere
+  else. A `tzrules` change would have gone straight through the rule as stated.
+- **Commits are confirmed against trees.** A source touched and then reverted
+  produces commits in `S..HEAD` but no change to the artifact's inputs; listing
+  commits gives a useful message, comparing `S:posix` to `HEAD:posix` gives the
+  correct verdict, and neither alone does both.
+- **The root `Cargo.toml` warns rather than fails.** Its `[profile.release]`
+  genuinely does change `libc.a`, but it far more often just gains a workspace
+  member from an unrelated lane — `byteread` did today. A check that cries wolf
+  gets flagged into silence. That is a known, documented hole, not an oversight.
+
+Also guarded, because this repo keeps rediscovering it: a family whose stamps
+match nothing, and a typo in a declared source path, both exit **2** rather than
+reporting clean. A path that does not exist otherwise reads as a path that never
+changed — cheerfully, and in green.
+
+**What is still yours:** the repair (rebuild and re-commit the nine ELFs), and a
+judgement call the detector does not settle — whether to also record the libc's
+**source** identity in the stamp (the tree hash of `posix/`, alongside the
+existing `libc.a` content hash). That would make the stamp answer the right
+question directly rather than have a second script answer it alongside, at the
+cost of coupling a file under `services/` to a path outside it. The detector
+makes it optional rather than urgent; lane A has no stake in which way you go.
 
 ## What this blocks, concretely
 

@@ -362,6 +362,98 @@ Test modules carry `#![allow(clippy::indexing_slicing, clippy::unwrap_used,
 clippy::panic)]` — a test that indexes out of range should fail loudly and
 point at the line that did it.
 
+### Sweep progress: `markdowneditor` 348 → 40, `indexing_slicing` 0 (2026-08-16)
+
+Second worst crate done, and the same three patterns did the work again.
+`apps/markdowneditor` went from 38 `indexing_slicing` findings to **0** (total
+warnings 348 → 40, all `arithmetic_side_effects`); tests 192 → 199. Commit
+`2a5c23082`. Two more reachable bugs fell out of it, recorded below.
+
+The tab pattern was fixed **structurally rather than a second time**. Rather
+than repeat the editor's `Tabs` fix in markdowneditor's `documents:
+Vec<Document>` + `active_doc: usize`, the editor's local `Tabs` was
+generalised to `guitk::tabs::Tabs<T>` and the local copy deleted, so both
+editors — and the next app with a tab bar — share one type whose first element
+is a plain field. Non-emptiness is now a property of the type, not a
+convention eight index expressions relied on. `Tabs<T>` has 8 tests of its own
+and a doctest; guitk 701 → 709.
+
+### `textfind`: the fold-then-index defect family, swept tree-wide (2026-08-16)
+
+The editor's bugs 2, 3 and 4 above are not an editor problem — they are what
+*every* hand-written case-insensitive search in this tree looked like. A sweep
+found six more instances across five apps, all fixed in commit `59b097746` by
+routing them through `guitk::textfind`, which folds incrementally while
+walking the real string and therefore only ever returns offsets into it:
+
+| App | Site |
+|---|---|
+| `ebook` | `find_all_matches` |
+| `pdfviewer` | `PdfDocument::search` |
+| `spreadsheet` | `case_insensitive_replace`, `SearchState::find_all` |
+| `filediff` | `SearchState::search` |
+| `rssreader` | `extract_snippet`, `search_articles`, `discover_feeds`, `extract_attribute`, `filtered_article_indices` |
+
+Every one of them had all three defects: offsets taken from a `to_lowercase()`
+copy, a match length taken from the needle rather than from what matched, and
+a scan resuming one byte past each match's *start* so matches overlapped. Each
+now has a regression test, and each test was verified by reverting the fix and
+watching it fail.
+
+**The lesson for future work: a case-insensitive search written by hand is
+wrong.** `to_lowercase()` is not length-preserving (Turkish `İ` U+0130 is two
+bytes and folds to three), so the copy's offsets and the original's diverge at
+the first such character, and the divergence ends in a slice inside a
+character — a panic. Call `textfind`; do not write the loop.
+
+This was a targeted pass at one defect family, not a full sweep of those five
+crates; their remaining `indexing_slicing` counts are `rssreader` 93,
+`spreadsheet` 42, `filediff` 17, `ebook` 16, `pdfviewer` 13.
+
+## Two more reachable bugs in `apps/markdowneditor`, found by the lint sweep (lane C)
+
+**Status: FIXED 2026-08-16** (lane C), commit `2a5c23082`. Neither was caught
+by any existing test; both now have one.
+
+**1. Undo of a heading duplicated the line instead of removing the prefix.**
+`insert_heading` inserts `"## "` at column 0, then recorded the undo as a
+`Delete` of the *old* line text. Undo therefore re-inserted the whole line in
+front of itself: pressing the H2 toolbar button on `Title` and then Ctrl+Z
+gave `Title## Title`, not `Title`. Proved reachable by reverting the fix and
+watching the new test fail with exactly that string. Fixed by recording what
+actually happened — an `Insert` of the prefix at column 0.
+
+**2. Rendering past the end of a shrunken document indexed off the end.**
+`render_editor`'s visible-line loop indexed `doc.lines[scroll_line + i]` and
+broke on reaching the end, so the bound was stated twice and the two could
+drift: a `scroll_line` left over from before a document shrank under the
+viewport indexed past the end on the first iteration, before the break could
+run. Replaced with `.skip(scroll_line).take(visible_lines)`, which states the
+bound once and draws nothing rather than panicking.
+
+## A hang in `apps/spreadsheet`'s find-and-replace (lane C)
+
+**Status: FIXED 2026-08-16** (lane C), commit `59b097746`. Found by the same
+sweep. `case_insensitive_replace` looped `while let Some(pos) = hay[at..]
+.find(needle)`, and an **empty** needle matches at every position without
+consuming anything, so `at` never advanced and the loop appended the
+replacement string to a `String` until the process ran out of memory. Reaching
+it took one keystroke: open Replace, leave Find empty, type a replacement,
+press the button. `textfind::matches` yields nothing for an empty needle, so
+the rewritten loop terminates immediately; pinned by
+`an_empty_needle_replaces_nothing`.
+
+## A byte-measured "character" window in `apps/rssreader` (lane C)
+
+**Status: FIXED 2026-08-16** (lane C), commit `59b097746`. `extract_snippet`
+takes a `context_chars` argument and its doc described a window in characters,
+but it computed the window with `saturating_sub`/`+` on **byte** offsets. For
+a non-ASCII article the snippet was therefore both the wrong length (up to 4×
+short) and cut at an arbitrary byte, which the subsequent `&text[head..tail]`
+slice panicked on whenever the cut landed inside a character. Rewritten to
+walk `char_indices` outwards from the match, so the window is in the unit it
+claims. Pinned by `a_snippet_window_lands_on_character_boundaries`.
+
 ## Four reachable panics/corruptions in `apps/editor`, found by the lint sweep (lane C)
 
 **Status: FIXED 2026-08-16** (lane C). All four were found by working through

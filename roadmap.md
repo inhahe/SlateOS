@@ -720,9 +720,20 @@ Roadmap:
   with fontTools to give it an oracle (Windows forms, Mac forms, and a
   no-forms control the pass must leave untouched) — 78 of 78 agree, and the
   oracle immediately caught that the pass was gated on the wrong predicate
-  and never fired at all. Next unblocked step is the rest of shaping: Khmer,
-  then Myanmar, then USE (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`, step 1
-  of 3 done), and no device tables in `ValueRecord`. Vello itself waits on
+  and never fired at all. Khmer is done too (step 2 of 3) — the Indic model
+  plus two moves, a COENG+RO pair jumping to the head of its syllable and a
+  pre-base vowel jumping ahead of it, with the reordering running *before* the
+  first lookup rather than after `locl`/`ccmp`. Sweep: `agree` 27421 →
+  **27687**, `differ` back to the same **1176** baseline, `reordered` 0. And
+  §431 paid for itself twice: no installed face has a `cfar` lookup — nor
+  `pres`, nor `psts` — so the host could not falsify the masks at all, and the
+  probe font built to disagree found `locl`/`ccmp`/`blwf`/`abvf`/`pstf` being
+  applied **twice** in *both* the Khmer and the long-shipping Indic shaper.
+  1 of 45 probe strings agreed before the fix, 43 after (§433); the two
+  remaining are a crate-wide default-ignorable bug, filed as
+  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES`. Next unblocked step is Myanmar,
+  then USE (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`, step 2 of 3 done), the
+  ignorable fix, and no device tables in `ValueRecord`. Vello itself waits on
   `[A]`'s GPU driver.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`

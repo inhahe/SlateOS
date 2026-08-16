@@ -62988,14 +62988,121 @@ measured:
   controls. **78 of 78 agree**, including the vendor preference and the
   no-private-use face, which the pass must leave untouched.
 
-Khmer is next, then Myanmar, then USE. `harfbuzz_sweep.py` gained a
-`--corpus FILE` flag along the way, so each of those can bring its own corpus
-without editing the built-in one.
+`harfbuzz_sweep.py` gained a `--corpus FILE` flag along the way, so each of
+the remaining steps can bring its own corpus without editing the built-in one.
+
+**Step 2 of 3 done — Khmer, 2026-08-15** (`gui/font/src/khmer.rs`, commits
+`1897b9b19` and `8f1247264`). The shaper, the oracle that could disagree with
+it, and the bug that oracle found in a shaper that had been shipping for weeks:
+
+* **The shaper.** Khmer is the Indic model with two moves and one structural
+  difference. The moves: a COENG+RO pair jumps to the head of its syllable and
+  takes `pref`, and everything it jumped over takes `cfar`; a pre-base vowel
+  moves to the head as well, ahead of a fronted pair. The five split vowels
+  (U+17BE–U+17C5) get no canonical decomposition from Unicode, so they are
+  split by hand into U+17C1 plus a second half before the syllables are cut.
+  The structural difference is that the reordering runs *before the first
+  lookup* rather than after `locl`/`ccmp` as Indic does. The syllable-serial
+  stamping the two shapers share came out into `gui/font/src/syllabic.rs` at
+  the same time. `cfar` was appended to `gsub::FEATURES` (and to
+  `langsys_survey.py`'s `WANTED`, which `otl.rs` pins equal to it).
+* **The host measurement.** 556 faces: **agree 27421 → 27687**, differ back
+  down to the same 1176 pre-existing NFC baseline, **reordered 0, misplaced 0**
+  — every Khmer string agreeing on every face.
+* **The oracle, per §431 of `design-decisions.md`.** That host number is worth
+  much less than it looks. Only three installed faces register `khmr` at all
+  (the Leelawadee UI family), and **not one face on this machine has a `cfar`
+  lookup**, nor `pres`, nor `psts` — probed directly. So the sweep was
+  reporting agreement about masks it never applied. `gui/font/tools/
+  gen_khmer_probe.py` builds `KhmerProbe.ttf`, where each of thirteen features
+  has one lookup rewriting every Khmer glyph as *itself followed by a marker
+  glyph unique to that feature*, so a glyph run spells out which features
+  reached it and in what order. It is a one-to-two substitution on purpose: the
+  base has to survive so the next feature still matches it, and `cfar` — which
+  is applied after `blwf`, on the very glyphs `blwf` is set on — is precisely
+  the feature a one-to-one substitution would have hidden. Markers carry zero
+  advance so a wrong mask can never smear into the positions.
+  `khmer-corpus.txt` is one string per edge of the shaper rather than sampled
+  text. **43 of 45 agree.**
+* **What it found.** `locl`, `ccmp`, `blwf`, `abvf` and `pstf` were each being
+  applied **twice** — named in an early stage and then again in the final
+  `ALL_FEATURES` stage, which `gsub::apply_stages` does not deduplicate.
+  HarfBuzz gives each feature exactly one stage (`hb_ot_map_builder_t::compile`
+  merges duplicate tags at the `hb_min` of their stages), so this was a real
+  divergence. **The Indic shaper had the same bug**, and 556 installed faces
+  had hidden it for as long as that shaper has existed: a duplicate application
+  is invisible unless a lookup is not idempotent, and real faces' lookups
+  overwhelmingly are. Fixed in both by masking the earlier stages out of the
+  last one; `stages()` was factored out of `shape` in each so the "one feature,
+  one stage" invariant is four tests rather than a comment.
+* **The two that still differ** are the joiner strings, and are not a Khmer
+  bug: HarfBuzz emits the face's space glyph for a default-ignorable character
+  (ZWJ, ZWNJ, soft hyphen …) once shaping is done, and deletes it outright if
+  the face has no space. We emit the character's own glyph. That is crate-wide
+  and script-independent — a soft hyphen would draw a visible hyphen mid-word
+  on any face that maps it — so it is tracked separately under
+  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES` rather than here.
+
+Myanmar is next, then USE.
 
 **Where.** `gui/font/src/sfnt.rs` — `Face::substitute`, which dispatches on
 `Script::shaping` and would gain the other families; `gui/font/src/indic.rs`
 and `indic_machine.rs` — the models to copy; `gui/font/tools/harfbuzz_sweep.py`
 — `CORPUS`, which needs a string per family before any of this is measurable.
+
+## TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES
+
+**What.** A handful of characters exist to instruct the shaper and are never
+meant to be drawn: the zero-width joiner and non-joiner, the soft hyphen, the
+bidi controls, the variation selectors, the byte-order mark. Once shaping is
+over, HarfBuzz erases them — `hb_ot_hide_default_ignorables`, in
+`hb_ot_substitute_post`, replaces each one's glyph with the face's `space`
+glyph, or **deletes the glyph entirely** if the face has no space — and
+`hb_ot_zero_width_default_ignorables`, during positioning, zeroes their
+advances and x-offsets first. We do neither: `ScaledFont::shape` maps the
+character through `cmap` like any other and returns whatever glyph came back.
+
+**Symptom, measured.** The two strings the Khmer probe font disagrees on
+(`gui/font/tools/khmer-corpus.txt`, the `\u17d2\u200d\u1781` and
+`\u17d2\u200c\u1781` lines) are exactly this: HarfBuzz emits the space glyph
+where we emit ZWJ's and ZWNJ's own glyphs. It is invisible in the host sweep
+only because the built-in corpus has no string containing an ignorable that
+the face also maps.
+
+**Why it matters beyond the joiners.** This is crate-wide and
+script-independent, and the joiner case is the *benign* one — a face that maps
+ZWJ usually maps it to something blank anyway. The soft hyphen U+00AD is the
+one that bites: fonts routinely map it to a real hyphen glyph, so a word
+carrying a discretionary break renders with a hyphen sitting in the middle of
+it whether or not the line broke there. The bidi controls and variation
+selectors are the same shape of bug.
+
+**One subtlety that is easy to get wrong.** HarfBuzz's predicate is
+`(unicode_props() & UPROPS_MASK_IGNORABLE) && !_hb_glyph_info_substituted()` —
+a character stops counting as ignorable the moment a GSUB lookup rewrites it,
+because at that point the glyph is whatever the font asked for and is no
+longer the control character. So the flag has to be *cleared on substitution*,
+not merely tested at the end. And the set is HarfBuzz's own hard-coded list
+(U+00AD, U+034F, U+061C, U+17B4–17B5, U+180B–180E, U+200B–200F, U+202A–202E,
+U+2060–206F, U+FE00–FE0F, U+FEFF, U+FFF0–FFF8, U+1BCA0–1BCA3, U+1D173–1D17A,
+U+E0000–E0FFF), *not* Unicode's `Default_Ignorable_Code_Point` property; using
+the Unicode set would make the sweep disagree in the other direction.
+
+**Proper fix.** A flag on `SubGlyph`, set in `scaled.rs`'s per-piece build loop
+from the character, cleared at the three sites in `gsub.rs` that assign a
+glyph id — `apply_single`, `apply_alternate`, the ligature path — and by
+`apply_multiple`'s splice. Then in the loop that builds `out: Vec<ShapedGlyph>`
+at the end of `shape`, zero the advance and offsets and substitute the space
+glyph, or drop the glyph if the face maps no space. Corpus strings containing
+a soft hyphen and the joiners go into `harfbuzz_sweep.py`'s built-in `CORPUS`
+in the same change, so the fix is measured on all 556 host faces rather than
+on the one probe font that happened to expose it.
+
+**Where.** `gui/font/src/scaled.rs` — the per-piece loop that derives
+`tab`/`klass`/`mark`/`indic` from each character, and the `out`-building loop
+after it; `gui/font/src/gsub.rs` — `apply_single`, `apply_multiple`,
+`apply_alternate` and the ligature path; `gui/font/tools/harfbuzz_sweep.py` —
+`CORPUS`.
 
 ## TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT
 

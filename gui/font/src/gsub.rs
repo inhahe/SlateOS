@@ -418,6 +418,29 @@ pub struct SubGlyph {
     /// Left at its default — not Indic, never reordered — for every run no
     /// Indic shaper touches, which is nearly all of them.
     pub(crate) indic: Char,
+    /// Whether this glyph is still standing for a character that exists to
+    /// instruct the shaper and is never meant to be drawn — a joiner, a soft
+    /// hyphen, a bidi control, a variation selector.
+    ///
+    /// **This is the one field substitution clears rather than carries.**
+    /// Every other property here is about the character the glyph started as,
+    /// and stays true of it however the glyph is rewritten; this one stops
+    /// being true the moment a lookup rewrites it. A face that maps ZWJ to a
+    /// visible glyph through a lookup has *asked* for that glyph and gets it —
+    /// the glyph is no longer the control character, it is whatever the font
+    /// said. HarfBuzz spells the same rule as
+    /// `is_default_ignorable() && !is_substituted()`, tracking substitution
+    /// with its own bit; keeping one field and clearing it comes to the same
+    /// thing, and puts the rule where the rewriting happens.
+    ///
+    /// Note the consequence for the paths that do *not* rewrite: reordering
+    /// moves this along with the glyph, and a ligature keeps its first
+    /// component's — which, since a ligature is a substitution, is cleared
+    /// anyway.
+    ///
+    /// Read once, at the very end of [`ScaledFont::shape`], where a glyph
+    /// still carrying it is replaced by the face's space glyph or dropped.
+    pub(crate) ignorable: bool,
 }
 
 /// Where a glyph sits inside a ligature: HarfBuzz's `lig_props`, unpacked.
@@ -622,6 +645,7 @@ impl SubGlyph {
             indic: Char::DEFAULT,
             syllable: 0,
             word: false,
+            ignorable: false,
         }
     }
 
@@ -641,6 +665,7 @@ impl SubGlyph {
             indic: Char::DEFAULT,
             syllable: 0,
             word: false,
+            ignorable: false,
         }
     }
 
@@ -680,6 +705,7 @@ impl SubGlyph {
             indic: Char::DEFAULT,
             syllable: 0,
             word: false,
+            ignorable: false,
         }
     }
 
@@ -702,6 +728,7 @@ impl SubGlyph {
             indic: Char::DEFAULT,
             syllable: 0,
             word: false,
+            ignorable: false,
         }
     }
 }
@@ -1072,6 +1099,10 @@ fn apply_single(data: &[u8], subtables: &[usize], glyphs: &mut [SubGlyph], i: us
         .iter()
         .find_map(|&sub| single_at(data, sub, glyph.gid))?;
     glyph.gid = gid;
+    // The font asked for this glyph, so it is no longer standing for the
+    // control character it was looked up from and must not be hidden at the
+    // end of shaping. See `SubGlyph::ignorable`.
+    glyph.ignorable = false;
     Some(1)
 }
 
@@ -1159,6 +1190,10 @@ fn apply_multiple(
             } else {
                 glyph.lig
             },
+            // Cleared, not inherited, and note that this is the one field of
+            // `glyph` the `..glyph` spread must not carry: every piece is a
+            // glyph the font asked for. See `SubGlyph::ignorable`.
+            ignorable: false,
             ..glyph
         }),
     );
@@ -1197,6 +1232,8 @@ fn apply_alternate(
         .iter()
         .find_map(|&sub| alternate_at(data, sub, glyph.gid))?;
     glyph.gid = gid;
+    // As in `apply_single`: substituted is no longer ignorable.
+    glyph.ignorable = false;
     Some(1)
 }
 
@@ -1303,6 +1340,14 @@ fn apply_ligature(
         // The cluster stays as it was: it is the first component's, and the
         // components that follow are being swallowed, not moved.
         first.gid = gid;
+        // ...but `ignorable` does not, for the same reason as in
+        // `apply_single`: a ligature is a glyph the font asked for. It matters
+        // here even though a joiner is rarely a ligature's *first* component,
+        // because it is routinely one of the rest — a joiner between two
+        // letters is exactly what makes some faces' ligature fire — and those
+        // components are removed below, which disposes of them just as
+        // thoroughly.
+        first.ignorable = false;
     }
     // Removed from the back so that the earlier indices stay valid. Component
     // zero is the glyph just rewritten and stays.

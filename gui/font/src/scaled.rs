@@ -685,6 +685,15 @@ impl ScaledFont {
                 mark: !tab
                     && norm::is_mark(ch)
                     && ((synth && placeable) || (by_category && zeroed)),
+                // Answered here for the reason the two below are: it is a
+                // property of the character, and after substitution there may
+                // be no character left to ask. Unlike them it does not survive
+                // substitution — see `SubGlyph::ignorable` — but it does have
+                // to survive *reordering*, which is why it rides on the glyph
+                // rather than in a parallel vector like `tabs`: the Indic and
+                // Khmer shapers move glyphs within a syllable, and a joiner
+                // moves with them.
+                ignorable: !tab && norm::is_default_ignorable(ch),
                 // What the Indic shaper needs and cannot recover later: both
                 // are properties of the character, and by the time it runs
                 // there may be no character left to ask — a conjunct is one
@@ -753,7 +762,7 @@ impl ScaledFont {
         // pass: `glyphs` is consumed into `out` below and `ShapedGlyph` has no
         // business carrying a combining class around for the rest of its life.
         // Empty unless the fallback is going to run.
-        let klasses: Vec<u8> = if synthesize {
+        let mut klasses: Vec<u8> = if synthesize {
             glyphs.iter().map(|g| g.klass).collect()
         } else {
             Vec::new()
@@ -902,6 +911,17 @@ impl ScaledFont {
                 // after it kerns against nothing.
                 kern_left = (!tab).then(|| out.len().saturating_sub(1));
             }
+        }
+
+        // The characters that instruct the shaper and are never drawn, erased
+        // now that everything that had to read them has. Last, and it has to be
+        // last: a joiner is what makes some faces' ligature fire, and a bidi
+        // control is what set the levels, so anything that dropped them earlier
+        // would be dropping the instruction along with the mark of it. Before
+        // the visual order below, though, because that is a permutation of
+        // `out`'s indices and a deletion moves them.
+        if glyphs.iter().any(|g| g.ignorable) {
+            hide_ignorables(&mut out, &mut klasses, &glyphs, space);
         }
 
         // Rule L2, over glyphs rather than characters: a ligature is one glyph
@@ -1414,6 +1434,78 @@ fn num(v: f32) -> i32 {
     }
 }
 
+/// Erase the glyphs still standing for characters that are never drawn.
+///
+/// HarfBuzz's `hb_ot_hide_default_ignorables`, plus the zeroing that
+/// `hb_ot_zero_width_default_ignorables` does just before it, which there are
+/// two passes only because one belongs to positioning and one to substitution.
+///
+/// A joiner, a soft hyphen, a bidi control and a variation selector are
+/// instructions, not letters. They must reach the shaper — a joiner deleted
+/// early stops the ligature it exists to request — and must not reach the
+/// screen. `cmap` will happily give each of them a glyph, and faces disagree
+/// wildly about what: blank for ZWJ in most, but a **visible hyphen** for
+/// U+00AD in many, which is the case that makes this a correctness bug rather
+/// than a tidiness one. A word carrying a discretionary break would render
+/// with a hyphen in the middle of it whether or not the line broke there.
+///
+/// Two dispositions, and which one is not a preference:
+///
+/// * **Replaced by the space glyph**, zero-width, when the face has one. The
+///   glyph stays in the run, so clusters, the visual order and every index
+///   into them are undisturbed.
+/// * **Deleted**, when the face has no `space` — `glyph_id` answering `0`,
+///   which is `.notdef`. Substituting the missing-glyph box would draw a
+///   visible tofu for a character whose entire point is to be invisible, so
+///   the glyph goes. HarfBuzz makes the same choice on the same test.
+///
+/// `klasses` is deleted from in lockstep, and that is the whole reason it is
+/// passed: it is indexed by position in `out` by
+/// [`synthesize_marks`](ScaledFont::synthesize_marks), so a deletion here that
+/// left it alone would shift every combining class one glyph to the left and
+/// stack the accents on the wrong letters.
+fn hide_ignorables(
+    out: &mut Vec<ShapedGlyph>,
+    klasses: &mut Vec<u8>,
+    glyphs: &[SubGlyph],
+    space: u16,
+) {
+    if space == 0 {
+        let mut i = 0;
+        // `retain` visits in order and exactly once, which is what makes the
+        // running index line up with `glyphs`; `out` and `glyphs` are still
+        // parallel here because the loop that built `out` pushed exactly one
+        // glyph per iteration.
+        out.retain(|_| {
+            let keep = !glyphs.get(i).is_some_and(|g| g.ignorable);
+            i = i.saturating_add(1);
+            keep
+        });
+        let mut j = 0;
+        klasses.retain(|_| {
+            let keep = !glyphs.get(j).is_some_and(|g| g.ignorable);
+            j = j.saturating_add(1);
+            keep
+        });
+        return;
+    }
+    for (glyph, sub) in out.iter_mut().zip(glyphs) {
+        if !sub.ignorable {
+            continue;
+        }
+        glyph.key = GlyphKey::outline(space);
+        // Advance *and* the kern charged to it, because the kern was added
+        // into the advance when it was charged and leaving it would make the
+        // recorded pieces stop summing to the width. The x offset goes for the
+        // same reason HarfBuzz zeroes it — a zero-advance glyph that is still
+        // displaced would drag its blank somewhere — and the y offset stays,
+        // also as in HarfBuzz, because nothing is drawn for it to move.
+        glyph.advance = 0.0;
+        glyph.kern_next = 0.0;
+        glyph.offset.0 = 0.0;
+    }
+}
+
 /// Move each kern onto the glyph that is now to the *left* of the pair.
 ///
 /// Kerning is a correction to the gap between two glyph images. Which of the
@@ -1615,6 +1707,106 @@ mod tests {
 
     fn font(px: f32) -> ScaledFont {
         ScaledFont::from_bytes(build_test_font(), px).unwrap()
+    }
+
+    /// The fixture has no `space` glyph — its `cmap` is 'A', 'B' and 'C' —
+    /// which puts every string here down the *deletion* branch. That is the
+    /// branch worth testing against a real face, because it is the one that
+    /// changes the glyph count and so the one that can desynchronise
+    /// something.
+    #[test]
+    fn a_face_with_no_space_deletes_the_characters_that_are_never_drawn() {
+        let f = font(1000.0);
+        let plain: Vec<u16> = f.shape("AB").glyphs().iter().map(|g| g.key.gid()).collect();
+        assert_eq!(plain, alloc::vec![1, 2]);
+        for text in [
+            "A\u{200d}B",  // ZWJ
+            "A\u{200c}B",  // ZWNJ
+            "A\u{ad}B",    // SOFT HYPHEN, the one faces draw visibly
+            "A\u{fe0f}B",  // VARIATION SELECTOR-16
+            "A\u{2060}B",  // WORD JOINER
+            "A\u{034f}B",  // COMBINING GRAPHEME JOINER
+        ] {
+            let run = f.shape(text);
+            let gids: Vec<u16> = run.glyphs().iter().map(|g| g.key.gid()).collect();
+            assert_eq!(gids, plain, "{text:?} should shape as {plain:?}");
+        }
+        // The control, and it matters: 'Z' is not in the fixture's `cmap`
+        // either, so it is `.notdef` exactly as the ignorables were — and it
+        // stays. Without this the test above would pass on a `shape` that
+        // simply dropped every unmapped character.
+        let gids: Vec<u16> = f
+            .shape("AZB")
+            .glyphs()
+            .iter()
+            .map(|g| g.key.gid())
+            .collect();
+        assert_eq!(gids, alloc::vec![1, 0, 2]);
+    }
+
+    /// The other branch, which no fixture here can reach because none has a
+    /// space: the glyph stays in the run, so nothing indexed by position
+    /// moves, and it is emptied instead — the space glyph, no advance, no
+    /// horizontal offset.
+    ///
+    /// The vertical offset is deliberately *not* zeroed, which is HarfBuzz's
+    /// behaviour: with no advance and nothing drawn there is nothing for it to
+    /// move, and matching the reference exactly is worth more than tidying it.
+    #[test]
+    fn a_face_with_a_space_empties_the_glyph_rather_than_removing_it() {
+        let ignorable = |yes: bool| {
+            let mut g = SubGlyph::new(0, 0);
+            g.ignorable = yes;
+            g
+        };
+        let subs = alloc::vec![ignorable(false), ignorable(true), ignorable(false)];
+        let filled = |gid: u16| ShapedGlyph {
+            key: GlyphKey::outline(gid),
+            cluster: 0,
+            advance: 7.0,
+            kern_next: 2.0,
+            offset: (3.0, 5.0),
+        };
+        let mut out = alloc::vec![filled(10), filled(11), filled(12)];
+        let mut klasses = alloc::vec![0u8, 1, 2];
+        hide_ignorables(&mut out, &mut klasses, &subs, 3);
+        assert_eq!(out.len(), 3, "the run keeps its length");
+        assert_eq!(klasses, alloc::vec![0, 1, 2], "and so does the class list");
+        assert_eq!(out[1].key.gid(), 3);
+        assert_eq!((out[1].advance, out[1].kern_next), (0.0, 0.0));
+        assert_eq!(out[1].offset, (0.0, 5.0));
+        // The neighbours are untouched — this is not a pass that zeroes a run.
+        assert_eq!(out[0].key.gid(), 10);
+        assert_eq!((out[0].advance, out[0].offset), (7.0, (3.0, 5.0)));
+        assert_eq!(out[2].key.gid(), 12);
+    }
+
+    /// The deletion branch must take the combining classes with it. They are
+    /// indexed by position in the glyph run by `synthesize_marks`, so a
+    /// deletion that left them alone would shift every accent one glyph left —
+    /// silently, and only on faces that need the mark fallback.
+    #[test]
+    fn deleting_a_glyph_deletes_its_combining_class_too() {
+        let ignorable = |yes: bool| {
+            let mut g = SubGlyph::new(0, 0);
+            g.ignorable = yes;
+            g
+        };
+        let subs = alloc::vec![ignorable(false), ignorable(true), ignorable(false)];
+        let filled = |gid: u16| ShapedGlyph {
+            key: GlyphKey::outline(gid),
+            cluster: 0,
+            advance: 1.0,
+            kern_next: 0.0,
+            offset: (0.0, 0.0),
+        };
+        let mut out = alloc::vec![filled(10), filled(11), filled(12)];
+        let mut klasses = alloc::vec![0u8, 230, 220];
+        // `space` of 0 is `glyph_id` reporting the face has no space glyph.
+        hide_ignorables(&mut out, &mut klasses, &subs, 0);
+        let gids: Vec<u16> = out.iter().map(|g| g.key.gid()).collect();
+        assert_eq!(gids, alloc::vec![10, 12]);
+        assert_eq!(klasses, alloc::vec![0, 220]);
     }
 
     /// LAMED then QAMATS: one Hebrew letter and one Hebrew point, neither of

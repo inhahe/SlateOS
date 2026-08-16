@@ -201,6 +201,56 @@ pub(crate) fn is_mark(ch: char) -> bool {
     MARKS.get(i).is_some_and(|&(lo, _)| cp >= lo)
 }
 
+/// The characters that exist to instruct the shaper and are never drawn.
+///
+/// HarfBuzz's `hb_unicode_funcs_t::is_default_ignorable`, transcribed range
+/// for range, and **not** Unicode's `Default_Ignorable_Code_Point` property,
+/// which is a different set. They disagree in both directions:
+///
+/// | | in HarfBuzz | in Unicode |
+/// |---|---|---|
+/// | U+180E MONGOLIAN VOWEL SEPARATOR | yes | removed from the property in 6.3 |
+/// | U+1BCA0..A3 SHORTHAND FORMAT | no | yes |
+/// | U+115F, U+1160, U+3164, U+FFA0 Hangul fillers | no | yes |
+///
+/// The set decides which glyphs are erased at the end of shaping, so taking
+/// Unicode's would make every string containing one of those disagree with
+/// HarfBuzz in a way that reads like a shaping bug and is not.
+///
+/// Written out as a table rather than derived from the Unicode data for the
+/// same reason: a derived set would drift silently the next time that data was
+/// regenerated. This one changes when HarfBuzz changes.
+const IGNORABLE: &[(u32, u32)] = &[
+    (0x0000_00AD, 0x0000_00AD), // SOFT HYPHEN
+    (0x0000_034F, 0x0000_034F), // COMBINING GRAPHEME JOINER
+    (0x0000_061C, 0x0000_061C), // ARABIC LETTER MARK
+    (0x0000_17B4, 0x0000_17B5), // KHMER VOWEL INHERENT AQ, AA
+    (0x0000_180B, 0x0000_180E), // MONGOLIAN free variation selectors, vowel separator
+    (0x0000_200B, 0x0000_200F), // ZERO WIDTH SPACE .. RIGHT-TO-LEFT MARK
+    (0x0000_202A, 0x0000_202E), // the bidi embedding and override controls
+    (0x0000_2060, 0x0000_206F), // WORD JOINER .. NOMINAL DIGIT SHAPES
+    (0x0000_FE00, 0x0000_FE0F), // VARIATION SELECTOR-1 .. -16
+    (0x0000_FEFF, 0x0000_FEFF), // ZERO WIDTH NO-BREAK SPACE
+    (0x0000_FFF0, 0x0000_FFF8), // unassigned, reserved as ignorable
+    (0x0001_D173, 0x0001_D17A), // MUSICAL SYMBOL BEGIN BEAM .. END PHRASE
+    (0x000E_0000, 0x000E_0FFF), // language tags, variation selectors supplement
+];
+
+/// Whether `ch` is one of the characters shaping consumes and never draws:
+/// a joiner, a soft hyphen, a bidi control, a variation selector.
+///
+/// The caller's obligation is *not* to skip them — they take part in shaping,
+/// and a joiner dropped early would stop making the ligature it exists to
+/// request — but to erase them once shaping is over, which is what
+/// [`SubGlyph::ignorable`](crate::gsub::SubGlyph) tracks and
+/// [`ScaledFont::shape`](crate::ScaledFont::shape) acts on.
+#[must_use]
+pub(crate) fn is_default_ignorable(ch: char) -> bool {
+    let cp = ch as u32;
+    let i = IGNORABLE.partition_point(|&(_, hi)| hi < cp);
+    IGNORABLE.get(i).is_some_and(|&(lo, _)| cp >= lo)
+}
+
 /// Whether `text` can possibly change under [`nfc`].
 ///
 /// Text with no combining marks and no composed characters is already in NFC
@@ -712,6 +762,79 @@ mod tests {
     #[test]
     fn a_spacing_combining_mark_is_not_a_mark_here() {
         assert!(!is_mark('\u{93f}'));
+    }
+
+    /// The characters the table names, one per range, and the letters either
+    /// side of the ones that are easiest to get off by one.
+    #[test]
+    fn the_ignorables_are_the_characters_that_instruct_the_shaper() {
+        for ch in [
+            '\u{ad}',     // SOFT HYPHEN, the one that draws a visible hyphen
+            '\u{34f}',    // COMBINING GRAPHEME JOINER
+            '\u{61c}',    // ARABIC LETTER MARK
+            '\u{17b4}',   // KHMER VOWEL INHERENT AQ
+            '\u{17b5}',   // ...and AA, the other end of that range
+            '\u{180b}',   // MONGOLIAN FREE VARIATION SELECTOR ONE
+            '\u{200b}',   // ZERO WIDTH SPACE
+            '\u{200c}',   // ZWNJ
+            '\u{200d}',   // ZWJ
+            '\u{200f}',   // RIGHT-TO-LEFT MARK
+            '\u{202b}',   // RIGHT-TO-LEFT EMBEDDING
+            '\u{2060}',   // WORD JOINER
+            '\u{fe0f}',   // VARIATION SELECTOR-16
+            '\u{feff}',   // ZERO WIDTH NO-BREAK SPACE
+            '\u{1d173}',  // MUSICAL SYMBOL BEGIN BEAM
+            '\u{e0020}',  // TAG SPACE
+            '\u{e0100}',  // VARIATION SELECTOR-17
+        ] {
+            assert!(is_default_ignorable(ch), "{ch:?}");
+        }
+        for ch in [
+            'a', ' ', '-',
+            '\u{ac}',    // one below SOFT HYPHEN
+            '\u{ae}',    // one above
+            '\u{17b3}',  // one below the Khmer pair
+            '\u{17b6}',  // one above it — a real vowel sign, drawn
+            '\u{200a}',  // HAIR SPACE, which is a space and *is* drawn
+            '\u{2010}',  // HYPHEN, the visible one U+00AD is confused with
+            '\u{fdff}', '\u{ff00}',
+        ] {
+            assert!(!is_default_ignorable(ch), "{ch:?}");
+        }
+    }
+
+    /// The set is HarfBuzz's, not Unicode's, and the doc comment says the two
+    /// differ. This is that claim as a test, in both directions, so that
+    /// anyone who "fixes" the table to match the Unicode property finds out
+    /// here rather than in a sweep of 556 faces.
+    #[test]
+    fn the_ignorable_set_is_harfbuzzs_and_not_unicodes() {
+        // In HarfBuzz's list, removed from Unicode's property in 6.3.
+        assert!(is_default_ignorable('\u{180e}'));
+        // In Unicode's property, absent from HarfBuzz's list: the shorthand
+        // format controls and the Hangul fillers.
+        assert!(!is_default_ignorable('\u{1bca0}'));
+        assert!(!is_default_ignorable('\u{115f}'));
+        assert!(!is_default_ignorable('\u{3164}'));
+        // ...and one that *is* in both, so the test cannot pass by the
+        // predicate having become uniformly false.
+        assert!(is_default_ignorable('\u{2065}'));
+    }
+
+    /// The table has to be sorted and disjoint, because the lookup is a binary
+    /// search that assumes both. An unsorted pair would make the search miss a
+    /// character silently — which is the failure mode this whole area is
+    /// trying to avoid, since a missed ignorable is a glyph drawn that should
+    /// not have been.
+    #[test]
+    fn the_ignorable_table_is_sorted_and_disjoint() {
+        for pair in IGNORABLE.windows(2) {
+            let [(lo, hi), (next_lo, next_hi)] = pair else {
+                continue;
+            };
+            assert!(lo <= hi, "{lo:#x}..{hi:#x} is inverted");
+            assert!(hi < next_lo, "{hi:#x} overlaps {next_lo:#x}..{next_hi:#x}");
+        }
     }
 
     /// The property the second sort rests on. If two classes the canonical

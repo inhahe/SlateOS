@@ -251,37 +251,26 @@ fn new_deck() -> Vec<Card> {
 }
 
 // -- RNG ---------------------------------------------------------------------
-
-struct Rng {
-    state: u64,
-}
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    fn next_range(&mut self, max: u64) -> u64 {
-        self.next() % max
-    }
-
-    /// Fisher-Yates shuffle.
-    fn shuffle<T>(&mut self, items: &mut [T]) {
-        let len = items.len();
-        for i in (1..len).rev() {
-            let j = self.next_range((i + 1) as u64) as usize;
-            items.swap(i, j);
-        }
-    }
-}
+//
+// From `randrange`, not a local LCG. The local one drew the Fisher-Yates
+// partner with `state % (i + 1)`, and on a modulus-2^64 generator the low bit
+// of `state` alternates 0,1,0,1 for ever. Half of a 52-card shuffle's bounds
+// are even, and `x % n` for even `n` preserves the parity of `x`, so on all 25
+// of those swaps the partner index had a *single fixed parity* -- chosen by
+// the parity of the seed and nothing else.
+//
+// That is not a subtle bias. Measured before the fix, over 200 000 deals from
+// the generator as the game actually runs it:
+//
+//   * the two of hearts reached player 2 44.3% of the time and player 0 9.5%,
+//     where each should see 25%;
+//   * 40 of the 52 cards were misdealt by more than two percentage points;
+//   * player 0 held the two of clubs -- and so led the first trick -- 33.6% of
+//     the time rather than 25%.
+//
+// The shuffle itself was already the correct downward Fisher-Yates. Only the
+// reduction was wrong, which is why nothing about the code looked suspect.
+use randrange::Rng;
 
 // -- Pass direction ----------------------------------------------------------
 
@@ -1648,56 +1637,77 @@ mod tests {
         assert!(deck.iter().any(|c| c.is_queen_of_spades()));
     }
 
-    // -- RNG tests -----------------------------------------------------------
+    // -- Deal fairness -------------------------------------------------------
+    //
+    // These replace five tests that asked whether the generator was
+    // deterministic, whether two seeds differ, whether a bounded draw stays in
+    // range, and whether a shuffle keeps its elements and changes their order.
+    // All five are properties of the generator, so `randrange` tests them now.
+    // None of the five could see what was actually wrong here, which was that
+    // every card had a favourite seat -- a permutation can keep its elements,
+    // change their order and still be drawn from a handful of the 52!
+    // possibilities. Ask about the deal instead.
+
+    /// Index a card into `0..52`, in the order `new_deck` builds them.
+    fn deck_index(card: &Card) -> usize {
+        card.suit.index() * 13 + usize::from(card.rank.value().saturating_sub(2))
+    }
 
     #[test]
-    fn test_rng_deterministic() {
-        let mut r1 = Rng::new(42);
-        let mut r2 = Rng::new(42);
-        for _ in 0..10 {
-            assert_eq!(r1.next(), r2.next());
+    fn every_card_reaches_every_seat_about_a_quarter_of_the_time() {
+        const DEALS: u32 = 20_000;
+        // One generator across all deals, because that is how the game runs:
+        // `start_round` reshuffles with the same `rng` every round. A defect
+        // that depends on the draw counter therefore has to survive here.
+        let mut rng = Rng::new(42);
+        let mut seats = [[0_u32; 4]; 52];
+        for _ in 0..DEALS {
+            let mut deck = new_deck();
+            rng.shuffle(&mut deck);
+            for (pos, card) in deck.iter().enumerate() {
+                seats[deck_index(card)][pos / 13] += 1;
+            }
+        }
+
+        // A quarter of 20 000 is 5000, with a standard deviation near 61, so
+        // 4 percentage points is over thirteen sigma. The old generator missed
+        // by as much as 19 points.
+        let expected = f64::from(DEALS) / 4.0;
+        for (index, counts) in seats.iter().enumerate() {
+            for (seat, &count) in counts.iter().enumerate() {
+                let share = 100.0 * f64::from(count) / f64::from(DEALS);
+                assert!(
+                    (f64::from(count) - expected).abs() < 0.04 * f64::from(DEALS),
+                    "card {index} reached seat {seat} {share:.1}% of the time, not about 25%"
+                );
+            }
         }
     }
 
     #[test]
-    fn test_rng_different_seeds() {
-        let mut r1 = Rng::new(1);
-        let mut r2 = Rng::new(2);
-        // They should produce different sequences
-        let v1 = r1.next();
-        let v2 = r2.next();
-        assert_ne!(v1, v2);
-    }
-
-    #[test]
-    fn test_rng_range() {
-        let mut rng = Rng::new(99);
-        for _ in 0..100 {
-            let val = rng.next_range(10);
-            assert!(val < 10);
+    fn the_lead_is_not_biased_towards_one_seat() {
+        // Whoever holds the two of clubs leads the first trick, so a biased
+        // deal shows up directly as a biased opening move. The old generator
+        // gave seat 0 the lead 33.6% of the time.
+        const DEALS: u32 = 20_000;
+        let mut rng = Rng::new(7);
+        let mut leads = [0_u32; 4];
+        for _ in 0..DEALS {
+            let mut deck = new_deck();
+            rng.shuffle(&mut deck);
+            let pos = deck
+                .iter()
+                .position(|c| c.suit == Suit::Clubs && c.rank == Rank::Two)
+                .expect("the deck contains the two of clubs");
+            leads[pos / 13] += 1;
         }
-    }
-
-    #[test]
-    fn test_rng_shuffle() {
-        let mut rng = Rng::new(42);
-        let mut items: Vec<u32> = (0..10).collect();
-        let original = items.clone();
-        rng.shuffle(&mut items);
-        // Should still contain same elements
-        items.sort();
-        let mut sorted_original = original;
-        sorted_original.sort();
-        assert_eq!(items, sorted_original);
-    }
-
-    #[test]
-    fn test_rng_shuffle_changes_order() {
-        let mut rng = Rng::new(42);
-        let mut items: Vec<u32> = (0..52).collect();
-        let original = items.clone();
-        rng.shuffle(&mut items);
-        assert_ne!(items, original, "Shuffle should change order");
+        for (seat, &count) in leads.iter().enumerate() {
+            let share = 100.0 * f64::from(count) / f64::from(DEALS);
+            assert!(
+                (share - 25.0).abs() < 4.0,
+                "seat {seat} led {share:.1}% of the hands, not about 25%"
+            );
+        }
     }
 
     // -- Pass direction tests ------------------------------------------------
@@ -2885,15 +2895,22 @@ mod tests {
 
     #[test]
     fn test_different_seeds_different_deals() {
-        let mut g1 = Hearts::new();
-        g1.rng = Rng::new(1);
-        g1.start_round();
-
-        let mut g2 = Hearts::new();
-        g2.rng = Rng::new(999);
-        g2.start_round();
-
-        // Hands should (almost certainly) differ
-        assert_ne!(g1.hands[0], g2.hands[0]);
+        // This compared seed 1 against seed 999 and asserted the two hands
+        // differed. They did -- and `apps/sliding` passed the same shape of
+        // test while its generator had only two distinct boards in the whole
+        // seed space. "Are these two different?" cannot tell two outcomes from
+        // a thousand. Count distinct hands over many seeds instead.
+        let mut hands = std::collections::BTreeSet::new();
+        for seed in 0..200 {
+            let mut game = Hearts::new();
+            game.rng = Rng::new(seed);
+            game.start_round();
+            hands.insert(game.hands[0].clone());
+        }
+        assert!(
+            hands.len() > 190,
+            "200 seeds produced only {} distinct hands for seat 0",
+            hands.len()
+        );
     }
 }

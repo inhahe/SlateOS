@@ -40,6 +40,12 @@
 //! and is pulled into each integration test with `#[path = "../src/hostpath.rs"]`
 //! — one source of truth, and not a byte of it in the binary that ships.
 
+// This file is compiled into four crates — the library's own test build and the
+// three integration tests — and each uses a different part of it: the in-process
+// tests want `host_path`, the spawning ones want `scrub`. Whichever is unused in
+// a given build is not dead code, it is the other suite's half.
+#![allow(dead_code)]
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 

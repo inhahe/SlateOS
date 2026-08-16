@@ -1850,6 +1850,7 @@ version = "0.1.0"
 name = "coreutils"
 version = "0.1.0"
 dependencies = [
+ "bignum",
  "ere",
 ]
 

@@ -590,9 +590,9 @@ on an invariant maintained by four other methods. All three are now a single
 
 ## The same broken reduction is copy-pasted into 27 crates, and `randrange` now exists to replace it (lane C)
 
-**Status: OPEN 2026-08-16 — five of 27 crates fixed** (`simon`, `battleship`,
-`sliding`, `asteroids`, `yahtzee`); the shared crate that the rest should move
-to is written and green.
+**Status: OPEN 2026-08-16 — eight of 27 crates fixed** (`simon`, `battleship`,
+`sliding`, `asteroids`, `yahtzee`, `hearts`, `solitaire`, `freecell`); the
+shared crate that the rest should move to is written and green.
 
 The defect above is not `simon`'s. A scan of the tree
 (`build/scratch/lcg_scan.py`) finds the same LCG constants in **~36 places** and
@@ -617,6 +617,19 @@ measured:
 | `apps/sliding` | 4 | 499 seeds produced **two** distinct 4×4 boards between them | fixed `de4280a98` |
 | `apps/asteroids` | 4 | every asteroid of every wave entered from **one** edge; the seed only chose which | fixed `762afae1f` |
 | `apps/yahtzee` | 6 | adjacent dice locked to opposite parity, so a Yahtzee was impossible — zero in 15 000 rolls, ~12 expected | fixed `81b88fc5e` |
+| `apps/hearts` | 2..52 | the two of hearts reached seat 2 44.3% of deals and seat 0 9.5%; 40 of 52 cards misdealt by >2 points; seat 0 led 33.6% of hands | fixed `63066a45b` |
+| `apps/solitaire` | 2..52 | the two of hearts was the leftmost face-up card in 17.6% of deals, against 1.9% | fixed `ea4560541` |
+| `apps/freecell` | 2..52 | the ace of hearts was the deepest card on the board in 17.4% of deals; ace depth alternated 8.5 / 15.5 / 9.7 / 16.2% | fixed `e1fa03154` |
+
+**The three card games are one shape and worth reading together.** All three
+shuffle 52 cards with a correct downward Fisher–Yates and draw the partner with
+`state % (i + 1)`. Half of those 51 bounds are even, so on 25 of the swaps the
+partner index carried a fixed parity — set by the parity of the draw counter,
+which is set by the seed and nothing else. `solitaire` and `freecell` make it
+worse than `hearts` does, because their `new_game` *reseeds* (`Rng::new(self
+.rng.next_u64())`): the draw counter restarts at zero every deal, so every deal
+repeats the same pattern of fixed parities and only which parity varies. That
+is why one card could own the same slot in a sixth of all games.
 
 `apps/pipes` was in this table and should not have been: its `next_bounded`
 shifts (`>> 33`) before the `%`, so it never touches the low-bit counter. The
@@ -632,12 +645,9 @@ so long: most call sites use an odd or non-power-of-two bound and look fine,
 and the ones that do not still pass every distribution test written against
 them.
 
-Still degenerate, not yet migrated: `breakout`, `dots`, `flood`, `freecell`,
-`hangman`, `hearts`, `life`, `lightsout`, `match3`, `maze`, `memory`,
-`minesweeper`, `pacman`, `pinball`, `snake`, `solitaire`, `sudoku`, `tetris`,
-`wordle`, `wordsearch`. `hearts` is the most interesting of them — it reduces
-with `self.next() % max` against a *decreasing* deck size, which is the card
-shuffle itself.
+Still degenerate, not yet migrated: `breakout`, `dots`, `flood`, `hangman`,
+`life`, `lightsout`, `match3`, `maze`, `memory`, `minesweeper`, `pacman`,
+`pinball`, `snake`, `sudoku`, `tetris`, `wordle`, `wordsearch`.
 
 The replacement is **`randrange/`**, a new top-level `no_std`,
 dependency-free crate on the same pattern as `textfind`, `byteread` and

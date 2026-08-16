@@ -47,7 +47,7 @@
 use alloc::vec::Vec;
 
 use crate::gsub::{ALL_FEATURES, Staging, SubGlyph, Substitutions, feature_bit, feature_bits};
-use crate::indic::Category;
+use crate::indic::{Category, Char, Position};
 use crate::khmer_machine::{ACCEPTS, TRANSITIONS};
 use crate::lang::Lang;
 use crate::norm::Piece;
@@ -176,7 +176,11 @@ pub(crate) fn present(text: &str) -> bool {
 /// combining class 0, so the sort cannot move one, and none of them takes part
 /// in any canonical composition, so `compose` cannot put one back together.
 /// HarfBuzz needs a `compose_khmer` that refuses to recompose a mark for
-/// exactly the case this crate does not have.
+/// exactly the case this crate does not have here. The scripts that *do* have
+/// it — the two-part vowels Unicode records a decomposition for — are covered
+/// by `norm`'s `SplitVowels` switch instead, which is one rule for both
+/// reordering engines rather than a hook per shaper; see
+/// `design-decisions.md` §439.
 pub(crate) fn split_matras(pieces: &mut Vec<Piece>, has_glyph: impl Fn(char) -> bool) {
     if !pieces.iter().any(|&(ch, _)| SPLIT.contains(&ch)) {
         return;
@@ -434,7 +438,12 @@ fn reorder(masks: &Masks, glyphs: &mut Vec<SubGlyph>, dotted: Option<u16>) {
     syllabic::insert_dotted_circles(
         glyphs,
         dotted,
-        Category::DottedCircle,
+        |g| {
+            g.indic = Char {
+                category: Category::DottedCircle,
+                position: Position::End,
+            };
+        },
         |stamp| Syllable::from_code(stamp) == Syllable::Broken,
         // No skip. Indic's circle goes after a repha, which is drawn above the
         // letter that follows and so needs a letter to follow; Khmer has no

@@ -43,15 +43,19 @@
 //! the right ones when the last record runs, whereas a substitution may have
 //! ligated a glyph away under a later record's feet.
 //!
-//! # What is not here
+//! # Sizes
 //!
-//! Device tables are read past: they tune a value for one specific ppem, and
-//! the value without them is the designer's intent at every size. See
-//! `TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING`.
+//! Every coordinate here may carry a device table, a per-pixel-size correction
+//! to the design-unit value beside it. That makes the pass's answer depend on
+//! the size it is asked at, which is why [`Run`] carries a
+//! [`Ppem`](crate::device::Ppem) and why a caller with no size — an unscaled
+//! [`Face`](crate::sfnt::Face) — gets the uncorrected values. See
+//! [`device`](crate::device).
 
 use alloc::vec::Vec;
 
 use crate::context::{MAX_NESTING, Matched, chain_match, context_match, read_records};
+use crate::device::Ppem;
 use crate::gsub::SubGlyph;
 use crate::lang::Lang;
 use crate::mark::{attachment, lig_attachment};
@@ -149,12 +153,26 @@ const RIGHT_TO_LEFT: u16 = 0x0001;
 const MAX_CHAIN: usize = 64;
 
 /// Value-record flags, in the order the fields appear in the record.
+///
+/// The four device flags name a `Device` table offset rather than a value; each
+/// sits four bits above the coordinate it corrects, which is why the pairing
+/// below can be written as a shift.
 const X_PLACEMENT: u16 = 0x0001;
 const Y_PLACEMENT: u16 = 0x0002;
 const X_ADVANCE: u16 = 0x0004;
 const Y_ADVANCE: u16 = 0x0008;
+const X_PLACEMENT_DEVICE: u16 = 0x0010;
+const Y_PLACEMENT_DEVICE: u16 = 0x0020;
+const X_ADVANCE_DEVICE: u16 = 0x0040;
+const Y_ADVANCE_DEVICE: u16 = 0x0080;
 
-/// One `ValueRecord`, with the device-table corrections dropped.
+/// One `ValueRecord`, in font units, with any device-table correction for the
+/// size it was read at already folded in.
+///
+/// Folded in rather than carried separately because nothing downstream could do
+/// anything else with it: the correction is a displacement in the same units and
+/// along the same axis as the value it corrects, and a caller that wanted them
+/// apart would only be adding them itself.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Value {
     pub(crate) x_placement: i16,
@@ -168,22 +186,36 @@ impl Value {
     ///
     /// The fields are stored in flag order with the absent ones simply missing,
     /// so a field's offset within the record is the size of a record holding
-    /// only the flags *below* it — which is what `bit - 1` masks out.
-    fn read(data: &[u8], at: usize, format: u16) -> Self {
-        let field = |bit: u16| -> i16 {
+    /// only the flags *below* it — which is what `bit - 1` masks out. That is
+    /// as true of the device offsets as of the coordinates: they are two bytes
+    /// each in the same list, and only their meaning differs.
+    ///
+    /// `sub` is the subtable the record lives in, which is what every one of
+    /// these device offsets is measured from — not the record, and not the
+    /// table.
+    fn read(data: &[u8], sub: usize, at: usize, format: u16, ppem: Ppem) -> Self {
+        let field_at = |bit: u16| -> Option<usize> {
             if format & bit == 0 {
-                return 0;
+                return None;
             }
-            let skip = value_size(format & bit.wrapping_sub(1));
-            at.checked_add(skip)
-                .and_then(|o| i16_at(data, o))
-                .unwrap_or(0)
+            at.checked_add(value_size(format & bit.wrapping_sub(1)))
         };
+        let coord = |bit: u16| -> i16 {
+            field_at(bit).and_then(|o| i16_at(data, o)).unwrap_or(0)
+        };
+        let correction = |bit: u16| -> i16 {
+            field_at(bit)
+                .and_then(|o| u16_at(data, o))
+                .map_or(0, |offset| ppem.delta(data, sub, offset))
+        };
+        // Saturating because a font whose correction overflows an i16 is broken
+        // in a way that a wrapped coordinate would hide.
+        let axis = |value: u16, device: u16| coord(value).saturating_add(correction(device));
         Self {
-            x_placement: field(X_PLACEMENT),
-            y_placement: field(Y_PLACEMENT),
-            x_advance: field(X_ADVANCE),
-            y_advance: field(Y_ADVANCE),
+            x_placement: axis(X_PLACEMENT, X_PLACEMENT_DEVICE),
+            y_placement: axis(Y_PLACEMENT, Y_PLACEMENT_DEVICE),
+            x_advance: axis(X_ADVANCE, X_ADVANCE_DEVICE),
+            y_advance: axis(Y_ADVANCE, Y_ADVANCE_DEVICE),
         }
     }
 }
@@ -278,6 +310,11 @@ pub(crate) struct Run<'a> {
     /// `None` — and any language the script does not register — takes the
     /// script's default language system. See [`lang`](crate::lang).
     pub(crate) lang: Option<Lang>,
+    /// The size the run will be drawn at, which selects the row of every device
+    /// table the lookups reach. [`Ppem::NONE`] asks for the uncorrected values,
+    /// which is what a caller that does not yet know its size must pass — see
+    /// [`device`](crate::device).
+    pub(crate) ppem: Ppem,
 }
 
 /// A face's `GPOS`, resolved once per script.
@@ -421,7 +458,7 @@ impl Positioning {
         depth: usize,
     ) -> Option<usize> {
         match lookup.kind {
-            SINGLE_POS => single(data, sub, run.glyphs, i, out),
+            SINGLE_POS => single(data, sub, run.glyphs, i, out, run.ppem),
             PAIR_POS => {
                 let skip = Skipper::new(
                     data,
@@ -431,7 +468,7 @@ impl Positioning {
                     u64::MAX,
                     Joiners::POSITIONING,
                 );
-                pair(data, sub, skip, run.glyphs, i, out)
+                pair(data, sub, skip, run.glyphs, i, out, run.ppem)
             }
             CURSIVE_POS => {
                 let skip = Skipper::new(
@@ -458,7 +495,7 @@ impl Positioning {
                     Joiners::POSITIONING,
                 );
                 let j = skip.prev(run.glyphs, i)?;
-                attach(data, sub, run.glyphs, i, j, out)
+                attach(data, sub, run.glyphs, i, j, out, run.ppem)
             }
             MARK_LIG_POS => {
                 // Same search as mark-to-base, for the same reason.
@@ -471,7 +508,7 @@ impl Positioning {
                     Joiners::POSITIONING,
                 );
                 let j = skip.prev(run.glyphs, i)?;
-                attach_to_lig(data, sub, run.glyphs, i, j, out)
+                attach_to_lig(data, sub, run.glyphs, i, j, out, run.ppem)
             }
             MARK_MARK_POS => {
                 // Here the lookup's flag is kept except for the three "ignore"
@@ -491,7 +528,7 @@ impl Positioning {
                 if self.defs.class(data, below) != CLASS_MARK {
                     return None;
                 }
-                attach(data, sub, run.glyphs, i, j, out)
+                attach(data, sub, run.glyphs, i, j, out, run.ppem)
             }
             CONTEXT_POS => {
                 let skip = Skipper::new(
@@ -582,6 +619,7 @@ fn single(
     glyphs: &[SubGlyph],
     i: usize,
     out: &mut [Adjust],
+    ppem: Ppem,
 ) -> Option<usize> {
     let gid = glyphs.get(i)?.gid;
     let coverage = sub.checked_add(usize::from(u16_at(data, sub.checked_add(2)?)?))?;
@@ -600,7 +638,7 @@ fn single(
         }
         _ => return None,
     };
-    out.get_mut(i)?.add(Value::read(data, at, format));
+    out.get_mut(i)?.add(Value::read(data, sub, at, format, ppem));
     i.checked_add(1)
 }
 
@@ -612,11 +650,12 @@ fn pair(
     glyphs: &[SubGlyph],
     i: usize,
     out: &mut [Adjust],
+    ppem: Ppem,
 ) -> Option<usize> {
     let left = glyphs.get(i)?.gid;
     let j = skip.next(glyphs, i)?;
     let right = glyphs.get(j)?.gid;
-    let (first, second, has_second) = pair_values(data, sub, left, right)?;
+    let (first, second, has_second) = pair_values(data, sub, left, right, ppem)?;
     if let Some(adjust) = out.get_mut(i) {
         adjust.add(first);
         adjust.kern = adjust.kern.saturating_add(i32::from(first.x_advance));
@@ -641,6 +680,7 @@ pub(crate) fn pair_values(
     sub: usize,
     left: u16,
     right: u16,
+    ppem: Ppem,
 ) -> Option<(Value, Value, bool)> {
     let format = u16_at(data, sub)?;
     let coverage = sub.checked_add(usize::from(u16_at(data, sub.checked_add(2)?)?))?;
@@ -653,8 +693,14 @@ pub(crate) fn pair_values(
         _ => return None,
     };
     Some((
-        Value::read(data, at, value1),
-        Value::read(data, at.checked_add(value_size(value1))?, value2),
+        Value::read(data, sub, at, value1, ppem),
+        Value::read(
+            data,
+            sub,
+            at.checked_add(value_size(value1))?,
+            value2,
+            ppem,
+        ),
         value2 != 0,
     ))
 }
@@ -755,10 +801,10 @@ fn cursive(
     };
 
     let this = record(run.glyphs.get(i)?.gid)?;
-    let exit = crate::mark::anchor(data, sub, u16_at(data, this.checked_add(2)?)?)?;
+    let exit = crate::mark::anchor(data, sub, u16_at(data, this.checked_add(2)?)?, run.ppem)?;
     let j = skip.next(run.glyphs, i)?;
     let next = record(run.glyphs.get(j)?.gid)?;
-    let entry = crate::mark::anchor(data, sub, u16_at(data, next)?)?;
+    let entry = crate::mark::anchor(data, sub, u16_at(data, next)?, run.ppem)?;
 
     let (exit_x, exit_y) = (i32::from(exit.0), i32::from(exit.1));
     let (entry_x, entry_y) = (i32::from(entry.0), i32::from(entry.1));
@@ -826,8 +872,9 @@ fn attach(
     i: usize,
     j: usize,
     out: &mut [Adjust],
+    ppem: Ppem,
 ) -> Option<usize> {
-    let (dx, dy) = attachment(data, sub, glyphs.get(j)?.gid, glyphs.get(i)?.gid)?;
+    let (dx, dy) = attachment(data, sub, glyphs.get(j)?.gid, glyphs.get(i)?.gid, ppem)?;
     let adjust = out.get_mut(i)?;
     // Assignment, not accumulation: an anchor pair states where the mark goes,
     // and a second lookup that also has an anchor for it is overriding the
@@ -855,6 +902,7 @@ fn attach_to_lig(
     i: usize,
     j: usize,
     out: &mut [Adjust],
+    ppem: Ppem,
 ) -> Option<usize> {
     let mark = *glyphs.get(i)?;
     let lig = *glyphs.get(j)?;
@@ -863,7 +911,7 @@ fn attach_to_lig(
     } else {
         0
     };
-    let (dx, dy) = lig_attachment(data, sub, lig.gid, mark.gid, component)?;
+    let (dx, dy) = lig_attachment(data, sub, lig.gid, mark.gid, component, ppem)?;
     let adjust = out.get_mut(i)?;
     adjust.x_offset = i32::from(dx);
     adjust.y_offset = i32::from(dy);
@@ -1058,15 +1106,94 @@ mod tests {
     fn a_value_record_finds_its_fields_whichever_are_present() {
         // XPlacement and XAdvance only: two fields, XAdvance second.
         let data = [0x00, 0x0A, 0xFF, 0xF6];
-        let v = Value::read(&data, 0, X_PLACEMENT | X_ADVANCE);
+        let v = Value::read(&data, 0, 0, X_PLACEMENT | X_ADVANCE, Ppem::NONE);
         assert_eq!(v.x_placement, 10);
         assert_eq!(v.x_advance, -10);
         assert_eq!(v.y_placement, 0);
         assert_eq!(v.y_advance, 0);
         // The same bytes read as YAdvance alone put the first field there.
-        let v = Value::read(&data, 0, Y_ADVANCE);
+        let v = Value::read(&data, 0, 0, Y_ADVANCE, Ppem::NONE);
         assert_eq!(v.y_advance, 10);
         assert_eq!(v.x_advance, 0);
+    }
+
+    /// A `SinglePosFormat1` subtable over one glyph whose value record carries
+    /// a device table on the placement *and* one on the advance.
+    ///
+    /// Both, because the two corrections are read through the same offset
+    /// arithmetic and a reader that confused them would still move the glyph —
+    /// just the wrong way and by the wrong amount.
+    fn single_pos1_device(id: u16, value: Value) -> Vec<u8> {
+        let format = X_PLACEMENT | X_ADVANCE | X_PLACEMENT_DEVICE | X_ADVANCE_DEVICE;
+        let cov = coverage1(&[id]);
+        // 6-byte header, 8-byte record, then the coverage, then the tables.
+        let cov_at = 14u16;
+        let place_at = cov_at + u16::try_from(cov.len()).unwrap();
+        // Two bits per delta covers -2..=1, four bits -8..=7 — enough to tell
+        // the two tables apart by the size of what they do.
+        let place = crate::device::table(10, 12, 1, &[1, -1, 0]);
+        let advance_at = place_at + u16::try_from(place.len()).unwrap();
+        let advance = crate::device::table(10, 12, 2, &[-3, 3, 0]);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1));
+        out.extend_from_slice(&be16(cov_at));
+        out.extend_from_slice(&be16(format));
+        out.extend_from_slice(&value.x_placement.to_be_bytes());
+        out.extend_from_slice(&value.x_advance.to_be_bytes());
+        out.extend_from_slice(&be16(place_at));
+        out.extend_from_slice(&be16(advance_at));
+        out.extend_from_slice(&cov);
+        out.extend_from_slice(&place);
+        out.extend_from_slice(&advance);
+        out
+    }
+
+    #[test]
+    fn a_device_table_corrects_the_value_at_the_size_it_names() {
+        let data = single_pos1_device(
+            7,
+            Value {
+                x_placement: 30,
+                x_advance: -40,
+                ..Value::default()
+            },
+        );
+        let run = glyphs(&[7]);
+
+        // With no size, the design-unit record is the whole answer — which is
+        // what an unscaled face must still get.
+        let mut out = alloc::vec![Adjust::plain(500)];
+        single(&data, 0, &run, 0, &mut out, Ppem::NONE);
+        assert_eq!((out[0].x_offset, out[0].x_advance), (30, 460));
+
+        // At 11px the table says -1 pixel of placement and +3 of advance, which
+        // at 1000 units to the em is -90 and +272 font units.
+        let mut out = alloc::vec![Adjust::plain(500)];
+        single(&data, 0, &run, 0, &mut out, Ppem::new(11.0, 1000));
+        assert_eq!(
+            (out[0].x_offset, out[0].x_advance),
+            (30 - 1000 / 11, 500 - 40 + 3 * 1000 / 11)
+        );
+
+        // At 12px both deltas are zero, and at 13px the table does not reach —
+        // two different reasons for the same answer, and both must give it.
+        for px in [12.0, 13.0] {
+            let mut out = alloc::vec![Adjust::plain(500)];
+            single(&data, 0, &run, 0, &mut out, Ppem::new(px, 1000));
+            assert_eq!((out[0].x_offset, out[0].x_advance), (30, 460), "{px}px");
+        }
+    }
+
+    #[test]
+    fn a_device_correction_scales_with_the_em_it_is_read_against() {
+        // The same table on a 2048-unit face must move the glyph the same
+        // *pixel* distance, which is a different number of font units.
+        let data = single_pos1_device(7, Value::default());
+        let run = glyphs(&[7]);
+        let mut out = alloc::vec![Adjust::plain(0)];
+        single(&data, 0, &run, 0, &mut out, Ppem::new(11.0, 2048));
+        assert_eq!(out[0].x_offset, -2048 / 11);
     }
 
     /// A `SinglePosFormat1` subtable over `ids`, applying `value`.
@@ -1094,11 +1221,11 @@ mod tests {
         );
         let run = glyphs(&[7, 8]);
         let mut out = alloc::vec![Adjust::plain(500), Adjust::plain(500)];
-        assert_eq!(single(&data, 0, &run, 0, &mut out), Some(1));
+        assert_eq!(single(&data, 0, &run, 0, &mut out, Ppem::NONE), Some(1));
         assert_eq!(out[0].x_offset, 30);
         assert_eq!(out[0].x_advance, 460);
         // The uncovered glyph is not touched, and reports no match.
-        assert_eq!(single(&data, 0, &run, 1, &mut out), None);
+        assert_eq!(single(&data, 0, &run, 1, &mut out, Ppem::NONE), None);
         assert_eq!(out[1], Adjust::plain(500));
     }
 
@@ -1116,8 +1243,8 @@ mod tests {
 
         let run = glyphs(&[4, 9]);
         let mut out = alloc::vec![Adjust::plain(100), Adjust::plain(100)];
-        single(&data, 0, &run, 0, &mut out);
-        single(&data, 0, &run, 1, &mut out);
+        single(&data, 0, &run, 0, &mut out, Ppem::NONE);
+        single(&data, 0, &run, 1, &mut out, Ppem::NONE);
         assert_eq!(out[0].x_advance, 89);
         assert_eq!(out[1].x_advance, 78);
     }
@@ -1157,7 +1284,7 @@ mod tests {
         let defs = Definitions::default();
         let skip = Skipper::new(&data, defs, 0, 0, u64::MAX, Joiners::POSITIONING);
         // No second record, so the second glyph may still open the next pair.
-        assert_eq!(pair(&data, 0, skip, &run, 0, &mut out), Some(1));
+        assert_eq!(pair(&data, 0, skip, &run, 0, &mut out, Ppem::NONE), Some(1));
         assert_eq!(out[0].x_advance, 440);
         assert_eq!(out[0].kern, -60);
         assert_eq!(out[1], Adjust::plain(500));
@@ -1176,7 +1303,7 @@ mod tests {
             u64::MAX,
             Joiners::POSITIONING,
         );
-        assert_eq!(pair(&data, 0, skip, &run, 0, &mut out), Some(2));
+        assert_eq!(pair(&data, 0, skip, &run, 0, &mut out, Ppem::NONE), Some(2));
         assert_eq!(out[0].x_advance, 440);
         assert_eq!(out[1].x_advance, 490);
         // Only the first half is a gap between the pair; the second is the
@@ -1248,7 +1375,7 @@ mod tests {
     /// Where `attach_to_lig` puts the mark at 1 on the ligature at 0.
     fn on_component(data: &[u8], run: &[SubGlyph]) -> Option<i32> {
         let mut out = alloc::vec![Adjust::plain(0); run.len()];
-        attach_to_lig(data, 0, run, 1, 0, &mut out)?;
+        attach_to_lig(data, 0, run, 1, 0, &mut out, Ppem::NONE)?;
         Some(out.get(1)?.x_offset)
     }
 
@@ -1656,6 +1783,7 @@ mod tests {
                     rtl: false,
                     script: None,
                     lang: None,
+                    ppem: Ppem::NONE,
                 },
             )
             .iter()
@@ -1685,6 +1813,7 @@ mod tests {
                 rtl: false,
                 script: None,
                 lang: None,
+                ppem: Ppem::NONE,
             },
         )
         .iter()

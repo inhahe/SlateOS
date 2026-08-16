@@ -61,6 +61,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
+use crate::device::Ppem;
 use crate::gpos::{Adjust, Positioning, Run};
 use crate::gsub::{SubGlyph, Substitutions};
 use crate::indic_shape::{self, Script};
@@ -1306,11 +1307,38 @@ impl Face {
     /// `A` and `V` keep kerning with an accent between them. Only a lookup
     /// whose flag would have let it see past every glyph in `between` is
     /// consulted, so a pair separated by a *letter* is still not kerned.
+    ///
+    /// This is the answer at the face's design size, because a face has no
+    /// other size to answer at. A pair whose `GPOS` record carries a device
+    /// table is kerned slightly differently once a size is known — see
+    /// [`ScaledFont::kern_across`](crate::scaled::ScaledFont::kern_across),
+    /// which is the one that matches how the text will actually be drawn.
     #[must_use]
     pub fn kern_across(&self, left: u16, right: u16, between: &[u16]) -> i16 {
+        self.kern_across_at(left, right, between, Ppem::NONE)
+    }
+
+    /// The same, at a known pixel size, so that device-table corrections apply.
+    pub(crate) fn kern_across_at(
+        &self,
+        left: u16,
+        right: u16,
+        between: &[u16],
+        ppem: Ppem,
+    ) -> i16 {
         self.kerning
             .as_ref()
-            .map_or(0, |k| k.pair(&self.data, left, right, between))
+            .map_or(0, |k| k.pair(&self.data, left, right, between, ppem))
+    }
+
+    /// The pixel size a device table should be read at when this face is drawn
+    /// at `px_per_em`.
+    ///
+    /// Here rather than in [`device`](crate::device) because the em a pixel
+    /// correction is converted back through is the face's, and this is what
+    /// holds it.
+    pub(crate) fn ppem(&self, px_per_em: f32) -> Ppem {
+        Ppem::new(px_per_em, self.metrics.units_per_em)
     }
 
     /// Whether this face carries any pair kerning this can read.

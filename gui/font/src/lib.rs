@@ -42,6 +42,7 @@ pub mod bidi;
 mod bidi_tables;
 pub mod cff;
 mod context;
+mod device;
 mod fallback;
 #[cfg(test)]
 mod fixture;

@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 
 use crate::FontMetrics;
 use crate::bidi::{self, Base, Level};
+use crate::device::Ppem;
 use crate::fallback::{self, Extents};
 use crate::gpos::{Adjust, Run};
 use crate::gsub::SubGlyph;
@@ -445,9 +446,19 @@ impl ScaledFont {
 
     /// The same, for a pair with `between` standing between them — the marks a
     /// face's "ignore marks" kerning is meant to be read across.
+    ///
+    /// Read at this font's pixel size, so that a pair whose `GPOS` record
+    /// carries a device table is kerned the way it will be drawn rather than
+    /// the way the design units alone would say.
     #[must_use]
     pub fn kern_across(&self, left: u16, right: u16, between: &[u16]) -> f32 {
-        f32::from(self.face.kern_across(left, right, between)) * self.scale
+        f32::from(self.face.kern_across_at(left, right, between, self.ppem())) * self.scale
+    }
+
+    /// The size device tables are read at for this font. See
+    /// [`device`](crate::device).
+    fn ppem(&self) -> Ppem {
+        self.face.ppem(self.px_per_em)
     }
 
     /// The same, read from the legacy `kern` table alone.
@@ -1375,6 +1386,7 @@ impl ScaledFont {
                 rtl,
                 script: segment.script,
                 lang,
+                ppem: self.ppem(),
             }) else {
                 continue;
             };

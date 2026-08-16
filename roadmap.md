@@ -492,7 +492,12 @@ assigned. Pick the top unclaimed item in your own lane.
 
 Roadmap:
 
-- `[A]` Ada/SPARK FFI bridge for kernel-space drivers (line ~345)
+- ~~`[A]` Ada/SPARK FFI bridge for kernel-space drivers~~ (line ~1206) —
+  **done 2026-08-16.** Cross-GNAT via Alire, ZFP runtime, prebuilt `.o` +
+  stamp so the toolchain is not a build prerequisite (`design-decisions.md`
+  §205). First proved component is the virtqueue descriptor allocator, and
+  `kernel/src/virtio/queue.rs` now routes every index decision through it,
+  which closes `B-VIRTIO-UNVALIDATED-USED-ID`.
 - ~~`[A]` Enable LLVM CFI as default for C/C++ compilation~~ (line ~282) —
   **do not pick this up.** Deferred by the operator (`design-decisions.md`
   §201); waiting in `deferred-questions.md` → D-Q2 until the first substantial
@@ -1203,7 +1208,14 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [x] Self-test for API consistency
   - [x] IOMMU page table setup (DMA remapping)
   - [x] Per-device DMA sandboxing for driver isolation
-- [ ] `[A]` Ada/SPARK FFI bridge for kernel-space drivers
+- [x] `[A]` Ada/SPARK FFI bridge for kernel-space drivers
+  - [x] Windows-hosted cross toolchain via Alire (`gnat_x86_64_elf` + gprbuild + gnatprove); see design-decisions.md §205
+  - [x] ZFP runtime, freestanding `x86_64-elf` object linked by rust-lld into the kernel image
+  - [x] `__gnat_last_chance_handler` bound to the Rust panic path, so an Ada run-time check failure is diagnosable rather than a triple fault
+  - [x] Committed prebuilt `.o` + SHA-256 `stamp.txt` checked by `kernel/build.rs` on every build, so the ~1 GB toolchain is not a prerequisite for building the workspace
+  - [x] First proved component: SPARK virtqueue descriptor index/free-list allocator (`kernel/ada/src/virtqueue_descriptors.adb`), gnatprove 106/106
+  - [x] `kernel/src/ada.rs` safe wrapper + boot self-test pinning the FFI boundary (status discriminants, `out` params, `Max_Descriptors`/`Max_Queues`)
+  - [x] `kernel/src/virtio/queue.rs` routes every index decision through it; free list removed from device-visible memory (closes B-VIRTIO-UNVALIDATED-USED-ID)
 - [x] virtio drivers (disk, network, GPU, sound) for VM development/testing
   - [x] virtio-blk driver (legacy PCI transport, synchronous sector I/O, interrupt-driven completion with polling fallback)
   - [x] virtio-net driver (legacy PCI transport, RX/TX queues, MAC read, interrupt acknowledgment)

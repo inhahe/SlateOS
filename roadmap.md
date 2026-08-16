@@ -887,11 +887,28 @@ Roadmap:
   resolves to level 2 inside a level-1 paragraph. The issue's own `"(123)"`
   example turned out not to demonstrate the bug — L4 and L2 cancel for a
   balanced pair — so the test uses `"(a"`, which draws as `a)` right to left.
-  **Next: the widgets, which draw every caret by logical prefix width and so
-  do not benefit from any of the above**
-  (`TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL` — a
-  `TextCursor { byte, affinity }` in `guitk`, then `pathbar`, `textview`, and
-  disjoint selection rectangles). Vello itself waits on `[A]`'s GPU driver.
+  **And the widgets, which had drawn every caret by logical prefix width and
+  so benefited from none of the above** — done
+  (`TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL` closed, §444).
+  `guitk::text::TextCursor { byte, affinity }` is the caret type; a click
+  returns one through `cursor_at` and it draws back where the click was, which
+  a bare byte offset cannot do at a direction boundary. Deliberately not `Ord`:
+  two cursors at one offset with different affinities are one place in the text
+  and two on the screen. And a selection is now a **list** of rectangles
+  (`ShapedRun::selection_rects`), because a range contiguous in the string need
+  not be contiguous on screen — the old two-edge form `x_of(to) - x_of(from)`
+  painted the characters *between* the pieces, telling the user they had
+  selected text they had not. `pathbar` and `textview` both loop over the
+  boxes; `textview` is read-only, so it needed the selection half only.
+  The audit that came with it found a crash class rather than a mis-draw:
+  three widgets held a byte-offset cursor and stepped it by **one byte**, so
+  the first non-ASCII character armed a panic in the next `String::insert`/
+  `remove` (`GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES`, fixed in
+  `guitk::widget::TextInput`, `guitk::modal::InputDialog` and `apps/editor`,
+  which additionally needed `snap_to_boundary` for a column carried between
+  lines). Still open, and wanting its own entry: arrow keys move in *logical*
+  order, so a caret crossing a direction boundary jumps across the screen
+  rather than stepping. Vello itself waits on `[A]`'s GPU driver.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
   (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it

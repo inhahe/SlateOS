@@ -520,10 +520,26 @@ def test_history_still_loads(bh):
     regressed, improved, added, removed, drift = bh.diff(
         previous, current, 25.0
     )
-    # Consecutive records come from the same suite, so nothing should appear
-    # or vanish; if it does, either the suite changed or the schema broke.
-    check("consecutive records share a benchmark set",
-          (added, removed), ([], []))
+    # Consecutive records come from the same suite, so a benchmark that
+    # *vanishes* means the suite changed or the schema broke -- and it is the
+    # dangerous direction, because the loss is silent: the benchmark stops being
+    # measured, its regression coverage disappears with it, and its accumulated
+    # history is orphaned with nothing left to diff against.
+    check("no benchmark vanished between consecutive records", removed, [])
+    # An addition is the opposite: coverage went up. It is the intended outcome
+    # of wiring a print-only measurement onto the scorecard, and there are ~20
+    # such measurements still to wire up, so asserting `added == []` would fail
+    # once per improvement. An assertion that fires on every legitimate change
+    # gets deleted -- and deleting this one would take the `removed` half with
+    # it, which is the half that actually protects the data. So report additions
+    # and do not fail on them.
+    #
+    # A *rename* is the case that looks like an addition but is really a loss;
+    # it is still caught, because it also empties the old name and therefore
+    # shows up in `removed`.
+    if added:
+        print("      note: %d benchmark(s) newly recorded: %s"
+              % (len(added), ", ".join(sorted(n for n, _ in added))))
     check("drift is estimated over the committed records", drift is not None,
           True)
     # Guard the invariant, not the values: entries land in exactly one bucket.
@@ -1037,7 +1053,15 @@ def test_main_records_end_to_end(bh, tmpdir):
     check("the stored verdict is the printed one",
           record["canary_verdict"], bh.CANARY_CLEAN)
     check("a clean canary is not stored as contamination",
-          record["contaminated"], False)
+          record["canary_contaminated"], False)
+    # The old name is gone, not merely supplemented. It claimed the whole run
+    # and answered only for the canary, so a record could carry
+    # `contaminated: false` beside `run_verdict: "contaminated"`. Asserting its
+    # absence is what stops it being reintroduced alongside the new key, which
+    # would restore the contradiction while looking like a compatibility
+    # courtesy.
+    check("the run-wide name is not written for a canary-only judgement",
+          "contaminated" in record, False)
     # The stored verdict and the printed prose come from one call now; assert
     # they agree, because storing a verdict that contradicts the summary above
     # it is worse than storing none.

@@ -2444,13 +2444,31 @@ def main(argv=None):
         # and the tolerance is explicitly a placeholder awaiting real data.
         if canary is not None:
             record["canary"] = dict(canary)
-            # Both, and they are not redundant. `contaminated` answers only the
-            # question its name asks and is False for a broken canary;
-            # `canary_verdict` is the one to test when what you mean is "may I
-            # trust this run?". Storing only the boolean is how nine release
-            # records ended up flagged as contaminated when the truth was that
-            # the instrument had died.
-            record["contaminated"] = canary_is_contaminated(canary)
+            # Both, and they are not redundant: the boolean is False for a
+            # *broken* canary, so `canary_verdict` is the one to test when what
+            # you mean is "may I trust this run?". Storing only the boolean is
+            # how nine release records ended up flagged as contaminated when the
+            # truth was that the instrument had died.
+            #
+            # Named `canary_contaminated`, not `contaminated`, as of 2026-08-16.
+            # The old name claimed the whole run and delivered only the canary's
+            # opinion of it, and the 02:53 record made that concrete: it holds
+            # `contaminated: false` beside `run_verdict: "contaminated"`, because
+            # the canary was clean while the dispersion instrument counted 25
+            # stalled benchmarks. A reader scanning that record for the honest
+            # field finds a flat contradiction and no way to tell which half to
+            # believe.
+            #
+            # Renaming rather than deleting because the value is genuinely worth
+            # keeping -- it is the only stored trace of *which* instrument
+            # objected -- and renaming rather than keeping because nothing reads
+            # the key. It is written here and read nowhere: the analysis path
+            # deliberately re-derives the verdict from the stored `canary`
+            # measurement instead (see `dispersion_count`), so no consumer
+            # breaks. Records written before this date carry the old key; that
+            # is ordinary append-only schema drift, already the norm here for
+            # `split` and `run_verdict`.
+            record["canary_contaminated"] = canary_is_contaminated(canary)
             record["canary_verdict"] = verdict
         if append_record(args.history, record):
             print(f"  Recorded {len(current_entries)} benchmarks to "

@@ -42,180 +42,20 @@ table to a paragraph and a concrete example to an abstraction. (The rule is in
 `CLAUDE.md` → "Write `open-questions.md` for a reader who does not know the
 subsystem".)
 
-Earlier deferred operator decisions (Q1–Q38) have been
-resolved — see the "Recently resolved" list below and `design-decisions.md` for
-full rationale. New decisions are appended just above the `---` separator that
-precedes the "Recently resolved" list, numbered with your lane's prefix
-(`A-Q<n>`, `B-Q<n>`, `C-Q<n>`) — the unprefixed `Q<n>` numbers are pre-split and
-are not to be extended.
+**The body of this file holds OPEN questions only.** When the operator answers
+one: write it up in `design-decisions.md` as a `Decided by: Operator` entry,
+**delete the entry from here**, and add one line to the `# Resolved` index at
+the bottom under your own lane's subheading. An answered question left in the
+body is pure clutter, and because it is older it sorts *first* — directly in
+front of the questions that still need an answer, which is the one thing this
+file exists to show. (This file is lane-*partitioned*, not append-only; the
+reasoning is `design-decisions.md` §437 and the rule is `roadmap.md` →
+"Three-Agent Parallel Execution" rule 3.)
 
-## Q40 — Should osh reproduce bash's *null array element*, which looks like an upstream defect? — Status: **RESOLVED 2026-08-15 → design-decisions.md §309**
-
-**Answer: B — do not reproduce it; waive it in the corpus.** osh keeps `Str`
-array elements and the array reads normally. The write-up stays in
-`known-issues.md` →
-`TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`
-so the call is reversible if a real script is ever found that depends on it.
-
-Decided by the operator; Claude recommended this option.
-
-**The part that outlives the bug:** byte-fidelity with bash now has an
-**"unless it is a defect" clause**. A measured behaviour may be waived when it
-is unreachable except through a construct built to reach it, inconsistent with
-bash's own observable model, and expensive to reproduce in a way that degrades
-osh's value model — and every future waiver must be argued against those three
-tests in `known-issues.md` rather than taken silently. See §309; this does not
-loosen §305's frozen fidelity scope.
-
-## Q41 — Should bash be cross-compiled instead of osh reimplemented? — Status: **RESOLVED 2026-08-14 → design-decisions.md §305**
-
-**Answer: the hybrid, with osh's fidelity scope frozen.** osh remains the shell;
-the cross-compiled GNU bash 5.2 (which boots and runs on SlateOS) ships beside
-it as the escape hatch and future on-device differential oracle; and
-byte-for-byte bash parity stops being an open-ended goal — **§305 carries the
-binding stopping criterion, and every `TD-OILS-*` entry and new corpus case is
-now gated by it.**
-
-Decided by the operator, who also raised the question. Claude recommended this
-option.
-
-**Do not re-open this as a feasibility question.** Feasibility was settled by
-measurement on 2026-08-12 (`scripts/bash-spike/`): bash cross-compiles with
-`zig cc`, links against our own `toolchain/sysroot/lib/libc.a` with zero
-undefined symbols and no shims, and runs — `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`
-proves it on every boot. The full spike results, the day-by-day history of how
-§72's expiry condition fired on 2026-07-22 and went unchecked for 25 days, and
-the general rule that failure established, are all in **§305**.
-
-## Q42 — Two crates are not rustfmt-clean, which makes `cargo fmt` a trap. Do a one-shot repo-wide reformat, or keep formatting only touched files? — Status: **RESOLVED 2026-08-15 → design-decisions.md §310**
-
-**Answer: A — one-shot repo-wide reformat, with a `.git-blame-ignore-revs` file
-committed alongside.** Decided by the operator; Claude recommended this option.
-
-Three constraints on how it lands, from §310:
-
-- `cargo fmt --all` **does not run here** (`os error 206`, the Windows
-  command-line length limit, hit by the number of workspace members). Iterate
-  crates one at a time.
-- It is **two commits in two lanes**: `posix/` is Lane B's, `kernel/` is Lane
-  A's (16 911 hunks). A single cross-lane reformat commit is exactly the
-  clobbering the lane split exists to prevent. Both hashes go into
-  `.git-blame-ignore-revs`. Lane A's half is requested in
-  `requests/b-a-rustfmt-repo-wide-reformat.md`.
-- Each reformat commit must contain **nothing but** formatting, so
-  `--ignore-rev` is safe to apply wholesale.
-
-## Q44 — libc reports "all Linux capabilities held" to every process because nothing maps our `(ResourceType, Rights)` handles onto `CAP_*` bits. Which mapping do you want? — Status: **RESOLVED 2026-08-15 → design-decisions.md §312**
-
-**Answer: A — conservative projection.** Decided by the operator; Claude
-recommended this option.
-
-Each Linux `CAP_*` bit is derived from a specific `(ResourceType, Rights)`
-predicate over the capabilities the process actually holds, and reports **not
-held** whenever no rule matches — the default is *deny*, so an unmapped `CAP_*`
-is false, never true. `CAP_SYS_RAWIO` ⇐ a `PortIo` handle with `READ|WRITE`;
-`CAP_KILL` ⇐ a `Process` handle with `SIGNAL`; `CAP_SYS_PTRACE` ⇐ `Process`
-with `DEBUG`; `CAP_SYS_NICE` ⇐ `Thread` with `IO_REALTIME`.
-
-`CAP_SYS_ADMIN` is the deliberate exception: an **explicit hand-maintained
-union** of what its 20 gate sites actually need, one commented member each. It
-is Linux's junk drawer and has no natural preimage in a per-object model, so a
-derived rule would be either permanently false (breaking 20 sites) or broad
-enough to re-grant everything, which is the bug being fixed.
-
-Rejected: **B** (`ResourceType::PosixCapability`) is ambient authority wearing a
-capability costume — process-wide authority tied to no object, spelled as a
-handle — and it was rejected even though it is the option that would have made
-`CAP_SYS_ADMIN` easy. **C** (stay optimistic, document `capget()` as "the
-ceiling, not the grant") leaves the silent-wrong-answer trap open, which is why
-the entry was logged. **D** (`capget()` fails) trades one silent wrong answer
-for loud breakage in every port that calls it informationally.
-
-**How it lands, in order** (from §312):
-
-1. **The enumerating query syscall first.** `SYS_CAP_QUERY` (400) returns only a
-   *count*; nothing can be seeded from it. That handler is **Lane A's tree** —
-   filed as `requests/b-a-cap-enumerating-query-syscall.md`.
-2. libc seeds its three words from that query rather than from `CAPS_DEFAULT`.
-3. **The libc gates stay advisory until the fixtures hold real capabilities.**
-   `services/ctest-jobctl`, `self_test_cctty` and `self_test_cpgroup` all spawn
-   with `capabilities: &[]` and pass today only because every bit is set. The
-   flip from advisory to enforcing is boot-test-visible and lands with QEMU
-   free.
-
-## Q45 — Text clipped by `max_width` is cut mid-glyph with no ellipsis. Should `RenderCommand::Text` carry an overflow policy? — Status: **RESOLVED 2026-08-15 → design-decisions.md §427**
-
-**Answer: A — `RenderCommand::Text` gets an `overflow: TextOverflow` field
-(`Clip` | `Ellipsis`), and the compositor draws the ellipsis.** Decided by the
-operator ("q45: a."); Claude raised the question and recommended this option.
-
-A is the only option that makes the mistake *unrepresentable*: after it, a text
-command cannot exist without having answered "and what if it doesn't fit?". The
-operator was told the churn was several hundred call sites and chose it on that
-ground anyway. Rejected: **B** (a second `RenderCommand` variant) splits a match
-arm in every renderer and test forever to encode one boolean; **C** (a builder)
-leaves the wrong struct-literal form available; **D** (sweep `text::elide`
-across today's bad call sites) fixes today's hundred and not the
-hundred-and-first.
-
-Two things the entry in §427 carries that this summary does not: the site count
-turned out to be **4517 across 208 files**, so the edit is scripted rather than
-hand-made; and the sites that already set a `max_width` default to `Ellipsis`
-rather than to the behaviour-preserving `Clip`, because today's behaviour *is*
-the reported bug. That sub-decision is Claude's and is written down in §427 to
-be overruled if the operator disagrees.
-
-**Execution constraint:** its own commit, nothing else in flight — see §310.
-Closes `known-issues.md` → `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`.
-
-## B-Q1 — The zoneinfo reader is done and nothing on disk to read: which tzdata do we ship, from where, and how is it updated? — Status: **RESOLVED 2026-08-15 → design-decisions.md §311**
-
-**Answer: A1 + B1 + C1.** Decided by the operator; Claude recommended this
-combination.
-
-- **A1 — full tzdata**, backward links included (`US/Eastern`,
-  `Asia/Calcutta`). ~450 KiB, ~1 800 files in the base image.
-- **B1 — vendor the prebuilt TZif binaries** from IANA, checked in and
-  version-pinned. No `zic` port, no home-grown TZif generator: the failure mode
-  of getting that subtly wrong is a wrong clock nobody notices for months.
-- **C1 — ship it as a `pkg/` package** and update it there. C3's dedicated fast
-  channel is the escalation if C1 proves too slow, not the starting point.
-
-**Residual risk accepted:** a user who never runs `pkg update` drifts into a
-stale tzdata, silently.
-
-**Execution note:** the reader, the libc paths and osh are Lane B; **`pkg/` is
-Lane C's tree**, so the packaging half goes via `requests/b-c-tzdata-package.md`.
-The two tests asserting the current UTC fallback
-(`test_zoneinfo_names_resolve_to_utc_until_tzdata_is_shipped`,
-`printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve`) **must start
-failing the day the data lands** — that is the signal it worked, not a
-regression.
-
-## C-Q1 — Should normalization consult font coverage? The last 339 sweep disagreements are all this one question — Status: **RESOLVED 2026-08-15 → design-decisions.md §428**
-
-**Answer: C — keep `nfc` font-blind; let `fit_to_face` decompose a composed
-character the face cannot draw when the pieces are drawable.** Decided by the
-operator ("c-q1: c."); Claude raised the question and recommended this option.
-
-`norm.rs`'s layering principle stands: `nfc` answers a question about *text* and
-never looks at a font, `fit_to_face` answers a question about the *font*. The
-fallback goes in the second stage, where `split_undrawable` already lives and
-already has that shape. The 339 residual HarfBuzz sweep disagreements — 255 of
-them `\u1e09`, 57 `\u212b` — should move to `agree` without `nfc` ever taking a
-face as input.
-
-Rejected: **A** (change nothing) draws a missing-glyph box where HarfBuzz draws
-correct text, and the user does not care which stage was principled. **B**
-(adopt HarfBuzz's font-aware recomposition wholesale) makes normalization a
-function of `(text, face)` — no longer hoistable, cacheable, or testable without
-a font in hand. §428 keeps B's argument written out, because it is what has to
-be beaten if some future case cannot be fixed inside `fit_to_face`.
-
-**The bill to watch for:** mark reordering after a late decomposition, which
-HarfBuzz gets right by construction and we would not. The sweep is the
-instrument; an ordering case it surfaces is this decision's cost coming due, not
-a surprise.
+New questions go at the end of the body, just above the `---` that precedes
+the `# Resolved` index, numbered with your lane's prefix (`A-Q<n>`, `B-Q<n>`,
+`C-Q<n>`). The unprefixed `Q<n>` numbers are pre-split and are not to be
+extended.
 
 ## Q45 — [A] The kshell byte-purity conversion is ~40× larger than its own scoping estimate. Convert the whole shell, or make only the *expanded word* byte-clean? — Status: OPEN
 
@@ -460,7 +300,64 @@ still unguarded, so this reduces the blast radius without removing it.
 
 ---
 
-Recently resolved (see `design-decisions.md` for the full rationale):
+# Resolved
+
+**The body above holds OPEN questions only.** When the operator answers one,
+write it up in `design-decisions.md` as a `Decided by: Operator` entry,
+**delete the entry from the body**, and add one line here. That is the whole
+point of the file: it is scanned for what still needs a decision, so an
+answered question left in the body is pure cost — and, being older, it sorts
+*first*, right where it is most in the way. (Why this is not append-only:
+`design-decisions.md` §437.)
+
+The index is split by lane so three lanes adding a line at once land at three
+different offsets and the merge is automatic. Newest first within each lane.
+`(§n)` cites `design-decisions.md`.
+
+## Resolved — lane A
+
+*(none yet)*
+
+## Resolved — lane B
+
+- B-Q1 Which tzdata do we ship, from where, and how is it updated? — resolved
+  2026-08-15 (§311): ship **full tzdata**, vendored as prebuilt TZif binaries
+  and updated as a `pkg/` package.
+
+## Resolved — lane C
+
+- C-Q1 Should normalization consult font coverage? — resolved 2026-08-15
+  (§428): **no** — normalization stays font-blind, and the font-fitting stage
+  decomposes what the face cannot draw. This was the last 339 sweep
+  disagreements, all one question.
+
+## Resolved — pre-split (unprefixed `Q<n>`, single-agent era)
+
+These numbers are not to be extended; new questions use `A-Q<n>` / `B-Q<n>` /
+`C-Q<n>`.
+
+- Q45 Should `RenderCommand::Text` carry an overflow policy, rather than text
+  being cut mid-glyph with no ellipsis? — resolved 2026-08-15 (§427): **yes** —
+  the draw command carries the policy and the compositor draws the ellipsis.
+  (Note: `Q45` was reused by lane A for an open question while this one still
+  sat in the body — an ID collision the old append-only rule made unavoidable
+  and this split removes.)
+- Q44 Which mapping of our `(ResourceType, Rights)` handles onto Linux `CAP_*`
+  bits, given libc reported "all capabilities held" to everything? — resolved
+  2026-08-15 (§312): a **conservative projection** of the real handles, not a
+  fiction.
+- Q42 One-shot repo-wide rustfmt, or keep formatting only touched files? —
+  resolved 2026-08-15 (§310): **one-shot repo-wide**, with a
+  `.git-blame-ignore-revs` file alongside so the reformat does not poison
+  `git blame`.
+- Q40 Should osh reproduce bash's *null array element*, which looks like an
+  upstream defect? — resolved 2026-08-15 (§309): **no** — byte-fidelity with
+  bash has an "unless it is a defect" clause.
+- Q41 Should bash be cross-compiled instead of osh reimplemented? — resolved
+  2026-08-14 (§305): **both** — osh ships as the shell, cross-compiled bash
+  ships beside it, and osh's bash-fidelity scope is frozen.
+
+### Earlier (Q1–Q39)
 
 - Q38 Should osh be locale-aware, or UTF-8-only? — resolved 2026-08-07 (§104):
   **option A — osh is UTF-8-only**, and `scripts/osh-bash-diff.py` moves to a

@@ -174,20 +174,53 @@ implements it or answers in the same file. Delete the file when it lands.
 
 ### 3. Shared documents are append-only, with per-lane sections
 
-These four files are read by all three lanes and would otherwise be the
-worst contention point in the repo:
+These files are read by all three lanes and would otherwise be the worst
+contention point in the repo.
 
-| File | Rule |
-|------|------|
-| `roadmap.md` | Edit **only** the lines tagged with your own lane letter. Never reflow or reorder. |
-| `known-issues.md` | **Append only**, at the very end of the file. Prefix every new heading with your lane letter: `### [A] B-FOO. …`. Editing an existing entry is allowed only if its heading carries your lane letter. |
-| `design-decisions.md` | Append only, at the very end. Numbering is by lane to avoid collisions: **A** takes §200–299, **B** §300–399, **C** §400–499. (§1–§127 are the existing single-agent history — never renumber them.) |
-| `open-questions.md` | Append only. Prefix the question ID with your lane letter. Write it for a reader who does not know the subsystem — see `CLAUDE.md` and the file's own header. |
-| `deferred-questions.md` | Append only, `D-Q<n>`. Questions that will need the operator *eventually* but cannot be answered usefully yet; every entry carries a `Trigger:` for promoting it back to `open-questions.md`. See `design-decisions.md` §313. |
-| `todo.txt` | Append only, under a `## Lane A` / `## Lane B` / `## Lane C` heading. |
+**The goal is that three lanes writing one file never produce a merge
+conflict. Append-only is not that rule and never was — it is a proxy for
+it, and a bad one.** Two lanes that both append at end-of-file are writing
+the *same line region*, which is the one thing git cannot auto-merge. That
+is not theoretical: on 2026-08-16 lane A's `design-decisions.md` §203 and
+lane C's §435/§436 were both appended at EOF and conflicted, despite the
+per-lane numbering that was supposed to keep them apart.
 
-If you need to *change* another lane's entry (e.g. you fixed their bug),
-file a request instead.
+What actually prevents conflicts is **partitioning**: each lane writes a
+different *region* of the file, so two lanes' edits land at different line
+offsets and git merges them without looking at the content. The rule that
+binds is therefore **"stay inside your region"**, not "never change a line
+you already wrote". Inside your own region you may edit in place, restamp a
+status, reorder, and **delete** — all of which append-only forbade for no
+gain. (Full reasoning: `design-decisions.md` §437.)
+
+| File | Your region | Inside it you may |
+|------|-------------|-------------------|
+| `roadmap.md` | The lines tagged with your own lane letter. | Edit them freely. Never reflow or reorder lines you do not own; never touch the shared prose sections (like this one) without a request to the other two lanes. |
+| `known-issues.md` | Entries whose heading carries your lane letter (`### [C] …`), plus **any** entry you are status-stamping — see the exception below. | Edit, restructure, mark fixed. New entries go at the end of `known-issues.md` with your lane letter in the heading. Move an entry to `known-issues-resolved.md` once it is fixed *and* the fix has been on `main` for a full boot test. |
+| `design-decisions.md` | Your numeric section band: **A** §200–299, **B** §300–399, **C** §400–499. (§1–§127 are single-agent history — never renumber them.) | Add and edit your own sections. **File order is numeric, not chronological**, so insert your section among its numeric neighbours rather than at EOF — that is what makes the bands physically disjoint and the merge automatic. Never edit another lane's band. |
+| `open-questions.md` | Questions whose ID carries your lane letter. | **This file holds OPEN questions only.** When one is answered, *delete the entry* and add a one-line record to the `## Resolved` index at the bottom, under your own lane's subheading. Write entries for a reader who does not know the subsystem — see `CLAUDE.md` and the file's own header. |
+| `deferred-questions.md` | Your own `D-Q<n>` entries. | Same shape as `open-questions.md`: entries leave the file when promoted or dropped, with a one-line record in its `## Closed` index. Every entry carries a `Trigger:` for promoting it back. See `design-decisions.md` §313. |
+| `todo.txt` | Everything under your own `## Lane A` / `## Lane B` / `## Lane C` heading. | Add, edit, and remove your own items. Done items are deleted, not annotated — that is what the git history is for. |
+
+**Two rules survive the change, and they are the ones that were doing the
+real work:**
+
+1. **Never write in another lane's region.** If you need to *change*
+   another lane's entry — beyond the status stamp below — file a request
+   instead. This is unchanged and is the actual conflict-prevention rule.
+2. **Never reflow, reorder, or reformat a region you do not own**, even
+   harmlessly. A whitespace-only rewrite of a paragraph you don't own
+   conflicts exactly as hard as a semantic one.
+
+**Exception — status stamps are cross-lane.** Any lane may add or update a
+single `**Status:** …` line at a fixed position (immediately under the
+heading) of *any* `known-issues.md` entry, without a request. Three reasons
+this is safe where general cross-lane editing is not: it is a one-line edit
+at a known offset, so a collision is trivially resolvable; the alternative
+is worse, since an issue you fixed but cannot mark stays open forever in the
+one file whose whole job is knowing what is open; and if two lanes stamp the
+same entry, the conflict is *itself the finding* — two lanes thought they
+fixed the same bug — and should be read, not avoided.
 
 ### 4. `Cargo.toml` at the workspace root
 

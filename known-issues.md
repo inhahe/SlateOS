@@ -330,6 +330,85 @@ those to `checked_*` buys correctness theatre rather than correctness. Take
 `indexing_slicing` to zero first; then judge `arithmetic_side_effects` on
 whether a per-crate `allow` with a justification beats 3161 mechanical edits.
 
+### Sweep progress: `editor` 500 → 80, `indexing_slicing` 0 (2026-08-16)
+
+The worst crate is done. `apps/editor` went from ~200 `indexing_slicing`
+findings to **0** (total warnings 500 → 80, all of them
+`arithmetic_side_effects`); tests 108 → 119, all passing. Commits `a0dcac89a`
+(`highlight.rs`) and `64998fde2` (`main.rs`, `syntree.rs`).
+
+**The sweep was not cosmetic — it found four reachable bugs**, listed
+separately below. That is the answer to "is this lint class worth the effort":
+one crate's worth of it turned up four defects that no existing test caught,
+in code that had been reviewed and shipped. The remaining worst crates are
+`markdowneditor` 348, `explorer` 264, `paint` 234, `backup` 198,
+`imageviewer` 193, `indexer` 149.
+
+Three patterns did most of the work and should be reused:
+
+- **`i < len && bytes[i]` states the bound twice**, and the two drift. Replace
+  with an `Option`-returning accessor (`at`, `starts_with_at`,
+  `scan_to_delimiter`) so the bound is stated once, in one place.
+- **A `Vec` plus an index is an invariant expressed as a convention.**
+  `documents: Vec<Document>` + `active_tab: usize` became a `Tabs` type whose
+  first document is a plain field, so "there is always a document open" is
+  what the type says rather than what five call sites assumed.
+- **A stale index handed back across a rebuild is the real hazard**, not the
+  in-bounds access. `SyntaxTree::node`, `Document::line` and
+  `Document::replace_in_line` all now return `Option`/`bool` rather than
+  trusting an index a caller has held since before the last edit.
+
+Test modules carry `#![allow(clippy::indexing_slicing, clippy::unwrap_used,
+clippy::panic)]` — a test that indexes out of range should fail loudly and
+point at the line that did it.
+
+## Four reachable panics/corruptions in `apps/editor`, found by the lint sweep (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). All four were found by working through
+`clippy::indexing_slicing` in `apps/editor` and checking each site for a *real*
+panic rather than silencing it. None was caught by any existing test; each now
+has one.
+
+**1. JS regex literal emitted a token past the end of the line.** In
+`highlight.rs`, the regex-literal scanner stepped `i += 2` over a backslash
+escape without checking that the second byte existed, so a line ending in
+`/\` produced a token ending at `len + 1`. The renderer slices the line by
+token range, so this panicked the editor — taking every unsaved buffer in
+every other tab with it — on a keystroke. Proved reachable by reverting the
+fix and watching the highlighter sweep test fail with `JavaScript: token 0..3
+out of bounds for "/\" (len 2)`. Fixed by routing the scan through
+`scan_to_delimiter`, which clamps. Covered by the sweep test, now 12 languages
+× 5 prefixes × 17 line-endings × 7 entry states = 7140 cases.
+
+**2. Find reported overlapping matches.** `FindState::find_all` resumed the
+search one byte into the match it had just recorded, so `"aaaa"` reported
+three occurrences of `"aa"`. Two consequences: the match count shown to the
+user was wrong, and `replace_all` then rewrote overlapping ranges one after
+another, shredding the line. The one-byte step also landed *inside* a
+multi-byte character, where the old `search_line[start..]` panicked outright.
+Fixed by resuming past the match end.
+
+**3. Find computed offsets against a string that is not the one being
+edited.** The case-insensitive path searched a `to_lowercase()` copy of the
+line and used the offsets it found to index the *real* line. `to_lowercase`
+is not length-preserving — Turkish `İ` (U+0130) folds to two characters,
+three bytes, from two — so past the first such character every offset is
+wrong. The editor selected, or replaced, the wrong bytes; a span past the end
+of the line reached `String::replace_range`, which panics. Fixed with
+`folded_match_end`, which folds *incrementally* while walking the real line,
+so every offset it returns is an offset into the line the user is looking at,
+and returns the match's real end (which can differ in length from the needle,
+for the same reason).
+
+**4. Replace trusted ranges recorded against a different document.**
+Find/replace records `(line, start, end)` against whichever document was
+searched, and nothing stopped a caller handing a different document to
+`replace_all`, or editing the buffer between the search and the replace.
+`String::replace_range` panics on an out-of-range span *and* on one that
+splits a character. Fixed by making `Document::replace_in_line` validate the
+line index, the ordering, the end bound and both char boundaries, returning
+`false` rather than panicking.
+
 ## `apps/editor`'s syntax highlighter is complete, tested, and not connected (lane C)
 
 **Status: FIXED 2026-08-16** (lane C). The highlighter now draws the editor.

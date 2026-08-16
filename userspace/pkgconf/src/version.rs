@@ -193,17 +193,20 @@ pub fn compare(a: &str, b: &str) -> Ordering {
     // Everything compared equal up to the point one side ran out; the side
     // with characters left over is the newer one.
     match (i >= one.len(), j >= two.len()) {
-        (true, true) => Ordering::Equal,
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
-        // Unreachable: the loop only breaks when at least one side is spent.
-        (false, false) => Ordering::Equal,
+        // Both spent — equal.  `(false, false)` cannot occur: the loop above
+        // only exits when at least one side is exhausted.  It shares this arm
+        // rather than getting an `unreachable!()`, because a version compare
+        // that panics would take down every build system that shells out to
+        // us, and `Equal` is the answer that case would want anyway.
+        (true, true) | (false, false) => Ordering::Equal,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{compare, CmpOp};
+    use super::{CmpOp, compare};
     use core::cmp::Ordering;
 
     #[test]

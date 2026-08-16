@@ -49,6 +49,22 @@ use pcfile::{Dep, PcFile};
 use store::{LookupError, Store};
 use version::CmpOp;
 
+/// `write!` into a `String`, whose `fmt::Write` impl cannot fail.
+///
+/// `push_str(&format!(..))` allocates twice, which `clippy::format_push_string`
+/// rejects; the `write!` it recommends returns a `Result` that for a `String`
+/// sink is unconditionally `Ok`, since `String`'s `fmt::Write` has no error
+/// path to take.  Discarding it is therefore correct rather than sloppy — but
+/// only if the discard is confined to one audited place instead of a `let _ =`
+/// at every call site, which is what this macro is for.
+macro_rules! wr {
+    ($dst:expr, $($arg:tt)*) => {{
+        use std::fmt::Write as _;
+        // SAFETY-of-a-sort: infallible sink, see the doc comment above.
+        let _ = write!($dst, $($arg)*);
+    }};
+}
+
 /// Reported by `--version`, and compared against by
 /// `--atleast-pkgconfig-version`, which `PKG_PROG_PKG_CONFIG` calls.
 const PKGCONF_VERSION: &str = "2.1.0";
@@ -106,6 +122,14 @@ Environment:
 ";
 
 /// Everything the command line asked for.
+///
+/// `clippy::struct_excessive_bools` wants an enum or a bitfield here.  Neither
+/// fits: these switches are *not* mutually exclusive (`--cflags --libs
+/// --static` is the ordinary invocation, not an odd one), so an enum would be
+/// wrong, and a bitfield would trade twenty self-describing field names for
+/// twenty mask constants without removing a single one of them.  The shape is
+/// dictated by pkg-config's command line, which we do not get to redesign.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Default, Debug)]
 struct Options {
     help: bool,
@@ -275,9 +299,7 @@ fn filter_libs(o: &Options, all: Vec<Flag>) -> Vec<Flag> {
         .filter(|f| {
             (o.libs_only_l && f.kind == FlagKind::LibName)
                 || (o.libs_only_big_l && f.kind == FlagKind::LibPath)
-                || (o.libs_only_other
-                    && f.kind != FlagKind::LibName
-                    && f.kind != FlagKind::LibPath)
+                || (o.libs_only_other && f.kind != FlagKind::LibName && f.kind != FlagKind::LibPath)
         })
         .collect()
 }
@@ -359,10 +381,7 @@ fn run(
 
     if o.list_all {
         for pkg in store.list_all() {
-            out.push_str(&format!(
-                "{:<24} {} - {}\n",
-                pkg.key, pkg.name, pkg.description
-            ));
+            wr!(out, "{:<24} {} - {}\n", pkg.key, pkg.name, pkg.description);
         }
         return 0;
     }
@@ -456,7 +475,7 @@ fn run(
     if o.bom {
         for pkg in &closure {
             let url = if pkg.url.is_empty() { "-" } else { &pkg.url };
-            out.push_str(&format!("{}\t{}\t{}\n", pkg.key, pkg.version, url));
+            wr!(out, "{}\t{}\t{}\n", pkg.key, pkg.version, url);
         }
         return 0;
     }
@@ -473,7 +492,7 @@ fn run(
     }
     if o.print_provides {
         for pkg in &requested {
-            out.push_str(&format!("{} = {}\n", pkg.key, pkg.version));
+            wr!(out, "{} = {}\n", pkg.key, pkg.version);
         }
     }
     if o.print_requires {
@@ -494,13 +513,13 @@ fn run(
     }
     if let Some(name) = &o.variable {
         for pkg in &requested {
-            out.push_str(pkg.var(name).unwrap_or(""));
+            out.push_str(pkg.var(name).as_deref().unwrap_or(""));
             out.push('\n');
         }
     }
     if o.print_variables {
         for pkg in &requested {
-            for name in pkg.vars.keys() {
+            for name in pkg.var_names() {
                 out.push_str(name);
                 out.push('\n');
             }
@@ -595,7 +614,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, run};
+    use super::{PKGCONF_VERSION, flags, parse_args, run, store};
     use std::path::PathBuf;
 
     /// A scratch directory of `.pc` files plus a fixed environment, so every
@@ -633,10 +652,7 @@ mod tests {
                 if k == "PKG_CONFIG_LIBDIR" {
                     return Some(libdir.clone());
                 }
-                extra
-                    .iter()
-                    .find(|(ek, _)| ek == k)
-                    .map(|(_, v)| v.clone())
+                extra.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.clone())
             };
             let mut out = String::new();
             let mut err = String::new();
@@ -920,9 +936,18 @@ Cflags: -I${prefix}/include/libpng16
     #[test]
     fn duplicate_flags_across_packages_collapse() {
         let f = Fixture::new("dupflags");
-        f.write("top", "Name: top\nVersion: 1\nRequires: l, r\nCflags: -I/common\n");
-        f.write("l", "Name: l\nVersion: 1\nCflags: -I/common\nLibs: -ll -lm\n");
-        f.write("r", "Name: r\nVersion: 1\nCflags: -I/common\nLibs: -lr -lm\n");
+        f.write(
+            "top",
+            "Name: top\nVersion: 1\nRequires: l, r\nCflags: -I/common\n",
+        );
+        f.write(
+            "l",
+            "Name: l\nVersion: 1\nCflags: -I/common\nLibs: -ll -lm\n",
+        );
+        f.write(
+            "r",
+            "Name: r\nVersion: 1\nCflags: -I/common\nLibs: -lr -lm\n",
+        );
         let (_, out, _) = f.run(&["--cflags", "top"]);
         assert_eq!(out.trim(), "-I/common");
         let (_, out, _) = f.run(&["--libs", "top"]);
@@ -961,7 +986,93 @@ Cflags: -I${prefix}/include/libpng16
 
         let (_, out, _) = f.run(&["--print-variables", "zlib"]);
         let names: Vec<&str> = out.lines().collect();
-        assert_eq!(names, vec!["includedir", "libdir", "prefix"]);
+        // `pcfiledir` is listed last, after the file's own bindings — pkgconf
+        // lists it, pkg-config 0.29 does not, and listing it is the only way
+        // `--print-variables` agrees with what `--variable=` will answer.
+        assert_eq!(names, vec!["includedir", "libdir", "prefix", "pcfiledir"]);
+    }
+
+    #[test]
+    fn pcfiledir_answers_as_a_variable_and_not_only_inside_substitution() {
+        // A relocatable package writes `prefix=${pcfiledir}/../..` and its
+        // consumer then asks for `pcfiledir` outright to compute install
+        // paths.  Resolving it during parsing but not here would make the
+        // first work and the second silently return "".
+        let f = Fixture::new("pcfiledir");
+        f.write("rel", "prefix=${pcfiledir}/../..\nName: rel\nVersion: 1\n");
+        let dir = f.dir.to_string_lossy().replace('\\', "/");
+        assert_eq!(f.run(&["--variable=pcfiledir", "rel"]).1.trim(), dir);
+        assert_eq!(
+            f.run(&["--variable=prefix", "rel"]).1.trim(),
+            format!("{dir}/../..")
+        );
+    }
+
+    #[test]
+    fn a_file_that_assigns_pcfiledir_itself_is_listed_once() {
+        let f = Fixture::new("pcfiledirdup");
+        f.write("odd", "pcfiledir=/elsewhere\nName: odd\nVersion: 1\n");
+        let (_, out, _) = f.run(&["--print-variables", "odd"]);
+        assert_eq!(out.lines().collect::<Vec<_>>(), vec!["pcfiledir"]);
+        // The file's own binding wins, matching every other variable.
+        assert_eq!(
+            f.run(&["--variable=pcfiledir", "odd"]).1.trim(),
+            "/elsewhere"
+        );
+    }
+
+    // ── the virtual pkg-config package ──────────────────────────────────
+
+    #[test]
+    fn the_virtual_pkg_config_package_exists_without_a_pc_file() {
+        // The bootstrap case: a system with no .pc files installed at all
+        // must still answer, because this is how a build system discovers
+        // where to install the first one.
+        let f = Fixture::new("virtual");
+        assert_eq!(f.run(&["--exists", "pkg-config"]).0, 0);
+        assert_eq!(
+            f.run(&["--modversion", "pkg-config"]).1.trim(),
+            PKGCONF_VERSION
+        );
+        let sep = store::PATH_SEP.to_string();
+        assert_eq!(
+            f.run(&["--variable=pc_path", "pkg-config"]).1.trim(),
+            store::DEFAULT_SEARCH_DIRS.join(&sep)
+        );
+        assert_eq!(
+            f.run(&["--variable=pc_system_libdirs", "pkg-config"])
+                .1
+                .trim(),
+            flags::SYSTEM_LIB_DIRS.join(&sep)
+        );
+    }
+
+    #[test]
+    fn pc_path_reports_the_compiled_in_default_not_the_active_search_path() {
+        // PKG_CONFIG_LIBDIR is set to the fixture dir by `run`, and
+        // PKG_CONFIG_PATH below adds another.  Neither may move pc_path: a
+        // cross build sets LIBDIR to the target sysroot, and if pc_path
+        // followed it every package built there would install its .pc file
+        // into the sysroot and vanish from the host's view.
+        let f = Fixture::new("pcpathfixed");
+        let (_, out, _) = f.run_env(
+            &["--variable=pc_path", "pkg-config"],
+            &[("PKG_CONFIG_PATH", "/some/other/place")],
+        );
+        assert_eq!(
+            out.trim(),
+            store::DEFAULT_SEARCH_DIRS.join(&store::PATH_SEP.to_string())
+        );
+    }
+
+    #[test]
+    fn the_virtual_package_has_no_pcfiledir() {
+        // It has no file, so answering "." would hand a relocatable-path
+        // expression a value meaning "wherever the build was run from".
+        let f = Fixture::new("virtualnodir");
+        assert_eq!(f.run(&["--variable=pcfiledir", "pkg-config"]).1, "\n");
+        let (_, out, _) = f.run(&["--print-variables", "pkg-config"]);
+        assert!(!out.lines().any(|l| l == "pcfiledir"), "{out}");
     }
 
     #[test]
@@ -990,9 +1101,15 @@ Cflags: -I${prefix}/include/libpng16
     #[test]
     fn system_directories_can_be_kept() {
         let f = Fixture::new("keepsys");
-        f.write("s", "Name: s\nVersion: 1\nCflags: -I/usr/include\nLibs: -L/usr/lib -ls\n");
+        f.write(
+            "s",
+            "Name: s\nVersion: 1\nCflags: -I/usr/include\nLibs: -L/usr/lib -ls\n",
+        );
         assert_eq!(f.run(&["--cflags", "s"]).1.trim(), "");
-        assert_eq!(f.run(&["--cflags", "--keep-system-cflags", "s"]).1.trim(), "-I/usr/include");
+        assert_eq!(
+            f.run(&["--cflags", "--keep-system-cflags", "s"]).1.trim(),
+            "-I/usr/include"
+        );
         assert_eq!(f.run(&["--libs", "s"]).1.trim(), "-ls");
         assert_eq!(
             f.run(&["--libs", "--keep-system-libs", "s"]).1.trim(),
@@ -1003,7 +1120,10 @@ Cflags: -I${prefix}/include/libpng16
     #[test]
     fn allow_system_env_vars_have_the_same_effect_as_the_flags() {
         let f = Fixture::new("allowsysenv");
-        f.write("s", "Name: s\nVersion: 1\nCflags: -I/usr/include\nLibs: -L/usr/lib -ls\n");
+        f.write(
+            "s",
+            "Name: s\nVersion: 1\nCflags: -I/usr/include\nLibs: -L/usr/lib -ls\n",
+        );
         let (_, out, _) = f.run_env(
             &["--cflags", "s"],
             &[("PKG_CONFIG_ALLOW_SYSTEM_CFLAGS", "1")],

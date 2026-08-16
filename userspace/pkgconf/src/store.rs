@@ -20,6 +20,55 @@ pub const PATH_SEP: char = ';';
 #[cfg(not(windows))]
 pub const PATH_SEP: char = ':';
 
+/// The package name every reference implementation answers for without
+/// touching the filesystem.
+pub const VIRTUAL_PKG_CONFIG: &str = "pkg-config";
+
+/// Build the virtual `pkg-config` package.
+///
+/// `pkg-config --variable=pc_path pkg-config` is how autotools, `CMake` and
+/// Meson discover where to *install* a `.pc` file, and
+/// `--variable=pc_system_libdirs` is how they decide which `-L` flags are
+/// redundant.  Both have to be answerable on a system where no `.pc` file is
+/// installed yet — the bootstrap case — so they cannot come from disk.
+///
+/// The values are the compile-time defaults on purpose, not the search path
+/// this invocation is actually using.  A cross build sets `PKG_CONFIG_LIBDIR`
+/// to the target sysroot; if `pc_path` tracked that, every package built
+/// inside such an environment would install its own `.pc` file into the
+/// sysroot and disappear from the host's view of the system.
+///
+/// It shadows a real `pkg-config.pc` found on the search path, matching
+/// upstream pkgconf, which consults its builtin table before searching.
+fn virtual_pkg_config() -> PcFile {
+    let mut vars: BTreeMap<String, String> = BTreeMap::new();
+    vars.insert("pc_path".to_string(), join_dirs(DEFAULT_SEARCH_DIRS));
+    vars.insert(
+        "pc_system_includedirs".to_string(),
+        join_dirs(crate::flags::SYSTEM_INCLUDE_DIRS),
+    );
+    vars.insert(
+        "pc_system_libdirs".to_string(),
+        join_dirs(crate::flags::SYSTEM_LIB_DIRS),
+    );
+    PcFile {
+        // Deliberately empty: there is no file, so `${pcfiledir}` must not
+        // resolve for this package rather than resolving to something
+        // plausible-looking like the current directory.
+        path: PathBuf::new(),
+        key: VIRTUAL_PKG_CONFIG.to_string(),
+        name: VIRTUAL_PKG_CONFIG.to_string(),
+        description: "virtual package defining pkg-config API version supported".to_string(),
+        version: crate::PKGCONF_VERSION.to_string(),
+        vars,
+        ..PcFile::default()
+    }
+}
+
+fn join_dirs(dirs: &[&str]) -> String {
+    dirs.join(&PATH_SEP.to_string())
+}
+
 /// Why a package could not be produced.
 #[derive(Clone, Debug)]
 pub enum LookupError {
@@ -108,11 +157,6 @@ impl Store {
         }
     }
 
-    #[must_use]
-    pub fn dirs(&self) -> &[PathBuf] {
-        &self.dirs
-    }
-
     /// Build the search path from the environment, in priority order:
     /// `PKG_CONFIG_PATH`, then `PKG_CONFIG_LIBDIR` (or the built-in defaults
     /// if it is unset), then any `--with-path=` directories.
@@ -121,7 +165,10 @@ impl Store {
     /// which is what makes it usable for cross builds: it is the only way to
     /// stop the host's own `.pc` files leaking into a target query.
     #[must_use]
-    pub fn search_dirs_from_env(extra: &[String], get: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf> {
+    pub fn search_dirs_from_env(
+        extra: &[String],
+        get: &dyn Fn(&str) -> Option<String>,
+    ) -> Vec<PathBuf> {
         let mut dirs: Vec<PathBuf> = Vec::new();
         let push_list = |s: &str, dirs: &mut Vec<PathBuf>| {
             for part in s.split(PATH_SEP) {
@@ -151,11 +198,16 @@ impl Store {
     fn locate(&self, name: &str) -> Option<PathBuf> {
         // A literal path to a .pc file is accepted in place of a name; this is
         // how a build tree queries an uninstalled package.
-        if name.ends_with(".pc") {
-            let p = Path::new(name);
-            if p.is_file() {
-                return Some(p.to_path_buf());
-            }
+        //
+        // The extension test is case-*sensitive* on purpose, so `foo.PC` is a
+        // package name rather than a path: `design.txt` mandates a
+        // case-sensitive filesystem, and both reference tools compare the
+        // literal `.pc`. Going through `Path::extension` rather than
+        // `ends_with` also stops a bare `.pc` — a legal dotfile name — being
+        // read as a zero-length package name.
+        let p = Path::new(name);
+        if p.extension().is_some_and(|e| e == "pc") && p.is_file() {
+            return Some(p.to_path_buf());
         }
         for dir in &self.dirs {
             let candidate = dir.join(format!("{name}.pc"));
@@ -176,6 +228,11 @@ impl Store {
     pub fn load(&mut self, name: &str) -> Result<Rc<PcFile>, LookupError> {
         if let Some(p) = self.cache.get(name) {
             return Ok(Rc::clone(p));
+        }
+        if name == VIRTUAL_PKG_CONFIG {
+            let rc = Rc::new(virtual_pkg_config());
+            self.cache.insert(name.to_string(), Rc::clone(&rc));
+            return Ok(rc);
         }
         let path = self.locate(name).ok_or_else(|| LookupError::NotFound {
             name: name.to_string(),
@@ -219,10 +276,10 @@ impl Store {
             let mut in_dir: Vec<String> = Vec::new();
             for entry in entries.flatten() {
                 let p = entry.path();
-                if p.extension().is_some_and(|e| e == "pc") {
-                    if let Some(stem) = p.file_stem() {
-                        in_dir.push(stem.to_string_lossy().into_owned());
-                    }
+                if p.extension().is_some_and(|e| e == "pc")
+                    && let Some(stem) = p.file_stem()
+                {
+                    in_dir.push(stem.to_string_lossy().into_owned());
                 }
             }
             in_dir.sort();
@@ -282,7 +339,14 @@ impl Store {
         let mut on_stack: Vec<String> = Vec::new();
 
         for dep in roots.iter().rev() {
-            self.visit(dep, None, include_private, &mut post, &mut done, &mut on_stack)?;
+            self.visit(
+                dep,
+                None,
+                include_private,
+                &mut post,
+                &mut done,
+                &mut on_stack,
+            )?;
         }
         post.reverse();
         Ok(post)
@@ -320,14 +384,7 @@ impl Store {
         // emit sibling dependencies backwards, which is harmless for `-I` but
         // reverses link order for `-l`.
         for child in children.iter().rev() {
-            self.visit(
-                child,
-                Some(&pkg.key),
-                include_private,
-                post,
-                done,
-                on_stack,
-            )?;
+            self.visit(child, Some(&pkg.key), include_private, post, done, on_stack)?;
         }
 
         // Conflicts are checked after the subtree so that a conflicting
@@ -357,7 +414,7 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use super::{LookupError, Store, DEFAULT_SEARCH_DIRS, PATH_SEP};
+    use super::{DEFAULT_SEARCH_DIRS, LookupError, PATH_SEP, Store};
     use crate::pcfile::Dep;
     use crate::version::CmpOp;
     use std::collections::BTreeMap;
@@ -434,9 +491,8 @@ mod tests {
     #[test]
     fn pkg_config_path_comes_first_and_splits_on_the_separator() {
         let value = format!("/a{PATH_SEP}/b");
-        let dirs = Store::search_dirs_from_env(&[], &|k| {
-            (k == "PKG_CONFIG_PATH").then(|| value.clone())
-        });
+        let dirs =
+            Store::search_dirs_from_env(&[], &|k| (k == "PKG_CONFIG_PATH").then(|| value.clone()));
         assert_eq!(dirs[0], PathBuf::from("/a"));
         assert_eq!(dirs[1], PathBuf::from("/b"));
         assert_eq!(dirs[2], PathBuf::from(DEFAULT_SEARCH_DIRS[0]));
@@ -469,7 +525,10 @@ mod tests {
     #[test]
     fn a_package_is_found_and_parsed() {
         let s = Scratch::new("found");
-        s.write("zlib", "prefix=/usr\nName: zlib\nVersion: 1.3.1\nLibs: -lz\n");
+        s.write(
+            "zlib",
+            "prefix=/usr\nName: zlib\nVersion: 1.3.1\nLibs: -lz\n",
+        );
         let pkg = s.store().load("zlib").expect("load");
         assert_eq!(pkg.version, "1.3.1");
         assert_eq!(pkg.libs, "-lz");
@@ -520,10 +579,7 @@ mod tests {
     #[test]
     fn private_requires_are_followed_only_when_asked() {
         let s = Scratch::new("private");
-        s.write(
-            "a",
-            "Name: a\nVersion: 1\nRequires.private: p\nLibs: -la\n",
-        );
+        s.write("a", "Name: a\nVersion: 1\nRequires.private: p\nLibs: -la\n");
         s.write("p", "Name: p\nVersion: 1\nLibs: -lp\n");
         let public = s.store().resolve(&[dep("a")], false).expect("resolve");
         assert_eq!(keys(&public), vec!["a"]);
@@ -536,9 +592,11 @@ mod tests {
         let s = Scratch::new("ver");
         s.write("a", "Name: a\nVersion: 1.2.3\n");
         let mut store = s.store();
-        assert!(store
-            .resolve(&[dep_v("a", CmpOp::Ge, "1.2")], false)
-            .is_ok());
+        assert!(
+            store
+                .resolve(&[dep_v("a", CmpOp::Ge, "1.2")], false)
+                .is_ok()
+        );
         let err = store
             .resolve(&[dep_v("a", CmpOp::Ge, "2.0")], false)
             .expect_err("1.2.3 is not >= 2.0");
@@ -613,10 +671,7 @@ mod tests {
         let second = Scratch::new("prio2");
         first.write("dup", "Name: dup\nVersion: 1\n");
         second.write("dup", "Name: dup\nVersion: 2\n");
-        let mut store = Store::new(
-            vec![first.dir.clone(), second.dir.clone()],
-            BTreeMap::new(),
-        );
+        let mut store = Store::new(vec![first.dir.clone(), second.dir.clone()], BTreeMap::new());
         assert_eq!(store.load("dup").expect("load").version, "1");
     }
 
@@ -632,6 +687,35 @@ mod tests {
             .expect("literal path should load");
         assert_eq!(pkg.version, "7");
         assert_eq!(pkg.key, "uninst");
+    }
+
+    #[test]
+    fn a_name_ending_in_pc_that_is_not_a_file_is_still_searched_for() {
+        // `libfoo.pc` on the command line with no such file in the current
+        // directory must fall through to the search path, not fail outright.
+        let s = Scratch::new("literalfall");
+        s.write("odd.pc", "Name: odd.pc\nVersion: 3\n");
+        let mut store = Store::new(vec![s.dir.clone()], BTreeMap::new());
+        assert_eq!(store.load("odd.pc").expect("via search path").version, "3");
+    }
+
+    #[test]
+    fn the_virtual_pkg_config_package_shadows_a_real_one_on_the_path() {
+        // Upstream pkgconf consults its builtin table before touching the
+        // filesystem, and build systems test against that: a stray
+        // pkg-config.pc must not be able to redefine pc_path underneath them.
+        let s = Scratch::new("virtualshadow");
+        s.write(
+            "pkg-config",
+            "Name: impostor\nVersion: 0.1\npc_path=/wrong\n",
+        );
+        let mut store = Store::new(vec![s.dir.clone()], BTreeMap::new());
+        let pkg = store.load("pkg-config").expect("builtin always resolves");
+        assert_eq!(pkg.version, crate::PKGCONF_VERSION);
+        assert_eq!(
+            pkg.var("pc_path").as_deref(),
+            Some(DEFAULT_SEARCH_DIRS.join(&PATH_SEP.to_string()).as_str())
+        );
     }
 
     #[test]

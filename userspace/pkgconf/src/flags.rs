@@ -229,17 +229,20 @@ pub fn dedup(flags: Vec<Flag>) -> Vec<Flag> {
 /// Directories the compiler and linker already search, and which therefore
 /// must not be added explicitly: doing so can reorder the search path and pull
 /// in a system header ahead of a package's own.
-const SYSTEM_INCLUDE_DIRS: &[&str] = &["/usr/include"];
-const SYSTEM_LIB_DIRS: &[&str] = &["/usr/lib", "/lib", "/usr/lib64", "/lib64"];
+///
+/// Public because the virtual `pkg-config` package reports them verbatim as
+/// `pc_system_includedirs` / `pc_system_libdirs`.  Build systems compare their
+/// own `-I`/`-L` lists against those values, so the two views must be the same
+/// list rather than two lists that agree today.
+pub const SYSTEM_INCLUDE_DIRS: &[&str] = &["/usr/include"];
+pub const SYSTEM_LIB_DIRS: &[&str] = &["/usr/lib", "/lib", "/usr/lib64", "/lib64"];
 
 /// Drop `-I` flags naming a directory the compiler searches anyway.
 #[must_use]
 pub fn strip_system_includes(flags: Vec<Flag>) -> Vec<Flag> {
     flags
         .into_iter()
-        .filter(|f| {
-            f.kind != FlagKind::IncludePath || !SYSTEM_INCLUDE_DIRS.contains(&f.payload())
-        })
+        .filter(|f| f.kind != FlagKind::IncludePath || !SYSTEM_INCLUDE_DIRS.contains(&f.payload()))
         .collect()
 }
 
@@ -295,8 +298,8 @@ pub fn render(flags: &[Flag]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_sysroot, dedup, parse_fragment, render, shell_split, strip_system_includes,
-        strip_system_libdirs, Flag, FlagKind,
+        Flag, FlagKind, apply_sysroot, dedup, parse_fragment, render, shell_split,
+        strip_system_includes, strip_system_libdirs,
     };
 
     fn texts(flags: &[Flag]) -> Vec<&str> {

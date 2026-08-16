@@ -256,9 +256,8 @@ fn split_glued_operator(tok: &str) -> Option<(String, (CmpOp, String))> {
 ///
 /// A ready-to-print message if a constraint is missing its version.
 pub fn parse_dep_list(text: &str) -> Result<Vec<Dep>, String> {
-    parse_deps("package list", text).map_err(|_| {
-        format!("Ignoring incomplete version constraint in package list '{text}'")
-    })
+    parse_deps("package list", text)
+        .map_err(|_| format!("Ignoring incomplete version constraint in package list '{text}'"))
 }
 
 /// The result of parsing: the package plus any non-fatal complaints.
@@ -294,9 +293,7 @@ pub fn parse(
 
     // `pcfiledir` lets a relocatable package express its own prefix as
     // `${pcfiledir}/../..`; it is a built-in and cannot be assigned.
-    let pcfiledir = path
-        .parent()
-        .map_or_else(|| ".".to_string(), |p| p.to_string_lossy().replace('\\', "/"));
+    let pcfiledir = pcfiledir_of(path);
 
     let mut vars: BTreeMap<String, String> = BTreeMap::new();
     let mut undefined: Vec<String> = Vec::new();
@@ -392,6 +389,20 @@ pub fn parse(
     })
 }
 
+/// The directory holding a `.pc` file, as `${pcfiledir}` sees it.
+///
+/// Backslashes are folded to `/` because the value is substituted into
+/// `-I`/`-L` flags that a compiler on SlateOS reads, and SlateOS paths use
+/// forward slashes; on a Windows *host* — which is where this crate's tests
+/// run — `Path::parent` would otherwise hand back `C:\x\y` and produce flags
+/// no target compiler could parse.
+fn pcfiledir_of(path: &Path) -> String {
+    path.parent().map_or_else(
+        || ".".to_string(),
+        |p| p.to_string_lossy().replace('\\', "/"),
+    )
+}
+
 /// Variable lookup order: command-line overrides, then the file's own
 /// bindings, then the built-in `pcfiledir`.
 fn resolve(
@@ -414,15 +425,48 @@ fn resolve(
 
 impl PcFile {
     /// Look up a variable for `--variable=NAME`.
+    ///
+    /// `pcfiledir` answers here as well as inside `${...}` substitution.  It
+    /// has to: a relocatable package writes `prefix=${pcfiledir}/../..`, and
+    /// the build system that consumes it then asks for `pcfiledir` directly to
+    /// compute its own install paths.  Resolving it during parsing but not
+    /// here would make `${pcfiledir}` work and `--variable=pcfiledir` return
+    /// the empty string, which is the kind of split that only shows up in
+    /// somebody else's build failure.
     #[must_use]
-    pub fn var(&self, name: &str) -> Option<&str> {
-        self.vars.get(name).map(String::as_str)
+    pub fn var(&self, name: &str) -> Option<String> {
+        if let Some(v) = self.vars.get(name) {
+            return Some(v.clone());
+        }
+        // A virtual package has no file, so it has no `pcfiledir`; answering
+        // "." there would hand a relocatable-path expression a value that
+        // silently means "wherever the build happened to be run from".
+        if name == "pcfiledir" && !self.path.as_os_str().is_empty() {
+            return Some(pcfiledir_of(&self.path));
+        }
+        None
+    }
+
+    /// Every name `--variable=` would resolve, in the order
+    /// `--print-variables` prints them.
+    ///
+    /// pkgconf lists `pcfiledir`; pkg-config 0.29 does not.  We follow pkgconf,
+    /// because a name that `--variable=` answers and `--print-variables` omits
+    /// is a worse lie than either behaviour on its own.  A file that assigns
+    /// `pcfiledir` itself is listed once, from its own bindings.
+    #[must_use]
+    pub fn var_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.vars.keys().map(String::as_str).collect();
+        if !self.vars.contains_key("pcfiledir") && !self.path.as_os_str().is_empty() {
+            names.push("pcfiledir");
+        }
+        names
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, ParseError};
+    use super::{ParseError, parse};
     use crate::version::CmpOp;
     use std::collections::BTreeMap;
     use std::path::Path;
@@ -457,13 +501,13 @@ Cflags: -I${includedir}
         assert_eq!(p.name, "zlib");
         assert_eq!(p.version, "1.3.1");
         assert_eq!(p.description, "zlib compression library");
-        assert_eq!(p.var("prefix"), Some("/usr"));
+        assert_eq!(p.var("prefix").as_deref(), Some("/usr"));
     }
 
     #[test]
     fn variables_expand_transitively_in_file_order() {
         let p = parse_ok(ZLIB);
-        assert_eq!(p.var("libdir"), Some("/usr/lib"));
+        assert_eq!(p.var("libdir").as_deref(), Some("/usr/lib"));
         assert_eq!(p.libs, "-L/usr/lib -lz");
         assert_eq!(p.cflags, "-I/usr/include");
     }
@@ -472,8 +516,8 @@ Cflags: -I${includedir}
     fn forward_references_do_not_resolve() {
         // Matches the reference tools: substitution is at assignment time.
         let p = parse_ok("a=${b}\nb=2\nName: t\nVersion: 1\n");
-        assert_eq!(p.var("a"), Some(""));
-        assert_eq!(p.var("b"), Some("2"));
+        assert_eq!(p.var("a").as_deref(), Some(""));
+        assert_eq!(p.var("b").as_deref(), Some("2"));
     }
 
     #[test]
@@ -510,7 +554,7 @@ Cflags: -I${includedir}
     #[test]
     fn pcfiledir_is_built_in() {
         let p = parse_ok("prefix=${pcfiledir}/../..\nName: t\nVersion: 1\n");
-        assert_eq!(p.var("prefix"), Some("/usr/lib/pkgconfig/../.."));
+        assert_eq!(p.var("prefix").as_deref(), Some("/usr/lib/pkgconfig/../.."));
     }
 
     #[test]
@@ -588,7 +632,7 @@ Cflags: -I${includedir}
     #[test]
     fn a_value_containing_a_colon_is_still_an_assignment() {
         let p = parse_ok("searchpath=/a:/b\nName: t\n");
-        assert_eq!(p.var("searchpath"), Some("/a:/b"));
+        assert_eq!(p.var("searchpath").as_deref(), Some("/a:/b"));
     }
 
     #[test]
@@ -632,7 +676,10 @@ Cflags: -I${includedir}
         let p = parse_ok("Name: t\nRequires.private: x >= 1\nConflicts: y < 2\n");
         assert_eq!(p.requires_private[0].name, "x");
         assert_eq!(p.conflicts[0].name, "y");
-        assert_eq!(p.conflicts[0].constraint, Some((CmpOp::Lt, "2".to_string())));
+        assert_eq!(
+            p.conflicts[0].constraint,
+            Some((CmpOp::Lt, "2".to_string()))
+        );
     }
 
     #[test]

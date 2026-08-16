@@ -80,7 +80,7 @@ import sys
 # cross-check of that benchmark's own measurement window as one token:
 #
 #   `-`    no cross-check was performed. NOT "stable" -- see SPLIT_ABSENT.
-#   `12`   checked; the two interleaved sample sets' minima differ by 12%.
+#   `12`   checked; the two half-window sample sets' minima differ by 12%.
 #   `31!`  checked and flagged past the kernel's gate.
 #   `?`    checked, but a set's minimum was zero, so there is no ratio.
 #
@@ -2083,10 +2083,10 @@ def report(previous, current_entries, threshold_pct,
             reg_within + imp_within, worst_first)
     if void_rows:
         print(
-            "  MEASUREMENT VOID (this run's two interleaved sample sets "
-            "disagreed, so the run's own noise floor moved *during* the "
-            "window -- the number below is not a measurement of anything and "
-            "is NOT counted as a regression):"
+            "  MEASUREMENT VOID (the first and second halves of this run's "
+            "measurement window disagreed, so the run's own noise floor moved "
+            "*during* the window -- the number below is not a measurement of "
+            "anything and is NOT counted as a regression):"
         )
         for name, before, after, raw, adj, band in sorted(void_rows,
                                                           key=worst_first):

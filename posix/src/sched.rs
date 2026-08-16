@@ -411,15 +411,22 @@ pub extern "C" fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const Cp
         return -1;
     }
 
-    // Phase 207: CAP_SYS_NICE gate for cross-process affinity.
-    // Linux's `sched_setaffinity` calls `check_same_owner(p)` and, if
-    // that fails, requires `ns_capable(CAP_SYS_NICE)`.  pid == 0 means
-    // "self" (always same-owner), so we only gate pid > 0 (targeting
-    // another process we cannot verify ownership of).
-    if pid > 0 && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE) {
-        errno::set_errno(errno::EPERM);
-        return -1;
-    }
+    // §314: no capability gate here.  Linux's `sched_setaffinity` calls
+    // `check_same_owner(p)` and only falls back to `ns_capable(CAP_SYS_NICE)`
+    // when that fails — so the capability is the *alternative*, not the rule.
+    //
+    // The Phase-207 gate used `pid > 0` as a stand-in for "not same owner",
+    // which is wrong in the most ordinary case there is: `pid == getpid()` is
+    // `pid > 0` and is trivially same-owner, so a process would have been
+    // denied setting its **own** affinity by explicit pid — working only if it
+    // happened to pass 0. Since libc cannot read another task's credentials,
+    // it cannot evaluate `check_same_owner` for the cases where the answer is
+    // not already obvious, and a test it cannot evaluate is a guess.
+    //
+    // This function does not yet reach the kernel (it validates its arguments
+    // and reports success), so there is no syscall answer to defer to either.
+    // When the real call lands it carries the check, as `sys_fs_set_owner`
+    // does for `chown`.
 
     0
 }
@@ -2164,14 +2171,19 @@ mod tests {
     }
 
     // ===================================================================
-    // Phase 207 — CAP_SYS_NICE gate on sched_setaffinity (pid > 0)
+    // §314 — sched_setaffinity has NO libc CAP_SYS_NICE gate
     // ===================================================================
     //
-    // Linux gates cross-process affinity changes on `check_same_owner`
-    // then `CAP_SYS_NICE`.  pid == 0 means "self" (no cap needed).
-    // Error priority:
+    // Linux gates cross-process affinity changes on `check_same_owner` and
+    // falls back to `CAP_SYS_NICE` only when that fails, so the capability
+    // is the alternative rather than the rule.  The Phase-207 gate used
+    // `pid > 0` as a stand-in for "not same owner" — which mis-classifies
+    // `pid == getpid()`, the most ordinary target there is.  §314 removed
+    // it; these tests now pin its absence, and in particular that an
+    // explicit self-pid is treated the same as `pid == 0`.
+    //
+    // Error priority is unchanged, because it never involved the gate:
     //   EFAULT > EINVAL (cpusetsize) > ESRCH (pid < 0) > EINVAL (mask)
-    //   > EPERM (no cap, pid > 0)
     mod phase207_cap_setaffinity {
         use super::*;
 
@@ -2278,21 +2290,46 @@ mod tests {
             );
         }
 
-        /// pid > 0 without CAP_SYS_NICE → EPERM.
+        /// pid > 0 without `CAP_SYS_NICE` is not denied by libc (§314).
         #[test]
-        fn test_setaffinity_other_no_cap_eperm() {
+        fn test_setaffinity_other_no_cap_is_not_libc_denied() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
             let m = valid_mask();
             crate::errno::set_errno(0);
             assert_eq!(
                 sched_setaffinity(1, core::mem::size_of::<CpuSetT>(), &m as *const _,),
-                -1,
+                0,
             );
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_ne!(crate::errno::get_errno(), crate::errno::EPERM);
         }
 
-        /// EFAULT (null mask) takes priority over EPERM.
+        /// The bug the Phase-207 gate actually had: setting **your own**
+        /// affinity by explicit pid.  `getpid()` is `> 0`, so the old
+        /// `pid > 0` proxy for "not same owner" caught the one target that
+        /// is unambiguously same-owner — a process could set its affinity
+        /// via `pid == 0` but not via its own pid, which is not a
+        /// distinction Linux makes.
+        #[test]
+        fn test_setaffinity_own_pid_without_cap_is_not_denied() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            // Guard against a host build where `getpid` is unavailable and
+            // reports a non-positive value: that would take the ESRCH arm and
+            // test nothing.  `max(1)` keeps this a `pid > 0` case either way,
+            // which is the classification under test.
+            let target = crate::process::getpid().max(1);
+            let m = valid_mask();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                sched_setaffinity(target, core::mem::size_of::<CpuSetT>(), &m as *const _,),
+                0,
+                "a process must be able to set its own affinity by pid, not \
+                 only by passing 0"
+            );
+        }
+
+        /// EFAULT (null mask) still takes priority.
         #[test]
         fn test_setaffinity_efault_before_eperm() {
             let _g = CapGuard::snapshot();

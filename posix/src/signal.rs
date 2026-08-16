@@ -962,12 +962,22 @@ fn signal_send_errno(ret: i64) -> i32 {
 ///   `pid == -1` (broadcast to everything signalable) is not modelled and
 ///   reports `ESRCH`.
 ///
-/// ## Capability gate (Phase 203)
+/// ## Authority — the kernel's, not libc's (§314; was a Phase-203 `CAP_KILL` gate)
 ///
-/// Every non-self `kill()` — `pid > 0` and the group forms alike —
-/// requires `CAP_KILL` (matches Linux's `check_kill_permission()` →
-/// `kill_ok_by_cred()`).  A group send is semantically N cross-process
-/// sends, so it cannot be a way around the gate.
+/// Non-self sends carry **no libc-side capability test**.  Linux's rule is
+/// `check_kill_permission()` → `kill_ok_by_cred()`: permitted when the sender's
+/// real or effective uid matches the target's, **or** when the sender holds
+/// `CAP_KILL`.  libc can evaluate neither half honestly — it cannot read the
+/// *target's* credentials, and after §312 its `CAP_KILL` is a deliberately
+/// conservative projection that reads false for authority the kernel would
+/// grant.  Testing only the capability would therefore not be Linux's rule
+/// minus a clause; it would be a strictly narrower rule that refuses the
+/// ordinary parent→child send.
+///
+/// So the check lives where the facts are: `SYS_SIGNAL_SEND` evaluates the real
+/// predicate and returns `PERMISSION_DENIED`, which surfaces here as `EPERM`.
+/// The group forms are not an exception — they take the same syscall, so they
+/// are not a cheaper route to anything.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     // sig == 0 is a pure existence/permission check; honour it.
@@ -1008,13 +1018,16 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     match kill_target(pid, self_pid) {
         KillTarget::Self_ => dispatch_self_signal(sig),
         KillTarget::ProcessGroup => {
-            // Same CAP_KILL gate as a single cross-process send: a group
-            // send reaches other processes, so it must not be a cheaper
-            // route to the same authority.
-            if !crate::sys_capability::has_capability(crate::sys_capability::CAP_KILL) {
-                errno::set_errno(errno::EPERM);
-                return -1;
-            }
+            // No pre-emptive CAP_KILL test here (§314).  `SYS_SIGNAL_SEND`
+            // is the authority for a group send exactly as it is for a
+            // single one, and it answers `PERMISSION_DENIED` when it
+            // refuses — which `signal_send_errno` turns into EPERM.  A
+            // libc-side gate could only ever be a second, worse copy of
+            // that decision: §312's projection is deliberately
+            // conservative, so a false `CAP_KILL` does not mean the kernel
+            // would refuse, and denying on it would break the group form
+            // for every process the kernel would have served.
+            //
             // The kernel fans the signal out across the group. Note this
             // may include *us*, if we are a member of the target group:
             // that delivery arrives asynchronously through the registered
@@ -1033,12 +1046,17 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
             0
         }
         KillTarget::Other => {
-            // Phase 203: CAP_KILL gate for cross-process signals.
-            if !crate::sys_capability::has_capability(crate::sys_capability::CAP_KILL) {
-                errno::set_errno(errno::EPERM);
-                return -1;
-            }
-
+            // No pre-emptive CAP_KILL test here (§314).  Linux's rule is
+            // "same real/effective uid as the target **or** CAP_KILL", and
+            // libc cannot evaluate the first half: it has no way to learn
+            // the *target's* credentials.  A capability-only test is
+            // therefore not Linux's rule with a piece missing, it is a
+            // different and strictly narrower rule — one that would refuse
+            // the ordinary parent→child send that `services/ctest-jobctl`
+            // depends on and that the kernel authorises on the parent
+            // relationship alone.  `SYS_SIGNAL_SEND` evaluates the real
+            // predicate and reports `PERMISSION_DENIED` when it refuses.
+            //
             // Deliver via the kernel signal shim.  The kernel sets the
             // signal pending and either delivers it to the target's
             // trampoline or applies the default action.  We don't
@@ -1071,7 +1089,7 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
 ///   (a negative process *group* is nonsense; without this check the negation
 ///   below would silently turn it into a positive per-process `kill`).
 /// * `ESRCH` — no such process group, or it has no live members.
-/// * `EPERM` — the caller does not hold `CAP_KILL`.
+/// * `EPERM` — the kernel refused the send (§314: it, not libc, decides).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn killpg(pgrp: i32, sig: i32) -> i32 {
     if pgrp < 0 {
@@ -1675,13 +1693,20 @@ pub extern "C" fn sigtimedwait(
 /// process-group, "self", or "all-processes" forms; the target must
 /// be a real positive PID.
 ///
-/// # Capability gate (Phase 204)
+/// # Authority (§314; was a Phase-204 `CAP_KILL` gate)
 ///
-/// Like `kill()`, Linux gates cross-uid signal delivery via
-/// `check_kill_permission()` → `kill_ok_by_cred()`.  Since
-/// `sigqueue` always targets a specific positive pid, the gate
-/// runs after argument validation (EINVAL) for every well-formed
-/// call.
+/// Linux gates cross-uid signal delivery via `check_kill_permission()` →
+/// `kill_ok_by_cred()` — same-uid **or** `CAP_KILL` — exactly as for
+/// [`kill`], and libc can evaluate that rule no better here than it can
+/// there.  This function is additionally still a **stub**: it delivers
+/// nothing.  Refusing with `EPERM` on a conservative capability projection
+/// would invent an authority failure for an operation that was never going
+/// to happen, and a port reading that `EPERM` would conclude it lacks a
+/// privilege rather than that the call is unimplemented.  `ENOSYS` is the
+/// answer that is true.
+///
+/// When real delivery lands here it takes the same shape as `kill`: issue
+/// the send and report what the kernel says.
 ///
 /// Errors (Linux-matching priority order):
 ///
@@ -1692,9 +1717,7 @@ pub extern "C" fn sigtimedwait(
 ///    validates sig deep in `__send_signal_locked::valid_signal`,
 ///    after process lookup; here the stub mirrors that EINVAL value
 ///    without modelling process existence.
-/// 3. `!CAP_KILL`                                      → `EPERM`
-///    (Phase 204)
-/// 4. `ENOSYS` for any otherwise-valid call.
+/// 3. `ENOSYS` for any otherwise-valid call.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigqueue(pid: crate::types::PidT, sig: i32, _value: usize) -> i32 {
     // 1. pid <= 0 → EINVAL.  Linux's do_rt_sigqueueinfo rejects this
@@ -1709,13 +1732,9 @@ pub extern "C" fn sigqueue(pid: crate::types::PidT, sig: i32, _value: usize) -> 
         crate::errno::set_errno(crate::errno::EINVAL);
         return -1;
     }
-    // 3. Phase 204: CAP_KILL gate — same contract as kill() Phase 203.
-    //    sigqueue always targets a specific pid (no process-group
-    //    forms), so the gate fires for every well-formed call.
-    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_KILL) {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
+    // 3. No CAP_KILL gate (§314): same reasoning as kill(), plus this is
+    //    still a stub — an EPERM here would report a privilege failure for
+    //    a send that does not happen either way.
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
 }
@@ -3002,12 +3021,20 @@ mod tests {
     }
 
     // =================================================================
-    // Phase 203 — CAP_KILL gate on kill() for cross-process signals
+    // §314 — kill() has NO libc-side CAP_KILL gate
     //
-    // Linux's check_kill_permission() → kill_ok_by_cred() gates
-    // cross-uid signal delivery on CAP_KILL.  The gate runs after
-    // the EINVAL signal check and the self-SIGABRT fast path, and
-    // only for pid > 0 (process-group forms fall through to ENOSYS).
+    // These were Phase-203 tests asserting that dropping CAP_KILL made a
+    // cross-process kill() return EPERM.  §314 removed that gate: Linux's
+    // rule is same-uid **or** CAP_KILL, libc cannot read the target's uid,
+    // and after §312 its CAP_KILL is a conservative projection that reads
+    // false for authority the kernel would grant.  A capability-only test
+    // is therefore narrower than Linux's rule, not a subset of it, and
+    // would refuse the ordinary parent→child send.
+    //
+    // So the tests are inverted rather than deleted: they now pin that
+    // dropping CAP_KILL does *not* by itself produce EPERM.  That is the
+    // property §312 step 3 will try to break, and it is worth a test that
+    // fails loudly if someone reinstates the gate on the way through.
     // =================================================================
 
     mod phase203_cap {
@@ -3069,127 +3096,148 @@ mod tests {
         }
     }
 
-    // -- cap held: the cap gate does not reject cross-process kill --------
+    // -- routing is unaffected by the capability --------------------------
     //
-    // Under the Phase-211 model the sender no longer classifies by
-    // disposition — every cross-process `kill(pid>0, sig)` with CAP_KILL
-    // held proceeds to `SYS_SIGNAL_SEND`, and the kernel/target decide
-    // what to do.  The *outcome* of that syscall is not host-testable
-    // (the host has no kernel shim and `syscall` returns garbage), so we
-    // only assert the deterministic, in-process invariant: with CAP_KILL
-    // held the cap gate is satisfied (it is the no-cap path, tested
-    // below, that short-circuits to EPERM).  The send-failure → errno
-    // mapping is covered by `test_signal_send_errno_mapping`, and the
-    // routing decision by the `test_kill_target_*` tests.
+    // Under the Phase-211 model the sender does not classify by disposition:
+    // every cross-process `kill(pid>0, sig)` proceeds to `SYS_SIGNAL_SEND`
+    // and the kernel/target decide.  The *outcome* of that syscall is not
+    // host-testable (the host has no kernel shim), so these tests assert the
+    // deterministic in-process invariants only.  The send-failure → errno
+    // mapping is covered by `test_signal_send_errno_mapping` — including the
+    // `PERMISSION_DENIED → EPERM` arm, which is now the *only* way `kill`
+    // produces EPERM.
 
-    /// With CAP_KILL (default), the capability gate is satisfied, so a
-    /// cross-process `kill` is *not* rejected with EPERM.
+    /// Routing does not consult the capability: `kill_target` is a pure
+    /// function of the two pids, with the cap held.
     #[test]
-    fn test_phase203_kill_with_cap_passes_gate() {
+    fn test_kill_routing_ignores_capability_when_held() {
         assert!(crate::sys_capability::has_capability(
             crate::sys_capability::CAP_KILL,
         ));
-        // The gate check is pure (reads capability atomics, issues no
-        // syscall): with the cap held it must not select the EPERM arm.
         assert_eq!(kill_target(1, 4242), KillTarget::Other);
     }
 
-    // -- cap dropped: cross-process kill → EPERM --------------------------
+    // -- §314: dropping CAP_KILL does not by itself deny ------------------
+    //
+    // The inverse of the old Phase-203 assertions.  What is being pinned is
+    // that libc has stopped pre-empting the kernel's decision — so a
+    // cross-process send with the capability dropped must reach
+    // `SYS_SIGNAL_SEND` and report *its* answer.  On the host that syscall
+    // is unimplemented and `signal_send_errno` maps the failure to ESRCH;
+    // the load-bearing part is `!= EPERM`, since EPERM is what a
+    // reinstated libc-side gate would produce.
 
-    /// Without CAP_KILL, kill(1, SIGHUP) → EPERM.
+    /// Without CAP_KILL, `kill(1, SIGHUP)` must not be denied by libc.
     #[test]
-    fn test_phase203_kill_no_cap_eperm() {
+    fn test_kill_no_cap_is_not_libc_denied() {
         let _g = phase203_cap::CapGuard::snapshot();
         phase203_cap::drop_cap_kill();
         crate::errno::set_errno(0);
-        let ret = kill(1, SIGHUP);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
-    }
-
-    /// Without CAP_KILL, kill(42, SIGTERM) → EPERM.
-    #[test]
-    fn test_phase203_kill_sigterm_no_cap_eperm() {
-        let _g = phase203_cap::CapGuard::snapshot();
-        phase203_cap::drop_cap_kill();
-        crate::errno::set_errno(0);
-        let ret = kill(42, SIGTERM);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
-    }
-
-    // -- sig==0 existence check bypasses the cap gate ---------------------
-
-    /// sig==0 is a pure existence check — it never signals, so
-    /// CAP_KILL is not required.  The sig==0 branch returns before
-    /// the cap gate.
-    #[test]
-    fn test_phase203_kill_sig0_bypasses_cap_gate() {
-        let _g = phase203_cap::CapGuard::snapshot();
-        phase203_cap::drop_cap_kill();
-        crate::errno::set_errno(0);
-        // pid <= 0 takes the group-probe path for sig==0; that's tested
-        // elsewhere.  For pid > 0, sig==0 does a SYS_PROCESS_IS_READY
-        // syscall — the result depends on whether pid 1 actually exists.
-        // Either ESRCH or 0 is acceptable; what matters is it's NOT EPERM.
-        let ret = kill(1, 0);
-        // We don't assert ret because pid 1 may or may not exist.
-        // The key invariant is that errno != EPERM.
+        let _ = kill(1, SIGHUP);
         assert_ne!(
             crate::errno::get_errno(),
             crate::errno::EPERM,
-            "sig==0 must bypass CAP_KILL gate"
+            "§314: libc must not deny a send the kernel has not been asked about"
         );
-        let _ = ret; // suppress unused warning
     }
 
-    // -- pid <= 0 is subject to the cap gate too --------------------------
+    /// Same for a terminating signal to an arbitrary pid — the signal
+    /// number is not what the removed gate keyed on, so it gets its own case.
+    #[test]
+    fn test_kill_sigterm_no_cap_is_not_libc_denied() {
+        let _g = phase203_cap::CapGuard::snapshot();
+        phase203_cap::drop_cap_kill();
+        crate::errno::set_errno(0);
+        let _ = kill(42, SIGTERM);
+        assert_ne!(crate::errno::get_errno(), crate::errno::EPERM);
+    }
+
+    /// The parent→child case `services/ctest-jobctl` depends on: a plain
+    /// `SIGCONT` to another pid, with no capability held.  This is the
+    /// regression §314 exists to prevent — the kernel authorises it on the
+    /// parent relationship, which libc cannot see and must not overrule.
+    #[test]
+    fn test_kill_sigcont_to_child_without_cap_is_not_libc_denied() {
+        let _g = phase203_cap::CapGuard::snapshot();
+        phase203_cap::drop_cap_kill();
+        crate::errno::set_errno(0);
+        let _ = kill(7, SIGCONT);
+        assert_ne!(
+            crate::errno::get_errno(),
+            crate::errno::EPERM,
+            "parent->child SIGCONT must not be refused by libc: the kernel \
+             authorises it on the parent relationship, which libc cannot see"
+        );
+    }
+
+    // -- sig==0 existence check is likewise not gated ---------------------
+
+    /// sig==0 is a pure existence check — it never signals.  It took the
+    /// early return before §314 and still does; the assertion is unchanged.
+    #[test]
+    fn test_kill_sig0_is_not_libc_denied() {
+        let _g = phase203_cap::CapGuard::snapshot();
+        phase203_cap::drop_cap_kill();
+        crate::errno::set_errno(0);
+        // For pid > 0, sig==0 issues SYS_PROCESS_IS_READY; whether pid 1
+        // exists is not ours to assert.  Either ESRCH or 0 is acceptable.
+        let _ = kill(1, 0);
+        assert_ne!(
+            crate::errno::get_errno(),
+            crate::errno::EPERM,
+            "an existence probe must never report a permission failure"
+        );
+    }
+
+    // -- the group forms are not gated either -----------------------------
     //
-    // These used to assert that the group forms *bypassed* CAP_KILL — but
-    // only because they could not signal anything at all, so the gate was
-    // unreachable dead weight.  Now that a group send really does reach
-    // other processes, exempting it would make `killpg(g, SIGKILL)` a way
-    // to do what `kill(pid, SIGKILL)` is denied.  The gate applies.
+    // These have now been through three states, which is worth recording so
+    // the next reader does not "restore" an earlier one.  Originally they
+    // asserted the group forms *bypassed* CAP_KILL — true only because a
+    // group send could not reach anything, so the gate was dead weight.
+    // Then, once the kernel fanout landed, they asserted the gate *applied*,
+    // so `killpg` could not do what `kill` was denied.  §314 removes the
+    // gate from both forms together, which preserves that symmetry: neither
+    // is a route around the other, because neither is gated in libc at all.
+    // `SYS_SIGNAL_SEND` fans out and decides, exactly as for a single send.
 
-    /// pid == 0 (the caller's own process group) with no cap → EPERM.
+    /// pid == 0 (the caller's own process group) with no cap: not libc-denied.
     #[test]
-    fn test_phase203_kill_pid0_no_cap_is_eperm() {
+    fn test_kill_pid0_no_cap_is_not_libc_denied() {
         let _g = phase203_cap::CapGuard::snapshot();
         phase203_cap::drop_cap_kill();
         crate::errno::set_errno(0);
-        let ret = kill(0, SIGHUP);
-        assert_eq!(ret, -1);
-        assert_eq!(
+        let _ = kill(0, SIGHUP);
+        assert_ne!(
             crate::errno::get_errno(),
             crate::errno::EPERM,
-            "a group send must not be a way around the CAP_KILL gate"
+            "the group form takes the same syscall as a single send, and the \
+             same authority: the kernel's"
         );
     }
 
-    /// pid == -1 (all processes) with no cap → EPERM.
-    ///
-    /// Note the gate fires *before* the kernel would report ESRCH for the
-    /// unmodelled broadcast: a caller without CAP_KILL must not be able to
-    /// probe which targets exist.
+    /// pid == -1 (broadcast) with no cap: not libc-denied.
     #[test]
-    fn test_phase203_kill_pidneg1_no_cap_is_eperm() {
+    fn test_kill_pidneg1_no_cap_is_not_libc_denied() {
         let _g = phase203_cap::CapGuard::snapshot();
         phase203_cap::drop_cap_kill();
         crate::errno::set_errno(0);
-        let ret = kill(-1, SIGTERM);
-        assert_eq!(ret, -1);
-        assert_eq!(
-            crate::errno::get_errno(),
-            crate::errno::EPERM,
-            "a broadcast send must not be a way around the CAP_KILL gate"
-        );
+        let _ = kill(-1, SIGTERM);
+        assert_ne!(crate::errno::get_errno(), crate::errno::EPERM);
     }
 
-    // -- ordering: EINVAL beats EPERM -------------------------------------
+    // -- ordering: EINVAL still precedes the syscall ----------------------
 
     /// Invalid signal + no cap → EINVAL (sig check before cap).
+    /// A bad signal number is still rejected before the syscall is issued.
+    ///
+    /// This one survives §314 unchanged and is the reason argument
+    /// validation was never part of the gate discussion: `EINVAL` is libc
+    /// answering a question about *its own arguments*, which it can
+    /// evaluate completely, as opposed to a question about authority, which
+    /// it cannot.  That is the whole line §314 draws.
     #[test]
-    fn test_phase203_kill_invalid_sig_einval_before_eperm() {
+    fn test_kill_invalid_sig_einval_precedes_the_syscall() {
         let _g = phase203_cap::CapGuard::snapshot();
         phase203_cap::drop_cap_kill();
         crate::errno::set_errno(0);
@@ -3198,39 +3246,45 @@ mod tests {
         assert_eq!(
             crate::errno::get_errno(),
             crate::errno::EINVAL,
-            "EINVAL for bad signal must precede EPERM"
+            "argument validation is libc's to do and must precede the send"
         );
     }
 
     // -- restoration: cap drop/restore cycle ------------------------------
 
-    /// After restoring CAP_KILL, ignore signals succeed again.
+    /// A drop/restore cycle of `CAP_KILL` changes nothing about `kill`.
     ///
-    /// The "succeed" branch issues `SYS_SIGNAL_SEND` against PID 1.  On
-    /// the OS target that hits the kernel signal shim, which dispatches
-    /// to init's handler (or its default — SIGCHLD's default is ignore,
-    /// so the syscall returns 0).  On host builds we can't issue real
-    /// syscalls, so the gate-restore half of the test only runs on the
-    /// OS target.  The CAP_KILL=dropped → EPERM half is pure-userspace
-    /// logic and runs everywhere.
+    /// Before §314 this test asserted the two halves of the gate. It now
+    /// asserts the gate's absence on both sides of the cycle, which is a
+    /// weaker claim about `kill` but a sharper one about `capset`: the
+    /// capability machinery still works (the restore is checked), it simply
+    /// no longer feeds this decision.
+    ///
+    /// The "succeeds" branch issues `SYS_SIGNAL_SEND` against PID 1, which
+    /// only exists on the OS target — there it reaches the kernel signal
+    /// shim, which dispatches to init's handler or its default (SIGCHLD's
+    /// default is ignore, so the syscall returns 0).
     #[test]
-    fn test_phase203_kill_cap_restore() {
+    fn test_kill_cap_drop_restore_cycle_does_not_change_kill() {
         {
             let _g = phase203_cap::CapGuard::snapshot();
             phase203_cap::drop_cap_kill();
             crate::errno::set_errno(0);
-            // Without CAP_KILL, cross-process signal → EPERM.
-            let ret = kill(1, SIGCHLD);
-            assert_eq!(ret, -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            let _ = kill(1, SIGCHLD);
+            assert_ne!(
+                crate::errno::get_errno(),
+                crate::errno::EPERM,
+                "§314: dropping the capability must not make libc deny"
+            );
         }
-        assert!(crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_KILL,
-        ));
+        assert!(
+            crate::sys_capability::has_capability(crate::sys_capability::CAP_KILL),
+            "the guard must have restored the capability"
+        );
         #[cfg(target_os = "none")]
         {
             crate::errno::set_errno(0);
-            // With cap restored, ignore signals succeed.
+            // With the cap restored, an ignore-by-default signal succeeds.
             let ret = kill(1, SIGCHLD);
             assert_eq!(ret, 0);
         }
@@ -3919,18 +3973,20 @@ mod tests {
     }
 
     // =================================================================
-    // Phase 204 — CAP_KILL gate on sigqueue()
+    // §314 — sigqueue() has NO libc-side CAP_KILL gate either
     //
-    // sigqueue always targets a specific positive pid; the gate runs
-    // after argument validation (EINVAL for pid/sig).  Reuses the
-    // Phase 203 cap helpers.
+    // These were the Phase-204 mirror of the Phase-203 kill() tests.  They
+    // now pin the stronger property that applies to an unimplemented call:
+    // its answer is ENOSYS *regardless* of the capability words, because an
+    // EPERM here would report a privilege failure for a send that does not
+    // happen under any capability.  A port that saw EPERM would conclude it
+    // needs a privilege; the truth is that the function needs writing.
+    // Reuses the kill() cap helpers.
     // =================================================================
 
-    // -- cap held: sigqueue reaches ENOSYS (unchanged) --------------------
-
-    /// With CAP_KILL (default), sigqueue(1, SIGHUP, 0) reaches ENOSYS.
+    /// With `CAP_KILL` held, `sigqueue(1, SIGHUP, 0)` reaches ENOSYS.
     #[test]
-    fn test_phase204_sigqueue_with_cap_enosys() {
+    fn test_sigqueue_with_cap_enosys() {
         assert!(crate::sys_capability::has_capability(
             crate::sys_capability::CAP_KILL,
         ));
@@ -3940,37 +3996,42 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    // -- cap dropped: sigqueue → EPERM ------------------------------------
-
-    /// Without CAP_KILL, sigqueue(1, SIGHUP, 0) → EPERM.
+    /// …and without it, the *same* ENOSYS. This is the pair that matters:
+    /// the two cases must be indistinguishable, since the capability is not
+    /// an input to the answer.
     #[test]
-    fn test_phase204_sigqueue_no_cap_eperm() {
+    fn test_sigqueue_without_cap_is_still_enosys_not_eperm() {
         let _g = phase203_cap::CapGuard::snapshot();
         phase203_cap::drop_cap_kill();
         crate::errno::set_errno(0);
         let ret = sigqueue(1, SIGHUP, 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ENOSYS,
+            "§314: an unimplemented call reports that it is unimplemented, \
+             not that the caller lacks a privilege"
+        );
     }
 
-    /// Without CAP_KILL, sig==0 (existence probe) → EPERM too.
-    /// Unlike kill(pid, 0), sigqueue has no special sig-0 fast path
-    /// — it goes through the same cap gate.
+    /// The `sig == 0` existence-probe form, likewise.  `sigqueue` has no
+    /// sig-0 fast path of its own, so this exercises the main body.
     #[test]
-    fn test_phase204_sigqueue_sig0_no_cap_eperm() {
+    fn test_sigqueue_sig0_without_cap_is_enosys() {
         let _g = phase203_cap::CapGuard::snapshot();
         phase203_cap::drop_cap_kill();
         crate::errno::set_errno(0);
         let ret = sigqueue(1, 0, 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    // -- ordering: EINVAL beats EPERM -------------------------------------
+    // -- ordering: argument validation still precedes everything ----------
 
-    /// pid <= 0 + no cap → EINVAL (pid check before cap).
+    /// `pid <= 0` is rejected before the body — argument validation is a
+    /// question libc can answer completely, unlike an authority question.
     #[test]
-    fn test_phase204_sigqueue_bad_pid_einval_before_eperm() {
+    fn test_sigqueue_bad_pid_einval_precedes_body() {
         let _g = phase203_cap::CapGuard::snapshot();
         phase203_cap::drop_cap_kill();
         crate::errno::set_errno(0);
@@ -3979,13 +4040,13 @@ mod tests {
         assert_eq!(
             crate::errno::get_errno(),
             crate::errno::EINVAL,
-            "EINVAL for bad pid must precede EPERM"
+            "EINVAL for bad pid must precede the ENOSYS body"
         );
     }
 
-    /// Invalid sig + no cap → EINVAL (sig check before cap).
+    /// Same for an out-of-range signal number.
     #[test]
-    fn test_phase204_sigqueue_bad_sig_einval_before_eperm() {
+    fn test_sigqueue_bad_sig_einval_precedes_body() {
         let _g = phase203_cap::CapGuard::snapshot();
         phase203_cap::drop_cap_kill();
         crate::errno::set_errno(0);
@@ -3994,22 +4055,24 @@ mod tests {
         assert_eq!(
             crate::errno::get_errno(),
             crate::errno::EINVAL,
-            "EINVAL for bad sig must precede EPERM"
+            "EINVAL for bad sig must precede the ENOSYS body"
         );
     }
 
     // -- restoration: cap restore cycle -----------------------------------
 
-    /// After restoring CAP_KILL, sigqueue reaches ENOSYS again.
+    /// A `CAP_KILL` drop/restore cycle leaves `sigqueue`'s answer identical
+    /// on both sides, which is the same claim as the pair above stated as a
+    /// round trip — it additionally proves the guard really restores.
     #[test]
-    fn test_phase204_sigqueue_cap_restore() {
+    fn test_sigqueue_cap_drop_restore_cycle_answers_identically() {
         {
             let _g = phase203_cap::CapGuard::snapshot();
             phase203_cap::drop_cap_kill();
             crate::errno::set_errno(0);
             let ret = sigqueue(1, SIGHUP, 0);
             assert_eq!(ret, -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         }
         assert!(crate::sys_capability::has_capability(
             crate::sys_capability::CAP_KILL,
@@ -4846,17 +4909,27 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
-    /// Cross-process kill() for any signal requires CAP_KILL: the gate
-    /// runs before SYS_SIGNAL_SEND, so without the cap we get EPERM
-    /// regardless of the signal's default disposition.
+    /// Cross-process `kill()` reaches `SYS_SIGNAL_SEND` whatever the
+    /// capability words say (§314), so a dropped `CAP_KILL` produces the
+    /// same routed answer as a held one — here ESRCH from the host's
+    /// unimplemented syscall, via `signal_send_errno`'s conservative arm.
+    ///
+    /// The signal chosen is `SIGCHLD` (default: ignore) because the
+    /// Phase-211 model stopped classifying by disposition at the sender;
+    /// this pins that the disposition is not smuggled back in as a reason
+    /// to answer before the syscall.
     #[test]
-    fn test_phase211_kill_cross_ignore_no_cap_eperm() {
+    fn test_phase211_kill_cross_ignore_no_cap_still_routes() {
         let _g = phase203_cap::CapGuard::snapshot();
         phase203_cap::drop_cap_kill();
         crate::errno::set_errno(0);
         let ret = kill(1, SIGCHLD);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ESRCH,
+            "the send must be attempted and the kernel's answer reported"
+        );
     }
 
     // =================================================================

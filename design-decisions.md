@@ -11004,8 +11004,14 @@ them; `ptrace_may_access` additionally needs the target's dumpable flag. A gate
 that cannot evaluate its own predicate is not a gate, it is a guess with an
 `EPERM` attached. Where the alternative *is* evaluable — `mlock`'s
 `CAP_IPC_LOCK` **or** `RLIMIT_MEMLOCK`, `setuid`'s `target == cur` — teaching
-the gate the full rule is exactly right, and those sites already do it. This
-decision is about the ones where it is not evaluable.
+the gate the full rule is exactly right. This decision is about the ones where
+it is not evaluable, and it deliberately does **not** license removing a gate
+whose alternative we could have checked. Applying it surfaced three such sites
+(`nice`, `setpriority`, `sched_setscheduler`'s RT arm, all keyed on
+`RLIMIT_NICE`/`RLIMIT_RTPRIO`) that had been *mis*-filed as unevaluable on the
+strength of their own comments; they get the full-rule treatment, not this one.
+Deciding which arm a site falls in therefore means checking what libc can
+actually see, not what the comment above the gate claims.
 
 **What is given up, honestly.** libc loses a defence-in-depth layer: a caller
 that would have been stopped early now issues a syscall and is stopped there.
@@ -11019,10 +11025,13 @@ a real one.
 
 **Where it bites.** The full site-by-site survey is `known-issues.md` →
 `TD-POSIX-CAP-GATES-OMIT-LINUX-S-NON-CAPABILITY-ALTERNATIVE`. This decision
-governs its Class A (7 sites, actionable) and the reporting half of Class B
-(7 sites blocked on a model concept we lack). It is a **prerequisite for §312
-step 3** — flipping the gates truthful before applying it would turn every one
-of these into a live regression on the same day.
+governs its Class A (7 sites, actionable) and the ptrace-family half of Class B
+(4 stub sites — `ptrace`, `process_vm_readv`/`writev`, `kcmp` — where the
+alternative genuinely is unevaluable and rule 3 applies). All eleven are done.
+The remaining three Class-B sites are the `RLIMIT` ones noted above; they are
+outside this decision and are fixed by writing the whole predicate. It is a
+**prerequisite for §312 step 3** — flipping the gates truthful before applying
+it would turn every one of these into a live regression on the same day.
 
 ## §400 — Every GUI process finds its own UI font, lazily, from a compiled-in fallback list
 

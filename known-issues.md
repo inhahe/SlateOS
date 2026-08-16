@@ -22610,7 +22610,23 @@ and that is boot-test-visible.
 
 ---
 
-### TD-POSIX-CAP-GATES-OMIT-LINUX-S-NON-CAPABILITY-ALTERNATIVE. A dozen libc capability gates test only the capability, where Linux's rule is "capability **or** something else" — so making them truthful would deny what the kernel permits — 🔶 **OPEN, blocks §312 step 3** — 2026-08-16
+### TD-POSIX-CAP-GATES-OMIT-LINUX-S-NON-CAPABILITY-ALTERNATIVE. A dozen libc capability gates test only the capability, where Linux's rule is "capability **or** something else" — so making them truthful would deny what the kernel permits — 🟡 **PARTLY FIXED (Class A + the ptrace family done, §314); RLIMIT rows still open and still block §312 step 3** — 2026-08-16
+
+> **Status 2026-08-16, later the same day.** Design decision **§314** was taken
+> to resolve *how* a conservative projection may be consumed, and applied:
+>
+> - **Class A — done.** The seven sites below no longer pre-empt the kernel.
+>   `kill`/`killpg`/`sigqueue` and `chown`/`fchown`/`lchown` and
+>   `sched_setaffinity` carry no libc capability test; `SYS_SIGNAL_SEND` and
+>   `sys_fs_set_owner` (which already `require_cap_type(File, WRITE)`) decide.
+> - **Class B, the ptrace family — done, differently.** `ptrace`,
+>   `process_vm_readv`, `process_vm_writev` and `kcmp` are all stubs, so under
+>   §314 rule 3 they now report `ENOSYS` unconditionally rather than inventing
+>   an `EPERM` from a capability that could not have made them work.
+> - **Class B, the three RLIMIT rows — still open, and worse than first
+>   thought**: see the correction below. They are the remaining blocker.
+
+
 
 **In short.** Several of our libc functions ask "do you hold capability X?" and
 refuse if not. Real Linux asks a two-sided question — "do you hold X, *or* is
@@ -22667,15 +22683,53 @@ step 3 does not rediscover them as surprises. Each needs a decision (implement
 the missing concept, or accept the divergence deliberately) rather than a code
 fix.
 
-| Site | Function | Missing alternative |
-|---|---|---|
-| `posix/src/sched.rs:155` | `sched_setscheduler` → RT/DEADLINE | `RLIMIT_RTPRIO` — no per-task rlimit model |
-| `posix/src/resource.rs:592` | `nice`, `inc < 0` | `RLIMIT_NICE`; its own comment says the test "collapses to a pure cap probe" |
-| `posix/src/resource.rs:648` | `setpriority`, raising priority | `RLIMIT_NICE`, same |
-| `posix/src/unistd.rs:3039` | `ptrace` attach | same-thread-group bypass — we do not track thread groups |
-| `posix/src/process.rs:3197` | `process_vm_readv` | `ptrace_may_access`: same-uid **and** dumpable |
-| `posix/src/process.rs:3239` | `process_vm_writev` | ditto |
-| `posix/src/process.rs:3348` | `kcmp` | ditto, twice (once per target pid) |
+| Site | Function | Missing alternative | Status |
+|---|---|---|---|
+| `posix/src/sched.rs:155` | `sched_setscheduler` → RT/DEADLINE | `RLIMIT_RTPRIO` | ❌ **misclassified — see correction below** |
+| `posix/src/resource.rs:592` | `nice`, `inc < 0` | `RLIMIT_NICE`; its own comment says the test "collapses to a pure cap probe" | ❌ **ditto** |
+| `posix/src/resource.rs:648` | `setpriority`, raising priority | `RLIMIT_NICE`, same | ❌ **ditto** |
+| `posix/src/unistd.rs:3039` | `ptrace` attach | same-thread-group bypass — we do not track thread groups | ✅ fixed (§314 rule 3: stub → `ENOSYS`) |
+| `posix/src/process.rs:3197` | `process_vm_readv` | `ptrace_may_access`: same-uid **and** dumpable | ✅ fixed (ditto) |
+| `posix/src/process.rs:3239` | `process_vm_writev` | ditto | ✅ fixed (ditto) |
+| `posix/src/process.rs:3348` | `kcmp` | ditto, twice (once per target pid) | ✅ fixed (ditto) |
+
+**Correction to the three RLIMIT rows — they were never Class B, and they are
+a live bug, not a divergence.** Putting them here rested on believing the
+comments above them, which say the capability test is the whole rule "under the
+default `RLIMIT_NICE = 0`" / "`RLIMIT_RTPRIO = 0`" and that we have no rlimit
+model. Both halves are false:
+
+1. **We do have the model.** `posix/src/resource.rs` keeps a real per-process
+   `RlimitTable`; `getrlimit`/`setrlimit`/`prlimit` read and write it, and
+   `setrlimit` already gates hard-limit raises on `CAP_SYS_RESOURCE`. So the
+   alternative arm *is* locally evaluable — exactly as `mman.rs`'s
+   `check_mlock_caps` already evaluates `RLIMIT_MEMLOCK`.
+2. **The default is not 0, it is infinity.** `RLIMITS_INIT`
+   (`posix/src/resource.rs:146`) seeds every slot to `RLIM_INFINITY` and then
+   overrides only `STACK`, `NOFILE` and `CORE` — so `RLIMIT_NICE` and
+   `RLIMIT_RTPRIO` come out `{INFINITY, INFINITY}`. Linux's own defaults are
+   `{0, 0}` for both (`include/asm-generic/resource.h`). A ported program that
+   reads `getrlimit(RLIMIT_NICE)` to decide whether to bother asking for
+   priority is told it has unlimited headroom, and then denied by the gate.
+   The test `default_limits_others_are_infinity`
+   (`posix/src/resource.rs:920`) currently *asserts* the wrong values.
+
+So the two facts contradict each other: the gates behave as if the limit were
+0 while `getrlimit` reports infinity. That is observable **today**, with the
+capability words still permissive, by any caller that consults `getrlimit` —
+it does not wait for step 3.
+
+*Proper fix (both halves; either alone leaves a lie in place):*
+
+- Seed `RLIMIT_NICE` and `RLIMIT_RTPRIO` to `{0, 0}` in `RLIMITS_INIT`, matching
+  Linux, and update `default_limits_others_are_infinity` accordingly.
+- Give the three gates Linux's whole predicate, in the `check_mlock_caps`
+  shape: `can_nice` is `20 - target_nice <= rlim_cur(RLIMIT_NICE) ||
+  capable(CAP_SYS_NICE)`; the RT gate is `sched_priority <=
+  rlim_cur(RLIMIT_RTPRIO) && rlim_cur != 0 || capable(CAP_SYS_NICE)`, with
+  `SCHED_DEADLINE` capability-only (Linux permits no rlimit alternative for it).
+  With the corrected defaults this preserves today's behaviour exactly, while
+  making a raised limit actually mean something.
 
 **Class C — verified correct, for the record**, so a future survey does not
 re-walk them: `posix/src/mman.rs:331` (`check_mlock_caps` — `CAP_IPC_LOCK`
@@ -22705,6 +22759,9 @@ it stops libc from second-guessing an authority it does not hold.
 For Class B, each row is a separate decision; none should be silently widened
 into a Class A-style fix, because inventing an ownership test we cannot
 actually evaluate would be worse than the current honest over-restriction.
+That reasoning held for the ptrace family (resolved by §314 rule 3, since a
+stub's honest answer is `ENOSYS`) and did **not** hold for the three RLIMIT
+rows, whose alternative turned out to be evaluable — see the correction above.
 
 **Do not fix this by weakening the gates.** Deleting the capability test, or
 making `has_capability` return `true` while advisory, both "work" and both

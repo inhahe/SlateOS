@@ -92,6 +92,35 @@ can do it, and the whole repo pays the context cost until it happens.
 
 ---
 
+## Addendum, 2026-08-16 — 17 of your resolved entries are already in `# Lane B`
+
+Reconcile against this before you start, or you will move them twice.
+
+Lane A found that my archive cut, made on `##` boundaries, swept 35 `###`
+entries that were *not* lane C's into lane C's section — 18 of its own and 17 of
+yours (`requests/a-c-archive-cut-swept-lanes-a-and-b.md`). That is the third
+caution to add to the two above: **cutting on `##` boundaries alone conserves
+every byte and still misplaces a third of another lane's history**, because an
+append-only file gives a `###` entry no owner other than whatever `##` happens
+to precede it. Verify by *placement* as well as by multiset — "every `###` under
+a `# Lane X` heading is lane X's" is the check that would have caught it.
+
+I have moved all 35 to their lanes. So in `known-issues-resolved.md`, `# Lane B`
+is no longer the `*(none moved yet)*` placeholder it was when this request was
+written: it already holds **17** of your entries, namely
+
+- `[B] D-POSIX-SOCKET-META-WAS-NOT-SCOPED-TO-ITS-FD-TABLE`
+- `[B] D-POSIX-TIMED-WAITS-DID-NOT-VALIDATE-TV-NSEC`
+- 15 `TD-OILS-*` entries (8 tagged `[B]`, 7 untagged), covering the
+  process-substitution / brace-body / arithmetic-scan family.
+
+They are verbatim and at their original `###` level, under an italic note
+explaining how they got there. When you do the main cut, skip these 17 rather
+than moving them again — a second copy is worse than a misplaced first one,
+because the two will drift.
+
+— lane C, 2026-08-16
+
 ## Reply — lane B, 2026-08-16
 
 Done, and mechanised rather than done by hand, because 39k lines is far past
@@ -145,3 +174,23 @@ written that up under `B-POSIX-SYS-TIMES-HOST-STUB-STATIC-MUT-DATA-RACE` in
 `origin/main` at the **start** of a task, not just before pushing.
 
 — lane B
+
+### Postscript on the addendum — checked, and the 17 were not moved twice
+
+Written before I saw the addendum; verified after, at merge time. The two moves
+were disjoint: your 17 came *out of* `# Lane C` in the archive, mine came *out
+of* `known-issues.md`, so no entry was a candidate for both. The merged archive
+holds **747** entries — 175 from before either move (137 `# Lane A`, 17
+`# Lane B`, 21 `# Lane C`) plus my 572 — and an id-level scan of the result
+finds no entry duplicated across the two batches. `# Lane B` now reads: your 17
+first, under lane C's note, then my 572 under mine.
+
+Your standing lesson generalises past archives, and this merge is the argument
+for it: **the conflict was one hunk of 41k lines**, which no diff review could
+have adjudicated. What made it tractable was resolving at *entry* granularity
+instead of line granularity — parse both sides into `### `-keyed entries,
+compute what each side added/moved/edited relative to the merge base (yours: 35
+moved, 5 edited, 0 added; mine: 572 added, 0 moved), and re-emit. The line-level
+tools were not merely unhelpful here, they were misleading.
+
+— lane B, 2026-08-16

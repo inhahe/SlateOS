@@ -484,6 +484,42 @@ pub struct SubGlyph {
     /// Left at its default — not Indic, never reordered — for every run no
     /// Indic shaper touches, which is nearly all of them.
     pub(crate) indic: Char,
+    /// What the Universal Shaping Engine thinks this glyph is.
+    ///
+    /// The same kind of field as [`indic`](Self::indic) and set from the
+    /// character for the same reason, but a *separate* one even though the two
+    /// are never both in use: HarfBuzz stores them in one buffer variable —
+    /// `indic_category()` and `use_category()` are the same slot — and could,
+    /// because its categories are plain numbers. Here they are two enums with
+    /// nothing in common, and sharing a field would mean either fusing two
+    /// unrelated category lists into one or reaching for a transmute. Two bytes
+    /// per glyph is the cheaper price.
+    ///
+    /// Carried through substitution untouched, and then *edited* by the shaper
+    /// in two places — a substituted `rphf` becomes a repha and a substituted
+    /// `pref` becomes a pre-base vowel, because what the font produced is no
+    /// longer what the character was. See
+    /// [`universal`](crate::universal).
+    ///
+    /// Left at its default — not USE, never cut into clusters — for every run
+    /// the engine does not shape.
+    pub(crate) universal: crate::universal::Char,
+    /// Whether some `GSUB` lookup has rewritten this glyph since the flag was
+    /// last cleared.
+    ///
+    /// HarfBuzz's `HB_OT_LAYOUT_GLYPH_PROPS_SUBSTITUTED`, and it is a
+    /// *shaper's* bookkeeping rather than substitution's own: the Universal
+    /// Shaping Engine runs `rphf` alone as a stage and then asks which glyph
+    /// the font actually turned into a repha, which is a question only the
+    /// font can answer and only by having answered it. Nothing else reads it,
+    /// so nothing else clears it.
+    ///
+    /// Set by every lookup that rewrites a glyph — single, multiple,
+    /// alternate and ligature — and cleared only where a shaper asks for it to
+    /// be, which is what makes "since the flag was last cleared" the whole
+    /// meaning. A ligature's components are removed rather than flagged; the
+    /// ligature itself carries the flag for all of them.
+    pub(crate) substituted: bool,
     /// Which never-drawn character this glyph is still standing for, if any —
     /// a joiner, a soft hyphen, a bidi control, a variation selector.
     ///
@@ -714,6 +750,8 @@ impl SubGlyph {
             mark: false,
             lig: Lig::default(),
             indic: Char::DEFAULT,
+            universal: crate::universal::Char::DEFAULT,
+            substituted: false,
             syllable: 0,
             word: false,
             ignorable: Ignorable::No,
@@ -734,6 +772,8 @@ impl SubGlyph {
             mark: false,
             lig: Lig::default(),
             indic: Char::DEFAULT,
+            universal: crate::universal::Char::DEFAULT,
+            substituted: false,
             syllable: 0,
             word: false,
             ignorable: Ignorable::No,
@@ -774,6 +814,8 @@ impl SubGlyph {
             mark: false,
             lig: Lig::default(),
             indic: Char::DEFAULT,
+            universal: crate::universal::Char::DEFAULT,
+            substituted: false,
             syllable: 0,
             word: false,
             ignorable: Ignorable::No,
@@ -797,6 +839,8 @@ impl SubGlyph {
             mark: false,
             lig: Lig::default(),
             indic: Char::DEFAULT,
+            universal: crate::universal::Char::DEFAULT,
+            substituted: false,
             syllable: 0,
             word: false,
             ignorable: Ignorable::No,
@@ -1198,6 +1242,7 @@ fn apply_single(
     // control character it was looked up from and must not be hidden at the
     // end of shaping. See `SubGlyph::ignorable`.
     glyph.ignorable = Ignorable::No;
+    glyph.substituted = true;
     Some(1)
 }
 
@@ -1289,6 +1334,9 @@ fn apply_multiple(
             // `glyph` the `..glyph` spread must not carry: every piece is a
             // glyph the font asked for. See `SubGlyph::ignorable`.
             ignorable: Ignorable::No,
+            // Every piece, not just the first: HarfBuzz's multiple
+            // substitution writes the glyph properties over the whole output.
+            substituted: true,
             ..glyph
         }),
     );
@@ -1329,6 +1377,7 @@ fn apply_alternate(
     glyph.gid = gid;
     // As in `apply_single`: substituted is no longer ignorable.
     glyph.ignorable = Ignorable::No;
+    glyph.substituted = true;
     Some(1)
 }
 
@@ -1441,6 +1490,7 @@ fn apply_ligature(
         // components are removed below, which disposes of them just as
         // thoroughly.
         first.ignorable = Ignorable::No;
+        first.substituted = true;
     }
     // Removed from the back so that the earlier indices stay valid. Component
     // zero is the glyph just rewritten and stays.

@@ -27,7 +27,6 @@
 use alloc::vec::Vec;
 
 use crate::gsub::SubGlyph;
-use crate::indic::{Category, Char, Position};
 
 /// Stamp each glyph with the syllable it belongs to.
 ///
@@ -124,19 +123,25 @@ pub(crate) fn clear(glyphs: &mut [SubGlyph]) {
 /// dotted circle instead, so that what appears on screen says "these marks
 /// belong to nothing" rather than silently corrupting the word before.
 ///
-/// `broken` says which stamps name a broken cluster, and `category` is the one
-/// the inserted circle carries — the two things the grammar decides and this
-/// does not. `skip` names the glyphs the circle goes *after* rather than
-/// before: the Indic shaper passes a repha, which is drawn above the letter
-/// that follows and so must keep a letter after it, and Khmer passes nothing,
-/// exactly as HarfBuzz's `repha_category` of `-1` does.
+/// `broken` says which stamps name a broken cluster, and `categorise` tells
+/// the freshly built circle what it is — the two things the grammar decides
+/// and this does not. `categorise` is a closure rather than a category because
+/// the four syllabic shapers do not share one: Indic, Khmer and Myanmar
+/// classify with [`indic::Category`](crate::indic::Category) and the Universal
+/// Shaping Engine with [`universal::Category`](crate::universal::Category), so
+/// the only thing this can hand over is the glyph itself.
+///
+/// `skip` names the glyphs the circle goes *after* rather than before: the
+/// Indic shaper passes a repha, which is drawn above the letter that follows
+/// and so must keep a letter after it, and Khmer passes nothing, exactly as
+/// HarfBuzz's `repha_category` of `-1` does.
 ///
 /// Nothing happens in a face with no U+25CC, which is the honest answer there:
 /// there is no circle to draw.
 pub(crate) fn insert_dotted_circles(
     glyphs: &mut Vec<SubGlyph>,
     dotted: Option<u16>,
-    category: Category,
+    categorise: impl Fn(&mut SubGlyph),
     broken: impl Fn(u8) -> bool,
     skip: impl Fn(&SubGlyph) -> bool,
 ) {
@@ -167,17 +172,15 @@ pub(crate) fn insert_dotted_circles(
         // glyph the circle is being inserted in front of, before the skip, so
         // that the circle belongs to the same cluster and is eligible for the
         // same features as the marks it is about to carry.
-        out.push(SubGlyph {
+        let mut circle = SubGlyph {
             gid,
             cluster: g.cluster,
             mask: g.mask,
             syllable: g.syllable,
-            indic: Char {
-                category,
-                position: Position::End,
-            },
             ..SubGlyph::cursive(gid, g.cluster, None)
-        });
+        };
+        categorise(&mut circle);
+        out.push(circle);
     }
     *glyphs = out;
 }

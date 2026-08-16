@@ -17257,240 +17257,8 @@ positional and reordering features are never asked for. No string in the sweep
 corpus exercises them, so the cost is unmeasured rather than zero. USE is the
 next shaper to write, and `indic_shape.rs`'s stage driver, syllable stamping
 and `Plan` probing are the reusable parts of it. Filed on as
-`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`.
-
-## TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE
-
-**What.** Of HarfBuzz's six complex shapers we have two: Arabic (joining) and
-Indic (reordering). The other four — Khmer, Myanmar, Thai/Lao, and the
-Universal Shaping Engine that covers roughly ninety further scripts — are not
-written, so a run in any of those scripts gets the default shaper: `ccmp`,
-`locl`, the ligature features, and nothing positional or reordering.
-
-**Symptom.** Unmeasured. No string in the sweep corpus is Khmer, Myanmar, Thai
-(as *shaped* text — the Thai string in the corpus exercises mark fallback on
-faces that do not cover it), Tibetan, Javanese or any other USE script, so the
-sweep reports zero disagreement for them because it never asks. The expected
-failure is the same shape as Devanagari's was before the Indic shaper: pre-base
-vowels drawn after their consonant, conjuncts not forming, and in Khmer the
-coeng-joined subscripts drawn as full-size letters on the baseline.
-
-**Why it is filed rather than fixed.** It is the largest single piece of
-shaping left and it wants its own measurement first. The sweep's corpus has to
-gain strings for each family before the work can be checked, and the host's 556
-faces have to be surveyed for which of them cover those scripts at all — on a
-Windows development host that is likely to be very few, which is itself an
-argument for doing it after the things the host *can* measure.
-
-**The survey has now been run** (2026-08-15, `gui/font/tools/script_survey.py`,
-579 faces), and it contradicts the guess above. Counting only faces that both
-cover the script *and* register its tag in `GSUB` — the sharper test, since a
-face that declares nothing gives both implementations nothing to do and agrees
-trivially:
-
-| shaper | script | measuring faces |
-|---|---|---|
-| Thai | Thai | **8** |
-| Thai | Lao | **19** |
-| Khmer | Khmer | 3 |
-| Myanmar | Myanmar | 2 |
-| USE | Tifinagh | 6 |
-| USE | Buginese | 4 |
-| USE | Tibetan / Javanese / Balinese / Sinhala / Cham | 1 each |
-| USE | Tai Tham | 0 (covered by one face, declared by none) |
-| *(control)* Indic | Devanagari | 5 |
-| *(control)* Arabic | Arabic | 43 |
-
-The control row is the point: **Devanagari, already written and measured from
-`misplaced 13` to `0`, had only five faces to measure against.** Thai has eight
-and Lao nineteen. So the host is not thin for these scripts at all — it is
-thin for exactly one of the four families, USE, where most scripts have a
-single face and Tai Tham has none.
-
-**Proper fix — order revised by the survey.** ~~USE first, since it subsumes
-the most scripts.~~ USE subsumes the most scripts and is the *least*
-measurable of the four; writing it first means writing the largest piece of
-shaping left with an oracle that can barely disagree with it. Take them in
-order of how well the host can check the work:
-
-1. **Thai/Lao first** — best measured (27 faces between them) and smallest.
-   It is not a reordering shaper at all: it is the PUA fallback for Thai fonts
-   with no `GSUB`, plus a `ccmp`-like normalization of the vowel/tone order.
-2. **Khmer, then Myanmar** — 3 and 2 faces, variants of the Indic model that
-   can reuse `initial_reordering_syllable`'s base-finding.
-3. **USE last** — the cluster grammar from the Unicode Shaping Engine spec,
-   the same stage driver `indic_shape.rs` already has, and `Plan`'s probing of
-   what the face declares. By then the three smaller shapers will have shaken
-   out the stage driver against faces that can actually object.
-
-Each step needs its corpus strings added to `harfbuzz_sweep.py` first, or the
-sweep reports agreement it never tested.
-
-**Step 1 of 3 done — Thai/Lao, 2026-08-15** (`gui/font/src/thai.rs`, commits
-`48597037a` and `a7130c6b4`). Both halves the survey predicted, and both
-measured:
-
-* **SARA AM decomposition.** U+0E33 (Lao U+0EB3) is one character drawn as two
-  marks in two places, and Unicode gives it no canonical decomposition, so we
-  were asking faces for a glyph almost none have. `thai::preprocess` splits it
-  into nikhahit + sara aa and walks the nikhahit back over any above-base
-  marks, which is HarfBuzz's `preprocess_text_thai` — Uniscribe's behaviour,
-  not the MS OT Thai spec's. It runs from `norm::normalize` *between*
-  decomposition and the mark sort, and the ordering is load-bearing rather
-  than incidental: sorting first puts the nikhahit on the wrong side of a
-  tone mark. Host sweep, 556 faces: **agree 18806 → 21015, reordered 3 → 0,
-  differ 3382 → 1176**, every Thai and Lao string now agreeing on every face.
-  The residual 1176 is entirely the pre-existing NFC bucket, untouched.
-* **The private-use fallback.** `thai::pua_shape`, two state machines
-  transcribed from `hb-ot-shaper-thai.cc`, gated on HarfBuzz's
-  `!plan->map.found_script[0]` — the face's `GSUB` did not name `thai`.
-  Note that this is *not* `Face::shapes_as_default`, which answers false for a
-  face with no `GSUB` at all; a face with no `GSUB` is exactly the font the
-  pass exists for, and using the wrong predicate made the pass never fire.
-
-  This one could not be measured against the host at all: **not one of the 556
-  installed faces carries a single Thai private-use glyph** (probed directly),
-  because every Thai font Windows ships today describes its shaping in `GSUB`,
-  which turns the fallback off. A host sweep would have reported agreement it
-  never tested. So the oracle was built instead —
-  `gui/font/tools/gen_thai_legacy.py` synthesizes three faces with no
-  `GSUB`/`GPOS`/`GDEF` (Windows forms, Mac forms, and none), and
-  `thai-pua-corpus.txt` names one string per edge of the two machines plus
-  controls. **78 of 78 agree**, including the vendor preference and the
-  no-private-use face, which the pass must leave untouched.
-
-`harfbuzz_sweep.py` gained a `--corpus FILE` flag along the way, so each of
-the remaining steps can bring its own corpus without editing the built-in one.
-
-**Step 2 of 3 done — Khmer, 2026-08-15** (`gui/font/src/khmer.rs`, commits
-`1897b9b19` and `8f1247264`). The shaper, the oracle that could disagree with
-it, and the bug that oracle found in a shaper that had been shipping for weeks:
-
-* **The shaper.** Khmer is the Indic model with two moves and one structural
-  difference. The moves: a COENG+RO pair jumps to the head of its syllable and
-  takes `pref`, and everything it jumped over takes `cfar`; a pre-base vowel
-  moves to the head as well, ahead of a fronted pair. The five split vowels
-  (U+17BE–U+17C5) get no canonical decomposition from Unicode, so they are
-  split by hand into U+17C1 plus a second half before the syllables are cut.
-  The structural difference is that the reordering runs *before the first
-  lookup* rather than after `locl`/`ccmp` as Indic does. The syllable-serial
-  stamping the two shapers share came out into `gui/font/src/syllabic.rs` at
-  the same time. `cfar` was appended to `gsub::FEATURES` (and to
-  `langsys_survey.py`'s `WANTED`, which `otl.rs` pins equal to it).
-* **The host measurement.** 556 faces: **agree 27421 → 27687**, differ back
-  down to the same 1176 pre-existing NFC baseline, **reordered 0, misplaced 0**
-  — every Khmer string agreeing on every face.
-* **The oracle, per §431 of `design-decisions.md`.** That host number is worth
-  much less than it looks. Only three installed faces register `khmr` at all
-  (the Leelawadee UI family), and **not one face on this machine has a `cfar`
-  lookup**, nor `pres`, nor `psts` — probed directly. So the sweep was
-  reporting agreement about masks it never applied. `gui/font/tools/
-  gen_khmer_probe.py` builds `KhmerProbe.ttf`, where each of thirteen features
-  has one lookup rewriting every Khmer glyph as *itself followed by a marker
-  glyph unique to that feature*, so a glyph run spells out which features
-  reached it and in what order. It is a one-to-two substitution on purpose: the
-  base has to survive so the next feature still matches it, and `cfar` — which
-  is applied after `blwf`, on the very glyphs `blwf` is set on — is precisely
-  the feature a one-to-one substitution would have hidden. Markers carry zero
-  advance so a wrong mask can never smear into the positions.
-  `khmer-corpus.txt` is one string per edge of the shaper rather than sampled
-  text. **43 of 45 agree.**
-* **What it found.** `locl`, `ccmp`, `blwf`, `abvf` and `pstf` were each being
-  applied **twice** — named in an early stage and then again in the final
-  `ALL_FEATURES` stage, which `gsub::apply_stages` does not deduplicate.
-  HarfBuzz gives each feature exactly one stage (`hb_ot_map_builder_t::compile`
-  merges duplicate tags at the `hb_min` of their stages), so this was a real
-  divergence. **The Indic shaper had the same bug**, and 556 installed faces
-  had hidden it for as long as that shaper has existed: a duplicate application
-  is invisible unless a lookup is not idempotent, and real faces' lookups
-  overwhelmingly are. Fixed in both by masking the earlier stages out of the
-  last one; `stages()` was factored out of `shape` in each so the "one feature,
-  one stage" invariant is four tests rather than a comment.
-* **The two that still differ** are the joiner strings, and are not a Khmer
-  bug: HarfBuzz emits the face's space glyph for a default-ignorable character
-  (ZWJ, ZWNJ, soft hyphen …) once shaping is done, and deletes it outright if
-  the face has no space. We emit the character's own glyph. That is crate-wide
-  and script-independent — a soft hyphen would draw a visible hyphen mid-word
-  on any face that maps it — so it is tracked separately under
-  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES` rather than here.
-
-**Step 3 of 3 done — Myanmar, 2026-08-15** (`gui/font/src/myanmar.rs`,
-`myanmar_machine.rs`, `tools/gen_myanmar_machine.py`). The shaper is the
-smallest of the three, and the pass it forced open — mark positioning — was
-the largest thing found in this whole exercise.
-
-* **The shaper.** Myanmar is syllabic like Indic and Khmer and shares their
-  category table and machine generator, but it reorders by a different
-  mechanism: it assigns a `Position` to *every* glyph of the syllable and then
-  **stably sorts** by it, rather than rotating a fixed few. Three things move —
-  a kinzi (`Ra + Asat + virama`) sorts to just after the base, a medial RA
-  (U+103C) to `PreC`, and a pre-base vowel (U+1031) to `PreM`, with a run of
-  several pre-base vowels flipped, the same repair Indic makes. The base search
-  is forwards and stops at the first consonant: there is no reph to guess at,
-  because a Myanmar kinzi is spelled out and recognised by that spelling.
-  `rphf`, `pref`, `blwf` and `pstf` each get a stage of their own with a pause,
-  where Khmer runs its basic features in one. The reordering runs *after*
-  `locl`/`ccmp` — Khmer's most surprising property inverted.
-
-* **Measured.** Myanmar sweep (`mmrtext.ttf`, `mmrtextb.ttf`): **58 of 58
-  agree**, `misplaced 0`. Full host sweep, 556 faces × 89 strings: `agree
-  48087`, `reordered 0`, `misplaced 170`, `differ 1178`, `mixed 49` — the 170
-  being the deliberate ignorable-caret divergence recorded under
-  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES`, unchanged.
-
-* **What it found: our mark fallback had HarfBuzz's *two* zeroing routes fused
-  into one.** HarfBuzz zeroes a mark's advance by two independent routes, and
-  we had been approximating them with a single union.
-  - *Route 1*, `zero_mark_widths_by_gdef`, is gated on the per-script
-    `plan->zero_marks` — which eleven scripts turn off — and zeroes every glyph
-    whose `GDEF` class is mark, **or**, only when the face has no `GDEF`
-    classes at all, every glyph whose general category is `Mn`. Either/or,
-    never both: a face that classifies has *stated* which glyphs are marks and
-    the character's category must not second-guess it.
-  - *Route 2*, `_hb_ot_shape_fallback_mark_position`, zeroes only the marks it
-    actually places (combining class ≠ 0), plus — when the base has no
-    extents — every `Mn` in the cluster.
-
-  We had the two `||`-ed together and the per-script gate missing entirely.
-  `scaled.rs` now encodes them separately: `zeroed_at` carries `zero_marks`
-  per segment, `marks` is the either/or, and `synthesize_marks` is a two-phase
-  transcription of `position_cluster_impl`/`position_around_base` — walk the
-  clusters and apply route-2 zeroing, *then* compute the pens, *then* place.
-  See `design-decisions.md` §436.
-
-* **And the bug that made it visible.** A mark whose combining class is zero is
-  not placed and not zeroed, which made it look exactly like a base to the old
-  cluster splitter, so the measurement **restarted at it** and every mark after
-  it was measured against the wrong glyph. In `ကို့` the dot below landed two
-  letters right of where HarfBuzz draws it. HarfBuzz cuts clusters on the
-  general *category* and takes the base as the first non-mark; the class only
-  decides whether a mark is moved once the base is known. Fixed, and pinned by
-  `scaled.rs`'s `a_class_zero_mark_does_not_start_a_new_cluster` and
-  `only_the_marks_the_fallback_places_lose_their_advance`. It was the whole of
-  the remaining `simsun.ttc` divergence (`0;-128;0` → HarfBuzz's `0;-640;0`).
-
-**One known gap, believed unreachable — the cluster splitter reads `Mn` where
-HarfBuzz reads `Mn|Mc|Me`.** `norm::is_mark` is `Mn`-only, which is exactly
-right for route 1 (it transcribes `hb_synthesize_glyph_classes`, which is also
-`Mn`-only) but is *narrower* than the `_hb_glyph_info_is_unicode_mark` that
-cuts fallback clusters. A spacing combining mark (`Mc` — an Indic matra) or an
-enclosing one (`Me`) would therefore end a cluster here and continue one in
-HarfBuzz. It cannot arise in NFC text: reaching it needs an `Mc` followed by a
-non-zero-class `Mn` inside one cluster, i.e. a matra with a nukta after it,
-which canonical ordering does not produce — and every path into this pass has
-already normalised. Filed rather than fixed because the fix is a second
-general-category predicate (`is_unicode_mark`) used by the splitter only, and
-adding an untestable one costs more than it buys. If a corpus string is ever
-found that reaches it, that is the fix.
-
-USE is next, and is now the only shaper left. Note for it: like Myanmar, it
-zeroes mark advances *before* `GPOS` rather than after, so its script tags have
-to join `mym2` in `fallback::Zeroing::BeforeGpos`.
-
-**Where.** `gui/font/src/sfnt.rs` — `Face::substitute`, which dispatches on
-`Script::shaping` and would gain the other families; `gui/font/src/indic.rs`
-and `indic_machine.rs` — the models to copy; `gui/font/tools/harfbuzz_sweep.py`
-— `CORPUS`, which needs a string per family before any of this is measurable.
+`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE` — **all four of those shapers now
+exist**, and that entry is closed in `known-issues-resolved.md` (`# Lane C`).
 
 ## TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT
 
@@ -21188,3 +20956,189 @@ Also worth knowing:
   disturb it. Deleting another lane's artifacts out from under a running gate
   would have been a cross-lane failure of exactly the kind the worktree split
   exists to prevent.
+
+### [A] B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY-EVEN-ON-A-CLEAN-RUN — 2026-08-16 — ✅ FIXED 2026-08-16 (`scripts/bench-history.py`, replication gate)
+
+**Status:** FIXED. Follows on from
+`### B-BENCH-COMPARES-TO-ONE-PRIOR-RUN-NOT-THE-DISTRIBUTION`, whose
+2026-08-15 fix added each benchmark's **own recent range** as a second
+gate precisely so a verdict could not be made from a single run-over-run
+delta. That fix helped and is not being undone here. What is new is a
+measurement of what it still lets through, and the number is not small.
+
+> **Corrected 2026-08-16, same day.** As first committed (`734c77a32`)
+> this entry asserted the gate used "an 8-run min-max" and recommended
+> replacing it with an IQR/MAD band. Both were wrong: the gate has been
+> Tukey's fence over quartiles since 2026-08-15, so the recommendation
+> was to install what was already installed. The error came from writing
+> the fix up from the *report's* wording ("its own range is 293-453ns")
+> without reading `per_benchmark_bands()`. Point 2 below now carries the
+> measurement that replaced the guess, and it reverses the conclusion —
+> band tuning cannot fix this at all.
+
+**What was measured.** Two `./scripts/boot-test.sh --bench` runs of the
+**same commit** (`602fc62e0`), 2.5 minutes apart, nothing rebuilt between
+them — an A/A test, where by construction every reported regression is a
+false positive:
+
+| | run A `10:39:57` | run B `10:42:35` |
+|---|---|---|
+| harness run verdict | `RUN CONTAMINATED` | **`RUN CLEAN`** |
+| `REGRESSED` (confirmed) | `pick_next` +92% | `page_alloc_free` +85%, `vfs_stat_breakdown_full` +36% |
+| `REGRESSED, UNCONFIRMED` | `futex_wait_mismatch` +38% | `heap_raw_alloc_free_512` +54% |
+
+Drift-corrected, **5 of 83 benchmarks moved >25% between two runs of one
+binary**. The distribution is not uniformly noisy — it is a thin tail on
+a stable body:
+
+    |change| across 83 benchmarks:  median 2%   p90 9%   max 85%
+
+**The two findings that matter, neither of which is "benchmarks are noisy".**
+
+1. **`RUN CLEAN` does not mean the verdicts are trustworthy.** Run B
+   passed every contamination instrument — canary steady, dispersion 16
+   within the host band of 16.0, wall time within band — and still
+   produced two *confirmed* regressions on code that had not changed.
+   The run-level verdict and the per-benchmark verdict are answering
+   different questions, and the output currently invites reading the
+   first as a warrant for the second.
+2. **The band is not the weak link, and cannot be made into the fix.**
+   The gate is already robust — `per_benchmark_bands()` takes Tukey's
+   fence (`TUKEY_K = 1.5`) over the trailing `SPEED_WINDOW = 8`
+   *comparable* runs, not a min-max. It flagged these values because
+   they genuinely are far outside where those benchmarks sit:
+   `page_alloc_free` fence 293-453ns, observed 680ns; `pick_next` fence
+   415-810ns, observed 1052ns. **The band is right and the conclusion is
+   still wrong**, because the outlier is environmental, not textual.
+
+   Replaying the real history through the module's own
+   `comparable_records()` / `per_benchmark_bands()` — importing them
+   rather than reimplementing, since a hand-rolled replay produced
+   fences nowhere near the printed ones (the window filters by host and
+   profile, and this history mixes profiles) — shows that widening the
+   window does not help and mostly hurts:
+
+   | window | k=1.5 fence, `page_alloc_free` | verdict on 680ns |
+   |---|---|---|
+   | 8 (current) | 293-453 | promoted |
+   | 12 | 152-689 | declined |
+   | 16 | 293-456 | promoted |
+   | 27 (all comparable) | 309-427 | promoted, **narrower** |
+
+   More history makes the fence *tighter*, because these tail events are
+   rare enough that they never move the quartiles. Loosening `k` to 3.0
+   declines `pick_next` only at window ≥ 24 and never declines
+   `page_alloc_free` at all — and a `k` wide enough to swallow an 85%
+   excursion is wide enough to swallow the 2x regression the suite
+   exists to catch. **No (window, k) setting separates these false
+   positives from real regressions**, which is the finding: on the
+   evidence available to the band, the two are not different.
+
+**Why `pick_next` is the instructive case.** In run A it was the single
+confirmed regression, +92%, on the scheduler path `CLAUDE.md` lists as
+performance-critical and requires to stay O(1). Normalised to the suite
+median it read 753/1000 against a 34-run historical range of 271-534 —
+i.e. an outlier by the *history*, not just by the previous run. It was
+still noise: run B put it at 1177ns and did not flag it at all. A
+plausible-looking regression, on a benchmark that matters, corroborated
+by a second statistic, was wrong.
+
+**What this does *not* say.** It is not evidence that the suite is
+useless: 90% of benchmarks agreed to within 9% across the pair, which is
+enough to catch the kind of regression that matters (a 2x algorithmic
+loss). The problem is confined to how a *verdict* is derived from one
+comparison.
+
+**What the proper fix looks like.** Do not call anything `REGRESSED`
+from a single pair of runs. The harness already records history and
+already computes a whole-suite median, so the material is present:
+
+- **Require replication — this is the whole fix.** Promote to
+  `REGRESSED` only when the movement survives a second run of the *same
+  commit*. This is the only mechanism that discriminates, and the reason
+  is structural rather than statistical: a code-caused regression
+  reproduces on the same binary, an environment-caused outlier does not.
+  Nothing computable from a single run can tell them apart, which is
+  precisely what the (window, k) sweep above demonstrates. The A/A pair
+  shows the cost is one extra boot — ~2 min, no rebuild, since the
+  binary is already staged — against a false positive's cost in reader
+  attention.
+- **Record each benchmark's own A/A noise floor** and refuse to judge
+  any movement smaller than it. `page_alloc_free` demonstrably has a
+  floor near 85%; a 30% move in it is unjudgeable and should say so, the
+  way `P21(b)` was correctly recorded as `UNGRADEABLE` rather than
+  graded. This needs repeated same-commit runs to populate, so it falls
+  out of the replication work rather than being extra effort.
+- **Do not touch `TUKEY_K` or `SPEED_WINDOW`.** Measured above: the
+  sweep changes *which* benchmarks are falsely promoted without reducing
+  how many, and the loosening that would decline these two also declines
+  real regressions. Tuning them would buy a quieter report and a blinder
+  one.
+
+**Where it lives:** `scripts/bench-history.py` (verdict logic),
+`scripts/boot-test.sh --bench` (invocation), `bench/history.jsonl` (the
+34-run record the A/A above was drawn from; the last two entries share
+commit `602fc62e0` and are the pair in question).
+
+**What was done (2026-08-16).** Both bullets above, and one more that the
+replay made obvious. `scripts/bench-history.py` gained:
+
+1. **A replication gate** (`replication_verdict`, `values_for_commit`).
+   Every movement that crossed the threshold *and* left its band is now
+   asked one further question: did this same commit produce it more than
+   once? Three outcomes, and the asymmetry between the last two is the
+   design. `REPLICATED` — every recorded run of the commit shows it —
+   keeps the word `REGRESSED`. `CONTRADICTED` — another run of the same
+   binary landed back inside the range — is withdrawn under a
+   `NOT REPLICATED` heading and does **not** fail the build.
+   `UNREPLICATED` — the commit was measured once — prints as
+   `REGRESSED, UNREPLICATED` and **still fails**, because excusing it
+   would silence the check in the ordinary case (one run per commit is
+   the norm), and that is the same failure as a check that cannot fire.
+   Only a positively-evidenced contradiction withdraws a claim, exactly
+   the standard `MODE_UNDECIDED` is already held to.
+2. **The A/A comparison is named outright.** If the baseline record and
+   the current run share a commit, the whole run-over-run diff is an A/A
+   test and no movement in it can have been caused by code — arithmetic,
+   not statistics, since the difference has no code term. The report says
+   so above every list and the run-over-run claims stop failing the
+   build. Sustained shifts are deliberately *not* excused: `level_shifts`
+   measures against a baseline drawn from earlier commits, so that
+   comparison is not self-referential. This is what the entry above was
+   missing — it covers the movements with too little history for a band,
+   which the per-benchmark gate declines to judge and which would
+   otherwise still have printed as `REGRESSED, UNCONFIRMED` on a binary
+   compared with itself.
+3. **The per-benchmark A/A noise floor is printed** wherever repeats
+   exist, which is the second bullet above falling out of the first as
+   predicted: `same-commit runs: [363, 680] -- a 87% spread with no code
+   change`.
+
+`TUKEY_K` and `SPEED_WINDOW` were not touched, per the third bullet.
+
+**Verified against the data that caused it, not only synthetically.**
+`test_replication_declines_the_measured_false_positives` replays run B
+against run A out of the real `bench/history.jsonl`: `report()` returned
+True before and returns False now, `page_alloc_free` and
+`vfs_stat_breakdown_full` are both withdrawn by name, and no benchmark
+gets the confirmed heading. Six new tests, 43 assertions. Both directions
+were mutation-tested — forcing the verdict to `REPLICATED` fails 14
+assertions, forcing it to `CONTRADICTED` fails 5 (including "a
+replicated movement fails the build") — because a gate that only ever
+withdraws is indistinguishable from deleting the check, and a test that
+cannot fail is the thing this whole file exists to catch.
+
+**What deliberately remains.** A first, single run of a genuinely quiet
+commit that hits a tail outlier still fails the build as
+`REGRESSED, UNREPLICATED`, and that is the intended trade: the report now
+tells the reader it is one run and names the exact command that settles
+it (`./scripts/boot-test.sh --bench` again, no rebuild, ~2 min). The
+alternative — treating unmeasured as absolved — buys a quiet report by
+making the check unable to fire.
+
+**Standing lesson this is another instance of.** Conservation is not
+placement, and a clean instrument is not a correct conclusion: run B's
+contamination checks all passed and its regression list was still wrong.
+A check that says something false is worse than no check, because it is
+believed — and the cost lands on the *next* real regression, which gets
+waved through as "probably noise again".

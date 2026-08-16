@@ -17,16 +17,10 @@ different offsets and the merge is automatic.
 
 The migration is **incremental**, not a one-shot sweep. As of 2026-08-16
 `known-issues.md` held 999 `###` entries plus 77 `##` ones, of which roughly
-777 read as resolved — about 55,000 of its 73,000 lines. Lanes C and B have
-moved theirs (28 and 572 entries); **lane A's are still in `known-issues.md`**
-(`requests/c-a-known-issues-archive.md`), so until that lands, **grep both**.
-
-Lane B's move was mechanised, and the tooling is reusable by any lane:
-`python scripts/ki_archive.py --dry-run`. It refuses to write unless the line
-multiset across the two files is unchanged and both files come out with an even
-number of code fences. Cutting 39k lines out of a document by line number can
-tear an entry in half invisibly, so the check — not the cut — is the point; it
-caught a real defect in the script on its first run.
+777 read as resolved — about 55,000 of its 73,000 lines. Lane C's are below;
+lanes A and B have been asked to move theirs (`requests/c-a-…`,
+`requests/c-b-…`). Until they do, resolved entries still live in both files,
+so **grep both**.
 
 ---
 
@@ -8796,6 +8790,1921 @@ the harness's output file; use `Read`/`tail` on **that file** afterwards instead
 of filtering in the pipeline. Reserve pipes for foreground commands whose status
 does not matter.
 
+*The 18 entries below are lane A's. They arrived in lane C's section by
+accident: the archive cut of 2026-08-15 was made on `##` boundaries, and these
+are `###` entries that happened to sit after a lane C `##` heading in the
+append-only `known-issues.md`, so conservation carried them but placement did
+not. Lane A reported it in `requests/a-c-archive-cut-swept-lanes-a-and-b.md`
+and lane C moved them here on 2026-08-16 — verbatim, at their original heading
+level, with no edit to their text.*
+
+### [A] B-SMP-FAST-CPU-INDEX-PANICS-BEFORE-APIC-INIT. `smp::fast_cpu_index()` reads the APIC before it is mapped — `debug_assert` panic in debug, wild read in release — FIXED 2026-08-14
+
+**Where:** `kernel/src/smp.rs` — the tier-3 fallback in `fast_cpu_index()`;
+`kernel/src/apic.rs:~214` — `apic_read()`'s `debug_assert!(base != 0, "APIC not
+initialized")`.
+
+**What.** `fast_cpu_index()` has three tiers: RDPID, then `rdtscp`, then an APIC
+MMIO read. On a CPU where neither RDPID nor `rdtscp` is advertised — which is
+exactly the boot-test configuration, `qemu64,+smep,+smap,+umip` under TCG —
+every call lands in tier 3 and does `crate::apic::read_id()`. Before
+`apic::init` has run, `APIC_BASE_VIRT` is still 0, so:
+
+- **debug builds:** `debug_assert!` fires → `KERNEL PANIC: APIC not initialized`.
+- **release builds:** *worse* — the assert is compiled out and `apic_read`
+  dereferences `(0 + offset) as *const u32`, a wild read of low memory. Silent
+  garbage, or a fault, depending on what is mapped there.
+
+**How it surfaced.** Wiring `frame_owner` ownership tagging into the frame
+allocator (TD-FRAME-OWNER-1GIB) made `current_owner()` — and therefore
+`fast_cpu_index()` — run on *every* frame allocation, including the allocator's
+own boot-time self-test. That self-test runs long before `apic::init`, so the
+kernel panicked at `[mm] Running frame allocator self-test...`:
+
+```
+!!! KERNEL PANIC !!!
+panicked at kernel\src\apic.rs:214:5:
+APIC not initialized
+  Task: 0 (""), priority 0, cpu 0
+```
+
+**Why it was latent.** The pre-existing tier-3 callers were all gated behind
+flags that only go true well after APIC init — the frame allocator's own
+per-CPU cache checks `PCPU_ENABLED` first, for instance. Nothing called
+`fast_cpu_index()` early, so the landmine was never stepped on. It was a real
+bug regardless: the function's contract claims tier 3 "always works", and any
+future early-boot caller would have hit it, in release builds silently.
+
+**Fix.** Added `apic::is_ready()` (`APIC_BASE_VIRT != 0`) and made tier 3 check
+it, returning CPU 0 when the APIC is not yet mapped. That is not a fudge: before
+`apic::init` the system is strictly uniprocessor (BSP only), so 0 is the
+*correct* index, not a fallback guess. Cost is one relaxed atomic load on the
+already-slowest tier; tiers 1 and 2 are untouched, so real hardware pays
+nothing.
+
+**Lesson.** A "this can't happen yet" precondition that is enforced only by the
+accident of who happens to call the function is not enforced at all. When the
+cheap tiers of a tiered fast path are unavailable, the "always works" fallback
+is the one that runs — so it is the one that has to actually always work.
+
+### [A] B-BENCH-COMPARATOR-CALLS-SUITE-WIDE-HOST-NOISE-A-REGRESSION. The run-over-run diff named six regressions in code that had not changed — FIXED 2026-08-14
+
+**Where:** `scripts/bench-history.py`, `diff()` / `report()`.
+
+**Symptom.** The first post-merge `--bench` run (commit `17dbde179`, host
+`Logoplex3`, BOOT_OK, exit 0) reported:
+
+```
+  REGRESSED (>25% slower):
+    firewall_check: 270ns -> 482ns (+79%)
+    shm_create_close: 58556ns -> 84996ns (+45%)
+    ipc_semaphore: 11676ns -> 16112ns (+38%)
+    net_veth_roundtrip: 47097ns -> 60102ns (+28%)
+    net_veth_send: 23240ns -> 29552ns (+27%)
+    io_ring_nop: 1948ns -> 2460ns (+26%)
+```
+
+**Why it was wrong.** `git diff bf26aabdb 17dbde179` over the perf-critical
+paths is **two files, +54/-8**: `kernel/src/syscall/number.rs` (doc comments)
+and `kernel/src/syscall/handlers.rs` (`sys_thread_join` moving its exit value
+to an out-pointer). Nothing under firewall, veth, shm, semaphore or io_uring
+changed at all, so not one of the six flagged benchmarks executes a line that
+differs between the two commits.
+
+The actual distribution over all 63 benchmarks: **median +6.1%, mean +9.4%,
+48 slower vs. 15 faster** — and the sorted tail is a smooth continuum,
+`24.4, 24.5, 24.6, 24.9, 26.3, 27.2, 27.6`. There is no gap anywhere near the
+threshold. A real regression is a few outliers standing clear of a ~0% median;
+what this was is a fixed 25% line drawn through the middle of a shifted
+distribution.
+
+**Root cause.** The module docstring claims run-over-run comparison "cancels
+the emulation constant". That holds across *hosts*, not across *runs on one
+host*: TCG is pure emulation and therefore CPU-bound, so whatever else the
+machine was doing scales the whole suite by a common factor. Shift a
+distribution whose own per-benchmark wobble already reaches ~20% by a further
+6% and its tail crosses 25%. The `diff()` docstring even anticipated the noise
+("a 10-20% wobble carries no information") but chose the wrong remedy — a
+coarser *absolute* threshold cannot subtract a *global* shift, it can only
+trade false positives for false negatives.
+
+**Fix.** Added `global_drift()`: the **median** of every benchmark's
+run-over-run ratio, used to normalise each ratio before thresholding, so the
+threshold applies to how a benchmark moved *relative to its peers on the same
+run*. The median (not the mean) is the estimator precisely because it is
+unaffected by a genuine regression in a minority of benchmarks — the signal
+that must not be subtracted away. Skipped below `MIN_SAMPLES_FOR_DRIFT = 8`,
+where the median means nothing and a handful of benchmarks can legitimately
+all move together. The report now prints the drift itself (information in its
+own right — it says the machine was busy), shouts if it exceeds 15%, and shows
+both numbers per entry (`+68% vs suite, +79% raw`) so no one has to trust the
+correction blindly.
+
+Replayed against the real data, the four pure-drift entries drop out and the
+report goes from six regressions to three.
+
+**Why this mattered enough to fix immediately.** It is the same class of defect
+as the bug that produced this harness in the first place
+(`TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE`): a report you cannot
+act on. A silent skip trains you not to notice; a comparator that cries wolf on
+every run trains you to skim past the one time it is right. Six false
+regressions on the *very first* run it was used in anger would have retired the
+feature within a week.
+
+**Related precedent:** `TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT`
+burned five boots on "ownership tagging costs 8500 cycles" that was also the
+emulator rather than the code. Same underlying trap, one level up.
+
+### [A] W-BENCH-THREE-BENCHMARKS-ABOVE-SUITE-DRIFT-WITH-NO-MATCHING-CODE-CHANGE. firewall_check / shm_create_close / ipc_semaphore — ✅ RESOLVED 2026-08-14: all three were noise
+
+**RESOLUTION (2026-08-14, third run `a18ea83a9`).** All three were noise, and
+the third run says so about as loudly as data can. They came back not merely
+to the suite median but to *below* their first-run values — and they are the
+**top three entries in the IMPROVED list**, in the same order they had
+occupied in REGRESSED:
+
+| benchmark | run 1 `bf26aabdb` | run 2 `17dbde179` | run 3 `a18ea83a9` | verdict |
+|---|---|---|---|---|
+| `firewall_check` | 270 ns | 482 ns | **228 ns** | run 2 is the outlier |
+| `shm_create_close` | 58 556 ns | 84 996 ns | **56 734 ns** | run 2 is the outlier |
+| `ipc_semaphore` | 11 676 ns | 16 112 ns | **11 219 ns** | run 2 is the outlier |
+
+Runs 1 and 3 agree to within 3–16 % in every case; run 2 stands alone. A real
+regression does not un-regress with no code change, so the correct reading is
+that run 2 was the anomaly, not run 3 — i.e. these were never regressions at
+all, and the flat 25 % threshold flagged them purely because their intrinsic
+spread exceeds it. The prediction recorded below — that `firewall_check` at
+270 ns would prove the noisiest by construction — held: its spread is 111 %,
+the second-widest in the suite.
+
+**Measured per-benchmark spread (max/min across the three runs), which is the
+number the comparator has been missing all along:**
+
+* median across all 63 benchmarks: **13 %**
+* but the tail is long: `crypto_ed25519_verify` 416 %, `firewall_check` 111 %,
+  `tcp_checksum_v6` 56 %, `shm_create_close` 50 %, `sched_pick_next` 49 %,
+  `syscall_dispatch` 44 %, `ipc_semaphore` 44 %.
+
+So a flat 25 % threshold is below the natural spread of at least seven
+benchmarks and far above that of the median one — it is simultaneously too
+tight and too loose, which is exactly the failure mode observed. **This
+promotes the "proper fix" named below from a suggestion to the next task:
+give the comparator a per-benchmark variance estimate.** Logged as
+TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE below.
+
+**Caveat recorded honestly: run 3 is partially contaminated, by me.** I ran
+greps, `git`, and `python` in the same window as the benchmark suite, having
+explicitly noted beforehand that the machine should be idle. Median drift
+correction removes a *uniform* slowdown; it cannot remove contention that
+lands on whichever benchmark happens to be running at the time. That is the
+most likely explanation for run 3's own new outliers —
+`crypto_ed25519_verify` (30.7M → 31.4M → **158.6M**, i.e. two tight samples
+then 5.1×) is the longest-running benchmark in the suite and therefore the
+most exposed to a contention window. Do **not** treat that as a regression on
+this evidence; see TD-BENCH-RUNS-ARE-CONTAMINATED-BY-THE-AGENTS-OWN-COMMANDS
+below.
+
+The original WATCH text follows unchanged.
+
+---
+
+### [A] W-BENCH-THREE-BENCHMARKS-ABOVE-SUITE-DRIFT-WITH-NO-MATCHING-CODE-CHANGE (original entry). firewall_check / shm_create_close / ipc_semaphore — WATCH, needs a third data point
+
+**Where:** benchmarks `firewall_check`, `shm_create_close`, `ipc_semaphore`;
+history in `bench/history.jsonl` (host `Logoplex3`).
+
+**What.** After the drift correction above, three benchmarks still sit clear of
+the suite: `firewall_check +68%` (270→482ns), `shm_create_close +37%`
+(58556→84996ns), `ipc_semaphore +30%` (11676→16112ns). As established above,
+none of their source changed between `bf26aabdb` and `17dbde179`.
+
+**Why it is a WATCH and not a bug (yet).** `bench/history.jsonl` holds exactly
+**two** runs on this host, so there is no per-benchmark variance estimate — the
+drift correction removes the *common* factor but says nothing about how noisy
+an individual benchmark is around it. `firewall_check` at 270ns is the prime
+suspect for being intrinsically noisy: it is the shortest benchmark in the
+suite, and at TCG timer granularity a couple of hundred nanoseconds is very
+few ticks, so its relative variance should be the largest by construction.
+
+**How to resolve.** Take a third `--bench` run on an otherwise-idle machine and
+compare. If these three land back at the suite median they were noise, and the
+proper fix is to give the comparator a per-benchmark variance estimate (flag on
+deviation from a benchmark's own historical spread, not a flat percentage)
+rather than to keep hand-adjudicating. If they stay high, they are real, and
+the next question is whether the `handlers.rs` change shifted code layout
+(icache/alignment) — cheap to test by benchmarking `bf26aabdb` again.
+
+**Do not** act on either theory from the current two runs; that is exactly the
+inference-from-insufficient-samples mistake the entry above documents.
+
+### [A] TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE. A flat 25% threshold is below the natural spread of seven benchmarks and far above the median one's — 2026-08-14 — OPEN
+
+**Where:** `scripts/bench-history.py`, `diff()` / `THRESHOLD_PCT`.
+
+**What.** The comparator flags a benchmark when its drift-corrected change
+exceeds a fixed ±25 %. Three runs of history now show that a single flat
+threshold cannot work, because the suite's per-benchmark spread (max/min
+across runs, *with no code change explaining it*) ranges over an order of
+magnitude:
+
+* median benchmark: 13 % spread → 25 % is far too loose; a genuine 20 %
+  regression here would pass unnoticed.
+* `crypto_ed25519_verify` 416 %, `firewall_check` 111 %, `tcp_checksum_v6`
+  56 %, `shm_create_close` 50 %, `sched_pick_next` 49 %, `syscall_dispatch`
+  44 %, `ipc_semaphore` 44 % → 25 % is far too tight; these produce false
+  positives every single run.
+
+Two investigation cycles have now been spent hand-adjudicating false
+positives thrown by this threshold (see the RESOLVED entry above and
+B-BENCH-COMPARATOR-CALLS-SUITE-WIDE-HOST-NOISE-A-REGRESSION). That is the
+signal to fix the estimator rather than keep adjudicating its output.
+
+**Proper fix.** Give each benchmark its own noise band derived from its own
+history, and flag only moves outside it. Concretely: keep the existing
+whole-suite median drift correction (it removes the common factor correctly
+and is not in question), then compare the drift-corrected change against a
+robust per-benchmark dispersion — median absolute deviation of the log-ratios
+across the recorded runs — rather than a constant. Retain a flat *floor* so
+that a benchmark with an implausibly tight history cannot be flagged on a
+sub-noise move, and require a minimum number of runs (the existing
+`MIN_SAMPLES_FOR_DRIFT` precedent) before the per-benchmark band is trusted,
+falling back to the flat threshold until then.
+
+**Test it the same way the drift fix was tested:** replay the estimator
+against the recorded `bench/history.jsonl` and confirm it drops the three
+now-known-noise entries while still flagging a deliberately injected
+regression. Do not ship it on reasoning alone — that is the mistake this
+whole thread of entries keeps documenting.
+
+**Update 2026-08-14 — the fix above is DATA-BLOCKED; the unblocking step has
+landed.** Attempting the implementation established that it cannot be built
+*or* validated yet, which is worth recording so the next attempt does not
+rediscover it:
+
+* The MAD-of-log-ratios estimator needs the spread of each benchmark across
+  runs. `bench/history.jsonl` holds **3** records, all from one host — which
+  yields **2** consecutive run-over-run residuals per benchmark. A median
+  absolute deviation over 2 points is not an estimate of anything; with
+  residuals of `{+2 %, +406 %}` it returns ~204 %, a band so wide it would
+  flag nothing, and one more run could as easily make it 2 %, a band so tight
+  it flags everything. A minimum-runs gate (the fix's own proposal) would
+  simply keep it disabled.
+* The test requirement above is therefore *also* unsatisfiable today: with 3
+  records there is no held-out data to replay against. Shipping it anyway
+  would be exactly the "on reasoning alone" failure the entry warns about, so
+  it was not shipped.
+
+**What landed instead** (commit alongside this update): the harness now emits
+and records a per-benchmark **dispersion** figure, which supplies the missing
+noise scale *from a single run* rather than requiring history to accumulate.
+`kernel/src/bench.rs::print_scorecard` extends the machine-readable line to
+
+```text
+[bench] SCORE <name> <min_ns> <target_ns> <PASS|OVER> <mean_ns> <iters>
+```
+
+and `bench-history.py` stores `mean_ns` / `iterations` as sibling maps in each
+record. The trailing pair is optional in the parser, so the 3 existing records
+still load — `scripts/test-bench-history.py` pins that down against the real
+history file, because those records are ~9-minute boots on commits that are
+now in the past and cannot be regenerated.
+
+`mean/min` is a genuine per-benchmark noise scale and not a proxy for one: the
+scorecard reports `min` because it is the least-contaminated estimate, but a
+benchmark whose mean sits at 1.05× its min took a clean measurement on nearly
+every iteration, while `dashboard_api_status` at 6.6× (160.4 ms mean vs 24.4 ms
+min) was interrupted on most of them — so its reported min is whichever
+iteration happened to dodge the interference, and is correspondingly fragile
+run-to-run. That is precisely the property the band needs to size itself by,
+and the two entries plainly should not share one threshold.
+
+**Remaining work, in order.** (1) Accumulate ≥6 same-host records — this is a
+by-product of ordinary benchmarked boots, not a task. (2) Validate the
+`mean/min` → run-over-run-sigma mapping *empirically* against those records
+before using it; the causal story above is plausible but the coefficient is
+not known, and inventing one would just build a new false-positive generator
+with more decimal places. (3) Then implement the band, preferring the
+historical MAD where enough runs exist and falling back to the dispersion
+prior where they do not. Do **not** skip step (2).
+
+### [A] TD-BENCH-RUNS-ARE-CONTAMINATED-BY-THE-AGENTS-OWN-COMMANDS. I ran greps and git during a benchmark suite after noting the machine had to be idle — 2026-08-14 — OPEN
+
+**What.** The benchmark suite runs under QEMU TCG, which is pure emulation and
+entirely CPU-bound, so any other load on the host scales the measurements.
+During run 3 (`a18ea83a9`) I ran roughly a dozen `grep`, `git`, `python` and
+file-read commands in the same window, despite having stated at the start of
+the run that the machine needed to stay idle for the numbers to mean anything.
+
+**Why the existing drift correction does not save it.** The median-ratio
+correction removes a *uniform* whole-suite factor — a machine that is
+consistently 6 % slower for the whole run. Contention from a handful of short
+commands is not uniform: it lands on whichever benchmark is executing at that
+moment and leaves the rest untouched. It therefore shows up as exactly what a
+real regression looks like — one or two benchmarks clear of an unchanged
+median. `crypto_ed25519_verify` is the canary: 30.7M → 31.4M → 158.6M ns,
+i.e. two runs agreeing within 2 % and then a 5.1× jump, on a benchmark whose
+source did not change and which is the longest-running in the suite (so the
+most likely to overlap a command).
+
+**Proper fix — structural, not a discipline reminder.** "Remember to stay
+idle" is not a fix; it already failed once, the same day it was written down.
+Make contamination *detectable* instead: have the bench harness re-run one
+cheap, low-variance reference benchmark at the start and again at the end of
+the suite, and record both. If the two disagree by more than a few percent,
+the host load changed mid-run and the whole run should be marked contaminated
+in `history.jsonl` and excluded from comparison (or at minimum reported as
+such). This turns "the operator/agent must behave" into a property the data
+itself can verify — the same principle as the stall detectors: a check that
+cannot fire is indistinguishable from a check that passes.
+
+**Interim mitigation until that exists:** when a `--bench` run is in flight,
+do read-only work only if it is genuinely necessary, and prefer to simply
+wait. Treat any single-benchmark outlier in a run that overlapped agent
+activity as unproven.
+
+**[A] ✅ FIXED 2026-08-14 — and the first version of the fix was itself blind
+to the case it was built for.** Worth reading for the second half.
+
+*Stage 1 (commit `be167dd90`).* The reference memory-access cost that already
+calibrates every budget in `bench.rs` is now measured a second time at the end
+of the suite, emitted as `[bench] CANARY <start> <end> <pct>`, recorded by
+`bench-history.py` as a sibling key with a `contaminated` flag, and covered by
+11 checks in `test-bench-history.py`. The measurement was factored into one
+parameterless function used by both ends, because the comparison means nothing
+unless both ends measure precisely the same thing.
+
+*What the first real run showed (commit `be167dd90`, host Logoplex3).* Two
+things, one confirming the entry and one refuting the fix.
+
+Confirming: `crypto_ed25519_verify` came back at **30.0M ns**, against 30.7M
+and 31.4M in the two runs before the spike and 158.6M during it. Three runs
+now agree within 4% and the spike stands alone, so run `a18ea83a9` **was**
+contaminated, exactly as this entry argued. Whole-suite drift for the new run
+was −0.1%.
+
+Refuting: the canary reported the host stable to within **3%** (283 → 275
+cycles) — while in that same run `shm_rw_64bytes` (298 → 771), `tcp_checksum_v4`
+(20714 → 35410), `net_ipv4_parse` (933 → 1645) and `net_ethernet_parse`
+(873 → 1216) all sat 40–160% above their established values. So the run was
+contaminated and the canary passed it.
+
+*Why.* Endpoint sampling detects a **sustained** load change. The
+contamination described at the top of this entry is a **transient burst** that
+"lands on whichever benchmark is executing at that moment and leaves the rest
+untouched" — which by construction is invisible to a check that only looks at
+the two ends. The first fix was therefore a check that could not fire on its
+own motivating case: the failure mode this project keeps rediscovering, arrived
+at from the opposite direction.
+
+*Stage 2 (this commit).* The reference is now sampled **throughout** the suite
+— every 8th scored benchmark, giving ~8 samples across the 63 — and the verdict
+uses the min-to-max spread rather than the endpoint ratio. Sampling is hooked
+into `score()`, the one function every benchmark already calls, so it spreads
+automatically and stays correct as benchmarks are added or reordered; a
+hand-placed list of sample points in `run_all` would rot. The line gains four
+append-only fields, `[bench] CANARY <start> <end> <pct> <min> <max> <spread>
+<samples>`, so the single record written by stage 1 still reads back and is
+still judged by the endpoint rule it was written under.
+
+*Tolerance status.* Still 25%, still a placeholder. One clean-endpoint
+observation (3%) is not a distribution, and the mid-suite spread has now to be
+observed over several runs before the bound is tightened — the same discipline
+applied to `TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE`. The raw min/max
+are recorded on every run precisely so the bound can be retuned later against
+real data instead of being invented; a stored verdict alone could never be
+re-judged.
+
+*Consequence for the four elevated benchmarks above:* unproven, not regressions.
+They are diffed against `a18ea83a9`, a run this entry now shows was itself
+contaminated, so the comparison is contaminated at both ends. They need a clean
+run-over-clean-run comparison before anyone reads them as real.
+
+**[A] Update 2026-08-14 — stage 2 verified, and all four elevated benchmarks
+were indeed contamination.** Run `5a2002bac` reported `spread 2%` over **10**
+mid-suite samples (267–275 cycles), so the sampling works end to end. Against
+that clean run every one of the four returned to its established value:
+`shm_rw_64bytes` 771 → **414**, `tcp_checksum_v4` 35410 → **20182**,
+`net_ipv4_parse` 1645 → **952**, `net_ethernet_parse` 1216 → **829**. None was
+a regression, which is what the refusal to report them was protecting.
+
+**Honest limitation — the production check has not yet been observed firing.**
+The unit tests prove the *logic* fires (a 173% mid-suite spread with quiet
+endpoints reads as contaminated), and both real runs so far were clean, so the
+mid-suite path has only ever been seen returning "OK". Host contamination
+cannot be summoned on demand, so this is a check believed-good rather than
+demonstrated-good in production — the precise distinction this entry exists to
+insist on. It should not be described as proven until a real run trips it.
+Whole-suite drift for `5a2002bac` was +3.1%.
+
+**RECURRENCE 2026-08-14, run `fcd066231` — I did it again, and this time it
+landed on a number I then acted on.** During the ~58 s QEMU bench run I ran
+`grep` over the 60 000-line `known-issues.md`, `git log`, `git show`, and
+several `Read`s. The dispersion report for that run flagged five benchmarks at
+≥5x `mean/min`, and **`vfs_stat_root` was one of them at 12x**. I then took
+that run's `vfs_stat_root` = 5920 ns, called it "8.5x over its 700 ns target",
+committed that claim, and opened an investigation into the VFS dcache on the
+strength of it.
+
+The number may well still be broadly right — `score()` records `min_ns`, and a
+burst inflates the mean far more than the min. But "broadly right" is not the
+standard, and the specific escape hatch does not close here: this benchmark is
+**500 iterations at ~6 µs ≈ 3 ms of wall time**. A host load episode lasting
+longer than 3 ms — which is to say, essentially any of them — covers the
+*entire* benchmark and inflates min and mean together, leaving `mean/min`
+looking normal while every sample is uniformly slow. The 12x ratio says a
+burst happened *inside* those 3 ms; it says nothing about whether a slower,
+broader episode also raised the floor. So the honest status of 5920 ns is
+**unverified**, not "confirmed 8.5x over".
+
+Two things follow, and both were done rather than noted:
+
+1. The re-measurement (the `vfs_stat_breakdown` run) is executed with **no
+   agent commands issued while QEMU is running** — the read-only work is done
+   before the run starts or after it finishes, never during.
+2. The dcache finding is not being justified by the 5920 ns figure at all. It
+   rests on reading the code: `VfsDcache::lookup` is a linear scan over 1024
+   slots with a full `PathBuf` compare per slot, which is a design defect
+   under CLAUDE.md's "linear scans … must be O(1) or O(log n)" rule
+   independently of what any timer says. A contaminated benchmark can motivate
+   a code review; it must not be the evidence.
+
+**The pattern, stated plainly, because this is the second occurrence.** The
+first time, the contamination hit numbers I merely recorded. This time it hit
+a number I *reasoned from* within minutes of producing it. The entry above
+correctly predicted the mechanism and even built the detector that caught it —
+and the detector working did not stop me, because I read the dispersion list
+*after* I had already drawn the conclusion. A check that fires after the
+decision is documentation, not a gate. The ordering is the fix: read the
+dispersion report **before** quoting any number from a run, not after.
+
+### [A] B-BENCH-WATCHLIST-WATCHED-LESS-THAN-HALF-THE-SUITE-IT-GUARDS. `BENCH_CRITICAL_PATHS` omitted idt.rs, fs/, net/ and crypto.rs — FIXED 2026-08-14
+
+**Where:** `scripts/boot-test.sh`, `BENCH_CRITICAL_PATHS` (feeds
+`report_bench_absence`).
+
+**What.** The list added earlier the same day to close
+`TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE` held five entries —
+`kernel/src/{mm,sched,ipc,syscall,smp.rs}` — because it was derived from
+CLAUDE.md's perf-critical *table*, read as directory names. The suite it is
+supposed to guard measures far more than that. Against the 63 recorded
+benchmark names:
+
+- `isr_latency`, `page_fault` → **`kernel/src/idt.rs`**. CLAUDE.md's table
+  names both "interrupt dispatch" and "page fault handling", but the handlers
+  live in `idt.rs`, not under `mm/` — so the two benchmarks that measure them
+  were unwatched.
+- 8 × `vfs_*` (`read_256`, `write_256`, `readdir`, `stat_{root,3comp,deep}`,
+  `throughput_16k_{read,write}`) → **`kernel/src/fs`**. CLAUDE.md lists "VFS
+  path lookup" and "filesystem read/write" as critical.
+- ~20 × `net_*`, `tcp_checksum_*`, `dns_build_query`, `firewall_check`,
+  `http_*`, `dashboard_api_*` → **`kernel/src/net`** (`http.rs`,
+  `dashboard.rs` live under it).
+- 9 × `crypto_*` → **`kernel/src/crypto.rs`**.
+
+So **30+ of 63 benchmarks measured code the watch list did not watch**, and a
+change to any of them printed "No perf-critical changes since the last
+benchmarked commit, so skipping the suite is reasonable here." Confidently,
+and wrongly.
+
+**How it surfaced.** The `W-KERNEL-COW-WRITE` diagnostic commit edits
+`kernel/src/idt.rs`. The following boot reported no perf-critical changes —
+while the suite contains `isr_latency` and `page_fault`, both measured by code
+in that exact file. (No real regression: that diagnostic sits on the fatal
+path, which is not hot. The harness had no way to know that, and did not
+reason about it — it simply never looked.)
+
+**Fix.** Widened the list to the four missing paths and annotated **every**
+entry with the benchmarks it guards, so the mapping is auditable instead of
+implicit. Verified: `git diff --name-only 17dbde179 HEAD` over the new list
+now returns `kernel/src/idt.rs`, which the old list missed.
+
+**Lesson (the recurring one this week).** This is the third instance in a row
+of the same shape: `TD-BENCHMARKS-...` (the suite silently never ran),
+`B-BENCH-COMPARATOR-CALLS-SUITE-WIDE-HOST-NOISE-A-REGRESSION` (the diff
+confidently named innocent benchmarks), and now a watch list that confidently
+reported "nothing to see" about a file it had never been told to look at. A
+check that cannot fire is indistinguishable from a check that passes — and
+every one of these was *my own* freshly-written tooling, reporting success.
+When adding a guard, the first test should be "does it fire on a case I know
+is positive?", not "does it run cleanly?".
+
+### [A] B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x. A hot loop that straddles a 4 KiB guest page costs ~1.7x under TCG, deterministically per build — ROOT-CAUSED 2026-08-14, fix pending
+
+**Where:** `kernel/src/bench.rs`, `bench_net_tcp_checksum_v4` (3281) /
+`bench_net_tcp_checksum_v6` (3340) and their bench-local kernels
+`tcp_checksum_bench` (3309) / `tcp_checksum_v6_bench` (3366).
+
+**What.** In 3 of the 5 recorded runs on host `Logoplex3`, one member of the
+pair sits near ~35000 ns while the other sits near ~20000 ns; in the other 2
+runs both sit in the 20000–26000 band. Which member is the elevated one
+varies:
+
+| commit | `tcp_checksum_v4` | `tcp_checksum_v6` |
+|---|---|---|
+| `bf26aabdb` | 20667 | 23021 |
+| `17dbde179` | 25279 | 25751 |
+| `a18ea83a9` | 20714 | **35899** |
+| `be167dd90` | **35410** | 20953 |
+| `5a2002bac` | 20182 | **35039** |
+
+The two kernels are near-identical byte-at-a-time fold loops over the same
+1460-byte segment; v6 does 36 more pseudo-header bytes than v4, i.e. ~2.5%
+more work. A 1.7x gap between them — in either direction — is not explicable
+by the work they do.
+
+**What the dispersion data does and does not show.** The recorded figure is
+`result.min_ns`, the **minimum** over 2000 iterations, and since the
+append-only `mean_ns` extension landed we also record the mean, so `mean/min`
+is available as a within-run dispersion measure:
+
+| commit | benchmark | min | mean/min |
+|---|---|---|---|
+| `be167dd90` | `tcp_checksum_v4` (elevated) | 35410 | 1.16 |
+| `be167dd90` | `tcp_checksum_v6` | 20953 | 1.20 |
+| `5a2002bac` | `tcp_checksum_v4` | 20182 | 1.21 |
+| `5a2002bac` | `tcp_checksum_v6` (elevated) | 35039 | 1.33 |
+
+In both runs the elevated member's dispersion is indistinguishable from the
+other member's. Compare the visibly burst-hit numbers in the same records:
+`net_ethernet_parse` at 2.86 and `context_switch` at 10.62 in `be167dd90`.
+So the elevated member is uniformly ~1.7x slower across all 2000 iterations
+with normal spread.
+
+**This rules out a sub-benchmark burst, and nothing more — do not read it as
+"not contamination".** A first draft of this entry concluded that a normal
+`mean/min` proved the slowdown was a steady-state property of the build. That
+does not follow. 2000 iterations at ~20 µs is only ~40 ms of wall time, and a
+host load episode that spans the *entire* 40 ms window inflates the min and
+the mean by the same factor, leaving `mean/min` untouched. Such an episode is
+entirely ordinary on a desktop. So the dispersion data distinguishes "a spike
+during part of the benchmark" from "uniformly slower", and is silent on
+*why* it was uniformly slower. Both a build property and a benchmark-length
+contamination episode predict exactly what is in the table above.
+
+**Two live hypotheses, and the test that separates them.**
+
+1. *Code-layout sensitivity under QEMU TCG.* The two loops are compiled
+   separately (deliberately duplicated "to avoid depending on tcp module
+   internals"), so their alignment and translation-block boundaries shift with
+   every unrelated code change; whichever lands unluckily pays a fixed
+   per-iteration penalty.
+2. *A contamination episode long enough to cover one whole benchmark.* The
+   mid-suite canary samples every 8 scored benchmarks, so an episode lasting
+   one benchmark can slip between two samples and be reported as a quiet run —
+   which is what `5a2002bac` reported.
+
+**These are separated by re-running the bench on the *same commit*.** Hypothesis
+1 is a property of the binary and must reproduce: same member elevated, same
+factor. Hypothesis 2 re-rolls: the elevated member moves, or neither is
+elevated. This needs no new code, just a second `--bench` boot on an unchanged
+tree.
+
+**RESOLVED 2026-08-14 — hypothesis 1, decisively.** That run was done on a
+byte-identical binary (only markdown had changed since `5a2002bac`):
+
+| | `5a2002bac` | re-run, same binary | agreement |
+|---|---|---|---|
+| `tcp_checksum_v4` | 20182 | 20687 | 2.5% |
+| `tcp_checksum_v6` | **35039** | **35048** | **0.03%** |
+
+The same member is elevated, at the same value — and the host was *noisier*
+this run, not quieter (canary spread 16% over 10 samples, against 2% before),
+which rules out the contamination reading rather than merely failing to
+support it. It is a deterministic property of the binary.
+
+**Mechanism: the elevated member's hot loop straddles a 4 KiB guest page.**
+Disassembling the staged binary and locating the backward branch in each fold
+loop:
+
+| | fold loop | span | pages |
+|---|---|---|---|
+| `tcp_checksum_bench` (v4, fast) | `ffffffff805d7202` → `ffffffff805d73f7` | 501 B | `…805d7` → `…805d7`, **one page** |
+| `tcp_checksum_v6_bench` (v6, elevated) | `ffffffff805d9ea9` → `ffffffff805da086` | 477 B | `…805d9` → `…805da`, **straddles** |
+
+Under TCG a translation block is bounded by the guest page — a loop that
+crosses a page boundary cannot stay a single directly-chained TB, so every
+iteration pays a dispatcher round-trip instead of a direct jump. That predicts
+exactly what is observed: a *uniform* per-iteration penalty (so `mean/min` is
+untouched), perfectly reproducible on the same binary, and re-rolled whenever
+unrelated code shifts the function's address — which is why runs 1 and 2 show
+neither member elevated (in those builds neither loop straddled).
+
+**Falsifiable prediction, to be checked on the next bench run:** disassemble
+first, and whichever of the two fold loops straddles a page is the one that
+will come back elevated — with neither elevated if neither straddles. This
+entry should be treated as provisional until that prediction has been made
+*before* a run and held.
+
+**This generalises to the whole suite, and that is the real finding.** Nothing
+about the mechanism is specific to `tcp_checksum`. Any benchmark whose hot loop
+happens to straddle a 4 KiB page pays the same penalty, and which benchmarks do
+re-rolls at every build. So commit-to-commit comparison under TCG carries an
+irreducible per-benchmark noise floor of up to ~1.7x that is *deterministic
+within a run* — meaning neither the canary nor `mean/min` can ever detect it,
+because both look for variation and there is none. Every noise-suppression
+mechanism built for this suite so far is structurally blind to it.
+
+**It is also mostly the same bug as
+`B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL`, and mostly the same
+fix.** The straddle probability scales with the byte length of the hot loop. At
+`opt-level = 0` this fold loop is 117 instructions / ~500 bytes, giving it
+roughly a 1-in-8 chance of crossing any given page; optimised it would be a
+few dozen bytes, closer to 1-in-100. Building the bench kernel `--release`
+therefore shrinks this noise source by about an order of magnitude as a side
+effect. Do that first and re-measure before considering anything more invasive
+(forced function alignment via `-Z align-functions` costs padding across the
+whole kernel and would only paper over the loop-length problem).
+
+**Why it matters.** Both are on the `over_target` list (targets 2000/2200 ns,
+measured 20000–35000), so the absolute numbers are already known-bad under TCG
+and nobody is being misled about pass/fail. The damage is to the *comparator*:
+a 1.7x swing that re-rolls every build is pure noise in any commit-to-commit
+diff, and `TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE` will size its
+band from exactly this history. If the band is fitted without knowing this
+pair is bimodal, it will either be stretched wide enough to hide real
+regressions everywhere else, or it will keep flagging these two forever.
+
+**Remaining plan.** Steps 1 and 2 are done (above). What is left:
+
+1. Build the bench kernel `--release` (see
+   `B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL`) and re-measure.
+2. Make the straddle prediction *before* that run and record it, so the
+   mechanism is confirmed prospectively rather than fitted after the fact.
+3. If page straddling still moves benchmarks materially at `opt-level = 3`,
+   teach the comparator about it: the check is mechanical (disassemble, locate
+   the backward branch, compare `addr >> 12` at both ends) and could be emitted
+   alongside each score, which would turn an invisible deterministic bias into
+   a recorded per-benchmark flag.
+
+**Reproducing the disassembly.** `llvm-nm` / `llvm-objdump` ship with the
+rustup toolchain — no binutils install needed:
+`~/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/`.
+The two kernels are `_ZN6kernel5bench18tcp_checksum_bench…` at
+`ffffffff805d7130` and `_ZN6kernel5bench21tcp_checksum_v6_bench…` at
+`ffffffff805d9df0`. Note the symbol hash differs per build, so match on the
+demangled prefix rather than pasting a mangled name.
+
+**Incidental finding from the disassembly: the benchmarked kernel is built
+without optimisation.** `tcp_checksum_bench` spills every intermediate to the
+stack (`movl %eax, -0x64(%rbp)` after each add). That is consistent with the
+whole suite sitting ~10x over targets that were set from optimised reference
+implementations, and it means the absolute numbers measure debug codegen under
+TCG, not the code that would ship. Worth confirming against the boot-test
+build flags and recording separately — it is a much larger effect than the
+1.7x this entry is about, and it is not this entry's subject.
+
+**Related observation — `mean/min` sees contamination the canary missed.** The
+canary called run `5a2002bac` clean (spread 2% over 10 samples). In that same
+run `crypto_ed25519_verify` had mean 323487129 against min 31875588, a
+**10.15x** ratio; `context_switch` had 10.62x in the run before it. The canary
+samples the host *between* benchmarks; `mean/min` measures dispersion *inside*
+the benchmark that was running, so it catches a burst that fell between two
+canary samples. The data is already recorded per benchmark and needs no
+cross-record history to interpret, so a per-benchmark "this number is suspect"
+flag is implementable now.
+
+Neither measure dominates the other, and the reason is exactly the failure
+above: `mean/min` is blind to any slowdown that covers a whole benchmark
+uniformly — including a sustained load change, which is what the canary
+endpoints exist to catch — while the canary is blind to bursts shorter than
+its sampling interval. The comparator should consult both, and should treat
+"canary quiet **and** `mean/min` normal" as the only combination that
+licenses reading a number as real.
+
+**PROSPECTIVE PREDICTION, recorded 2026-08-14 BEFORE the first release-profile
+bench run.** This entry says above that the page-straddle mechanism "should be
+treated as provisional until that prediction has been made *before* a run and
+held." This section is that prediction. It was written from the disassembly of
+`target/x86_64-unknown-none/release/kernel` (built clean, 0 warnings, 9m25s)
+with **no release-profile measurement in existence yet** — the first such run
+has not been performed. Whatever the numbers turn out to be, this text is not
+to be edited afterwards; the result goes in a separate section below it.
+
+Structural facts read out of the release binary:
+
+| | v4 | v6 |
+|---|---|---|
+| closure inlined into the timed loop? | **yes** | **no** — `callq`+`ret` per iteration |
+| hot fold loop | `ffffffff80985cc2`–`…985cf7` | `ffffffff80976ba0`–`…976bc7` |
+| straddles a 4 KiB page? | **no** (all in `…985000`) | **no** (all in `…976000`) |
+| timed outer loop | `…985caa`–`…985d51` (page `…985`) | `…9864a5`–`…9864fd` (page `…986`) |
+| per-iteration indirect branch | none | one `ret` |
+| bytes consumed per loop iteration | 4 (2x unrolled) | 4 (2x unrolled) |
+
+So in the release build the *specific* mechanism this entry root-caused — a
+hot loop split across a guest page boundary — is **not active for either
+benchmark**. Both fold loops are comfortably interior to a page. If the 1.7x
+bimodal swing were caused by anything else, it should survive the profile
+change; if it was the straddle, it should vanish.
+
+Predictions, in falsifiable form:
+
+1. **The 1.7x v6/v4 gap collapses.** Predicted release ratio **1.00–1.20**.
+   A ratio still ≥1.5 falsifies the straddle explanation outright.
+2. **A residual v6 penalty is still expected, but small.** v6 pays one
+   out-of-line call and — the part that actually costs under TCG — one `ret`,
+   which is an *indirect* branch and cannot be direct-chained between
+   translation blocks; it takes a jump-cache lookup every iteration. But that
+   is one dispatch amortised over ~365 fold-loop iterations of real work, so
+   it should be a low-single-digit percentage, not a multiple. v6 also has the
+   genuinely larger 40-byte pseudo-header (the straight-line preamble at
+   `…976aa3`–`…976b8e`), which is real work and legitimately makes v6 slower.
+3. **Both numbers drop by roughly an order of magnitude** from the debug
+   figures (v4 ~20200–20700 ns, v6 ~35000 ns). The debug loop spilled every
+   intermediate to the stack and consumed 2 bytes per iteration; the release
+   loop is 10 instructions, register-only, 4 bytes per iteration. Predicted
+   release: **v4 ~2000–3000 ns, v6 ~2200–3500 ns** — i.e. at or near the
+   2000/2200 ns targets, which were set from optimised reference
+   implementations and have been failed by ~10x for the whole life of the
+   suite for exactly that reason.
+4. **The run is scored against no baseline.** `bench-history.py --profile
+   release` should report that no same-profile record exists and decline to
+   diff against the five debug records, rather than reporting a fabricated
+   ~10x "improvement". This is the profile-isolation change under test.
+
+If (1) holds and (3) holds, the mechanism is confirmed prospectively and the
+entry can be closed. If (1) fails while (3) holds, the optimisation level was
+a confound and the straddle explanation is wrong — in that case the same-binary
+re-run table above (v6 35048 vs 35039, 0.03%) still stands as proof the effect
+is deterministic per build, and a different per-build mechanism must be found.
+
+**RESULT of the prediction above — run `fcd066231`, release profile,
+2026-08-14T15:57:59.** Scored against the four predictions as written, with no
+edits to them:
+
+| | Predicted | Measured | Verdict |
+|---|---|---|---|
+| 1. v6/v4 ratio | 1.00–1.20 (≥1.5 falsifies) | **0.93** | central claim **holds**, band missed |
+| 2. v6 slightly slower than v4 | yes, low single-digit % | v6 **6.6% faster** | **WRONG** |
+| 3. both drop ~10x | v4 2000–3000 ns, v6 2200–3500 ns | v4 **1716**, v6 **1602** | order right, **both beat the band** |
+| 4. no cross-profile baseline diff | refuses to compare | refused, verbatim | **holds exactly** |
+
+Raw: `v4 min 1716 ns (6366 cyc), mean 1772` and `v6 min 1602 ns (5946 cyc),
+mean 1663`. Dispersion 1.03 and 1.04 — both clean, so neither number is a
+contaminated read. Against the debug records (v4 20182–35410, v6 20953–35899)
+that is **11.8x and 21.9x faster**, and both now pass their 2000/2200 ns
+targets — the first time either has, ever.
+
+The bimodality is gone outright. Across the six debug records the ~35000 band
+was occupied by v6, v6, v4, v6, v6 and neither (a middle run at 25279/25751);
+in release both members sit in a 1602–1716 band with no elevated member. So
+the entry's *central* claim is confirmed: **the 1.7x swing was an artefact of
+the build, not a property of the checksum code.**
+
+**But this run does not isolate the page-straddle mechanism, and it would be
+dishonest to close the entry as if it had.** Going from `opt-level = 0` to `3`
+rewrote the code completely — new instruction sequences, 2x unrolling, new
+addresses, new inlining decisions. The straddle hypothesis predicted the gap
+would vanish and it vanished; but so would *any* hypothesis of the form "this
+is a build artefact", which is a much weaker and much easier claim. I changed
+two variables at once and can only credit the one they share. The experiment
+confirms the **class**, not the **mechanism**.
+
+**Prediction 2 failing matters more than prediction 1 succeeding.** v6 does
+strictly more work than v4 — a 40-byte pseudo-header instead of 12 — *and* in
+this build pays an out-of-line `callq` plus a `ret` (an indirect branch, not
+direct-chainable between TCG translation blocks) on every one of its 2000
+iterations. It came out faster anyway. That is the same fine-grained "what
+costs what under TCG" reasoning the straddle story rests on, applied to a case
+where the answer was checkable, and it got the *sign* wrong. Confidence in the
+straddle attribution should be downgraded accordingly, not raised by
+prediction 1.
+
+**The experiment that would actually isolate it** (not yet done): stay within
+one profile and move a function's address deliberately — insert padding, or a
+`#[repr(align)]`/`.balign` on the hot loop — so that a loop which currently
+sits interior to a page is pushed across a boundary, with nothing else
+changed. Same optimisation level, same instructions, same trip count, one
+variable. Until that is run, "TCG translation blocks are page-bounded" remains
+a plausible and well-documented QEMU property that *fits* the data rather than
+a mechanism this project has demonstrated.
+
+**Much larger incidental result: the profile switch moved the whole suite.**
+`over_target` went **58–59 of 63 on every debug record to 15 of 63 on
+release** — scorecard `48/63 within hardware target`. The suite had been
+reporting a near-total failure that was overwhelmingly an artefact of
+measuring unoptimised codegen, exactly as
+`B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL` predicted. The 15
+remaining over-target entries (`syscall_dispatch` 661 ns vs 200,
+`futex_wake_empty` 944 vs 500, `futex_wait_mismatch` 1507 vs 500,
+`vfs_stat_root` 5920 vs 700, `vfs_stat_deep_2comp` 31046 vs 1400,
+`isr_latency` 164652 cyc vs 37000, …) are now the first *credible* performance
+findings this suite has produced, because they are the first measured on the
+code that would ship. They should be triaged on their own merits — `vfs_stat`
+at 22x and 8x target is the standout — and are not this entry's subject.
+
+**Caveat on those 15, added after the fact.** This run's dispersion report
+flagged five benchmarks at ≥5x `mean/min`, and `vfs_stat_root` — the one
+singled out as "the standout" above — was among them at **12x**. I ran greps
+and git commands during the QEMU boot, which is exactly the mistake recorded
+in `TD-BENCH-RUNS-ARE-CONTAMINATED-BY-THE-AGENTS-OWN-COMMANDS`. The
+over-target *set* is unlikely to be an artefact (a 22x miss does not come from
+host noise), but the individual magnitudes from this run should be treated as
+provisional until re-measured on an idle host. See the RECURRENCE note in that
+entry for why `min_ns` does not fully rescue a 3 ms benchmark.
+
+### [A] B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL. Every recorded benchmark ran at `opt-level = 0` and was scored against optimised-reference targets — **FIXED 2026-08-14, confirmed by measurement**
+
+> **Resolution.** `scripts/boot-test.sh` now builds `--release` and stages from
+> `target/x86_64-unknown-none/release/kernel` when `--bench` is passed, and
+> `bench-history.py` records/compares a `profile` field so release and debug
+> records are never diffed against each other. Confirmed end-to-end by run
+> `fcd066231`: the release kernel built clean (0 warnings, 9m25s), booted, and
+> **`over_target` fell from 58–59 of 63 on every debug record to 15 of 63** —
+> scorecard `48/63 within hardware target`. The comparator correctly refused
+> to diff against the six debug records. Quantified per-benchmark evidence is
+> in the RESULT section of
+> `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x` above (e.g. `tcp_checksum_v4`
+> 20667 → 1716 ns, `v6` 35048 → 1602 ns).
+>
+> Two things this did **not** settle, both tracked elsewhere and neither a
+> reason to keep this entry open: (a) whether the *non-bench* boot test should
+> also build release — that is **Q46**, still with the operator, and the
+> default deliberately stays debug meanwhile; (b) the 15 benchmarks still over
+> target, which are now genuine findings rather than codegen artefacts and
+> need triage on their own merits.
+
+**Where:** `scripts/boot-test.sh:602` (`"$CARGO" build`) and `:218`
+(`KERNEL_BIN=".../target/x86_64-unknown-none/debug/kernel"`); `Cargo.toml`
+`[profile.dev]` (357–365) vs `[profile.release.package.kernel]` (370–373).
+
+**What.** The boot test builds with a bare `cargo build` — no `--release` — and
+stages the artefact out of `target/x86_64-unknown-none/**debug**/kernel`. The
+benchmark suite is compiled into the kernel unconditionally; `--bench` only
+changes which serial marker the script waits for (`BENCH_OK` instead of
+`BOOT_OK`), it does not change the build. `[profile.dev]` sets only
+`panic = "abort"`, and there is no `[profile.dev.package.kernel]`, so the
+kernel is built at **`opt-level = 0`**.
+
+So every number in `bench/history.jsonl` — all 5 records, all 63 benchmarks —
+measures unoptimised codegen, and every one of them is scored against
+`baselines.toml` targets taken from *optimised* Linux / Fuchsia / L4 / jemalloc
+implementations.
+
+**Evidence.** Disassembling the staged binary shows textbook `opt-level = 0`
+output. `tcp_checksum_bench` reloads and re-spills the accumulator to the stack
+around every single add:
+
+```
+805d7181:  addl  %ecx, %eax
+805d7183:  movl  %eax, -0x64(%rbp)
+805d7186:  movl  -0x64(%rbp), %eax     # reload of the value just stored
+```
+
+That is one store + one load per accumulation in a loop whose entire body is
+one accumulation. (`llvm-objdump` ships with the rustup toolchain — see the
+path in `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x` — so this needs no binutils
+install.)
+
+**The irony.** `[profile.release.package.kernel]` already exists and is
+deliberately tuned for exactly this — `opt-level = 3`, `codegen-units = 1`,
+`strip = "none"` — with a comment explaining the per-package override. The
+benchmark path has simply never used it.
+
+**Why it matters.** This invalidates the *absolute* verdicts wholesale, and
+they are the ones CLAUDE.md's benchmarking protocol is built on:
+
+- The `over_target` list is not a list of subsystems that are too slow. It is
+  mostly a list of subsystems compiled without optimisation. `tcp_checksum_v4`
+  at 20000 ns against a 2000 ns target is a 10x miss that says nothing about
+  the shipped code.
+- "If a change regresses a benchmark by more than 10%, investigate before
+  merging" cannot be applied to numbers whose baseline is debug codegen.
+- The scale is wrong in the direction that matters: `opt-level = 0` → `3` on
+  byte-loop code of this shape is routinely 5–20x. That dwarfs both the ~1.7x
+  swing in `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x` and the 25% canary
+  tolerance, which means the noise work done so far has been tuning the
+  measurement of the wrong binary.
+
+*Relative* commit-to-commit comparisons are not destroyed — both sides are
+debug — but they are still measuring optimisation-sensitive code paths whose
+debug/release ratio is not uniform, so a debug-visible change need not be a
+release-visible one.
+
+**Same family as the three before it.** `TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN`
+(the suite never ran), `B-BENCH-WATCHLIST-...` (the watch list never looked),
+`B-BENCH-COMPARATOR-CALLS-SUITE-WIDE-HOST-NOISE-A-REGRESSION` (the diff named
+innocents) — and now a suite that ran, reported, and was compared against
+targets, while measuring a binary nobody intends to ship. A check that measures
+the wrong thing is indistinguishable from a check that passes.
+
+**Proposed fix.** Build the kernel `--release` for `--bench` runs, staging from
+`target/x86_64-unknown-none/release/kernel`, and add an append-only `profile`
+field to each `bench/history.jsonl` record so the comparator only ever compares
+like with like. The 5 existing records must keep their meaning: absent
+`profile` reads as `"debug"`, and a release record must never be diffed against
+a debug one. This is a real cost — a second full kernel build, and a bench
+history that restarts from zero same-profile records, which also resets the
+≥6-record threshold that `TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE`
+is waiting on. It is still the only honest option: a benchmark that does not
+measure the shipped build is not a benchmark.
+
+**Open sub-question:** whether the *non*-bench boot test should stay debug.
+Keeping it debug preserves fast iteration and readable panics, at the cost of
+two kernel builds in the tree and the risk that release-only miscompiles or
+UB-dependent behaviour are only ever exercised on bench runs. Leaning toward
+keeping the default boot test debug and making release the `--bench` path, but
+this is worth the operator's view — see `open-questions.md`.
+
+### [A] AUDIT 2026-08-14 — the softirq × hard-IRQ shared-lock class is clean. No action needed; recorded so it is not re-audited
+
+**Why it was worth checking.** `softirq::process_pending` re-enables interrupts
+(`kernel/src/softirq.rs`, module docs 51–56), so any lock held by a softirq
+handler can be observed by a hard-IRQ handler that preempts it. That is
+structurally the same failure mode as the rtl8139 deadlock and as
+`B-COMPLETION-TIMER-IRQ-DEADLOCK`: the hard IRQ spins on a lock whose holder
+cannot run until the IRQ returns. The intersection was believed empty only
+because rtl8139 was the tree's single hard-IRQ lock acquisition — "empty by
+accident" is not a property that stays true, so it needed enumerating rather
+than assuming.
+
+**What was audited.** Every callee reachable from the three softirq handlers
+(`handle_timer` 355, `handle_sched` 434, `handle_irq_poll` 445):
+
+| Callee | Lock discipline | Verdict |
+|---|---|---|
+| `sched::process_sleep_wakeups` (sched/mod.rs 5248) | atomic scan of `SLEEP_QUEUE`, no lock | clean |
+| `sched::process_deferred_wakes` (sched/mod.rs 4897) | non-blocking wake path | clean |
+| `ipc::timer::process_timer_expirations` (ipc/timer.rs 211) | explicitly non-blocking on `CP_TABLE`/`SCHED`, leaves the timer un-advanced on contention so the next tick retries | clean, and documented against `B-COMPLETION-TIMER-IRQ-DEADLOCK` |
+| `ktimer::process_expirations` (ktimer.rs 323) | atomic scan of `TIMERS` | clean |
+| `fs::cache::try_flush_expired` (fs/cache.rs 906) | `try_lock`, result deliberately discarded — retries in ~5 s | clean |
+| `watchdog`, `kstat`, `loadavg`, `irq_storm`, `irqbalance`, `cpufreq`, `thermal` | zero `.lock()` calls; atomics only | clean |
+| `rcu::tick` → `process_callbacks` (rcu.rs 483) | all three `CALLBACKS.lock()` sites (403, 486, 547) wrapped in `cpu::without_interrupts`, popping one callback per critical section and invoking it with the lock released | clean, and the comment at 393–401 records the observed 2/10 boot hang that motivated it |
+
+`rcu` is the only softirq callee that takes a blocking lock at all, and it is
+the one already hardened — the fix predates this audit and cites the boot hang
+it was found by.
+
+**Result: the intersection is empty, and empty by construction rather than by
+luck.** Each site either uses atomics, uses `try_lock`, or masks interrupts for
+the lock-hold window. No change was made.
+
+**What would break it.** Adding a `.lock()` (not `try_lock`, not
+`without_interrupts`-wrapped) to any callee of `handle_timer` — which is a wide
+and growing list: it already fans out to 12 subsystems — while that same lock is
+reachable from a hard-IRQ handler. The `handle_timer` fan-out is the risk
+surface to re-check when a subsystem is added to it, not the whole kernel.
+
+### [A] B-BENCH-CANARY-CERTIFIES-CLEAN-RUNS-THAT-CONTAIN-MULTI-X-STALLS. All three runs it passed had 5–8 benchmarks stalled ≥5x — MITIGATED 2026-08-14
+
+**Where:** `kernel/src/bench.rs` (`maybe_canary_sample`, `CANARY_SAMPLE_EVERY = 8`)
+and `scripts/bench-history.py` (the `Canary OK` verdict).
+
+**What.** The mid-suite canary has never once fired. That was read as "the host
+has been quiet"; it is not what the data says. Cross-checking each run's canary
+verdict against the per-benchmark `mean/min` recorded in the same run:
+
+| run | canary verdict | benchmarks with `mean/min` ≥ 5x |
+|---|---|---|
+| `be167dd90` | clean (endpoints 97%) | **8** — `ipc_channel` 23x, `page_alloc_free` 19x, `syscall_dispatch` 16x, `pick_next` 16x, `context_switch` 11x, `crypto_ed25519_sign` 8x, `dashboard_api_status` 8x, `ipc_channel_sync` 6x |
+| `5a2002bac` | clean (spread 2%) | **5** — `page_alloc_free` 24x, `vfs_stat_deep` 15x, `vfs_stat_3comp` 12x, `crypto_ed25519_verify` 10x, `vfs_throughput_16k_write` 5x |
+| `f74f97b6d` | clean (spread 16%) | **6** — `context_switch` 21x, `vfs_stat_deep` 16x, `vfs_stat_3comp` 14x, `vfs_throughput_16k_write` 8x, `dashboard_api_health` 7x, `crypto_ed25519_verify` 7x |
+
+The run reported as the *cleanest* of the three — `5a2002bac`, spread 2%, the
+one used to certify that four earlier benchmarks had merely been contaminated —
+contained a benchmark whose mean was **24x its own minimum**.
+
+**Why the canary cannot see this.** It samples the host *between* benchmarks,
+once per 8 scored entries — 10 samples across 63 benchmarks. A stall confined
+to one benchmark falls between two samples and leaves no trace in it. The
+canary measures the gaps; the stalls are in the benchmarks.
+
+**Why `mean/min` can.** It is computed from the benchmark's own iterations, so
+it sees precisely the interval the canary skips. And the data was already being
+recorded — the append-only `mean_ns` extension landed for a different reason
+(the variance band) and turns out to answer this too.
+
+**These are not intrinsically noisy benchmarks.** That was the obvious
+alternative reading, and it is wrong. Across the three runs only
+`ipc_channel_sync` is *persistently* elevated (6.0 / 3.9 / 4.6). Every other
+high reading is spiky — `pick_next` 15.8 then 1.1 then 1.2; `syscall_dispatch`
+16.1 then 1.2 then 1.2; `page_alloc_free` 19.3, 24.4, then 1.3. A benchmark
+that is 16x dispersed in one run and 1.2x in the next is being disturbed, not
+behaving that way.
+
+**Nor is it one cold first iteration.** `vfs_stat_3comp` in `f74f97b6d`: min
+1334082, mean 18349532, max 758926475 over 500 iterations. The single worst
+iteration accounts for only ~8% of the total time, so the elevation is broad —
+many slow iterations, not one outlier. Same shape for `crypto_ed25519_verify`
+(max is ~7% of total over 50 iterations).
+
+**Mitigation applied.** `scripts/bench-history.py` now reports per-benchmark
+dispersion (`suspect_dispersion` / `report_dispersion`,
+`DISPERSION_SUSPECT_RATIO = 5.0`) and the canary's verdict line no longer
+claims "host load stable" — it now says only that the reference access cost was
+steady *between* benchmarks, and points at the dispersion line. 6 new tests
+(48 total, all passing), including the real `page_alloc_free` 24x shape from the
+run the canary called clean.
+
+**The threshold is deliberately unfitted.** Measured across the three records:
+median benchmark 1.26–1.59, the large majority under 2, excursions at 5–25x,
+and little in between. 5.0 sits in that empty band. It wants retuning once
+release-profile records exist, since optimised benchmarks run for less wall
+time and so present a smaller target to a burst.
+
+**Not yet done — this reports, it does not correct.** A flagged benchmark's
+recorded figure is still its *minimum*, which may well be sound; the flag says
+"do not read movement here as signal", not "this number is wrong". Deciding
+which is which needs a per-benchmark dispersion *baseline*, i.e.
+`TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE`, whose record count has just
+been reset to zero by the debug→release profile switch.
+
+**Lesson, the fourth of this shape.** After `TD-BENCHMARKS-...` (the suite never
+ran), `B-BENCH-WATCHLIST-...` (the watch list never looked), and
+`B-BENCH-COMPARATOR-...` (the diff named innocents): a canary that never fired,
+read as evidence of quiet. Its own motivating case had already refuted the
+first version of it, and the second version was written specifically to catch
+per-benchmark bursts — yet it was still reporting "host load stable" over runs
+containing 24x stalls. "It has never fired" is a claim about the check, never
+about the world.
+
+---
+
+### B-VFS-STAT-ROOT-IS-12x-OVER-TARGET-AND-THE-DCACHE-IS-NOT-WHY — 2026-08-14 — OPEN (`kernel/src/fs/vfs.rs`, `kernel/src/ipc/namespace.rs`)
+
+`vfs_stat_root` — `Vfs::stat("/")`, the single cheapest path operation the VFS
+can perform — costs **6151 ns** on the release-profile run (`min` of 500
+iterations, and *not* flagged by the dispersion check in that run, so the number
+is clean). The CLAUDE.md target for a cached lookup is 200–500 ns per component.
+For a zero-component path that is roughly **12–30x over**.
+
+**The hypothesis I started with was wrong, and measurement is what killed it.**
+`VfsDcache::lookup` (`kernel/src/fs/vfs.rs:1189`) is an O(n) linear scan over
+`VFS_DCACHE_SIZE = 1024` slots, and CLAUDE.md explicitly forbids linear scans in
+VFS path lookup. It was the obvious culprit and I was one step from rewriting it
+as a hash table. Instrumenting first (`bench_vfs_stat_breakdown`, this commit)
+showed:
+
+```
+vfs_stat_breakdown: dcache 25 valid entries (of 1024), +550 hits +0 misses
+```
+
+**25 live entries, filled from index 0, 100% hit rate.** A hit-scan terminates
+in ~25 iterations, not 1024 — the cost of a linear scan is a function of
+*occupancy*, not capacity. The scan cannot account for microseconds. The
+1024-slot scan remains a latent defect (it degrades as occupancy grows, and it
+is the *miss* path that walks all 1024) and is tracked as such below — but it is
+**not** this bug's cause. Had I "fixed" it I would have burned a refactor and
+moved the number by nothing.
+
+**Where the time actually goes.** Splitting `Vfs::stat` at its own seam —
+`resolve_follow(path)` then `stat_resolved(&path)`:
+
+```
+vfs_stat_breakdown_full:      6191 ns
+vfs_stat_breakdown_resolved:  2442 ns
+  => resolve_follow ~3749 ns (61%) + stat_resolved 2442 ns (39%)
+```
+
+So path *resolution* is the larger half, and both halves are individually over
+target.
+
+**Prime suspect for the 3749 ns, not yet confirmed.** `resolve_follow`
+(`vfs.rs:1553`) calls `namespace::resolve_path` (`ipc/namespace.rs:721`), which
+via `resolve_path_for` (`:735`) takes **`PROCESS_NS.lock()`**, then
+**`PROCESS_ROOT.lock()`**, then conditionally **`PROCESS_MOUNTS.lock()`** — three
+global spinlocks — and performs `path.to_path_buf()`, a heap allocation, *even
+in the trivial `ROOT_NAMESPACE` pass-through case where the answer is the input
+unchanged*. That is a fixed per-resolution cost paid by every single VFS
+operation in the system. `validate_path`, `normalize_path` (another alloc), the
+`VFS_DCACHE.lock()`, and `entry.resolved.clone()` (another alloc) are the other
+candidates in that 3749 ns.
+
+**Explicitly not yet attributed.** The above is a reading of the code, not a
+measurement, and the last time I reasoned this way about a hot path
+(`B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x`, prediction 2) I got the *sign*
+wrong. The next step is to split `resolve_follow` the same way this commit split
+`stat` — `namespace::resolve_path` vs `validate_path`+`normalize_path` vs the
+dcache lock+clone — and let the numbers pick the target. Do not optimise any of
+the four candidates before that split exists.
+
+**Related, same shape, worse:** `vfs_stat_deep_2comp` = 33573 ns, ~16786 ns per
+component against a 200–500 ns/component target. If the fixed per-resolution
+prologue is the cause of `vfs_stat_root`, it does not explain this one — 2
+components cost 5.4x one component, so there is a *per-component* cost here too.
+Both need the same treatment.
+
+#### PROSPECTIVE PREDICTION (written and committed before the stage-split run)
+
+Same protocol as `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x`: the prediction is
+committed before the measurement exists, so it can be graded rather than
+rationalised. Last time this protocol caught me getting a *sign* wrong; the
+point is to let it do that again.
+
+**Primitive costs from the same release run** (`bench/history.jsonl`, commit
+`040049442`) — these are the anchors, not guesses:
+
+| primitive | measured | what it bounds |
+|---|---|---|
+| `heap_alloc_free_64` | 184 ns | one alloc+free pair ⇒ a single alloc ≲ 180 ns |
+| `sched_pick_next` | 40 ns | takes the run-queue lock ⇒ an uncontended spinlock is *cheap*, ≲ 20 ns |
+| `context_switch` | 1275 ns | nothing here should approach this |
+
+**What each stage actually does** (from the code, and this is the weak part —
+inspection is exactly what was wrong about the dcache):
+
+* `ns_translate` = `current_task_id()` + `owner_process()` (a `THREAD_OWNERS.lock()` + `BTreeMap::get`) + `PROCESS_NS.lock()` + get + `path.to_path_buf()` (**1 alloc**, of a 1-byte path) + `PROCESS_ROOT.lock()` + get → `None`. So **3 spinlocks + 3 map lookups + 1 alloc**.
+* `validate_normalize` = a byte scan of `"/"` + `normalize_path` (**1 alloc**).
+* `dcache_hit` = `VFS_DCACHE.lock()` + ~25 path compares + `entry.resolved.clone()` (**1 alloc**).
+
+**Predictions, falsifiable:**
+
+1. `ns_translate` < 400 ns.
+2. `validate_normalize` < 400 ns.
+3. `dcache_hit` < 500 ns.
+4. **Therefore the three stages sum to well under the 3749 ns that subtraction
+   attributed to `resolve_follow` — I predict the sum is < 1500 ns.** Three
+   allocations at ≤180 ns and six-ish uncontended spinlocks at ≤20 ns simply
+   do not reach 3.7 µs.
+5. **If (4) holds, the subtraction is what was wrong.** The specific mechanism I
+   expect: `Vfs::stat` feeds `stat_resolved` the *resolved* path, while the
+   isolated `vfs_stat_breakdown_resolved` benchmark feeds it the literal `"/"`.
+   If `resolve_path("/")` returns something longer than `"/"`, then the
+   `stat_resolved` inside `stat` is doing strictly more work than the isolated
+   measurement of it, and subtraction charges that surplus to `resolve_follow`.
+   **In that case the real culprit is `stat_resolved` — `resolve_mount`'s
+   `VFS.lock()` + linear mount scan + `to_path_buf()` + `Arc::clone`, then
+   `fs.lock().stat()` — and I will have misattributed the cost twice in a row
+   on this one benchmark.**
+
+This run therefore carries a direct measurement of `resolve_follow`
+(`Vfs::resolve_path` is a public alias for it) *alongside* the subtraction, plus
+a print of what `resolve_path("/")` actually returns. Prediction 5 is decided by
+those two lines and needs no further argument.
+
+**Standing caution, restated:** predictions 1–3 lean on the same
+fine-grained cost reasoning that got the tcp_checksum sign wrong. Treat a hit as
+weak confirmation and a miss as strong disconfirmation.
+
+#### RESULT — 2026-08-14, release profile, commit `f9807f73a` (`build/stage-split.log`)
+
+```
+vfs_stat_breakdown: full 6423ns = resolve_follow ~3843ns + stat_resolved 2580ns
+vfs_stat_breakdown: resolve_follow measured directly 3504ns (vs 3843ns by subtraction)
+vfs_stat_breakdown: resolve_follow 3504ns = ns_translate 1948ns + validate_normalize 318ns + dcache_hit ~1238ns
+vfs_stat_breakdown: resolve_path("/") -> "/" (1 bytes)
+vfs_stat_breakdown: dcache 25 valid entries (of 1024), +1100 hits +0 misses over the run
+```
+
+| # | prediction | actual | verdict |
+|---|---|---|---|
+| 1 | `ns_translate` < 400 ns | **1948 ns** | **MISS, 4.9x** |
+| 2 | `validate_normalize` < 400 ns | 318 ns | hit |
+| 3 | `dcache_hit` < 500 ns | **~1238 ns** | **MISS, 2.5x** |
+| 4 | three stages sum < 1500 ns | **3504 ns** | **MISS, 2.3x** |
+| 5 | "the subtraction is what was wrong" | subtraction was **right** | **disconfirmed** |
+
+**Prediction 5 was wrong in the way that matters most: it was an escape
+hatch.** It said that if the stages came out cheap, the *subtraction* must be
+the error and the real culprit would be `stat_resolved`. Both halves are
+refuted outright by the two lines this run was built to print:
+`resolve_path("/")` returns `"/"` unchanged (1 byte), so the different-inputs
+hazard that would have made subtraction unsound never existed on this path; and
+the direct measurement (3504 ns) agrees with the subtraction (3843 ns) to within
+9.7%. `resolve_follow` really is ~55% of the whole stat, exactly where
+subtraction put it. I did **not** misattribute the cost twice — I misattributed
+it once, to the dcache, and then predicted I had misattributed it again in the
+opposite direction. The second guess was as wrong as the first.
+
+**Why 1 and 3 missed: a bad anchor, and it was bad by misreading the code.**
+The prediction leaned on "`sched_pick_next` = 40 ns, and it takes the run-queue
+lock, therefore an uncontended spinlock is ≲ 20 ns." That premise is simply
+false about the benchmark. `bench_sched_pick_next` builds a **local**
+`PriorityRoundRobin::new()` on the stack and calls `rq.pick_next()` directly —
+it never touches `SCHED.lock()`. **It takes no lock at all.** So the one number
+in the anchor table that was supposed to bound lock cost was measuring a
+lock-free path, and the 20 ns figure was manufactured from nothing. This is the
+same failure as the dcache: a claim about what the code does, asserted from
+reading rather than from measuring, load-bearing for the conclusion.
+
+**The cost model the measurement actually supports.** Solving the three stages
+against their contents (3 locks + 3 map lookups + 1 alloc = 1948; 1 lock + ~25
+path compares + 1 alloc = 1238; a byte scan + 1 alloc = 318) gives a consistent
+fit at roughly:
+
+| primitive | implied cost under QEMU-TCG |
+|---|---|
+| uncontended **global spinlock** acquire+release | **~500 ns** |
+| heap alloc (small) | ~180 ns (matches `heap_alloc_free_64`) |
+| one dcache path compare | ~21 ns |
+
+A lock is ~3x an allocation here, and the whole path is **lock-dominated**: 4
+global spinlocks across `resolve_follow` alone, ~2000 ns of its 3504. Every
+optimisation instinct I had was aimed at allocations and at scan length, and
+both are minor terms.
+
+**But that model is derived, not measured, and deriving is what just failed
+twice.** So the next run adds `bench_spinlock_uncontended` to measure the
+primitive directly. The suite has anchors for allocation, context switch and
+syscall dispatch but none for the single most common operation in the kernel,
+which is precisely why a fabricated 20 ns figure went unchallenged.
+
+**Consequences (tracked as `B-NAMESPACE-RESOLVE-TAKES-3-GLOBAL-LOCKS-TO-RETURN-ITS-INPUT` below).**
+`ns_translate` is 1948 ns — 56% of `resolve_follow`, 30% of the entire stat —
+and for a process in the root namespace with no chroot and no volume mounts
+(i.e. every process on a normal desktop) it does all of that work to **return
+its input unchanged**.
+
+---
+
+### B-NAMESPACE-RESOLVE-TAKES-3-GLOBAL-LOCKS-TO-RETURN-ITS-INPUT — 2026-08-14 (`kernel/src/ipc/namespace.rs`)
+
+**Measured, not inferred:** `ns_translate` = **1948 ns**, which is 56% of
+`resolve_follow` and **30% of an entire `stat("/")`**. See the RESULT section of
+`B-VFS-STAT-ROOT-IS-12x-OVER-TARGET-AND-THE-DCACHE-IS-NOT-WHY` above.
+
+`namespace::resolve_path` is called before **every** path operation in the VFS —
+read, write, stat, open, mkdir, unlink, all of it. For a process in the root
+namespace with no chroot and no volume mounts — which is every process on a
+normal desktop, and every process in this kernel today — the entire function
+body is:
+
+1. `current_task_id()` — cheap, an atomic load.
+2. `owner_process(task_id)` → **`THREAD_OWNERS.lock()`** + map get.
+3. **`PROCESS_NS.lock()`** + map get → `ROOT_NAMESPACE`.
+4. `path.to_path_buf()` — a heap allocation.
+5. **`PROCESS_ROOT.lock()`** + map get → `None`.
+6. Return the path, byte-for-byte identical to the input.
+
+**Three global spinlock acquisitions and one heap allocation, to return the
+argument unchanged.** At the measured ~500 ns per uncontended global spinlock
+under TCG, the locks alone are ~1500 of the 1948 ns.
+
+This is not a micro-optimisation target, it is a missing fast path. The
+structure charges every path operation in the system for a feature (containers)
+that is not in use, and the charge is paid in the most expensive primitive
+available.
+
+**The fix** — a global "namespace features are in use" flag, checked with one
+relaxed atomic load before any lock is taken:
+
+* An `AtomicBool` (`NS_FEATURES_ACTIVE`) set with `Release` ordering at the
+  three sites that can make namespace state non-trivial: inserting into
+  `PROCESS_NS`, into `PROCESS_ROOT`, and into `PROCESS_MOUNTS`.
+* `resolve_path_for` loads it with `Acquire`; if clear, it returns immediately.
+* **The flag is never cleared.** Clearing it on the last teardown would
+  introduce a race with a resolve already in flight, and the cost of staying on
+  the slow path after containers have been used once is exactly the cost we have
+  today. Monotonic is the sound choice and it is deliberate, not an oversight.
+
+This is the standard rarely-used-feature pattern (Linux's static keys). It does
+not change behaviour for any process: with the flag clear, no process has a
+namespace, a root, or a volume, so every branch the slow path could take is the
+identity branch — which is what makes the fast path a refactor rather than a
+semantic change.
+
+**The allocation in step 4 survives this fix** and is the correct next target:
+`resolve_path` returns `PathBuf`, so the pass-through allocates a copy that
+`resolve_prologue` immediately re-allocates in `normalize_path`. Returning
+`Cow<'_, Path>` would remove one of the two. Deferred until the lock fix is
+measured, because at ~180 ns it is a third of a single lock and chasing it first
+would have been another instance of optimising the minor term.
+
+#### PROSPECTIVE PREDICTION (recorded before the fix is built)
+
+Same protocol, and this time with a directly measured anchor rather than a
+fabricated one — the next run also adds `bench_spinlock_uncontended`.
+
+1. `bench_spinlock_uncontended` comes out in **300–700 ns**. This is the load-
+   bearing one: the whole cost model above stands or falls on it. If it lands
+   below ~150 ns, the lock attribution is wrong and something else in
+   `ns_translate` is the real cost.
+2. `ns_translate` drops from 1948 ns to **< 150 ns** (one atomic load, one
+   allocation removed only if the `Cow` change lands too — so expect ~180 ns if
+   the allocation stays; I predict the allocation is skipped entirely on the
+   fast path, hence < 150).
+3. `resolve_follow` drops from 3504 ns to **1700–2000 ns**, now dominated by
+   `dcache_hit`.
+4. Full `vfs_stat_root` drops from ~6151 ns to **~4400–4700 ns**, a ~28%
+   improvement on a benchmark I twice tried to fix by looking at the wrong
+   subsystem.
+
+**If (1) holds but (2) does not**, the fast path is not being taken — most
+likely because some process really did set one of the three maps during boot,
+which would itself be worth knowing and is why the benchmark prints the flag.
+
+#### RESULT — 2026-08-14, two post-fix release boots ✅ FIXED
+
+The first post-fix boot reported `namespace fast path DISABLED
+(NS_FEATURES_ACTIVE=true)` — the pre-registered fallback clause above, firing
+verbatim. The cause was not "some process set one of the maps during boot" but
+something better: **the namespace self-tests themselves**.
+`test_process_attach_detach`, `test_process_root` and `test_volume_mounts` call
+`attach`/`set_root`/`add_volume`, which arm the monotonic flag, and nothing
+disarmed it. So the self-tests were permanently degrading the VFS of the kernel
+they had just finished validating — every path operation for the rest of the
+boot paid three global spinlocks to exercise a feature that no longer had a
+user. Fixed by asserting `reset_ns_features_if_trivial()` at the end of
+`self_test()`, which doubles as a leak check: it can only succeed if every
+namespace test cleaned up its process state.
+
+Two boots after that fix (the first aborted on an unrelated flake — see
+`B-FASTPY-SLEEP-SELF-TEST-IS-FLAKY` — so both are reported):
+
+| # | prediction | pre-fix | run A | run B | grade |
+|---|---|---|---|---|---|
+| 1 | uncontended tracked lock **300–700 ns** | 628 | 448 | 632 | **HIT** (all three in band) |
+| 2 | `ns_translate` **< 150 ns** | 1670 | 347 | 264 | **MISS** (1.8x over) |
+| 3 | `resolve_follow` **1700–2000 ns** | 3138 | 2488 | 1627 | **UNPROVEN** (band narrower than the noise) |
+| 4 | `vfs_stat_root` **4400–4700 ns** | 5930 | 2971 | 4394 | **HIT** (run B lands 0.14% under the band) |
+
+**(1) HIT, and it was the load-bearing one.** The previous prediction on this
+benchmark failed because its lock cost came from a *fabricated* anchor; this one
+was measured first, and everything built on it held.
+
+**(2) MISS, and the miss was avoidable by reading a type signature.** The
+prediction said "I predict the allocation is skipped entirely on the fast path,
+hence < 150". It cannot be: `resolve_path` returns `PathBuf`, so *every* return
+allocates, fast path or not. The residual ~264 ns is one atomic load plus that
+allocation. This is not a measurement surprise — it is a claim contradicted by
+the function's own declaration, which was there to be read. It also promotes the
+deferred `Cow<'_, Path>` change from "the correct next target" to "the only
+remaining term".
+
+**(3) UNPROVEN, and that is the more useful result.** 1627 and 2488 straddle the
+band. The two runs differ by 1.53x while the band spans 1.18x — the prediction
+was finer-grained than the instrument meant to grade it. Predicting to a
+precision the measurement cannot resolve yields a verdict that is noise wearing
+a grade's clothes, which is worse than no verdict. See
+`TD-BENCH-STAGE-SPLIT-HAS-NO-COHERENCE-CHECK` below, where the same two runs
+disagree by 1.67x on two byte-identical benchmarks.
+
+**(4) HIT.** Predicted "~28% improvement"; measured −26% (5930 → 4394). This is
+the benchmark twice attacked in the wrong subsystem (first the dcache, then the
+subtraction). The third attempt — measure the anchor, then follow the
+measurement — worked on the first try.
+
+---
+
+### B-LOCKDEP-CLASS-LOOKUP-IS-A-LINEAR-SCAN-ON-EVERY-LOCK — 2026-08-14 (`kernel/src/lockdep.rs`)
+
+**Measured, and it is the largest single overhead found this session.** The lock
+microbenchmark added to grade the namespace fix answered a question nobody had
+asked it:
+
+```
+lock acquire+release: raw 30ns, tracked 632ns, no-lockdep 232ns, no-stats 656ns
+lock overhead: total +602ns = lockdep 400ns + preempt 29ns + rdtsc 57ns + unexplained 116ns
+```
+
+`raw` is `spin::Mutex`; `tracked` is `crate::sync::Mutex`, the type every global
+in the kernel uses. **The tracked mutex costs 21x the raw one, and two thirds of
+the difference is lockdep.** Confirmed across both post-fix boots: 400/602 ns
+(66%) and 281/430 ns (65%).
+
+The cause is not that validation is expensive. It is that the *lookup* is
+`O(classes)`:
+
+```rust
+fn find_or_register_class(lock_addr: usize, name: &[u8]) -> Option<u16> {
+    let count = CLASS_COUNT.load(Ordering::Relaxed) as usize;
+    for i in 0..count.min(MAX_CLASSES) {          // <-- up to 128 iterations
+        if unsafe { CLASSES[i].id } == lock_addr { return Some(i as u16); }
+    }
+    ...
+```
+
+and `find_class` — called from `lock_release` — is the same scan again. So every
+lock operation in the kernel walks the class table **twice**, and `MAX_CLASSES`
+is 128. This is exactly the "linear scan on a hot path" CLAUDE.md's performance
+section forbids, hiding inside the *debugging* infrastructure rather than the
+code being debugged, which is why no amount of reading the subsystem under
+investigation would ever have found it.
+
+Two further consequences worth stating because they distort the whole benchmark
+suite:
+
+* **The cost is positional.** A lock class registered early is found in a few
+  iterations; one registered late pays the full scan. So the same lockdep call
+  is cheap or expensive depending on *boot order*, and a benchmark's own lock —
+  registered last, at benchmark time — pays the worst case. The 400 ns figure is
+  therefore an upper bound on the average, not the average.
+* **Every benchmark in this suite that takes a lock is partly measuring this.**
+  `syscall_dispatch` (653–699 ns), `futex_wake_empty` (953 ns) and the VFS
+  numbers all include it.
+
+**The fix** (implemented in the same change as this entry): an open-addressed
+hash index from lock address to class slot, Fibonacci-hashed and linearly
+probed, 512 buckets for 128 classes so the load factor stays at 25%. This is
+what Linux does (`classhash_table`, `kernel/locking/lockdep.c`). Entries are
+append-only, so a probe run is contiguous and stopping at the first empty bucket
+is correct.
+
+**This fix is what makes the tempting question go away.** The obvious reaction to
+"lockdep costs 400 ns per lock" is to gate it to debug builds, as Linux does with
+`CONFIG_PROVE_LOCKING` — trading deadlock detection in production for lock speed.
+That would have been a real architectural fork worth escalating. It is moot: the
+validator was never inherently expensive, its index was. Keep both.
+
+**The optimisation is guarded by a test that can actually fail.** A hash that
+silently *misses* a registered class is the dangerous failure: `find_or_register_class`
+would then register a second class for the same lock, that lock's dependency
+edges would split across two graph nodes, no cycle would ever be found through
+it, and lockdep would go quiet — looking exactly as healthy as a kernel with no
+deadlocks. So the linear scan is not deleted, it is demoted to an oracle:
+`test_class_hash_index()` asserts the hash and the scan agree on every registered
+class, agree on absence, that double registration yields one class, and — using
+a colliding address it *searches for* rather than hopes for — that the probe
+sequence survives a bucket collision.
+
+#### PROSPECTIVE PREDICTION (recorded before the fix is booted)
+
+1. `lock_tracked` drops from ~632 ns to **250–330 ns**, i.e. close to the
+   measured `no-lockdep` figure (232 ns) plus a hash lookup and probe (~2 memory
+   references, call it 20–80 ns under TCG). If it lands *below* 232 ns something
+   is wrong — the index cannot be cheaper than not running at all.
+2. `lockdep` in the overhead split drops from ~400 ns to **< 100 ns**.
+3. The knock-on: `syscall_dispatch` (653–699 ns across four boots, target 200)
+   improves by **at least 15%**, because it takes tracked locks. This is the
+   riskiest of the three — if syscall dispatch does *not* move, then either it
+   takes no tracked lock or the lock is registered early enough to have been
+   cheap already, and the "every benchmark is partly measuring lockdep" claim
+   above is overstated and must be narrowed.
+4. `lockdep classes registered` (newly printed) comes out **> 40**. If it is in
+   single digits, the scan was never long and the 400 ns has some *other* cause
+   inside `lock_acquire` — most likely `smp::current_cpu_index()` or the
+   re-entrancy guard — and this whole diagnosis is wrong.
+
+#### RESULT — 2026-08-14, release boot ✅ FIXED
+
+```
+[lockdep]   class hash: OK (3 classes verified vs scan, bucket collision handled)
+[bench]   lock acquire+release: raw 25ns, tracked 274ns, no-lockdep 223ns, no-stats 301ns
+[bench]   lock context: 43 lockdep classes registered
+[bench]   lock overhead: total +249ns = lockdep 51ns + preempt 29ns + rdtsc 56ns + unexplained 113ns
+[bench] SCORE lock_uncontended 274 500 PASS
+```
+
+| # | prediction | before | after | grade |
+|---|---|---|---|---|
+| 1 | `lock_tracked` **250–330 ns** | 632 | **274** | **HIT** |
+| 2 | lockdep's share **< 100 ns** | 400 | **51** | **HIT** (7.8x) |
+| 3 | `syscall_dispatch` improves **≥ 15%** | 653–699 | **699** | **MISS** (0%) |
+| 4 | **> 40** classes registered | — | **43** | **HIT** |
+
+**The tracked mutex went from 21x the raw spinlock to 11x, and
+`lock_uncontended` moved from OVER to PASS** (274 vs the 500 ns target). Knock-on
+in the same boot: `vfs_stat_root` 4394 → **3344 ns**, so with the namespace fast
+path the total on that benchmark is **5930 → 3344, −44%**.
+
+**(3) MISS, and the pre-registered consequence is honoured rather than
+explained away.** The prediction said: *"if syscall dispatch does not move, then
+the 'every benchmark is partly measuring lockdep' claim is overstated and must be
+narrowed."* It did not move — 699 ns, identical to the best of the four pre-fix
+boots. **Narrowing it: the claim was overstated.** Lockdep taxed benchmarks that
+take `crate::sync::Mutex` *specifically*, which is the VFS/namespace path, not
+"every benchmark that takes a lock". `syscall_dispatch` evidently takes none, or
+takes a different lock type (`PreemptSpinMutex`, which is a distinct type with
+distinct overhead — a distinction this session already had to write a comment
+about in `bench.rs`). `syscall_dispatch` at 3.5x its 200 ns target is therefore
+still unexplained and remains open.
+
+**The coherence gates from `TD-BENCH-STAGE-SPLIT-HAS-NO-COHERENCE-CHECK` shipped
+in the same boot and reported a clean run:** drift 3331 → 3353 ns (0%),
+parts/whole 96%. That is the *quiet* outcome, so it proves only that the gates do
+not fire spuriously — **it does not prove they fire.** They have not yet been
+observed rejecting a run, and until they have, they carry exactly the weakness
+this file keeps documenting. The two incoherent runs that motivated them are
+recorded above, so the next drifting boot is the test.
+
+**Weak spot in the new test, recorded rather than glossed:** `test_class_hash_index()`
+runs from `lockdep::self_test()`, which executes early in boot when only **3**
+classes are registered — but the pathology it guards against (a probe run
+walking into a collision) needs a *populated* table, and by benchmark time there
+are 43. The synthetic collision case is what carries the test today; the
+verify-every-registered-class part is checking 3 of the eventual 43. It should be
+re-run late in boot as well. Tracked as
+`TD-LOCKDEP-HASH-TEST-RUNS-BEFORE-THE-TABLE-IS-POPULATED`.
+
+---
+
+### TD-LOCKDEP-HASH-TEST-RUNS-BEFORE-THE-TABLE-IS-POPULATED — 2026-08-14 — ✅ FIXED 2026-08-14 (`kernel/src/lockdep.rs`, `kernel/src/main.rs`)
+
+`test_class_hash_index()` verifies the O(1) class index against a linear-scan
+oracle, but it is called from `lockdep::self_test()` during early boot, when the
+class table holds **3** entries. By the time the kernel is doing real work it
+holds **43**. So the "every registered class is found at the index the scan
+reports" assertion — the one that would catch a probe-sequence bug — is
+exercised at 7% of the table size it needs to defend.
+
+The synthetic part of the test (register a fresh address, then register a
+deliberately colliding one and check both resolve) does not depend on table size
+and is doing the real work today. That is why this is tech debt and not a hole:
+the collision path *is* covered, just not at realistic occupancy.
+
+**Proper fix:** expose it as `pub fn verify_class_index()` and call it a second
+time late in boot — after driver/subsystem init, when the table is full — so the
+oracle comparison runs against all 43 classes. It must run on every boot, not
+only `--bench` boots, or it inherits the "check that only runs when you're
+already looking" problem.
+
+> **Resolution.** Done as described; the call takes a `when` label so the two
+> runs are distinguishable in the log and the vacuous early pass cannot be
+> misread as the meaningful one:
+>
+> ```
+> [lockdep]   class hash (early): OK (3 classes verified vs scan, bucket collision handled)
+> [lockdep]   class hash (populated): OK (31 classes verified vs scan, bucket collision handled)
+> ```
+>
+> **The placement was itself the interesting part, and got it wrong on the first
+> attempt.** The late call went in next to the deferred-benchmark spawn, which
+> reads as "late in boot" — but that sits *after* `BOOT_OK`, and
+> `boot-test.sh` kills QEMU at `BOOT_OK` unless `--bench` is given. So the first
+> version printed nothing on a normal boot test: a check that would have run only
+> on benchmark boots, i.e. only when someone was already looking, which is the
+> precise failure mode it was added to prevent. Moved above the `BOOT_OK` marker,
+> with a comment at the site saying why it must stay there. Verified by the
+> absence-then-presence of the line across two boots, not by reading the code.
+
+**Residual, not worth a separate entry:** 31 classes at `BOOT_OK` versus 43 by
+benchmark time — the last dozen register during post-boot activity. Coverage is
+now 72% of the eventual table rather than 7%, and the synthetic collision case
+covers the probe path independently of occupancy.
+
+---
+
+### TD-BENCH-STAGE-SPLIT-HAS-NO-COHERENCE-CHECK — 2026-08-14 (`kernel/src/bench.rs`)
+
+Two byte-identical benchmarks, in the same boot, disagreed by 1.67x:
+
+```
+SCORE vfs_stat_root 2971 ...
+[bench] vfs_stat_breakdown_full: min=25808 cycles (4976ns) ...
+```
+
+Both are `run(..., 500, || black_box(Vfs::stat("/")))`. Nothing distinguishes
+them but *when in the boot they ran*. In the next boot the same pair came out
+4394 and 4306 — coherent. So the harness's min-of-500 is sometimes accurate and
+sometimes 1.7x off, and **nothing in the output says which kind of run you are
+reading.**
+
+The consequences are not hypothetical; they are the two runs above:
+
+* Run A attributed `stat_resolved` 2531 → 4109 ns, a 62% "regression" caused by
+  a change that cannot touch it.
+* Run B printed `full 4306ns = resolve_follow ~0ns + stat_resolved 5762ns` — the
+  subtraction saturated at zero because a *part* measured larger than the
+  *whole*. That is arithmetically impossible and it was printed without comment.
+* Run A's parts summed to 133% of its whole. Also printed without comment.
+
+This is the project's recurring defect class in its purest form: the check was
+*there* — the code deliberately measures `resolve_follow` both directly and by
+subtraction, with a comment explaining that a disagreement would indict the
+subtraction — and then prints both numbers side by side and says nothing when
+they disagree by 2.9x. **A check whose failure is not distinguishable from its
+success is not a check, it is a decoration.**
+
+> **Resolution (same change).** Two gates, both of which say the word WARNING:
+>
+> * **Drift gate.** The first measurement (`vfs_stat_breakdown_full`) is repeated
+>   verbatim at the *end* of the block as `..._full2`. The two are the same code
+>   over the same input, so any difference is pure measurement drift across the
+>   width of the block, and it bounds how much of every stage difference is real.
+>   Over 25% and the run is declared not internally coherent and unusable for
+>   attribution.
+> * **Parts/whole gate.** `resolve_direct + stat_resolved` must land within
+>   75–125% of `full`, or the stage attribution is declared "not arithmetic, it
+>   is noise".
+>
+> The same discipline is applied to the new lock benchmark, which prints
+> `unexplained` as an explicit residual and warns when the components exceed the
+> total they were subtracted from.
+
+**Not fixed:** the harness still reports a single `min` with no confidence
+interval, so a *single* benchmark with no in-block replicate (i.e. all the
+others) remains ungraded for coherence. The proper fix is for `run()` itself to
+take two interleaved sample sets and report their disagreement, making every
+benchmark self-checking rather than just this one. Tracked here; not blocking.
+
+---
+
+### B-FASTPY-SLEEP-SELF-TEST-IS-FLAKY — 2026-08-14 (`kernel/src/proc/spawn.rs:15508`)
+
+`self_test_fastpy_slateos_sleep()` failed one release boot and passed the next
+with no relevant code change in between:
+
+```
+[spawn]   FAIL: fastpy-sleep (ring 3) — reached Zombie but exit code was Some(3),
+          expected 0 (3 = a clock read was 0 or the observed sleep delta was < 40000000 ns)
+```
+
+The tool printed its measured delta: **36 818 000 ns for a `time.sleep(0.05)`**,
+i.e. the sleep returned **26% early**, against a 40 ms lower bound. The kernel's
+own `[sched] sleep_ns` test in the same boot passed (`slept 20.459ms for 20ms
+request`), so whatever is short is not the scheduler's `sleep_ns` at a 20 ms
+scale.
+
+Two candidate causes, not yet separated:
+
+1. **The sleep genuinely returns early at 50 ms** — a wakeup-deadline rounding or
+   timer-phase bug that a 20 ms request happens not to expose.
+2. **`clock_realtime()` advances more slowly than real time** during the sleep,
+   so a correct 50 ms sleep *reads* as 36.8 ms. Ratio 50/36.818 = 1.358, which is
+   suspiciously close to nothing in particular, but the two clocks the test
+   compares (the scheduler's timer and `clock_realtime`) are different sources
+   and their agreement is exactly what the test implicitly assumes and never
+   checks.
+
+Distinguishing them is cheap and should be done before touching anything: have
+the harness log its own `clock_realtime()` delta across the child's lifetime
+next to the child's measured delta. It already reads both — guard #2 in the
+doc comment — but only compares each against the bound, never against each
+other. If the kernel-side delta is ~50 ms while the child's is ~37 ms, it is
+cause (2) and the bug is in the userspace clock path, not the sleep.
+
+Impact today: an intermittently red boot test, which is corrosive — a suite that
+cries wolf gets its failures ignored, and this is the only ring-3 test of the
+blocking-sleep path. Not lane-A-exclusive (the tool is fastpy/userspace), but
+the timekeeping and `SYS_SLEEP` sides are, and the harness is in
+`kernel/src/proc/spawn.rs`.
+
+#### CORRECTION 2026-08-14 — the proposed discriminator cannot discriminate
+
+The plan above ("have the harness log its own `clock_realtime()` delta next to
+the child's") **would not have separated the two causes**, because the two
+numbers it compares come from *the same clock*. `SYS_CLOCK_REALTIME` returns
+`timekeeping::clock_realtime()`; the harness calls
+`timekeeping::clock_realtime()`. Under cause (2) — that clock running slow —
+both readings compress by the same factor and the comparison shows nothing.
+The test would have been "instrumented" and still blind: one more instance of
+this file's recurring defect, *a check that cannot fire is indistinguishable
+from a check that passes.*
+
+The real discriminator was already in the tree, unread. Reading the call chain:
+
+| stage | clock |
+|---|---|
+| `sleep_ns` computes and enforces its deadline | `hrtimer::now_ns()` → **HPET** (`kernel/src/hrtimer.rs:147`) |
+| the child, and the harness, measure the elapsed time | `timekeeping::clock_realtime()` → **TSC**, via `clock_monotonic()` (`kernel/src/timekeeping.rs:154`) |
+
+So the sleep is *enforced* against one oscillator and *measured* against
+another, and the test silently assumes the two agree. That assumption is the
+untested one, and it is the whole bug surface:
+
+- If HPET and TSC agree across the window, the sleep really did return early —
+  **cause (1)**, a deadline/timer-phase bug in `sleep_ns`.
+- If HPET says ~50 ms while TSC says ~37 ms, the sleep was correct and the
+  **TSC calibration** (`bench::tsc_freq()`) is off by that ratio — cause (2),
+  and then it is not a userspace clock bug at all but a kernel calibration one,
+  which would also skew every `clock_realtime()` consumer and every
+  wall-clock-derived figure in the tree.
+
+Note the observed ratio: 50 / 36.818 = **1.358**. The entry above called that
+"suspiciously close to nothing in particular" — but as a *TSC calibration*
+error it needs no numerological explanation; a mis-measured `tsc_freq` can land
+anywhere, and under TCG the calibration loop is exactly the kind of thing a
+busy host perturbs. That reading also explains the flakiness the entry opens
+with: a calibration performed once per boot, on a host whose load varies, gives
+a different scale factor on each boot — so the same correct sleep reads 50 ms
+on a quiet boot and 37 ms on a busy one. **The intermittency is evidence for
+cause (2), and the original framing had no account of it at all.**
+
+The instrument therefore is: sample **both** `hrtimer::now_ns()` and
+`timekeeping::clock_realtime()` either side of the child's lifetime, print both
+deltas and their ratio, and print them on the *failure* path too — today
+`kernel_elapsed` is computed at `spawn.rs:15623`, *after* the guard-#1 early
+return at 15611, so on the exact runs that fail, the one number that would
+explain the failure is never printed.
+
+**Prediction P16** (registered before the measurement exists): on a boot where
+the child reports < 40 ms, the HPET delta will exceed the TSC delta by >= 1.2x
+— cause (2). MISS if the two agree within 5%, which puts it back on `sleep_ns`.
+
+---
+
+### TD-BASELINES-TOML-IS-INVALID-TOML-AND-NOTHING-READS-IT — 2026-08-14 — ✅ FIXED 2026-08-14 (`bench/baselines.toml`, `scripts/test-bench-history.py`)
+
+`bench/baselines.toml` — the file CLAUDE.md names as the place performance
+baselines live, and which ~30 comments across `kernel/src/bench.rs` cite as
+their source — **did not parse as TOML.** It carried two `[compositor_frame_4k]`
+tables, at lines 296 and 389, which is a hard error in every conforming parser:
+
+```
+tomllib.TOMLDecodeError: Cannot declare ('compositor_frame_4k',) twice
+                         (at line 389, column 21)
+```
+
+The two disagreed about the **unit**: `target_ns = 2000000` in one,
+`target_ms = 2.0` in the other. Only one carried the measured figure and the
+optimisation history (48.6 ms → 21.4 → 15.8 → 11.9 → 10.6 ms). So the file had
+been carrying two contradictory records of the same benchmark, and a parser
+that tolerated duplicates would have silently taken whichever came last.
+
+**Why it survived: nothing reads the file.** Every reference to it in the tree
+is a *comment*. `kernel/src/bench.rs` hard-codes each target as a literal with
+`// Target from baselines.toml: < 200 ns` beside it; `scripts/bench-history.py`
+never opens the file. So the file *looked* like the authority while the real
+authority was ~60 scattered literals in Rust, and no parser was ever pointed at
+the thing that was supposed to be the source of truth.
+
+**This is the fifth instance of the same defect class**, after
+`TD-BENCHMARKS-...` (the suite never ran), `B-BENCH-WATCHLIST-...` (the watch
+list never looked), `B-BENCH-COMPARATOR-...` (the diff named innocents) and
+`TD-BENCH-CANARY-...` (the canary never fired). The invariant keeps holding: *a
+check that cannot fire is indistinguishable from a check that passes.* Here it
+went one step further — the artefact could not even be **loaded**, and that too
+was indistinguishable from health, because loading was never attempted.
+
+> **Resolution.** The duplicate table is merged (the poorer one removed, with a
+> comment at the site recording why). `scripts/test-bench-history.py` gained
+> `test_baselines_is_valid_toml()`, which `tomllib.load`s the real file — so the
+> file is now machine-read for the first time and a duplicate or syntax error
+> fails the suite. The test also asserts every table names a target in some
+> unit, matched by `target*` **prefix** rather than an enumerated list (the
+> units are open-ended by design: `target_accesses_over_nop` and
+> `target_accesses_delta` exist because TCG harness overhead swamps the
+> absolute number, and an enumerated list would silently under-report the day
+> it wasn't extended). Calibration constants and host metadata opt out via a
+> declarative `not_a_target = true` in the data rather than a name list in the
+> test. Writing that assertion immediately found four more tables to classify.
+> 16 checks pass.
+
+**Not fixed — the duplication itself.** Targets still live in two places: this
+file and the literals in `bench.rs`, with nothing keeping them in sync, so they
+can drift silently and at least one (`vfs_stat_root`: 700 ns in the file) should
+be re-derived anyway. The proper fix is for the kernel's scorecard to be checked
+against the parsed file by `bench-history.py`, so the file becomes the authority
+it already claims to be. Blocked on nothing but effort; tracked here.
+
+#### FOLLOW-UP 2026-08-14: with the file finally parseable, the drift is measurable — and it is near-total
+
+Making `baselines.toml` load was worth doing for its own sake, but the first
+thing a working parser bought was a number for the damage. Matching the 63
+benchmark names the kernel prints against the 57 baseline tables:
+
+| | count |
+|---|---|
+| benchmarks measured by the kernel | 63 |
+| baseline tables in the file | 57 |
+| **matched by name** | **30** |
+| measured with no baseline at all | 33 |
+| baselines naming a benchmark never measured | 27 |
+
+**Less than half of what runs has a baseline it can be compared to.** And the
+two lists are not describing different work — they are largely the *same*
+benchmarks under two names, drifted apart because nothing ever had to reconcile
+them:
+
+| kernel prints | baselines.toml calls it |
+|---|---|
+| `syscall_dispatch` | `syscall_trivial` |
+| `page_fault` | `page_fault_anon` |
+| `tcp_checksum_v4` | `net_tcp_checksum_v4_1460b` |
+| `tcp_checksum_v6` | `net_tcp_checksum_v6_1460b` |
+| `vfs_stat_deep` | `vfs_stat_deep_2comp` |
+| `vfs_throughput_16k_read`/`_write` | `vfs_throughput_16k` |
+| `heap_alloc_free_64` | `heap_alloc_small` |
+| `ipc_channel` | `ipc_channel_roundtrip` |
+| `ipc_pipe` | `ipc_pipe_roundtrip` |
+| `ipc_eventfd` | `eventfd_signal_read` |
+| `ipc_semaphore` | `semaphore_signal_wait` |
+| `firewall_check` | `net_firewall_inbound_check` |
+| `dns_build_query` | `net_dns_build_a_query` |
+| `io_ring_nop` | `iouring_sqe_submit` |
+| `isr_latency` | `interrupt_dispatch` |
+| `service_connect` | `service_connect_accept` |
+| `cp_notify_wait_rt` | `cp_notify_wait_roundtrip` |
+| `net_tcp_conn_lookup` | `net_tcp_conn_table_scan` |
+
+That is 18 of the 33 unmatched accounted for as pure renames. The remainder
+split into benchmarks genuinely lacking a baseline (`vfs_stat_root`,
+`vfs_read_256`, `vfs_write_256`, `vfs_readdir`, `vfs_stat_3comp`,
+`http_gzip_*`, `ipc_channel_sync`, `net_arp_lookup`, `net_checksum`,
+`net_ethernet_parse`, `net_ipv4_parse`, `pick_next`, `sched_pick_next`) and
+baselines for work that is not benchmarked at all (`futex_uncontended`,
+`futex_contended_wake`, `futex_wait_mismatch`, `compositor_frame_4k` — the last
+is Lane C's and is measured by a host-side `cargo test`, not by this suite).
+
+**Note what this does to the headline number.** The `over_target` count the
+kernel reports (15 of 63 on the release run) is computed from the literals in
+`bench.rs`, not from this file — so it is not wrong, but it is also not
+*checkable* against the stated baselines for the 33 unmatched. Ranking the
+release run against the parsed file yields only 7 over-target entries, and that
+smaller number is an artefact of the missing half, not good news. Notably
+`vfs_stat_root` — the benchmark currently under investigation at 8.5x over — has
+**no** table here at all; its 700 ns target exists only as a comment in
+`bench.rs` citing a file that does not mention it.
+
+**Proper fix, unchanged but now specified.** `bench-history.py` should parse
+this file and check each recorded entry against it, reporting unmatched names
+in both directions as a failure rather than silence. That requires first
+reconciling the names — one canonical name per benchmark, used by both the
+`run()` call in `bench.rs` and the table here. The rename table above is the
+work list. Until then the parse test added today guarantees only that the file
+is *loadable*, not that it is *true*.
+
+
+#### FOLLOW-UP 2026-08-14 (2): the file is now *checked*, and 11 targets disagree
+
+`bench-history.py` gained `load_baselines()` + `report_baselines()`, which
+compare the target the kernel prints on each `SCORE` line — the literal in
+`bench.rs` — against the target this file states. The very first run of that
+check, against `build/serial-test.txt` (63 benchmarks):
+
+```
+Baselines: 11 disagree, 15 unbaselined, 7 unused
+  context_switch:      kernel says   5000ns, file says  10000ns
+  crypto_aead_1KiB:    kernel says 100000ns, file says  70000ns
+  crypto_sha256_1KiB:  kernel says  50000ns, file says  40000ns
+  dns_build_query:     kernel says  40000ns, file says   2000ns   (20x)
+  firewall_check:      kernel says   2000ns, file says   1000ns
+  heap_alloc_free_64:  kernel says    400ns, file says    200ns
+  http_mime_type:      kernel says   2000ns, file says    500ns   (4x)
+  io_ring_nop:         kernel says    200ns, file says    300ns
+  ipc_channel:         kernel says   2000ns, file says   3000ns
+  page_fault:          kernel says  10000ns, file says   8000ns
+  syscall_dispatch:    kernel says    200ns, file says   1200ns   (6x)
+```
+
+**Every PASS/OVER verdict for those 11 has been graded against a number its own
+documentation contradicts.** The direction matters case by case: `syscall_dispatch`
+measured 653 ns is *OVER* against the kernel's 200 ns and would *PASS* against
+the file's 1200 ns. Which is correct is not obvious — 200 ns is the CLAUDE.md
+hardware figure (Linux getpid ~100 ns, "within 2x"), while 1200 ns looks like a
+TCG-adjusted budget. That is exactly why the check **reports and does not
+reconcile**: picking a side automatically is how the two drifted apart.
+
+The check distinguishes three failure modes deliberately, because they are
+different problems: *disagree* (one side edited without the other), *unbaselined*
+(the Rust literal is the only record of the target — 15 benchmarks, including
+`vfs_stat_root`), and *unused* (the file claims coverage that does not exist — 7).
+It also refuses to conflate an unparseable file with an agreeing one, printing
+`UNVERIFIED`; that distinction is the entire lesson of this entry and is pinned
+by a test.
+
+Table renames brought name-matching from 30/63 to 48/63 (the tables moved, not
+the benchmarks — `history.jsonl` is append-only and its names cannot change
+without orphaning every historical record). 23 checks pass, up from 13.
+
+**Still open:** the 11 disagreements need adjudicating one at a time, and the 15
+unbaselined benchmarks need tables with real provenance. Both are now *visible on
+every bench run* rather than invisible, which is the change that matters.
+
+#### FOLLOW-UP 2026-08-14 (3): the 11 disagreements were mostly ONE bug — two kinds of target merged into one number
+
+Adjudicating the 11 turned up a structural cause rather than eleven clerical
+errors. `bench.rs` says it plainly in its own comments:
+
+```rust
+// OpenSSL SHA-256 1KiB: ~1500ns.  QEMU target: 50000ns.
+score("crypto_sha256_1KiB", &result, 50000);
+
+// DNS query build includes a heap allocation (Vec::with_capacity) which
+// is expensive under QEMU (~35us).  Target set to 40us to track regressions
+// without false-failing on the allocation overhead.
+score("dns_build_query", &result, 40000);
+```
+
+**Those are TCG budgets, not hardware references** — and `baselines.toml` was
+storing the hardware reference under the same key. Comparing them reported a
+20x "disagreement" where in truth the two files were each right about a
+different quantity. Two more (`heap_alloc_free_64`, `http_mime_type`) were the
+same shape one level down: a *scope* difference, where the benchmark measures a
+fixed multiple of the per-operation target (alloc+free is 2x an alloc; the MIME
+benchmark does 4 lookups).
+
+Worse, `bench-history.py` printed this on every run:
+
+> *(The 'target' column in the scorecard above is a **hardware** reference and
+> cannot be met under TCG — see bench/baselines.toml.)*
+
+which is **false for at least six benchmarks**, whose targets are explicit QEMU
+budgets. The line explaining the number misdescribed it, and so did the
+scorecard headline: "48/63 within hardware target" counts passes that were
+scored against TCG budgets.
+
+**Fix: make the two kinds separate keys.** `target_ns` stays the hardware
+reference; `tcg_target_ns` is the budget the suite is graded against under
+emulation, and the cross-check prefers it when present. The explanatory line now
+says the column is a mix and points at which key records which.
+
+**Three were real disagreements.** Two are settled by CLAUDE.md's performance
+table, which outranks the file:
+
+* `context_switch`: file said 10 µs, spec says *"Target: < 5 µs"* → file corrected.
+* `page_fault`: file said 8 µs, spec says *"Target: < 10 µs"* → file corrected.
+* `ipc_channel`: file said 3 µs, spec says *"Target: < 2 µs round-trip"* → file corrected.
+* `syscall_dispatch`: file said 1200 ns, derived by doubling a **638 ns WSL2
+  measurement of a full syscall including spectre mitigations** — not the same
+  quantity as dispatch. Spec says *"Linux: ~100 ns for getpid. Target: within 2x"*
+  → 200 ns. **This one changes a verdict:** the measured 653 ns is OVER at
+  200 ns and would have PASSed at 1200 ns. The 638 ns figure is kept as context,
+  not as a derivation.
+* `io_ring_nop`: file said 300 ns (2x a 150 ns measurement), spec says
+  *"~100-200 ns per SQE; same order"* → 200 ns.
+
+Result: **11 disagreements → 1.**
+
+**The last one is instructive and is deliberately still open.** `firewall_check`
+carries the comment `// Target from baselines.toml: 2000ns` in `bench.rs` while
+the file says 1000 ns — a citation that is simply false, and the direction
+(2x looser) means the kernel silently relaxed its own target at some point.
+Both pass comfortably (measured 55 ns), so nothing is hidden by it; it is left
+for the next `bench.rs` change rather than fixed now, because a kernel edit
+during an in-flight release build would produce a binary that does not
+correspond to any commit. Recorded here so it is not lost.
+
 ---
 
 # Lane B
@@ -8809,6 +10718,1385 @@ Entries that are merely *accepted* — `WON'T FIX`, `NOT-A-BUG`, `WAIVED`,
 `INTENTIONAL`, `MINOR`, `ACCEPTED DIVERGENCE` — were deliberately **not** moved.
 They describe behaviour that is still current, so they belong in the file that
 says what is currently true, even though nobody intends to change them.
+
+*The first 17 entries are a separate, earlier correction and arrived by a
+different route: lane C moved them here on 2026-08-16 for the reason the note in
+`# Lane A` gives — the 2026-08-15 archive cut ran on `##` boundaries and swept
+these `###` entries into lane C's section. They are verbatim, at their original
+heading level. Everything after them is the bulk move described above; the two
+met in this merge.*
+
+### [B] D-POSIX-SOCKET-META-WAS-NOT-SCOPED-TO-ITS-FD-TABLE — ✅ FIXED 2026-08-14
+
+**Found while running the eighth audit pass**, not by looking for it:
+`socket::tests::test_phase201_bind_port443_no_cap_eacces` failed once with
+`ENOTSOCK` where `EACCES` was expected, then passed three runs in a row.
+
+`SOCKET_META` (posix/src/socket.rs) is indexed by fd number, so it must have
+exactly the same scope as the fd table it is keyed by. `fdtable` made its
+storage **per-thread** on host builds (design-decisions.md §110) precisely
+because libtest runs tests on parallel threads. `SOCKET_META` stayed a
+process-global `static mut`, and the mismatch was reachable: two tests on
+different threads each create a socket and, drawing from *separate* per-thread
+fd tables, both get the same fd number `N` — near-certain, not unlikely, since
+each thread's table starts empty. They then shared one `SOCKET_META[N]`, and
+the first to `close()` wiped the entry the other was still using, whose next
+call saw a live fd with no metadata and reported `ENOTSOCK` for a good socket.
+
+Fixed by giving `SOCKET_META` the same `cfg`-split storage as
+`fdtable::fd_store`. Six consecutive full runs clean afterwards.
+
+Two things worth keeping from this. First, the `// SAFETY: Single-threaded
+access.` comments on these accesses were **true on the target and false under
+`cargo test`** — a safety comment that silently changes truth value with
+`cfg` is worse than none, and `fdtable` had already learned this lesson
+without the fix being propagated to the table keyed by its own indices.
+Second, an intermittent failure at roughly one run in four is easy to
+dismiss as noise when it appears in a test unrelated to what you are
+changing; it was worth the ten minutes to chase.
+
+### [B] D-POSIX-TIMED-WAITS-DID-NOT-VALIDATE-TV-NSEC — ✅ FIXED 2026-08-14
+
+`pthread_cond_timedwait`, `pthread_mutex_timedlock` and `sem_timedwait`
+accepted any `timespec` whatsoever. A `tv_nsec` of `1_000_000_000` or `-1` —
+the classic result of adding a nanosecond offset without carrying into
+`tv_sec` — should be `EINVAL` (glibc `valid_nanoseconds`, `include/time.h:517`);
+instead it fell through to the deadline comparison, where a too-large
+`tv_nsec` silently extended the wait by up to a second and a negative one made
+the call return `ETIMEDOUT` immediately. Both are wrong in the direction that
+hides the caller's bug. Separately, `mqueue::deadline_from_timespec` checked
+`tv_nsec` but not `tv_sec < 0`, which the kernel's `timespec64_valid` rejects.
+
+Fixed by adding `time::valid_nanoseconds` (glibc's predicate, verbatim) and
+calling it from each site **at the position its own upstream uses** — eagerly
+in `pthread_cond_timedwait` and `sem_timedwait`, lazily (contended branch
+only) in `pthread_mutex_timedlock` — plus the missing `tv_sec` half in
+`mqueue`. See the ninth-pass write-up under
+`D-POSIX-NULL-POINTER-ERRNO-NEEDS-A-PER-FUNCTION-AUDIT` for why the three
+placements differ and why the mqueue predicate is not the same predicate.
+
+Seven tests pin the distinctions, including the two that would silently pass
+under a naive "check it at the top of every function" fix:
+`test_pthread_mutex_timedlock_uncontended_ignores_a_bad_deadline` and
+`test_sem_timedwait_checks_the_deadline_before_the_fast_path`.
+
+**Not fixed, because we do not have them:** `pthread_cond_clockwait`,
+`sem_clockwait` and the `pthread_rwlock_{timed,clock}{rd,wr}lock` family are
+unimplemented. When they are added they need the same predicate plus
+`futex_abstimed_supported_clockid`, and the rwlocks check **eagerly** — see
+the comment at `pthread_rwlock_common.c:286-291`.
+
+---
+
+### [B] TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED. bash runs `${z:-<(echo hi)}` and substitutes `/dev/fd/63`; osh yielded the nine characters `<(echo hi)` — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where it was:** `userspace/oils/src/lexer.rs`, [`Lexer::read_word_verbatim`],
+which reads the operand, the pattern and the replacement of a `${ … }` and had
+no `<`/`>` arm at all.
+
+bash splits this construct across two files and osh had only one half of it.
+**Part (A) — the parse** — is `parse_matched_pair` naming `<(`, `>(` and `$(` in
+one breath (parse.y:5028) and sending all three through `parse_comsub`
+(parse.y:5042), so a `${ … }` body's scan parses a process substitution where it
+meets it, its syntax error is the enclosing unit's, and what survives is the
+parse *re-printed*; see
+`userspace/oils/tests/corpus/a-process-substitution-in-a-brace-body-is-parsed-where-it-is-met.sh`
+and [`parser::procsub_reprints`]. **Part (B) — the performance** — is
+`expand_word_internal` *running* it, and was this entry.
+
+**The rule** is bash's quoting flag, not the position. `expand_word_internal`
+reads a process substitution only when `if (string[++sindex] != LPAREN ||
+(quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) || (word->flags & W_NOPROCSUB))`
+lets it (subst.c:11079), so an **operand** runs one when the expansion is bare
+and keeps the characters when it is double-quoted, a **pattern** and a
+**replacement** run one either way (both are re-entered without
+`Q_DOUBLE_QUOTES`), and a **subscript** or a **substring bound** never does
+(`Q_DOUBLE_QUOTES|Q_ARITH`), so its arithmetic error names the characters.
+
+**The fix.** [`Verbatim`] gained an `Arith` mode beside `Bare`, `Replacement`
+and `Dquote` — identical to `Bare` in every other respect — and
+[`Lexer::read_word_verbatim`] gained a `<`/`>` arm live in `Bare` and
+`Replacement` only. On the parser side [`parser::verbatim_word_at`] picks the
+lexer entry from a new `Frag` (`Word` or `Arith`), which is what a subscript and
+the `' … '` runs inside it now pass. The body the arm reads is already the
+*re-print* part (A) spliced in, which is what bash performs too: the token
+buffer a `${ … }` scan leaves behind holds the re-print and nothing else.
+
+No new expansion machinery was needed. The double-quoted operand was already
+right — the splice puts the re-print into the text and its nested `$( … )` then
+expands normally, so `"${z:-<(echo $(echo q))}"` is `<(echo q)` in both shells —
+so the whole of part (B) was one liveness decision taken at lex time, which is
+where osh decides quoting.
+
+**The pre-existing inconsistency this closed.** The substring bound
+(`${z:<(echo hi)}`, via [`parser::parse_slice_bounds`]) *did* perform the procsub
+while the subscript beside it did not, so osh's two arithmetic contexts — which
+bash expands identically — disagreed. The bound is tokenized rather than read
+verbatim, so it has no `Verbatim` mode to set; [`parser::word_from_source`], its
+only reader, now turns a `Seg::ProcSub` back into the characters it was read
+from. Both contexts are on the same side now.
+
+**Verified:** `a-process-substitution-in-a-brace-body-is-performed-unless-the-expansion-is-quoted.sh`,
+27 cases across the five contexts. None of them prints a substitution's path —
+bash names it `/dev/fd/N` and osh a temporary file — so each asks a question the
+path does not answer: whether the text still begins `<(`, whether it names
+something that exists, or what a `cat` of it reads.
+
+**How it was found:** implementing part (A) — the eager parse and re-print of a
+process substitution met by a `${ … }` body scan.
+
+### [B] TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN. bash's `brace_gobbler` and its `${x@P}` re-read each meet a `<(` osh's do not — 2026-08-14 — ✅ FIXED 2026-08-14 (both halves, and the arithmetic-fragment residue)
+
+Two residues of TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED
+(above), left after both halves of it were done. Each is a *second* scan of the
+same text — one that is not `parse_matched_pair` and not `expand_word_internal` —
+which has a `<(` row of its own that osh's counterpart lacks. The `$(` spelling
+of each already matches bash byte for byte, so in both the machinery is there
+and only the row is missing.
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::gobbled_subs`]; and the
+`${x@P}` re-read, `userspace/oils/src/parser.rs`, [`dquote_word_from_source`].
+
+* **✅ FIXED 2026-08-14.** `echo "${z:-"<(fi)"}"` — bash reports
+  `command substitution: line N+1: syntax error near unexpected token 'fi'`
+  plus the tail of the physical line, where osh prints `<(fi)`. The agent is
+  **`brace_gobbler`**, whose command-substitution row names all three spellings
+  (`(c == '$' || c == '<' || c == '>') && text[i+1] == '('`, braces.c:675) and
+  reaches `extract_command_subst` → `xparse_dolparen`, which *parses* the body
+  and throws the result away. Two facts pin it down. The gobbler's `quoted`
+  state does not nest and `${` opens none of its own (it is treated like `\{`),
+  so the **inner** `"` is `c == quoted` and clears the state — which is why the
+  row fires here and not in the plain `"${z:-<(fi)}"`, where parse.y has
+  already answered. And it fires only where brace expansion runs: an argument
+  or command word errors (`: "${z:-"<(fi)"}"`, `f "${z:-"<(fi)"}"`,
+  `echo "${a["<(fi)"]}"`), while an assignment RHS — which is not brace-expanded
+  — does not (`x="${z:-"<(fi)"}"` is silent). bash only ever *parses* it: with a
+  body that does parse, `echo "${z:-"<(echo hi)"}"` prints `<(echo hi)` in both
+  shells, so this is a diagnostic and not a missing expansion.
+
+  What was missing was something to hang the row on. [`Shell::gobbled_subs`]
+  walks the *parse* structurally, and here the tree is right to hold characters
+  — the `<(` sits in a `" … "` run inside a double-quoted operand, where neither
+  bash's expander nor osh's reads one — so no part was ever going to appear for
+  it. The fix is therefore not another lexer mode but a text-level pass beside
+  the structural walk, as `gobbled_backtick_subs` already is for a backquote:
+
+  * `wordscan::gobbler_procsubs(s, dquoted)` — the same flat-state loop as
+    `gobbler_readable`, reporting the index of each `<(`/`>(` met while `quoted`
+    is 0. (`gobbler_readable` could not answer this: it reports the stretches the
+    **`$(`** row fires in, which is `quoted == 0` *and* `quoted == '"'`, and the
+    `<(` row is the first of those alone.) A `$( … )` is skipped whole rather
+    than reported — that is the one spelling a part already stands for.
+  * `Shell::gobbled_procsubs` — for each index, lex `$(` + the rest of the word
+    with `parser::dquote_word_from_source` and take the resulting
+    `CmdSubBody::Unread`. The two spellings reach the same
+    `extract_command_subst`, so the swap is exact, and one lex settles the body,
+    the remainder and whether there was a `)` at all. It is a *lex*, not the
+    paren count `gobbler_readable` skips with, because `xparse_dolparen` is a
+    real parse: a `(` inside a quoted run of the body is not a nesting level to
+    it, and a count would carve `echo <(echo "(")` into a body that fails.
+  * The two are merged by **remainder length**: every tail the gobbler's word
+    carries is measured against the whole word (`unparse::gobbler_word`), so a
+    longer one is an earlier meeting. That is what keeps the interleaving right
+    where a word holds both — measured, `echo "${z:-'$(fi)'"<(for)"}"` reports
+    the `$(fi)` and `echo "${z:-"<(fi)"'$(for)'}"` the `<(fi)`.
+  * `Shell::has_gobbled_sub` — the cheap pre-test — gained a `WordPart::Literal`
+    row, answering wide (any `<(`/`>(` in a literal under quotes) so the word
+    reaches the scan that settles it.
+
+  **Verified:** `userspace/oils/tests/corpus/a-process-substitution-a-brace-scan-meets-is-read-where-the-quoting-is-clear.sh`,
+  29 rows, all matching bash 5.2.37 — including the parity (`"${z:-"a"<(fi)"b"}"`
+  is a *parse* error, `"${z:-"${y:-"<(fi)"}"}"` is silent), the `set +B` gate, the
+  words brace expansion does not reach (assignment RHS, `case` word, here-doc
+  body), the read happening before expansion (`z=Z`, `${z:+…}`), and the `declare
+  -f` re-print.
+* **✅ FIXED 2026-08-14 for the double-quoted operand** (`${z:-…}`, `${z:+…}`,
+  `${z:=…}`, `${z:?…}` and the plain `${z-…}` family) — which is the position
+  the report named, and the only one a `${x@P}`/`PS4` re-read reaches with the
+  quoting bash's own expansion declines a process substitution under. The
+  remaining positions are a residue of their own, logged at the end of this
+  bullet. Original report: `x='${z:-<(fi)}'; echo "${x@P}"` — bash's `extract_dollar_brace_string`
+  (subst.c:1881-1950) has a `<(` row of its own and recurses into it with a real
+  parse, so the `@P` re-read is a `bad substitution` and the text is printed
+  unchanged; osh splices the re-print and prints `<(fi)`.
+
+  **Measured against bash 5.2.37 (2026-08-14).** The row behaves as the `$(`
+  row beside it in every respect: `A${z:-<(fi)}TAIL` and `A${z:-$(fi)}TAIL`
+  give byte-identical output, down to the quoted remainder `` `fi)}TAIL' ``
+  and the `line 2` numbering `xparse_dolparen` gives an unread body. It is the
+  scan's row and not the string's — `x='a<(fi)b'` is silent — and it is reached
+  only where the scan's own quoting allows: `"<(fi)"` (double-quoted),
+  `'<(fi)'` (single-quoted, `skip_single_quoted`) and `\<(fi)` are all silent
+  and print their text. A body that parses is silent too and is *not*
+  performed: `A${z:-<(echo A >&2)}B` prints `A<(echo A >&2)B` and no `A` on
+  stderr.
+
+  osh already matched on six of those shapes. What it got wrong:
+
+  | written (as `x`, then `echo "${x@P}"`) | bash | osh (before) |
+  |---|---|---|
+  | `A${z:-<(fi)}TAIL` | reports, `bad substitution`, text | `A<(fi)TAIL` |
+  | `A${z:-${y:-<(fi)}}B` | reports (nested body too) | `A<(fi)B` |
+  | `A${z:-p<(fi)q$(for)r}B` | reports the **`<(fi)`** | reports the `$(for)` |
+  | `A${z:-<(fi}B` | `unexpected EOF`, `bad substitution`, text | runs `fi}` — `command not found` |
+
+  All but the last now match. The last is a *different* defect that the `$(`
+  spelling has identically — see
+  TD-OILS-AN-UNCLOSED-SUBSTITUTION-IN-AN-UNREAD-BRACE-BODY-IS-RUN-INSTEAD-OF-REFUSED
+  below — so it was left alone here rather than fixed twice.
+
+  **Why it was not a two-line change.** The `<(` span *is* already collected —
+  `Lexer::read_dollar_brace` has the row (lexer.rs:7069) and records a
+  `CmdSubSpan` with `SubOpen::Proc`, its `src`, its `range` and
+  `SubBody::Unread`. What is missing is a [`WordPart`] for
+  [`Shell::brace_scanned_subs`] to walk to: `procsub_reprints`
+  (parser.rs:6288) splices a re-print only for a `SubBody::Eager` span, and the
+  re-lex that carves the operand out of the body (`read_word_verbatim`) leaves
+  a `<(` as characters on purpose. So for an *unread* body the process
+  substitution survives only as text in a `WordPart::Literal`.
+  `arith_unread_subs` is the shape of the answer for the arithmetic scan, and
+  it excludes this spelling deliberately (parser.rs:6233-6240).
+
+  Two things make the obvious fixes wrong, both measured above:
+
+  * **The remainder runs past the `}`.** `` `fi)}TAIL' `` and
+    `` `fi)}B${y:-<(for)}C' `` are the rest of the *whole re-read string*, not
+    of the `${ … }`. So a text scan confined to the brace's own source (the
+    only text [`Shell::brace_extent_scan`] is handed) cannot build the part's
+    `tail`, and the `$( … )` spelling gets its own from
+    `unparse::attach_comsub_tails`, which runs over the assembled word in the
+    parser.
+  * **It must interleave with the `$(` spelling**, in the order the one scan
+    meets them — hence the `p<(fi)q$(for)r` row above.
+
+  Reusing [`CmdSubBody::Unread`] for the synthesized part is safe for the
+  *read* (the diagnostic quotes the body's remnant, never the delimiter, so a
+  `<(` and a `$(` in this position are byte-identical) but not for anything
+  that re-prints or *runs* one — `interp.rs:34302` performs an unread body, and
+  a process substitution here is never performed. So either the part carries
+  its spelling (a new field on `CmdSubBody::Unread`, two construction sites and
+  one printer, plus the run site taught to refuse) or it is synthesized late
+  enough that it can never escape into a print or a run — which is what
+  `Shell::gobbled_procsubs` does for the `brace_gobbler` half above, and the
+  reason that one could be done without touching the AST.
+
+  **What was done.** The first of the two: the part carries its spelling, which
+  makes both blockers vanish rather than needing to be worked around.
+
+  * `ast::SubDelim { Dollar, ProcIn, ProcOut }`, with `bytes()` (the delimiter
+    as written) and `is_performed()` (true only for `Dollar`). Recorded on
+    `CmdSubBody::Unread` and on the lexer's `SubBody::Unread`. Only the unread
+    form needs it: a body a parser *read* is a `CmdSubBody::Parsed` for `$(`
+    and a `WordPart::ProcSub` for the other two, so those two shapes already
+    tell the spellings apart.
+  * `Lexer::read_word_verbatim` gained a `<(`/`>(` row for `Verbatim::Dquote`
+    **when the text is unread** (`self.here_text`), emitting
+    `Seg::CmdSub(body, close, SubBody::Unread { delim })`. The existing
+    `Verbatim::Bare | Verbatim::Replacement` row above it is untouched — those
+    fragments really do *perform* the substitution, measured:
+    `x='A${z/p/<(echo hi)}B'; echo "${x@P}"` prints a `/dev/fd/N` in bash.
+  * `unparse.rs` prints the body back in `delim.bytes()`, and
+    `Shell::command_sub_body` returns that text instead of running anything
+    when `!delim.is_performed()`.
+  * The backslash arm of the same loop takes a `\<(`/`\>(` into the literal
+    run, because the *scan* that produced this text honours a backslash
+    whatever follows it (`extract_dollar_brace_string`'s `case '\\'`,
+    subst.c:1899) while the operand's own dquote read does not. `A${z:-\<(fi)}B`
+    prints `A\<(fi)B` and reports nothing.
+
+  Both blockers then answer themselves: the `tail` is filled by
+  `unparse::attach_comsub_tails` over the whole assembled word (so it runs past
+  the `}`, giving `` `fi)}TAIL' ``), and the interleaving is
+  `Shell::brace_scanned_subs`'s existing left-to-right walk.
+
+  **Verified:** `userspace/oils/tests/corpus/a-process-substitution-a-brace-re-read-meets-is-read-like-the-dollar-spelling.sh`,
+  22 rows, all matching bash 5.2.37 — the byte-identity with the `$(` spelling,
+  both interleavings, the nested body, the not-performed rows (including
+  `>(cat)` and a body writing to stderr, quoted and unquoted), the read
+  happening before the operand is chosen (`z=Z`, `${z:+…}`), the four shields
+  (unbraced text, `" … "`, `' … '`, backslash), the stepped-over subscript, and
+  the `PS4` spelling of the same re-read.
+
+* **✅ FIXED 2026-08-14** (every position but the arithmetic one; that one
+  closed later the same day, at the end of this bullet)**.** The row
+  was wired for the double-quoted **operand** only, and bash's scan reads the
+  whole `${ … }` body — it walks characters and knows nothing of the `#`, `/`
+  or `^^` it has already passed — so every other fragment wanted the same row:
+
+  | written (as `x`, then `echo "${x@P}"`) | bash | osh before |
+  |---|---|---|
+  | `A${z#<(fi)}B` (pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z/p/<(fi)}B` (replacement) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z^^<(fi)}B` (case pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z:0:<(fi)}B` (offset) | reports ×2, `bad substitution`, text | `AB` |
+
+  The `$( … )` spelling was right in all four (measured), so again only the row
+  was missing. It was harder than the operand's, because in these positions the
+  substitution is *both* read for its extent **and** performed — a replacement
+  really does expand to `/dev/fd/N`, measured — so the part could not simply be
+  the non-performed `CmdSubBody::Unread` the operand's is.
+
+  **What was done.** The split `CmdSubBody` already makes between a body a
+  parser read and one only a scan read is now made for the process-substitution
+  part too, so one part answers for both halves:
+
+  * `ast::ProcSubBody` — `Parsed(Program)` or `Unread { src, tail, closed }` —
+    replaces the bare `Program` in `WordPart::ProcSub`.
+  * `lexer::ProcRead` (`Eager` / `Unread { closed }`) rides on `Seg::ProcSub`;
+    the `Verbatim::Bare | Verbatim::Replacement` arm of
+    `Lexer::read_word_verbatim` picks it from `self.here_text`, and now
+    tolerates a missing `)` exactly as the `$(` spelling does.
+  * `parser::seg_to_part` parses only an eager body. An unread one is carried
+    as text, because its read belongs to the scan and happens later, from
+    where a failure is `bad substitution` rather than a script syntax error.
+  * `unparse`: an unread body prints back as written, and joins
+    `attach_comsub_tails` so it gets the same remainder the `$(` spelling does.
+  * `interp`: `Shell::brace_scanned_subs_slice` collects it,
+    `Shell::extent_read_of_subs` reads it through the same
+    `comsub_reparse_read`, and the new `Shell::proc_sub_body` parses-then-
+    performs at expansion — only reachable if that read succeeded.
+
+  **Verified:** corpus case
+  `a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`,
+  21 rows, IDENTICAL against bash 5.2.37.
+
+  **✅ The arithmetic fragment, 2026-08-14.** Deferred at first, because osh
+  diverged over `<` in a bound before any process substitution was written at
+  all (`${z:1<(2)}` is `bcdef` in bash and was an `operand expected` in osh);
+  that was fixed as
+  TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND,
+  and this row followed.
+
+  It was **not** simply `Verbatim::Arith`'s row, as the deferral assumed. A
+  subscript shares that mode and must *not* get it: bash's scan steps over a
+  subscript whole (`skip_matched_pair` from the `[`), so `${z[<(fi)]}` never
+  offers its body to `extract_command_subst` and is an `operand expected` —
+  which osh already matched. A bound is walked in the open. So the mode split
+  in two: `Verbatim::Bound` / `Frag::Bound`, reached by `lex_bound_verbatim`
+  and `parser::word_bound_from_source_at`, identical to `Arith` in every
+  respect but that it takes `Dquote`'s unread-`<(` arm. That is the whole
+  change — the arm was already written for the operand, and the read/perform
+  split it produces (`SubBody::Unread`) is exactly a bound's: read for its
+  extent by the scan, never performed, because `Q_DOUBLE_QUOTES|Q_ARITH` is
+  what stops `expand_word_internal` (subst.c:11079).
+
+  No interp-side work was needed: `unparse::nested_parts` already classifies
+  `ParamSubstr`/`ArraySlice` bounds as `Nested::Operand`, so
+  `Shell::brace_scanned_subs_slice` was already descending into them.
+
+  **Verified:** 14 further rows in the same corpus case (the bound in offset
+  and length position, `${a[@]:…}` and `${@:…}`, the `@P` and `PS4` spellings,
+  the three quotings that shield it, and the well-formed `${z:<(echo 1)}` that
+  reaches the evaluator as characters), IDENTICAL against bash 5.2.37.
+
+**How it was found:** implementing the entry above.
+
+### [B] TD-OILS-AN-UNCLOSED-SUBSTITUTION-IN-AN-UNREAD-BRACE-BODY-IS-RUN-INSTEAD-OF-REFUSED. `x='A${z:-$(fi}B'; echo "${x@P}"` runs `fi}` where bash reports `bad substitution` — 2026-08-14 — ⚠️ OPEN
+
+A `$( … ` with no `)` inside a `${ … }` written in text no parser read — a
+`${x@P}` re-read, a `PS4`, a here-document body. bash reads the extent with
+`xparse_dolparen`, which fails at end of input; `si` is left past the end of the
+string, so the brace never closes, so `parameter_brace_expand` reports
+`bad substitution` naming the whole text and prints the text unchanged. Nothing
+is run. osh gets the *first* diagnostic right and then runs the body anyway:
+
+```sh
+x='A${z:-$(fi}B'; echo "${x@P}"
+# bash: command substitution: line 3: unexpected EOF while looking for matching `)'
+#       line 1: A${z:-$(fi}B: bad substitution
+#       A${z:-$(fi}B
+# osh:  command substitution: line 3: unexpected EOF while looking for matching `)'
+#       line 1: fi}: command not found
+#       A
+
+x='A${z:-$(echo hi}B'; echo "${x@P}"
+# bash: … unexpected EOF …; … bad substitution; A${z:-$(echo hi}B
+# osh:  … unexpected EOF …; Ahi}
+```
+
+Both spellings are affected identically — `<(fi}` behaves exactly as `$(fi}`,
+which is the point: the delimiter is not what is wrong here.
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::extent_read_of_subs`]
+(~29622) and [`Shell::run_abandoned_extent`]. The scan classifies the failed
+read as `ExtentRead::Abandoned { body, rest }` and hands the body on to be run.
+That classification is *right* for an abandoned extent bash really does run on
+— it is `extract_command_subst`'s no-`)` path with the `jump_to_top_level`
+suppressed — but wrong when the caller is the brace scan, because there the
+unclosed read is also what stops the `}` from ever being found, and the
+`bad substitution` that follows pre-empts the run.
+
+**Proper fix:** distinguish the two callers. `extent_read_of_subs` should
+report the abandonment to the brace scan (so `brace_extent_scan` fails the
+whole `${ … }` and takes the `bad substitution` path with the source text)
+rather than letting the body reach `run_abandoned_extent`. The `closed: false`
+flag on `CmdSubBody::Unread` already names exactly this shape, so the test is
+to hand.
+
+**How it was found:** measuring the `<(` row of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN
+against its `$(` twin, which turned out to be wrong the same way.
+
+### [B] TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND
+
+**Status:** ✅ FIXED 2026-08-14. Found 2026-08-14, measured against bash 5.2.37.
+The cause turned out to be wider than the title: the two bounds were
+**tokenized as a command** rather than read as arithmetic, so `<` was only the
+most visible of the operators being lost. See "The fix" at the end.
+
+A `<` in the offset or length of `${z:o:l}` swallows everything to its left.
+The same expression inside a plain `$(( ... ))` is fine, so this is the brace
+fragment's own reading of the text, not the arithmetic evaluator's:
+
+| written | bash | osh |
+|---|---|---|
+| `z=abcdef; echo "${z:1<(2)}"` | `bcdef` | `z: <(2): syntax error: operand expected` |
+| `z=abcdef; echo "${z:0:1<(2)}"` | `a` | same error |
+| `echo $(( 1<(2) ))` | `1` | `1` |
+
+bash reads `1<(2)` as `1 < (2)`, which is `1`, so the offset is 1. osh
+evaluates `<(2)` alone -- the `1` is gone by the time the evaluator sees the
+expression, which is what the quoted error token shows.
+
+**Where:** `userspace/oils/src/lexer.rs`, the `Verbatim::Arith` path of
+[`Lexer::read_word_verbatim`], and whatever splits a `${z:o:l}` body into its
+two fragments in `userspace/oils/src/parser.rs`. The `<` is being taken for
+something other than a comparison operator -- most likely a fragment boundary.
+
+**Proper fix:** treat `<` in an arithmetic fragment as the comparison operator
+it is, so the whole fragment reaches the evaluator. A `<(` there is *not* a
+process substitution to be performed either -- measured, `${z:0:<(echo 1)}` is
+an `operand expected` in bash with the characters `<(echo 1)` standing as the
+error token, which osh already matches.
+
+**Blocked, and then unblocked (same day):** the arithmetic-fragment row of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN.
+bash's `${ ... }` scan reads a `<( ... )` in an arithmetic fragment exactly as it
+reads one anywhere else in the body -- `x='A${z:0:<(fi)}B'; echo "${x@P}"`
+reports the parse twice and then `bad substitution`, where osh printed `AB` --
+but a corpus row for it would have been measuring this bug instead, so the
+corpus case
+`a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`
+left that position out and said so. The fix below removed the obstacle, and the
+rows went in the same day: that case now measures a bound in seven further
+positions.
+
+**How it was found:** measuring where bash's brace scan reads a `<( ... )`,
+while checking whether the `Verbatim::Arith` fragments needed the same row as
+the pattern and replacement ones.
+
+**The fix (2026-08-14).** `parse_slice_bounds`
+(`userspace/oils/src/parser.rs`) read each bound with `word_from_source`, which
+called `tokenize(...)` — a *command* tokenizer — and then joined the surviving
+`Tok::Word`s with a literal space. So every operator character was claimed by
+the tokenizer instead of reaching the evaluator, and whatever it could not make
+a word of was silently dropped. `<` was merely the case that produced an IO
+number and a redirect. The rest, all measured against bash 5.2.37 with
+`z=abcdef`:
+
+| written | bash | osh, tokenized |
+|---|---|---|
+| `${z:1<2}` | `bcdef` | `cdef` — `1<` taken for a redirect |
+| `${z:1>2}` | `abcdef` | `cdef` — likewise |
+| `${z:1<=2}` | `bcdef` | `=2: operand expected` |
+| `${z:1 < (2)}` | `bcdef` | `1 2: syntax error` |
+| `${z:1;2}` | `;2: invalid arithmetic operator` | `1 2: syntax error` |
+| `${z:1&2}` | `abcdef` | `1 2: syntax error` |
+| `${z:3|2}` | `def` | `3 2: syntax error` |
+| `${z:1&&2}` | `bcdef` | `1 2: syntax error` |
+| `${z:1)}` | `1): syntax error in expression` | silently `abcdef` |
+
+Both bounds now go through `word_subscript_from_source_at` — the very reader an
+array subscript uses, which is `verbatim_word_at(..., Frag::Arith)` plus
+`attach_subscript_reads`. The two arithmetic fragments therefore no longer
+disagree with each other, which is what `attach_subscript_reads`'s own doc
+comment had been asking for.
+
+Two further defects of the same splitter were found while measuring it, and are
+fixed in the same change:
+
+* **Which colon cuts.** bash does not `strchr` for the `:`; `skiparith`
+  (subst.c) skips one `:` for every `?` seen, and counts nothing at all inside
+  a `( … )`. `${z:1?2:3}` is `cdef` (the whole text is the offset) while
+  `${z:1?2:3:1}` is `c`; `${z:1?1?2:3:4}` is `cdef`, two `?` swallowing both
+  colons; `${z:(1?2:3):1}` is `c`. osh split on the first `:` unconditionally
+  and so reported `` `:' expected for conditional expression `` for all of
+  these. Now `slice_split_colon` implements the rule.
+* **An empty bounds text.** `${z:}` is `${z:}: bad substitution` in bash, and
+  uniformly so — `${@:}`, `${*:}`, `${a[@]:}`, `${a[1]:}` and an unset
+  parameter all report it. osh printed the whole value. It is the *text* that
+  must be non-empty, not what it expands to: `${z:$e}` with `e=` is `abcdef`.
+  `parse_slice_bounds` now returns `None` for an empty text and each of its
+  three call sites turns that into `WordPart::BadSubst`.
+
+Verified by the corpus case
+`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`
+(75 rows, IDENTICAL), the lib suite and a full sweep.
+
+**Unblocked, and then done (same day):** the arithmetic-fragment row named
+under "Blocks" above was the only thing left of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN,
+and it is now closed there. It was a separate row from this entry's — after
+this fix `${z:1<(2)}` evaluated correctly but `x='A${z:0:<(fi)}B'; echo
+"${x@P}"` still printed `AB`, where bash reads the body for its extent and
+reports `bad substitution`. It turned out **not** to be the `Verbatim::Arith`
+row this entry's title suggested, because the *subscript* shares that mode and
+must not get it: bash's `${ … }` scan steps over a subscript whole
+(`skip_matched_pair`), so `${z[<(fi)]}` never offers its body to the scan and
+is an `operand expected` in bash — which osh already matched. Only a bound is
+walked in the open, so `Frag::Arith` split in two and the new `Frag::Bound`
+took the row. See that entry for the change.
+
+### [B] TD-OILS-AN-UNBALANCED-PAREN-IN-A-SLICES-BOUNDS-IS-AN-ARITHMETIC-ERROR-NOT-A-BAD-SUBSTITUTION
+
+**Status:** ✅ FIXED 2026-08-14. Found 2026-08-14, measured against bash 5.2.37.
+The fix turned up a second rule of the same walk, fixed with it — see "The fix"
+at the end.
+
+`skiparith` (subst.c) balances parens while looking for the colon that cuts
+`${x:off:len}` in two, and an unbalanced `(` makes it run off the end. bash
+then reports that as a **bad substitution** naming the whole bounds text, before
+either bound is evaluated. osh implements the balancing (that is what makes
+`${z:(1?2:3):1}` cut in the right place) but not the complaint, so the text
+reaches the evaluator and produces an arithmetic diagnostic instead:
+
+| written | bash | osh |
+|---|---|---|
+| `${z:(1}` | ``bad substitution: no closing `)' in (1`` | ``z: (1: missing `)' (error token is "1")`` |
+| `${z:(1:2}` | ``… no closing `)' in (1:2`` | ``z: (1: missing `)'`` — and it cut at the colon |
+| `${z:((1:2}` | ``… no closing `)' in ((1:2`` | likewise |
+| `${z:1+(2}` | ``… no closing `)' in 1+(2`` | ``z: 1+(2: missing `)'`` |
+| `${a[@]:(1}` | ``… no closing `)' in (1`` | arithmetic error |
+| `${@:(1}` | ``… no closing `)' in (1`` | arithmetic error |
+
+Both are rc=1, so only the message differs — but the message differs in class,
+not just wording: bash's is the DISCARD-class `bad substitution` family, raised
+by the cut, and it names the bounds text rather than the parameter.
+
+Three things scope it precisely, all measured:
+
+* It is the **whole bounds text** that is checked, once, before the cut — the
+  message quotes `(1:2` entire, the colon never having split it.
+* It is only the text the *cut* walks. Once a colon has been found with the
+  depth back at zero, an unbalanced `(` in the length is an ordinary arithmetic
+  error: `${z:0:(1}` is ``z: (1: missing `)'`` in bash too, and osh matches.
+* A stray `)` at depth zero is not an error at all: `${z:)1}` is
+  `)1: syntax error: operand expected` in both.
+
+**Where:** `userspace/oils/src/parser.rs`, `slice_split_colon` — which already
+tracks the depth and would only need to report a non-zero one at the end — and
+its three call sites in `parse_braced_param_in`, which currently turn the
+`None` that means "empty bounds" into `WordPart::BadSubst(raw)`.
+
+**Proper fix:** `slice_split_colon` reports the unbalanced case distinctly from
+the empty one, and the call sites raise ``bad substitution: no closing `)' in
+<bounds text>``. That message shape already exists in
+`userspace/oils/src/interp.rs` (`b"bad substitution: no closing `)' in "`,
+~35600) but it names the whole *word*, whereas this one names the bounds text
+only, so it needs its own carrier on the word part rather than a reuse of
+`BadSubst`, whose printer names `${…}` entire.
+
+**Blocked:** one row of the corpus case
+`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`,
+which said so in its header and left the shape out. Now measured there.
+
+**How it was found:** measuring bash's slice bounds exhaustively while fixing
+TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND. It
+was the last of four divergences that measurement turned up, and the only one
+not fixed there.
+
+**The fix (2026-08-14).** Two things, because measuring the first turned up the
+second.
+
+**(1) The complaint.** `slice_split_colon` now returns the depth it ended at
+beside the split index, `parse_slice_bounds` carries a non-zero one as
+`SliceBounds::unclosed`, and both `WordPart::ParamSubstr` and
+`WordPart::ArraySlice` gained an `unclosed: Option<Str>` field for it. It is a
+field on the operator rather than a `WordPart::BadSubst`, because *where* it is
+raised is the whole of what distinguishes the two: `${z:}` is a bad
+substitution even for an unset parameter, while `${u:(1}` with `u` unset is
+silently empty. So the check sits exactly where the offset would have been
+evaluated — `Shell::slice_bounds_unclosed`, called from `scalar_slice`,
+`assoc_slice` and the indexed path of `slice_elements_resolved`, each after its
+own "nothing to measure" exit. Every ordering measured lines up: an empty
+array, an empty `$@`, `set -u`, and a set-but-empty scalar (which *does* report,
+having one position).
+
+`no_longjmp_on_fatal_error` — `Shell::prompt_expanding` — **suppresses** the
+complaint rather than rewording it, so under `${x@P}` or `PS4` the characters go
+on to the evaluator and the arithmetic error is what comes out. That is the
+`if (no_longjmp_on_fatal_error == 0)` guard the report sits behind, and it is
+why osh's *old* answer was right in those two contexts and only those two.
+
+**(2) The walk is quote-aware.** Measuring (1) showed the walk steps over a
+`' … '` run, a `" … "` run and a backslash-escape whole — all three counters
+included, not just the paren one. `${z:"1:2"}` does not split (the evaluator
+meets `1:2` as one bound and says so), `${z:1"?"2:3}` does split (the quoted `?`
+buys no colon), and `${z:0"("}`, `${z:0'('}`, `${z:0\(}` and `${z:(1"("2)}` are
+all balanced. osh's walk saw none of that, so before this fix it both cut in the
+wrong place and complained where bash did not. Note this is about the *walk*
+only: the quote characters stay in the bound, and the arithmetic reading each
+half is given removes them (or does not — a `' … '` keeps its second reading).
+
+The walk is over the text **as written**, which the same measurement pins down
+from the other side: `p="("; ${z:$p 1}` and `${z:$(echo "(1")}` are ordinary
+arithmetic errors, each being balanced as written however unbalanced its value.
+
+**Verified:** 37 further rows in
+`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`, the
+lib suite and a full sweep.
+
+### [B] TD-OILS-THE-WAIT-NO-OPERANDS-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP. The job holding `$!` is not spared, once per many sweeps — 2026-08-14 — OPEN
+
+**Where:** `userspace/oils/tests/corpus/wait-with-no-operands-and-a-job-that-just-ended.sh`,
+the group "only the last one backgrounded is spared", against
+`Shell::builtin_wait`'s operand-less arm and `Shell::drain_jobs`
+(`userspace/oils/src/interp.rs`).
+
+**What — and this time the whole row was captured.** One full
+`scripts/osh-bash-diff.py` sweep came back `654 matched, 0 waived, 1 failed`
+with **one line** of the case different, everything else in it identical:
+
+```sh
+( exit 3 ) & ( exit 4 ) & sleep 0.4; wait; echo "  noargs=$?"
+VAR=stale; wait -n -p VAR; echo "  n=$? $(pvar)"
+```
+
+| | bash 5.2.37 | osh (this sweep) |
+|---|---|---|
+| `noargs=` | 0 | 0 (agreed) |
+| `n=` | `4 a pid` | **`127 unset`** |
+
+So osh had nothing left to report where bash still had the last-backgrounded
+job. Re-run on its own immediately after: `1 matched, 0 waived, 0 failed`.
+Saved report:
+`target/dvscratch/corpus-failures/20260814-145703/wait-with-no-operands-and-a-job-that-just-ended.txt`.
+
+**What a 127 requires, read out of the code rather than guessed.** The spare is
+`builtin_wait`'s operand-less arm: after `drain_jobs`, every job with a status
+is marked `notified` *except* the one whose pid is `last_bg_pid`, and
+`cleanup_dead_jobs` then drops exactly the notified ones. But `drain_jobs`
+itself marks `notified` for every job it *waited for*, and it waits for any job
+not already in its `known` snapshot — `known` being the jobs whose `exit_seen`
+was set **before** the wait was reached. So the spare survives only when the
+`$!` job's `exit_seen` was already set, which the unit-boundary
+`cleanup_dead_jobs` does for a job that is both finished and older than
+`JOB_EXIT_NOTICE_GRACE` (20 ms). A 127 means that did not happen for the `$!`
+job specifically: had it been the *other* job that was late, `drain_jobs` would
+have waited that one and the spare would still stand.
+
+**The margin is not thin, which is what makes this odd.** Both shells were
+measured at four margins (`build/pgS.sh`), and they agree exactly:
+
+| `sleep` before the `wait` | bash | osh |
+|---|---|---|
+| none | `127 unset` | `127 unset` |
+| 0.01 | `4 a pid` | `4 a pid` |
+| 0.05 | `4 a pid` | `4 a pid` |
+| 0.4 | `4 a pid` | `4 a pid` |
+
+The flip is between 0 and 0.01, so the case's `sleep 0.4` is a ~40x margin — not
+the ~1x margin that
+TD-OILS-THE-COMPGEN-JOB-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP turned out to
+be. **Do not assume the same diagnosis and just widen the sleep.**
+
+**Loads that do NOT reproduce it — do not spend the time again.** The job is
+thread-backed, not a process (`( exit 4 ) & echo $!` prints the synthetic
+`900000`, where `sleep 0.4 &` prints a real pid), so both of the obvious
+starvation stories were tried and neither bit:
+
+- 20 serial runs of the group alone: clean.
+- 119 runs of the group at 8-way concurrency: clean.
+- 64 runs of the *whole case* at 8-way concurrency: clean.
+- 36 runs under a process-spawn storm (6 loops spawning `osh -c :` and
+  `bash -c :` back to back, this host's documented ~200-290 ms spike source):
+  clean.
+- 30 runs under CPU saturation (24 busy-loop processes on 12 cores): clean.
+
+Probes are `build/repro-wait.sh` (the group), `build/repro-wait2.sh` (the whole
+case), `build/spawnstorm.sh`, `build/cpuburn.py` — all in the gitignored
+`build/`, so re-create them from this entry if they are gone.
+
+**Proper fix.** Unknown, and deliberately not guessed at. The next sighting
+should establish which of the two conditions failed — whether the `$!` job's
+body was genuinely unfinished at the unit-boundary poll, or whether the poll did
+not run — by instrumenting `poll_jobs` to record, per job, `is_finished` and
+`born_at.elapsed()` at each call, and dumping that when `wait -n` answers 127.
+That distinguishes "the thread really was 400 ms late" from a bookkeeping fault,
+and only the first is a case-margin problem.
+
+**Impact.** An intermittently red sweep, which is the gate on every commit —
+and the sweep takes ~19 minutes, so a re-run to disambiguate is expensive.
+
+**Sighting 2026-08-14, in the *unit* suite, and fixed there.**
+`interp::tests::wait_n_ignores_a_job_whose_status_was_already_reported` failed
+once under `cargo test -p oils --lib` (`wait -n` answered 127 where 3 was due,
+i.e. the operand-less `wait` had *not* spared the job) and passed when re-run
+alone. Same shape as this entry, but with a cause the test owned: it backgrounded
+`( exit 3 ) &` and then slept a constant `0.2` to make the job finish first, and
+no constant is long enough to promise that on a loaded machine. Fixed properly
+rather than by lengthening the sleep — a new `settle_jobs` test helper (the
+whole-table form of the existing `settle_job`) polls `poll_jobs` until every job
+has a status, after the same `JOB_EXIT_NOTICE_GRACE`. That removes this test from
+the flaky family; the *corpus* case above is untouched and stays open.
+
+---
+
+### TD-OILS-AN-ARITHMETIC-SCAN-REPORTS-NONE-OF-THE-READS-IT-MAKES. `$(( … ))` swallows the diagnostics its nested `$( … )` should raise, and loses the text after a read that stopped early — 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::arith_extent_expand` /
+`arith_extent_frame` and the `$((` route out of `Shell::arith_extent_route`.
+
+**What is wrong.** `param_expand` reaches a `$((` through
+`extract_command_subst` with `SX_COMMAND` (subst.c:10575), so the paren count
+*does* recurse into a nested `$( … )` — a real parse, reported where it is met.
+osh runs the count but never reports, and in one shape stops in the wrong place.
+Measured against bash 5.2.37 (`build/pgX.sh` rows a/c, `build/pgY.sh` d4/d5):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash | osh |
+|---|---|---|
+| `A$((1+$(echo hi⏎q` | reports EOF, `[A]` | reports EOF, `[Ahi]` |
+| `A$((1+$(for⏎q))B` | reports **twice** (`for`, then `` `(1+$(for' ``), `[AB]` | silent, `[A]` |
+| `A$((1+$(for⏎xB` | reports `for`, `[A]` | reports `for`, **runs `fo`**, `[A⏎xB]` |
+
+Rows 1 and 3 report because the read runs from `Shell::arith_nested_read`,
+which does call `Shell::comsub_reparse_read`; what those two get wrong is the
+*value*, both by performing the abandoned extent the way the string level does
+and the brace level does not. Row 2 is the substantive one: the read stopped
+part way, so bash's count resumed after the `for`'s line and found the `))`,
+leaving `B` to the word. osh consumes to the end and loses it — and so never
+reaches the read at all, which is why it is the one row that is also silent.
+
+**What the proper fix looks like.** The `$((` count needs the same two-outcome
+treatment `${ … }` got on 2026-08-14: `Shell::comsub_reparse_read` for the
+report (which also decides jump vs. no-jump), and
+`Shell::failed_extent_split`'s resume point for where the count carries on.
+`Lexer::unread_comsub_stop` already puts the lexer in the right place; what is
+missing is the interp half — an `arith`-side counterpart of
+`Shell::unclosed_brace_reads`.
+
+**Impact.** Diagnostics only for two of the three rows; a wrong value for the
+third. Needs `@P`/`PS4`/here-doc text to be reachable at all.
+
+---
+
+### TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN. A `<(`/`>(` in it is never read, though the brace scan names it — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::extent_read_of_rest` and
+`Shell::unclosed_brace_reads`, both of which lex their text with
+`crate::parser::dquote_word_from_source` → `crate::lexer::lex_dquote_body`.
+
+**What is wrong.** `extract_dollar_brace_string` names `$(`, `<(` and `>(`
+together and hands each to the same `extract_command_subst` (subst.c:1881-1950),
+**whatever the quoting** — that is why `x='A${z#<(fi)}B'` reports the parse
+twice. A double-quoted *run*, by contrast, has no process substitution in it at
+all: at string level bash and osh agree that `v='A<(echo hi⏎q'` is literal
+text. So `lex_dquote_body` is the right lexer for a string-level remainder and
+the wrong one for text the **brace scan** is walking.
+
+Measured (`build/pgY.sh` d6), `A${z:-P1<(echo hi⏎S1}B` under `${…@P}`:
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| reports | `` unexpected EOF while looking for matching `)' `` **then** `…: bad substitution` | the `bad substitution` only |
+| value | undecoded word | same |
+
+The `$(` spelling of the same row (`build/pgW.sh` row 5) is byte-exact, so this
+is precisely the two openers `lex_dquote_body` cannot see. The dollar spelling
+of d7 — where the read stops early and the brace closes — is also exact,
+because that path re-lexes through `parse_braced_param_in` in
+`Quoting::Unread`, which *does* read them.
+
+**It is not only the two openers — the whole quote model is wrong** (measured
+2026-08-14, `build/pq1.sh` and `build/pq2.sh`). `extract_dollar_brace_string`
+**skips** a quoted run rather than walking it, and the two quotes skip
+differently:
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | what it shows |
+|---|---|---|
+| `A${z:-P1<(echo hi⏎S1}B` | reports EOF, `bad substitution` | the bare `<(` row **is** read |
+| `A${z:-P1"<(echo hi⏎S1"}B` | silent, `[AZZB]` | a `<(` inside `" … "` is **not** |
+| `A${z:-P1"$(echo hi⏎S1"}B` | reports EOF, `bad substitution` | a `$(` inside `" … "` **is** |
+| `A${z:-P1'$(echo hi⏎S1'}B` | silent, `[AZZB]` | a `$(` inside `' … '` is **not** |
+| `A${z:-P1'<(echo hi⏎S1'}B` | silent, `[AZZB]` | …nor a `<(` |
+| `A${z:-P1"<(echo hi⏎S1}B` | `bad substitution`, **no** read report | a lone `"` swallows to end of string |
+| `A${z:-P1'<(echo hi⏎S1}B` | `bad substitution`, **no** read report | …and so does a lone `'` |
+| `A${z:-"x"<(echo hi⏎S1}B` | reports EOF, `bad substitution` | a *closed* run does not suppress what follows |
+| `A${z:-P1\<(echo hi⏎S1}B` | silent, `[AZZB]` | a backslash escapes the opener |
+
+So the brace scan delegates a `" … "` run to a double-quote skipper that has
+the `$(` row and **not** the `<(`/`>(` row — bash's ordinary rule that there is
+no process substitution inside double quotes — and skips a `' … '` run whole,
+offering its interior to nothing.
+
+`lex_dquote_body` models neither — it treats both quote characters as ordinary
+literals, which is correct for `Q_DOUBLE_QUOTES`, where the string *is* already
+the quoted run. Measured (`build/pq1.sh`, `build/pq2.sh`, `build/pq3.sh`), osh
+nevertheless agrees with bash on every *quoted* row above, by a different
+mechanism in each case: where the run closes, the brace closes too and the word
+goes through `parse_braced_param_in`, which does model quotes; where the run does
+not close, `lex_dquote_body`'s missing `<(` row happens to suppress the same read
+bash's skip suppresses. Two rows were left where the mechanisms did not coincide;
+the first of them is now fixed:
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh |
+|---|---|---|
+| `A${z:-P1"$(echo hi⏎S1}B` | reports EOF, `bad substitution`, undecoded | ✅ same since 2026-08-14 |
+| `A${z:-'p$(echo hi'q$(fi⏎S1}B` | reports `fi`, `[AZZB]` | silent, `[AZZB]` |
+
+Row 1 was the serious one — a **spurious command execution**: osh reported the
+EOF, then ran `S1}` and produced `[Ahi]`. A lone `"` opens a run that swallows to
+end of string, leaving the brace nothing to close on, so bash condemns the word;
+osh instead let the failed read out of `read_opaque_span`'s `"`-run `$(` sub-arm,
+where [`Lexer::unclosed_seg`] degraded the whole word into a *string-level*
+`$( … )` and then performed it. Fixed 2026-08-14 by giving that sub-arm
+(`userspace/oils/src/lexer.rs`, `read_opaque_span`'s `'"'` arm) the same
+`Err(e) if self.unread_comsub(&e)` recovery the two `read_dollar_brace_body`
+arms already had: re-emit the `$(` into the raw text, take back what the reader
+consumed with `Lexer::unread_comsub_stop`, and `continue` the quoted-run loop.
+The read is still reported — it happened — and the run then swallows the rest,
+so the brace never closes and the word is condemned, exactly as in bash. The bug
+was **pre-existing**, not a regression: measured identical on the commit before
+the earlier 2026-08-14 brace-scan fix.
+
+Row 2 is a lost diagnostic only; the same row before the brace-scan fix had the
+wrong value *and* ran `f`, so it is much improved.
+
+**A second mechanism loses the same report where the brace *does* close**
+(measured 2026-08-14, `build/pr1.sh` r3). `A${z:-'i"t'<(fi⏎S1}B` reports `fi`
+in bash and expands to `[AZZB]`; osh now gets the value right (it was the
+undecoded word until the unmated-`"` fix of the same day) but still says
+nothing. That path never goes near `extent_read_of_rest`: the brace closed, so
+the reads are replayed off the *parsed operand*, and the operand lexer is
+`read_word_verbatim` in [`Verbatim::Dquote`] — which has a perfectly good `<(`
+row, but never reaches it, because the `"` inside the `' … '` run opens a
+quoted run that swallows `t'<(fi⏎S1` whole.
+
+Both scans are right about their own text and wrong about each other's, which
+is the shape of the whole issue: bash runs **two** passes over these bytes with
+**different quote rules** — `extract_dollar_brace_string`, where a `'` run is
+skipped and a `"` is a quote, and `expand_word_internal`, where a `'` is an
+ordinary character and a `"` is a quote. osh derives the reads from the
+expansion's lex in one path and from a string-level lex in the other, and
+neither is the scan's.
+
+**What the proper fix looks like.** A real lex entry for "text a brace scan is
+walking" — not `lex_dquote_body` with a row bolted on, and not the operand lex
+either. It needs, at its own level: the `<(`/`>(` openers beside `$(`; a `'`
+that consumes to the next `'` or to end of string, offering nothing inside it;
+and a `"` that consumes to the next `"` or to end of string, offering only `$(`
+(and `` ` ``) inside it. A backslash hides the byte after it. Then
+`extent_read_of_rest`, `unclosed_brace_reads` **and `brace_extent_scan`** all
+take their reads from that one pass, `lex_dquote_body` keeps its current
+string-level callers unchanged — the p1/p2 probe above confirms those answers
+are right as they stand — and the operand lex stops being asked a question it
+was never answering.
+
+These rows are the acceptance test the table above does not already cover — the
+ones that pin *which* quote wins when the two are interleaved (measured
+2026-08-14 against bash 5.2.37, `build/pr1.sh`):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh today |
+|---|---|---|
+| `A${z:-"it's"$(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
+| `A${z:-"it's"<(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
+| `A${z:-'i"t'<(fi⏎S1}B` | reports `fi`, `[AZZB]` | ✅ same since 2026-08-14 |
+| `A${z:-P1\'<(echo hi⏎S1}B` | reports EOF, `bad substitution` | ✅ same since 2026-08-14 |
+| `A${z:->(echo hi⏎S1}B` | reports EOF, `bad substitution` | ✅ same since 2026-08-14 |
+| `A${z:-${y:-<(fi⏎S1}B` | reports `fi`, `bad substitution` | same |
+
+So a `'` inside a closed `" … "` run opens nothing (rows 1-2) and a `"` inside a
+closed `' … '` run opens nothing (row 3) — each quote is invisible inside the
+other's run — and a backslash spends itself on the quote it precedes, leaving
+the `<(` after it live (row 4).
+
+An attempt that added only the `<(`/`>(` row to `lex_dquote_body` was written
+and reverted on 2026-08-14, before being compiled, because these measurements
+showed it would have regressed the three suppressed rows above (they are silent
+in bash today and in osh today, and would have started reporting).
+
+**Fixed 2026-08-14**, along the lines above. Three pieces:
+
+- `Lexer::brace_scan` (`userspace/oils/src/lexer.rs`) — a flag saying "this
+  scan stands in for `extract_dollar_brace_string`, not for the expansion after
+  it". With it set, `read_double_quote_until` grows the scan's other two
+  openers: a `<(`/`>(` becomes a `SubBody::Unread` segment carrying its own
+  `SubDelim`, which the expansion prints straight back
+  (`SubDelim::is_performed` is false for both), so the word's **value** is
+  untouched and only the extent walk gains a construct to read. The new entry
+  `lexer::lex_brace_scan_body` → `parser::brace_scan_word_from_source` is what
+  `Shell::extent_read_of_rest` now lexes its remainder with, which is the
+  unclosed-brace half (rows 4-5 of the interleaving table above).
+- The closed-brace half (row 3) is the same flag turned on from
+  `read_word_verbatim`'s `"` arm, and **only** when that run opened inside a
+  `' … '` one — `in_run && self.here_text`. That is exactly the case where the
+  scan never saw a quote at all, because it stepped over the single quotes
+  whole. Outside a run the `"` is the scan's own, and there `skip_double_quoted`
+  reads the `$(` spelling alone, which is what the reader already did.
+- The quote state itself moved out of the lexer and into the walk, as
+  `ScanQuote` (`interp.rs`): two independent flags, because
+  `skip_single_quoted` hunts for a `'` and `skip_double_quoted` for a `"` and
+  neither knows the other character — so each quote is an ordinary byte inside
+  the other's run. `Shell::brace_scanned_subs_slice` tracks both over the
+  literal runs (a `\` still hides the byte after it) and suppresses the two
+  process-substitution spellings inside a `" … "` while letting `$(` through;
+  `brace_scanned_subs_in` no longer resets the state on entering a
+  `WordPart::DoubleQuoted` whose `"` the scan never saw.
+
+Corpus case:
+`userspace/oils/tests/corpus/the-brace-scan-reads-a-process-substitution-and-the-expansion-after-it-does-not.sh`
+— 14 shapes plus a here-document body, byte-identical to bash 5.2.37 including
+stderr.
+
+**Impact while it stood.** Diagnostics only — the values already agreed. A
+`<(`/`>(` at brace level lost its read report. The worst shape — a lone `"`
+before a `$( … )` making osh run a command bash does not, and yield the wrong
+value — was fixed earlier the same day (see row 1 of the two-row table above).
+Reachable only through `@P`/`PS4`/here-doc text holding a malformed `${ … }`.
+
+**Not fixed by this, and tracked separately:** row 2 of the two-row table,
+`A${z:-'p$(echo hi'q$(fi⏎S1}B`. That one is not about the openers but about
+where a construct *ends*; see
+`TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN`.
+
+---
+
+### TD-OILS-AN-UNMATED-DOUBLE-QUOTE-GROWS-A-MATE-WHEN-THE-WORD-IS-PRINTED-BACK — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `userspace/oils/src/unparse.rs` — `part_src`'s
+`WordPart::DoubleQuoted` arm, which writes a `"` on both ends unconditionally;
+the run that has no closing `"` is built by `userspace/oils/src/lexer.rs`,
+`Lexer::read_word_verbatim`'s `'"'` arm under `ParseOpts::tolerant`.
+
+**Repro** (bash 5.2.37, `build/pr11.sh` t1):
+
+```sh
+z=ZZ
+v='A${z:-'"'"'i"t'"'"'$(fi)}B'; printf '[%s]\n' "${v@P}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| remainder quoted by the read | `` `fi)}B' `` | `` `fi)"}B' `` |
+| word named by `bad substitution` | `A${z:-'i"t'$(fi)}B` | `A${z:-'i"t'$(fi)"}B` |
+| value | `[A${z:-'i"t'$(fi)}B]` | same |
+
+**What is wrong.** In text no parser read, a `"` with no mate is not an error:
+`string_extract_double_quoted` is handed a *finished word* and its walk ends at
+the end of the string as readily as at a quote (that is
+`ParseOpts::tolerant`, and the corpus case
+`a-double-quote-with-no-mate-in-an-operand-runs-to-the-end-of-the-operand.sh`
+pins the expansion of it). The resulting `WordPart::DoubleQuoted` therefore
+covers a run whose closing quote **was never in the source** — but the part
+does not record that, and `part_src` prints the pair back. Every consumer of
+`crate::unparse::word_src` then sees one byte that was not in the word.
+
+The value is unaffected, because quote removal drops the `"` either way. What is
+affected is everything derived from the *text*: `Shell::bad_sub_word` (the word
+`bad substitution` names), the tail `extract_command_subst` quotes back in its
+own diagnostic, and — in principle, though no divergence has been measured for
+it yet — `crate::wordscan::word_fault`, which re-scans `word_src` for the
+unclosed `${`/`` ` `` verdicts and could be pushed either way by a stray quote.
+
+The single-quote analogue exists in the same shape:
+`Lexer::read_single_quote` has a `None if self.opts.tolerant => return Ok(s)`
+arm, and `part_src`'s `WordPart::SingleQuoted` likewise writes both `'`s. No
+divergence has been measured for it, because the paths that produce an unmated
+`'` do not currently reach a diagnostic that prints the word back — but the
+defect is the same one and a fix should cover both.
+
+**What the proper fix looks like.** Record the missing mate on the part rather
+than guessing at print time: `Seg::Dq(Vec<Seg>)` → `Seg::Dq(Vec<Seg>, bool)`
+and `WordPart::DoubleQuoted(Vec<WordPart>)` → a `closed` field, exactly as
+`Seg::Sq(Str, bool)` already carries its own flag, with `part_src` writing the
+trailing quote only when it was there. About 27 sites mention `DoubleQuoted`
+across `ast.rs`, `parser.rs`, `interp.rs` and `unparse.rs`; most are matches
+that need only a `..`. The single-quote half is the same edit on
+`WordPart::SingleQuoted`.
+
+Not worth reaching for a cheaper trick: an unmated run always extends to the
+end of its text, so "omit the quote when the part is last" would be *nearly*
+right, and nearly-right quoting is how a word stops re-parsing.
+
+**Fixed 2026-08-14**, along the lines above. `read_double_quote_until` now
+reports whether a `"` really ended the run — it has exactly two `Ok` returns,
+one per case, so the flag falls straight out of the existing control flow — and
+that rides on `Seg::Dq(Vec<Seg>, bool)` into
+`WordPart::DoubleQuoted { parts, closed }`. `part_src` writes the trailing quote
+only when `closed`. The single-quote half is the same edit:
+`read_single_quote`'s tolerant arm answers `false`, `Seg::Sq` became a struct
+variant `{ text, escaped, closed }` rather than grow a second unnamed `bool`,
+and an unmated run prints as `'` + text instead of going through
+`sh_single_quote`, whose whole job is to supply the mate.
+
+Two returns needed thought rather than transcription: the pair inside
+`read_double_quote_until` that end the run on an *unclosed construct* absorbed
+into a `Seg::Unclosed` answer `false`, since the run ended on the construct and
+not on a quote; and the backslash spelling of `Seg::Sq` is unconditionally
+`closed: true`, having no quotes to match.
+
+Corpus case:
+`userspace/oils/tests/corpus/a-double-quote-with-no-mate-does-not-grow-one-when-the-word-is-printed-back.sh`
+— 8 shapes including `PS4` and a here-document body, byte-identical to bash
+5.2.37 including stderr.
+
+**Impact while it stood.** Diagnostics only — one spurious `"` in the two lines
+bash prints for a malformed `${ … }` whose operand holds a `"` opened inside a
+`' … '` run. Reachable only through `@P`/`PS4`/here-doc text.
+
+---
+
+### TD-OILS-AN-UNMATED-SQUOTE-IN-A-SUBSCRIPT-LOSES-ITS-QUOTE-BYTES-FROM-THE-WORD-PRINTED-BACK — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `attach_subscript_reads` (`userspace/oils/src/parser.rs`), which gives
+each top-level `' … '` of an arithmetic fragment its interior parse.
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+declare -A m=([k]=V)
+echo "[${arr['x${m:-']}]"
+```
+
+bash names `` 'x${m:-' `` — the whole fragment, quotes included. osh named
+`x${m:-` — the interior of the run alone.
+
+**Cause, which was not the one first written here.** The first note guessed the
+text came from `crate::unparse::word_src` by way of `crate::wordscan::word_fault`.
+It does not: `word_fault` returns `None` for these words, and the word source osh
+builds is byte-correct. The diagnostic comes from `Shell::expand_unclosed` on an
+`Unclosed::BadSubst` whose `text` the *interior's own lexer* filled in with
+`Lexer::whole_text` — the interior being a string of osh's making. bash has no
+such string: an arithmetic fragment is expanded with `Q_DOUBLE_QUOTES` set, which
+switches the single quote off, so `expand_word_internal` walks straight through
+the pair and the string it was handed is the fragment. Both "no closing"
+reporters echo that string (`report_error (…, string)`, subst.c:1498 for
+`$[ … ]`, subst.c:1972 for `${ … }`).
+
+That also explains the shape the note found puzzling — a name that begins one
+byte late and ends two bytes early is exactly the interior of a `' … '` run.
+There were not two faults there, but there is a second one beside it; see
+`TD-OILS-A-BRACE-WHOSE-NAME-SCAN-RUNS-OFF-A-FRAGMENT-TAKES-THE-OTHER-DIAGNOSTIC`.
+
+**Fix.** `attach_subscript_reads` already re-measures the fragment after parsing
+an interior — that is what `crate::unparse::attach_comsub_tails` does for a
+`$( … )`'s echoed remainder. It now also re-*names*: a new
+`name_unclosed_after_the_fragment` walks the interiors it just attached and gives
+every top-level `WordPart::Unclosed(Unclosed::BadSubst { text, .. })` the
+fragment's source for its `text`. Only the run's own level is renamed; a `" … "`
+inside the interior is carved out by `string_extract_double_quoted` as its own
+string and keeps naming itself, as one written a character to the left of the `'`
+would. `src` is left alone — it is the construct's spelling for a re-print, not a
+diagnostic's `%s`.
+
+Corpus:
+`a-construct-left-open-in-a-quoted-subscript-names-the-fragment-around-it.sh`
+(seven rows: a `${ … }` body scan running off, the same with text after the run,
+a `$[ … ]`, both substring bounds, and a run that closes nothing early).
+
+---
+
+### TD-OILS-A-BRACE-WHOSE-NAME-SCAN-RUNS-OFF-A-FRAGMENT-TAKES-THE-OTHER-DIAGNOSTIC — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `Shell::expand_unclosed` (`userspace/oils/src/interp.rs`) and the
+`Unclosed::BadSubst` the lexer raises for it (`userspace/oils/src/lexer.rs`).
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+declare -A m=([k]=V)
+echo "[${arr['x${m']}]"
+```
+
+| | |
+|---|---|
+| bash | `` 'x${m': bad substitution `` |
+| osh | ``bad substitution: no closing `}' in 'x${m'`` |
+
+The same string is named — that much was fixed the same day — but it is the
+wrong one of bash's two messages.
+
+**Why bash has two.** A `${ … }` in a string is read in two steps, and only the
+second one is `extract_dollar_brace_string`. First `parameter_brace_expand`
+extracts the *name* with `string_extract (string, &t_index, "#%^,~:-=?+/@}",
+SX_VARNAME)` (subst.c:9550), which stops at one of those operator characters or
+at the end of the string — `SX_VARNAME` stepping over a whole `[ … ]` subscript
+on the way. If it stopped at the end, `c` is `NUL` and the `switch (c)` falls to
+`default: case '\0': bad_substitution:` (subst.c:10018-10024), which is
+`report_error (_("%s: bad substitution"), string)` and no longjmp. Only if it
+stopped at an *operator* does the body go to `extract_dollar_brace_string`, whose
+own running-out is the "no closing" one that longjmps (subst.c:1972).
+
+So the two messages divide on whether the unclosed brace got as far as an
+operator, and the division is visible:
+
+| fragment | bash |
+|---|---|
+| `'x${m'` | `` 'x${m': bad substitution `` |
+| `'x${#m'` | `` 'x${#m': bad substitution `` |
+| `'x${m[0]'` | `` 'x${m[0]': bad substitution `` |
+| `'x${m['` | `` 'x${m[': bad substitution `` |
+| `'x${m:-'` | ``no closing `}' in 'x${m:-'`` |
+
+**Two things the entry got wrong, found while fixing it.**
+
+*It is not only a fragment.* A here-document body takes the same two messages,
+and osh had the same one answer for both — `cat <<E`/`a${m b`/`E` is
+`a${m b⏎: bad substitution` in bash. The `${x@P}` case really does collapse
+(`no_longjmp_on_fatal_error` makes `extract_dollar_brace_string` return `NULL`
+quietly and its caller fall to the same label), which is why the divergence
+looked narrower than it was.
+
+*The name scan is not the whole story.* Two checks between it and
+`extract_dollar_brace_string` also reach `bad_substitution:` with an operator
+already found — `valid_brace_expansion_word` on the name (subst.c:9803) and the
+length branch's `string[sindex-1] != RBRACE` (subst.c:9687). So `'x${m[a:b'`
+(the `:` *is* reached, but `m[a` is no name) and `'x${#q:-'` are both plain bad
+substitutions. A third check, `parameter_brace_expand_indir` (subst.c:9807),
+runs there too and reports in the missing brace's place: `a${!nosuch:-b` is
+`nosuch: invalid indirect expansion`, and a pointer holding `not a name` is
+`not a name: invalid variable name`.
+
+**The fix.** None of this needed new state on `Unclosed::BadSubst`. osh already
+had the whole decision procedure — `Shell::unterminated_brace_kind`, written for
+the arithmetic-string scanner, which answers `BadSub` / `NoClosing` /
+`Indir(name)` from the body text alone and has `Shell::arith_indir_resolves`
+beside it for the third. `Shell::expand_unclosed` now asks it, for `close ==
+'}'`, before anything else it does, and a new `Shell::unclosed_bad_substitution`
+reports the `BadSub` answer naming `text` (bash's `string`) with the
+`ErrexitOrPosix` class the `bad_substitution:` label carries.
+
+Asking it *first* matters, and is bash's own order: a `$( … )` written inside
+the name is walked over by `string_extract` without being parsed, so
+`a${m$(fi) b` names the bad substitution and never mentions the `fi` — where osh
+used to run `Shell::unclosed_brace_reads` first and report the `fi`.
+
+**Fixed by:** `Shell::expand_unclosed` + `Shell::unclosed_bad_substitution`
+(`userspace/oils/src/interp.rs`). Corpus:
+`a-brace-whose-name-scan-runs-off-the-text-is-a-bad-substitution-not-a-missing-brace.sh`
+— sixteen shapes covering the fragment, the here-document, the command
+substitution in each half, all three indirection outcomes and the prompt
+collapse, byte-identical to bash 5.2.37 including stderr.
+
+---
+
+### TD-OILS-AN-UNCLOSED-ARITH-SUBSTITUTION-IN-A-QUOTED-SUBSCRIPT-IS-NOT-CAUGHT-BEFORE-EXPANSION — 2026-08-14
+
+**Where:** `crate::wordscan` (`userspace/oils/src/wordscan.rs`), the word-extent
+pass `Shell::begin_word` runs before a word is expanded.
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+echo "$(touch RAN)[${arr['x$(( 1+ ']}]"
+```
+
+bash prints ``bad substitution: no closing `)' in "$(touch RAN)[${arr['x$(( 1+ ']}]"``
+— the **whole word** — and `RAN` is never created. osh prints
+``bad substitution: no closing `)' in 'x$(( 1+ '`` — the fragment — and the
+`touch` runs.
+
+The side effect is the real defect; the name follows from it. bash reaches this
+one on the *extent* pass, before any part of the word expands, so it names the
+string that pass was walking. osh reaches it only when the subscript is expanded,
+by which time the substitution ahead of it has already run.
+
+**Not the same as the two entries above.** Those are about which string a fault
+found *during* the fragment's expansion names. This one is about a fault bash
+finds before expansion starts and osh does not find at all until later.
+
+**What the proper fix looks like.** `wordscan::scan` has rows for `${`,
+`` ` ``, `$(`, `$[` and `<(`/`>(`, and its faults are `WordFault::Brace` and
+`WordFault::Backquote`. An unclosed `$((` inside a `' … '` in a subscript is a
+third: `extract_delimited_string`'s (subst.c:1498), which names the scanned
+string and closes it with `)`. Adding it means teaching `word_fault` a fault that
+carries its own closing delimiter, and teaching the subscript skip that a `'` in
+there does not hide a `$((` from the enclosing scan.
+
+**Impact.** A command substitution written before such a subscript runs when bash
+would not have run it. Narrow, but it is a side effect and not just text.
+
+---
+
+### TD-OILS-A-BACKQUOTE-IN-A-QUOTED-SUBSCRIPT-IS-A-PARSE-ERROR-WHERE-BASH-EXPANDS — 2026-08-14 — ✅ FIXED 2026-08-14 (in-scope half; see the scope note at the end)
+
+**Where:** the `' … '` interior parse of an arithmetic fragment —
+`attach_subscript_reads` (`userspace/oils/src/parser.rs`) and the lexer path
+behind it.
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+echo "[${arr['x`fi']}]"
+echo TAIL
+```
+
+| | |
+|---|---|
+| bash | ``bad substitution: no closing "`" in `fi'`` at line 2, then `TAIL` |
+| osh, before | ``unexpected EOF while looking for matching `` ` ``'`` at line 4 — the script never runs |
+| osh, now | identical to bash |
+
+osh turned a runtime diagnostic into a *parse* error, so the whole script was
+rejected. bash's parser stops at the `'` and resumes at its mate, so the
+backquote inside is text as far as any parse is concerned; it is met only by
+`param_expand`'s own `string_extract (…, SX_REQMATCH)` at expansion time
+(subst.c:11269), which names `string + t_index` — the text from the backquote on.
+
+**The fix.** Three parts:
+
+- `Lexer::read_word_verbatim`'s `` ` `` arm used a bare `?`, which let the
+  `LexError` escape as a parse error. It now converts to an `Unclosed::Backquote`
+  segment via `unclosed_seg`, exactly as the `$` arm does for an unmatched `${`.
+  This is the part that stopped the script being rejected.
+- `Unclosed::Backquote` gained a `text` field, because its `%s` is
+  `string + t_index` and not `string`: the report runs from the backquote to the
+  end of the **fragment**, whereas `src` is also what `part_src`/`parts_src`
+  re-print and so cannot be widened in place.
+- `name_unclosed_after_the_fragment` (`parser.rs`) widens that `text` with the
+  fragment tail past the run's interior — the run's own closing quote and
+  whatever follows it — mirroring what it already did for `BadSubst`.
+
+**Verified.** `userspace/oils/tests/corpus/an-unmated-backquote-in-a-quoted-subscript-is-met-at-expansion-and-not-by-a-parse.sh`
+is byte-identical to bash 5.2.37, as are probes `build/pr28.sh` and
+`build/pr29.sh`. Full sweep green.
+
+**SCOPE: one residue is out of frozen scope (§305) and is deliberately left
+unfixed.** Where the unmated backquote sits inside a *nested double quote* within
+the run — `build/pr30.sh` d2, `echo "[${arr['x"`fi"']}]"` — bash reports
+``no closing "`" in `fi"'`` and osh reports ``no closing "`" in `fi"``: osh is one
+trailing `'` short. Everything else matches, including the script surviving, the
+exit status and all other output. The cause is known:
+`name_unclosed_after_the_fragment` visits only the run's own top level and does
+not descend into a nested `DoubleQuoted` part (`crate::unparse::nested_parts_mut`
+would give the descent; note its `SingleQuoted { .. }` arm returns `Vec::new()`,
+so it can only supplement the outer loop, not replace it).
+
+This is **the exact substring an error message echoes**, which design-decisions
+§305 names as out of scope: nothing SlateOS runs will ever depend on it. Fix it only
+if it turns up as part of something that does. The in-scope half of this
+entry — a whole script being rejected where bash runs it — is closed.
+
+**Fixed by:** the corpus case named above, plus `lexer.rs` (`Unclosed::Backquote`
+`text` field, `read_word_verbatim`'s `` ` `` arm), `interp.rs`
+(`Unclosed::Backquote` report) and `parser.rs`
+(`name_unclosed_after_the_fragment`).
+
+### TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN. A `$( … )` opened inside one swallows the read that should have followed it — 2026-08-14
+
+**Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_word_verbatim`'s `$`
+arm in [`Verbatim::Dquote`], reached through
+`Shell::brace_extent_scan` → `Shell::brace_scanned_subs`.
+
+**Repro** (bash 5.2.37, `build/pr12.sh`):
+
+```sh
+z=ZZ
+v='A${z:-'"'"'p$(echo hi'"'"'q$(fi
+S1}B'; printf '[%s]\n' "${v@P}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| reports | ``syntax error near unexpected token `fi' `` | **nothing** |
+| value | `[AZZB]` | same |
+
+**What is wrong.** The two passes bash makes over this word carve it into
+*different constructs*, not merely read the same constructs differently.
+
+- `extract_dollar_brace_string` meets the `'` and hands the run to
+  `skip_single_quoted`, which stops at the **mate**. So `'p$(echo hi'` is one
+  skipped run, the `$(` inside it is never seen at all, and the scan resumes at
+  `q` — where it meets `$(fi⏎S1}B`, reads it, and reports `fi`.
+- `expand_word_internal` has no `'` left to speak of, so its
+  `string_extract_double_quoted` meets the **first** `$(`, hands the rest of the
+  word to `extract_command_subst`, and — there being no `)` anywhere — takes
+  everything. One substitution, not two.
+
+osh derives the brace scan's reads from the expansion's lex, so it gets the
+second carving and the second `$(` is inside the first's body, where the walk
+never reaches it. `Shell::brace_scanned_subs_slice`'s single-quote bookkeeping
+then correctly suppresses the one construct it *can* see (it is inside the run),
+and the result is silence.
+
+This is the residue of
+`TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN`, which
+fixed the part of the same disagreement that was only about *which openers*
+count. Rows where the two passes agree on the extents but not on the openers are
+now handled by `Lexer::brace_scan`; this row is one where they disagree on the
+extents, and no flag on the expansion's lex can express it.
+
+**What the proper fix looks like.** `Shell::brace_extent_scan` has to run over
+the brace's **text**, with the scan's own carve, rather than over the parsed
+part. Concretely: keep the undecoded source of an unread `${ … }` on the part
+(or reach it through `crate::unparse`), and lex it once in
+`Lexer::brace_scan` mode with the single-quote rule the scan really has — a `'`
+consumes to its mate and offers nothing inside, so a `$(` in there can neither
+be read nor run past the mate. `read_word_verbatim` already computes that mate
+(`sq_close`); what it does not do is let it bound a substitution, because for
+the *expansion* it must not.
+
+Note that `Lexer::brace_scan` as it stands is deliberately the narrow version:
+it adds openers and leaves extents alone. Widening it to bound a `$( … )` at
+`sq_close` would be wrong for the same lexer's expansion duty, so the widening
+has to come with the second pass, not instead of it.
+
+**Impact.** Diagnostics only — the value is already right. Reachable only
+through `@P`/`PS4`/here-doc text holding a `${ … }` whose operand has both an
+unterminated `$( … )` inside a `' … '` run and a failing one after it.
+
+---
+
+### TD-OILS-A-DOLLAR-BRACKET-BOUND-DOES-NOT-PERFORM-ITS-COMMAND-SUBSTITUTION. `$[ 1+$(… ]` reads the `$( … )` as an arithmetic operand token — 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — the evaluation of a
+`WordPart::ArithSub { bracket: true, … }` whose expression text holds an
+unclosed `$( … )`.
+
+**What is wrong.** `extract_arithmetic_subst` is
+`extract_delimited_string (string, sindex, "$[", "[", "]", 0)` (subst.c:1299) —
+flags `0`, so **no** `SX_COMMAND` and no nested read. The `$[` therefore closes
+at its `]` by plain delimiter counting, and the unclosed `$( … )` inside is met
+later, by the *arithmetic expansion* of the bounds text, which performs it under
+`Q_DOUBLE_QUOTES|Q_ARITH`: it reports, runs the abandoned extent, and yields
+nothing. osh instead hands the raw characters to its arithmetic tokenizer, which
+calls them a bad operand.
+
+Measured (`build/pgY.sh` d1/d2):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash | osh |
+|---|---|---|
+| `A$[1+$(for⏎x]B` | reports `for`, runs `fo`, `[A1B]` | silent, `[AA$[1+$(for⏎x]B]` |
+| `A$[1+$(echo hi⏎x]B` | reports EOF, `[A1B]` | silent, `[AA$[1+$(echo hi⏎x]B]` |
+
+Row d3 — the same body with no `]` at all — is byte-exact in both shells
+(silent, undecoded text), because there the `$[` genuinely never closes.
+
+**What the proper fix looks like.** Two things, in order. (1) `$[`'s lex must
+close at its `]` by plain delimiter counting, without the nested read — which
+means `Lexer::read_opaque_span` needs to know its enclosing close character, so
+that the `$((` spelling (SX_COMMAND) and the `$[` one (flags `0`) can part
+company. Routing that arm through `Lexer::unread_comsub_stop` was tried on
+2026-08-14 and reverted: it made the `$[` bounds text match bash on d1/d2, but
+it *regressed* the `$((` spelling in the corpus case
+`an-unterminated-construct-in-text-no-parser-read-is-a-runtime-failure`, whose
+`$((1+$(echo` row must report the read and stop rather than condemn the `$((`.
+A passing case outranks a documented divergence, so that arm keeps its `?`.
+(2) The arithmetic evaluator must perform a `$( … )` in its expression text
+with the unread-text rule rather than tokenizing it — which is what makes both
+rows' values follow.
+
+**Impact.** Wrong value and wrong diagnostic for a deprecated spelling of
+arithmetic expansion, in malformed input, reachable only through `@P`/`PS4`/
+here-doc text.
+---
+
+
+---
 
 ### TD-POSIX-GETRANDOM-WAS-AN-LCG-SEEDED-FROM-ONE-RDRAND-DRAW. libc's CSPRNG was not one — 2026-08-12 — ✅ FIXED 2026-08-12 (`posix/src/random.rs`, `SYS_GETRANDOM`)
 
@@ -48521,3282 +51809,6 @@ The residual 339 are exactly the composed-Latin-diacritics cases this entry
 predicted (`\u1e09` 255, `\u212b` 57, `été` 10, …). They are **not** tracked
 here as a bug; they are the layering question in `norm.rs`'s module doc, and
 belong to the operator. See `open-questions.md`.
-### [B] D-POSIX-SOCKET-META-WAS-NOT-SCOPED-TO-ITS-FD-TABLE — ✅ FIXED 2026-08-14
-
-**Found while running the eighth audit pass**, not by looking for it:
-`socket::tests::test_phase201_bind_port443_no_cap_eacces` failed once with
-`ENOTSOCK` where `EACCES` was expected, then passed three runs in a row.
-
-`SOCKET_META` (posix/src/socket.rs) is indexed by fd number, so it must have
-exactly the same scope as the fd table it is keyed by. `fdtable` made its
-storage **per-thread** on host builds (design-decisions.md §110) precisely
-because libtest runs tests on parallel threads. `SOCKET_META` stayed a
-process-global `static mut`, and the mismatch was reachable: two tests on
-different threads each create a socket and, drawing from *separate* per-thread
-fd tables, both get the same fd number `N` — near-certain, not unlikely, since
-each thread's table starts empty. They then shared one `SOCKET_META[N]`, and
-the first to `close()` wiped the entry the other was still using, whose next
-call saw a live fd with no metadata and reported `ENOTSOCK` for a good socket.
-
-Fixed by giving `SOCKET_META` the same `cfg`-split storage as
-`fdtable::fd_store`. Six consecutive full runs clean afterwards.
-
-Two things worth keeping from this. First, the `// SAFETY: Single-threaded
-access.` comments on these accesses were **true on the target and false under
-`cargo test`** — a safety comment that silently changes truth value with
-`cfg` is worse than none, and `fdtable` had already learned this lesson
-without the fix being propagated to the table keyed by its own indices.
-Second, an intermittent failure at roughly one run in four is easy to
-dismiss as noise when it appears in a test unrelated to what you are
-changing; it was worth the ten minutes to chase.
-
-### [B] D-POSIX-TIMED-WAITS-DID-NOT-VALIDATE-TV-NSEC — ✅ FIXED 2026-08-14
-
-`pthread_cond_timedwait`, `pthread_mutex_timedlock` and `sem_timedwait`
-accepted any `timespec` whatsoever. A `tv_nsec` of `1_000_000_000` or `-1` —
-the classic result of adding a nanosecond offset without carrying into
-`tv_sec` — should be `EINVAL` (glibc `valid_nanoseconds`, `include/time.h:517`);
-instead it fell through to the deadline comparison, where a too-large
-`tv_nsec` silently extended the wait by up to a second and a negative one made
-the call return `ETIMEDOUT` immediately. Both are wrong in the direction that
-hides the caller's bug. Separately, `mqueue::deadline_from_timespec` checked
-`tv_nsec` but not `tv_sec < 0`, which the kernel's `timespec64_valid` rejects.
-
-Fixed by adding `time::valid_nanoseconds` (glibc's predicate, verbatim) and
-calling it from each site **at the position its own upstream uses** — eagerly
-in `pthread_cond_timedwait` and `sem_timedwait`, lazily (contended branch
-only) in `pthread_mutex_timedlock` — plus the missing `tv_sec` half in
-`mqueue`. See the ninth-pass write-up under
-`D-POSIX-NULL-POINTER-ERRNO-NEEDS-A-PER-FUNCTION-AUDIT` for why the three
-placements differ and why the mqueue predicate is not the same predicate.
-
-Seven tests pin the distinctions, including the two that would silently pass
-under a naive "check it at the top of every function" fix:
-`test_pthread_mutex_timedlock_uncontended_ignores_a_bad_deadline` and
-`test_sem_timedwait_checks_the_deadline_before_the_fast_path`.
-
-**Not fixed, because we do not have them:** `pthread_cond_clockwait`,
-`sem_clockwait` and the `pthread_rwlock_{timed,clock}{rd,wr}lock` family are
-unimplemented. When they are added they need the same predicate plus
-`futex_abstimed_supported_clockid`, and the rwlocks check **eagerly** — see
-the comment at `pthread_rwlock_common.c:286-291`.
-
----
-
-### [B] TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED. bash runs `${z:-<(echo hi)}` and substitutes `/dev/fd/63`; osh yielded the nine characters `<(echo hi)` — 2026-08-14 — ✅ FIXED 2026-08-14
-
-**Where it was:** `userspace/oils/src/lexer.rs`, [`Lexer::read_word_verbatim`],
-which reads the operand, the pattern and the replacement of a `${ … }` and had
-no `<`/`>` arm at all.
-
-bash splits this construct across two files and osh had only one half of it.
-**Part (A) — the parse** — is `parse_matched_pair` naming `<(`, `>(` and `$(` in
-one breath (parse.y:5028) and sending all three through `parse_comsub`
-(parse.y:5042), so a `${ … }` body's scan parses a process substitution where it
-meets it, its syntax error is the enclosing unit's, and what survives is the
-parse *re-printed*; see
-`userspace/oils/tests/corpus/a-process-substitution-in-a-brace-body-is-parsed-where-it-is-met.sh`
-and [`parser::procsub_reprints`]. **Part (B) — the performance** — is
-`expand_word_internal` *running* it, and was this entry.
-
-**The rule** is bash's quoting flag, not the position. `expand_word_internal`
-reads a process substitution only when `if (string[++sindex] != LPAREN ||
-(quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) || (word->flags & W_NOPROCSUB))`
-lets it (subst.c:11079), so an **operand** runs one when the expansion is bare
-and keeps the characters when it is double-quoted, a **pattern** and a
-**replacement** run one either way (both are re-entered without
-`Q_DOUBLE_QUOTES`), and a **subscript** or a **substring bound** never does
-(`Q_DOUBLE_QUOTES|Q_ARITH`), so its arithmetic error names the characters.
-
-**The fix.** [`Verbatim`] gained an `Arith` mode beside `Bare`, `Replacement`
-and `Dquote` — identical to `Bare` in every other respect — and
-[`Lexer::read_word_verbatim`] gained a `<`/`>` arm live in `Bare` and
-`Replacement` only. On the parser side [`parser::verbatim_word_at`] picks the
-lexer entry from a new `Frag` (`Word` or `Arith`), which is what a subscript and
-the `' … '` runs inside it now pass. The body the arm reads is already the
-*re-print* part (A) spliced in, which is what bash performs too: the token
-buffer a `${ … }` scan leaves behind holds the re-print and nothing else.
-
-No new expansion machinery was needed. The double-quoted operand was already
-right — the splice puts the re-print into the text and its nested `$( … )` then
-expands normally, so `"${z:-<(echo $(echo q))}"` is `<(echo q)` in both shells —
-so the whole of part (B) was one liveness decision taken at lex time, which is
-where osh decides quoting.
-
-**The pre-existing inconsistency this closed.** The substring bound
-(`${z:<(echo hi)}`, via [`parser::parse_slice_bounds`]) *did* perform the procsub
-while the subscript beside it did not, so osh's two arithmetic contexts — which
-bash expands identically — disagreed. The bound is tokenized rather than read
-verbatim, so it has no `Verbatim` mode to set; [`parser::word_from_source`], its
-only reader, now turns a `Seg::ProcSub` back into the characters it was read
-from. Both contexts are on the same side now.
-
-**Verified:** `a-process-substitution-in-a-brace-body-is-performed-unless-the-expansion-is-quoted.sh`,
-27 cases across the five contexts. None of them prints a substitution's path —
-bash names it `/dev/fd/N` and osh a temporary file — so each asks a question the
-path does not answer: whether the text still begins `<(`, whether it names
-something that exists, or what a `cat` of it reads.
-
-**How it was found:** implementing part (A) — the eager parse and re-print of a
-process substitution met by a `${ … }` body scan.
-
-### [B] TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN. bash's `brace_gobbler` and its `${x@P}` re-read each meet a `<(` osh's do not — 2026-08-14 — ✅ FIXED 2026-08-14 (both halves, and the arithmetic-fragment residue)
-
-Two residues of TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED
-(above), left after both halves of it were done. Each is a *second* scan of the
-same text — one that is not `parse_matched_pair` and not `expand_word_internal` —
-which has a `<(` row of its own that osh's counterpart lacks. The `$(` spelling
-of each already matches bash byte for byte, so in both the machinery is there
-and only the row is missing.
-
-**Where:** `userspace/oils/src/interp.rs`, [`Shell::gobbled_subs`]; and the
-`${x@P}` re-read, `userspace/oils/src/parser.rs`, [`dquote_word_from_source`].
-
-* **✅ FIXED 2026-08-14.** `echo "${z:-"<(fi)"}"` — bash reports
-  `command substitution: line N+1: syntax error near unexpected token 'fi'`
-  plus the tail of the physical line, where osh prints `<(fi)`. The agent is
-  **`brace_gobbler`**, whose command-substitution row names all three spellings
-  (`(c == '$' || c == '<' || c == '>') && text[i+1] == '('`, braces.c:675) and
-  reaches `extract_command_subst` → `xparse_dolparen`, which *parses* the body
-  and throws the result away. Two facts pin it down. The gobbler's `quoted`
-  state does not nest and `${` opens none of its own (it is treated like `\{`),
-  so the **inner** `"` is `c == quoted` and clears the state — which is why the
-  row fires here and not in the plain `"${z:-<(fi)}"`, where parse.y has
-  already answered. And it fires only where brace expansion runs: an argument
-  or command word errors (`: "${z:-"<(fi)"}"`, `f "${z:-"<(fi)"}"`,
-  `echo "${a["<(fi)"]}"`), while an assignment RHS — which is not brace-expanded
-  — does not (`x="${z:-"<(fi)"}"` is silent). bash only ever *parses* it: with a
-  body that does parse, `echo "${z:-"<(echo hi)"}"` prints `<(echo hi)` in both
-  shells, so this is a diagnostic and not a missing expansion.
-
-  What was missing was something to hang the row on. [`Shell::gobbled_subs`]
-  walks the *parse* structurally, and here the tree is right to hold characters
-  — the `<(` sits in a `" … "` run inside a double-quoted operand, where neither
-  bash's expander nor osh's reads one — so no part was ever going to appear for
-  it. The fix is therefore not another lexer mode but a text-level pass beside
-  the structural walk, as `gobbled_backtick_subs` already is for a backquote:
-
-  * `wordscan::gobbler_procsubs(s, dquoted)` — the same flat-state loop as
-    `gobbler_readable`, reporting the index of each `<(`/`>(` met while `quoted`
-    is 0. (`gobbler_readable` could not answer this: it reports the stretches the
-    **`$(`** row fires in, which is `quoted == 0` *and* `quoted == '"'`, and the
-    `<(` row is the first of those alone.) A `$( … )` is skipped whole rather
-    than reported — that is the one spelling a part already stands for.
-  * `Shell::gobbled_procsubs` — for each index, lex `$(` + the rest of the word
-    with `parser::dquote_word_from_source` and take the resulting
-    `CmdSubBody::Unread`. The two spellings reach the same
-    `extract_command_subst`, so the swap is exact, and one lex settles the body,
-    the remainder and whether there was a `)` at all. It is a *lex*, not the
-    paren count `gobbler_readable` skips with, because `xparse_dolparen` is a
-    real parse: a `(` inside a quoted run of the body is not a nesting level to
-    it, and a count would carve `echo <(echo "(")` into a body that fails.
-  * The two are merged by **remainder length**: every tail the gobbler's word
-    carries is measured against the whole word (`unparse::gobbler_word`), so a
-    longer one is an earlier meeting. That is what keeps the interleaving right
-    where a word holds both — measured, `echo "${z:-'$(fi)'"<(for)"}"` reports
-    the `$(fi)` and `echo "${z:-"<(fi)"'$(for)'}"` the `<(fi)`.
-  * `Shell::has_gobbled_sub` — the cheap pre-test — gained a `WordPart::Literal`
-    row, answering wide (any `<(`/`>(` in a literal under quotes) so the word
-    reaches the scan that settles it.
-
-  **Verified:** `userspace/oils/tests/corpus/a-process-substitution-a-brace-scan-meets-is-read-where-the-quoting-is-clear.sh`,
-  29 rows, all matching bash 5.2.37 — including the parity (`"${z:-"a"<(fi)"b"}"`
-  is a *parse* error, `"${z:-"${y:-"<(fi)"}"}"` is silent), the `set +B` gate, the
-  words brace expansion does not reach (assignment RHS, `case` word, here-doc
-  body), the read happening before expansion (`z=Z`, `${z:+…}`), and the `declare
-  -f` re-print.
-* **✅ FIXED 2026-08-14 for the double-quoted operand** (`${z:-…}`, `${z:+…}`,
-  `${z:=…}`, `${z:?…}` and the plain `${z-…}` family) — which is the position
-  the report named, and the only one a `${x@P}`/`PS4` re-read reaches with the
-  quoting bash's own expansion declines a process substitution under. The
-  remaining positions are a residue of their own, logged at the end of this
-  bullet. Original report: `x='${z:-<(fi)}'; echo "${x@P}"` — bash's `extract_dollar_brace_string`
-  (subst.c:1881-1950) has a `<(` row of its own and recurses into it with a real
-  parse, so the `@P` re-read is a `bad substitution` and the text is printed
-  unchanged; osh splices the re-print and prints `<(fi)`.
-
-  **Measured against bash 5.2.37 (2026-08-14).** The row behaves as the `$(`
-  row beside it in every respect: `A${z:-<(fi)}TAIL` and `A${z:-$(fi)}TAIL`
-  give byte-identical output, down to the quoted remainder `` `fi)}TAIL' ``
-  and the `line 2` numbering `xparse_dolparen` gives an unread body. It is the
-  scan's row and not the string's — `x='a<(fi)b'` is silent — and it is reached
-  only where the scan's own quoting allows: `"<(fi)"` (double-quoted),
-  `'<(fi)'` (single-quoted, `skip_single_quoted`) and `\<(fi)` are all silent
-  and print their text. A body that parses is silent too and is *not*
-  performed: `A${z:-<(echo A >&2)}B` prints `A<(echo A >&2)B` and no `A` on
-  stderr.
-
-  osh already matched on six of those shapes. What it got wrong:
-
-  | written (as `x`, then `echo "${x@P}"`) | bash | osh (before) |
-  |---|---|---|
-  | `A${z:-<(fi)}TAIL` | reports, `bad substitution`, text | `A<(fi)TAIL` |
-  | `A${z:-${y:-<(fi)}}B` | reports (nested body too) | `A<(fi)B` |
-  | `A${z:-p<(fi)q$(for)r}B` | reports the **`<(fi)`** | reports the `$(for)` |
-  | `A${z:-<(fi}B` | `unexpected EOF`, `bad substitution`, text | runs `fi}` — `command not found` |
-
-  All but the last now match. The last is a *different* defect that the `$(`
-  spelling has identically — see
-  TD-OILS-AN-UNCLOSED-SUBSTITUTION-IN-AN-UNREAD-BRACE-BODY-IS-RUN-INSTEAD-OF-REFUSED
-  below — so it was left alone here rather than fixed twice.
-
-  **Why it was not a two-line change.** The `<(` span *is* already collected —
-  `Lexer::read_dollar_brace` has the row (lexer.rs:7069) and records a
-  `CmdSubSpan` with `SubOpen::Proc`, its `src`, its `range` and
-  `SubBody::Unread`. What is missing is a [`WordPart`] for
-  [`Shell::brace_scanned_subs`] to walk to: `procsub_reprints`
-  (parser.rs:6288) splices a re-print only for a `SubBody::Eager` span, and the
-  re-lex that carves the operand out of the body (`read_word_verbatim`) leaves
-  a `<(` as characters on purpose. So for an *unread* body the process
-  substitution survives only as text in a `WordPart::Literal`.
-  `arith_unread_subs` is the shape of the answer for the arithmetic scan, and
-  it excludes this spelling deliberately (parser.rs:6233-6240).
-
-  Two things make the obvious fixes wrong, both measured above:
-
-  * **The remainder runs past the `}`.** `` `fi)}TAIL' `` and
-    `` `fi)}B${y:-<(for)}C' `` are the rest of the *whole re-read string*, not
-    of the `${ … }`. So a text scan confined to the brace's own source (the
-    only text [`Shell::brace_extent_scan`] is handed) cannot build the part's
-    `tail`, and the `$( … )` spelling gets its own from
-    `unparse::attach_comsub_tails`, which runs over the assembled word in the
-    parser.
-  * **It must interleave with the `$(` spelling**, in the order the one scan
-    meets them — hence the `p<(fi)q$(for)r` row above.
-
-  Reusing [`CmdSubBody::Unread`] for the synthesized part is safe for the
-  *read* (the diagnostic quotes the body's remnant, never the delimiter, so a
-  `<(` and a `$(` in this position are byte-identical) but not for anything
-  that re-prints or *runs* one — `interp.rs:34302` performs an unread body, and
-  a process substitution here is never performed. So either the part carries
-  its spelling (a new field on `CmdSubBody::Unread`, two construction sites and
-  one printer, plus the run site taught to refuse) or it is synthesized late
-  enough that it can never escape into a print or a run — which is what
-  `Shell::gobbled_procsubs` does for the `brace_gobbler` half above, and the
-  reason that one could be done without touching the AST.
-
-  **What was done.** The first of the two: the part carries its spelling, which
-  makes both blockers vanish rather than needing to be worked around.
-
-  * `ast::SubDelim { Dollar, ProcIn, ProcOut }`, with `bytes()` (the delimiter
-    as written) and `is_performed()` (true only for `Dollar`). Recorded on
-    `CmdSubBody::Unread` and on the lexer's `SubBody::Unread`. Only the unread
-    form needs it: a body a parser *read* is a `CmdSubBody::Parsed` for `$(`
-    and a `WordPart::ProcSub` for the other two, so those two shapes already
-    tell the spellings apart.
-  * `Lexer::read_word_verbatim` gained a `<(`/`>(` row for `Verbatim::Dquote`
-    **when the text is unread** (`self.here_text`), emitting
-    `Seg::CmdSub(body, close, SubBody::Unread { delim })`. The existing
-    `Verbatim::Bare | Verbatim::Replacement` row above it is untouched — those
-    fragments really do *perform* the substitution, measured:
-    `x='A${z/p/<(echo hi)}B'; echo "${x@P}"` prints a `/dev/fd/N` in bash.
-  * `unparse.rs` prints the body back in `delim.bytes()`, and
-    `Shell::command_sub_body` returns that text instead of running anything
-    when `!delim.is_performed()`.
-  * The backslash arm of the same loop takes a `\<(`/`\>(` into the literal
-    run, because the *scan* that produced this text honours a backslash
-    whatever follows it (`extract_dollar_brace_string`'s `case '\\'`,
-    subst.c:1899) while the operand's own dquote read does not. `A${z:-\<(fi)}B`
-    prints `A\<(fi)B` and reports nothing.
-
-  Both blockers then answer themselves: the `tail` is filled by
-  `unparse::attach_comsub_tails` over the whole assembled word (so it runs past
-  the `}`, giving `` `fi)}TAIL' ``), and the interleaving is
-  `Shell::brace_scanned_subs`'s existing left-to-right walk.
-
-  **Verified:** `userspace/oils/tests/corpus/a-process-substitution-a-brace-re-read-meets-is-read-like-the-dollar-spelling.sh`,
-  22 rows, all matching bash 5.2.37 — the byte-identity with the `$(` spelling,
-  both interleavings, the nested body, the not-performed rows (including
-  `>(cat)` and a body writing to stderr, quoted and unquoted), the read
-  happening before the operand is chosen (`z=Z`, `${z:+…}`), the four shields
-  (unbraced text, `" … "`, `' … '`, backslash), the stepped-over subscript, and
-  the `PS4` spelling of the same re-read.
-
-* **✅ FIXED 2026-08-14** (every position but the arithmetic one; that one
-  closed later the same day, at the end of this bullet)**.** The row
-  was wired for the double-quoted **operand** only, and bash's scan reads the
-  whole `${ … }` body — it walks characters and knows nothing of the `#`, `/`
-  or `^^` it has already passed — so every other fragment wanted the same row:
-
-  | written (as `x`, then `echo "${x@P}"`) | bash | osh before |
-  |---|---|---|
-  | `A${z#<(fi)}B` (pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
-  | `A${z/p/<(fi)}B` (replacement) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
-  | `A${z^^<(fi)}B` (case pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
-  | `A${z:0:<(fi)}B` (offset) | reports ×2, `bad substitution`, text | `AB` |
-
-  The `$( … )` spelling was right in all four (measured), so again only the row
-  was missing. It was harder than the operand's, because in these positions the
-  substitution is *both* read for its extent **and** performed — a replacement
-  really does expand to `/dev/fd/N`, measured — so the part could not simply be
-  the non-performed `CmdSubBody::Unread` the operand's is.
-
-  **What was done.** The split `CmdSubBody` already makes between a body a
-  parser read and one only a scan read is now made for the process-substitution
-  part too, so one part answers for both halves:
-
-  * `ast::ProcSubBody` — `Parsed(Program)` or `Unread { src, tail, closed }` —
-    replaces the bare `Program` in `WordPart::ProcSub`.
-  * `lexer::ProcRead` (`Eager` / `Unread { closed }`) rides on `Seg::ProcSub`;
-    the `Verbatim::Bare | Verbatim::Replacement` arm of
-    `Lexer::read_word_verbatim` picks it from `self.here_text`, and now
-    tolerates a missing `)` exactly as the `$(` spelling does.
-  * `parser::seg_to_part` parses only an eager body. An unread one is carried
-    as text, because its read belongs to the scan and happens later, from
-    where a failure is `bad substitution` rather than a script syntax error.
-  * `unparse`: an unread body prints back as written, and joins
-    `attach_comsub_tails` so it gets the same remainder the `$(` spelling does.
-  * `interp`: `Shell::brace_scanned_subs_slice` collects it,
-    `Shell::extent_read_of_subs` reads it through the same
-    `comsub_reparse_read`, and the new `Shell::proc_sub_body` parses-then-
-    performs at expansion — only reachable if that read succeeded.
-
-  **Verified:** corpus case
-  `a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`,
-  21 rows, IDENTICAL against bash 5.2.37.
-
-  **✅ The arithmetic fragment, 2026-08-14.** Deferred at first, because osh
-  diverged over `<` in a bound before any process substitution was written at
-  all (`${z:1<(2)}` is `bcdef` in bash and was an `operand expected` in osh);
-  that was fixed as
-  TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND,
-  and this row followed.
-
-  It was **not** simply `Verbatim::Arith`'s row, as the deferral assumed. A
-  subscript shares that mode and must *not* get it: bash's scan steps over a
-  subscript whole (`skip_matched_pair` from the `[`), so `${z[<(fi)]}` never
-  offers its body to `extract_command_subst` and is an `operand expected` —
-  which osh already matched. A bound is walked in the open. So the mode split
-  in two: `Verbatim::Bound` / `Frag::Bound`, reached by `lex_bound_verbatim`
-  and `parser::word_bound_from_source_at`, identical to `Arith` in every
-  respect but that it takes `Dquote`'s unread-`<(` arm. That is the whole
-  change — the arm was already written for the operand, and the read/perform
-  split it produces (`SubBody::Unread`) is exactly a bound's: read for its
-  extent by the scan, never performed, because `Q_DOUBLE_QUOTES|Q_ARITH` is
-  what stops `expand_word_internal` (subst.c:11079).
-
-  No interp-side work was needed: `unparse::nested_parts` already classifies
-  `ParamSubstr`/`ArraySlice` bounds as `Nested::Operand`, so
-  `Shell::brace_scanned_subs_slice` was already descending into them.
-
-  **Verified:** 14 further rows in the same corpus case (the bound in offset
-  and length position, `${a[@]:…}` and `${@:…}`, the `@P` and `PS4` spellings,
-  the three quotings that shield it, and the well-formed `${z:<(echo 1)}` that
-  reaches the evaluator as characters), IDENTICAL against bash 5.2.37.
-
-**How it was found:** implementing the entry above.
-
-### [B] TD-OILS-AN-UNCLOSED-SUBSTITUTION-IN-AN-UNREAD-BRACE-BODY-IS-RUN-INSTEAD-OF-REFUSED. `x='A${z:-$(fi}B'; echo "${x@P}"` runs `fi}` where bash reports `bad substitution` — 2026-08-14 — ⚠️ OPEN
-
-A `$( … ` with no `)` inside a `${ … }` written in text no parser read — a
-`${x@P}` re-read, a `PS4`, a here-document body. bash reads the extent with
-`xparse_dolparen`, which fails at end of input; `si` is left past the end of the
-string, so the brace never closes, so `parameter_brace_expand` reports
-`bad substitution` naming the whole text and prints the text unchanged. Nothing
-is run. osh gets the *first* diagnostic right and then runs the body anyway:
-
-```sh
-x='A${z:-$(fi}B'; echo "${x@P}"
-# bash: command substitution: line 3: unexpected EOF while looking for matching `)'
-#       line 1: A${z:-$(fi}B: bad substitution
-#       A${z:-$(fi}B
-# osh:  command substitution: line 3: unexpected EOF while looking for matching `)'
-#       line 1: fi}: command not found
-#       A
-
-x='A${z:-$(echo hi}B'; echo "${x@P}"
-# bash: … unexpected EOF …; … bad substitution; A${z:-$(echo hi}B
-# osh:  … unexpected EOF …; Ahi}
-```
-
-Both spellings are affected identically — `<(fi}` behaves exactly as `$(fi}`,
-which is the point: the delimiter is not what is wrong here.
-
-**Where:** `userspace/oils/src/interp.rs`, [`Shell::extent_read_of_subs`]
-(~29622) and [`Shell::run_abandoned_extent`]. The scan classifies the failed
-read as `ExtentRead::Abandoned { body, rest }` and hands the body on to be run.
-That classification is *right* for an abandoned extent bash really does run on
-— it is `extract_command_subst`'s no-`)` path with the `jump_to_top_level`
-suppressed — but wrong when the caller is the brace scan, because there the
-unclosed read is also what stops the `}` from ever being found, and the
-`bad substitution` that follows pre-empts the run.
-
-**Proper fix:** distinguish the two callers. `extent_read_of_subs` should
-report the abandonment to the brace scan (so `brace_extent_scan` fails the
-whole `${ … }` and takes the `bad substitution` path with the source text)
-rather than letting the body reach `run_abandoned_extent`. The `closed: false`
-flag on `CmdSubBody::Unread` already names exactly this shape, so the test is
-to hand.
-
-**How it was found:** measuring the `<(` row of
-TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN
-against its `$(` twin, which turned out to be wrong the same way.
-
-### [B] TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND
-
-**Status:** ✅ FIXED 2026-08-14. Found 2026-08-14, measured against bash 5.2.37.
-The cause turned out to be wider than the title: the two bounds were
-**tokenized as a command** rather than read as arithmetic, so `<` was only the
-most visible of the operators being lost. See "The fix" at the end.
-
-A `<` in the offset or length of `${z:o:l}` swallows everything to its left.
-The same expression inside a plain `$(( ... ))` is fine, so this is the brace
-fragment's own reading of the text, not the arithmetic evaluator's:
-
-| written | bash | osh |
-|---|---|---|
-| `z=abcdef; echo "${z:1<(2)}"` | `bcdef` | `z: <(2): syntax error: operand expected` |
-| `z=abcdef; echo "${z:0:1<(2)}"` | `a` | same error |
-| `echo $(( 1<(2) ))` | `1` | `1` |
-
-bash reads `1<(2)` as `1 < (2)`, which is `1`, so the offset is 1. osh
-evaluates `<(2)` alone -- the `1` is gone by the time the evaluator sees the
-expression, which is what the quoted error token shows.
-
-**Where:** `userspace/oils/src/lexer.rs`, the `Verbatim::Arith` path of
-[`Lexer::read_word_verbatim`], and whatever splits a `${z:o:l}` body into its
-two fragments in `userspace/oils/src/parser.rs`. The `<` is being taken for
-something other than a comparison operator -- most likely a fragment boundary.
-
-**Proper fix:** treat `<` in an arithmetic fragment as the comparison operator
-it is, so the whole fragment reaches the evaluator. A `<(` there is *not* a
-process substitution to be performed either -- measured, `${z:0:<(echo 1)}` is
-an `operand expected` in bash with the characters `<(echo 1)` standing as the
-error token, which osh already matches.
-
-**Blocked, and then unblocked (same day):** the arithmetic-fragment row of
-TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN.
-bash's `${ ... }` scan reads a `<( ... )` in an arithmetic fragment exactly as it
-reads one anywhere else in the body -- `x='A${z:0:<(fi)}B'; echo "${x@P}"`
-reports the parse twice and then `bad substitution`, where osh printed `AB` --
-but a corpus row for it would have been measuring this bug instead, so the
-corpus case
-`a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`
-left that position out and said so. The fix below removed the obstacle, and the
-rows went in the same day: that case now measures a bound in seven further
-positions.
-
-**How it was found:** measuring where bash's brace scan reads a `<( ... )`,
-while checking whether the `Verbatim::Arith` fragments needed the same row as
-the pattern and replacement ones.
-
-**The fix (2026-08-14).** `parse_slice_bounds`
-(`userspace/oils/src/parser.rs`) read each bound with `word_from_source`, which
-called `tokenize(...)` — a *command* tokenizer — and then joined the surviving
-`Tok::Word`s with a literal space. So every operator character was claimed by
-the tokenizer instead of reaching the evaluator, and whatever it could not make
-a word of was silently dropped. `<` was merely the case that produced an IO
-number and a redirect. The rest, all measured against bash 5.2.37 with
-`z=abcdef`:
-
-| written | bash | osh, tokenized |
-|---|---|---|
-| `${z:1<2}` | `bcdef` | `cdef` — `1<` taken for a redirect |
-| `${z:1>2}` | `abcdef` | `cdef` — likewise |
-| `${z:1<=2}` | `bcdef` | `=2: operand expected` |
-| `${z:1 < (2)}` | `bcdef` | `1 2: syntax error` |
-| `${z:1;2}` | `;2: invalid arithmetic operator` | `1 2: syntax error` |
-| `${z:1&2}` | `abcdef` | `1 2: syntax error` |
-| `${z:3|2}` | `def` | `3 2: syntax error` |
-| `${z:1&&2}` | `bcdef` | `1 2: syntax error` |
-| `${z:1)}` | `1): syntax error in expression` | silently `abcdef` |
-
-Both bounds now go through `word_subscript_from_source_at` — the very reader an
-array subscript uses, which is `verbatim_word_at(..., Frag::Arith)` plus
-`attach_subscript_reads`. The two arithmetic fragments therefore no longer
-disagree with each other, which is what `attach_subscript_reads`'s own doc
-comment had been asking for.
-
-Two further defects of the same splitter were found while measuring it, and are
-fixed in the same change:
-
-* **Which colon cuts.** bash does not `strchr` for the `:`; `skiparith`
-  (subst.c) skips one `:` for every `?` seen, and counts nothing at all inside
-  a `( … )`. `${z:1?2:3}` is `cdef` (the whole text is the offset) while
-  `${z:1?2:3:1}` is `c`; `${z:1?1?2:3:4}` is `cdef`, two `?` swallowing both
-  colons; `${z:(1?2:3):1}` is `c`. osh split on the first `:` unconditionally
-  and so reported `` `:' expected for conditional expression `` for all of
-  these. Now `slice_split_colon` implements the rule.
-* **An empty bounds text.** `${z:}` is `${z:}: bad substitution` in bash, and
-  uniformly so — `${@:}`, `${*:}`, `${a[@]:}`, `${a[1]:}` and an unset
-  parameter all report it. osh printed the whole value. It is the *text* that
-  must be non-empty, not what it expands to: `${z:$e}` with `e=` is `abcdef`.
-  `parse_slice_bounds` now returns `None` for an empty text and each of its
-  three call sites turns that into `WordPart::BadSubst`.
-
-Verified by the corpus case
-`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`
-(75 rows, IDENTICAL), the lib suite and a full sweep.
-
-**Unblocked, and then done (same day):** the arithmetic-fragment row named
-under "Blocks" above was the only thing left of
-TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN,
-and it is now closed there. It was a separate row from this entry's — after
-this fix `${z:1<(2)}` evaluated correctly but `x='A${z:0:<(fi)}B'; echo
-"${x@P}"` still printed `AB`, where bash reads the body for its extent and
-reports `bad substitution`. It turned out **not** to be the `Verbatim::Arith`
-row this entry's title suggested, because the *subscript* shares that mode and
-must not get it: bash's `${ … }` scan steps over a subscript whole
-(`skip_matched_pair`), so `${z[<(fi)]}` never offers its body to the scan and
-is an `operand expected` in bash — which osh already matched. Only a bound is
-walked in the open, so `Frag::Arith` split in two and the new `Frag::Bound`
-took the row. See that entry for the change.
-
-### [B] TD-OILS-AN-UNBALANCED-PAREN-IN-A-SLICES-BOUNDS-IS-AN-ARITHMETIC-ERROR-NOT-A-BAD-SUBSTITUTION
-
-**Status:** ✅ FIXED 2026-08-14. Found 2026-08-14, measured against bash 5.2.37.
-The fix turned up a second rule of the same walk, fixed with it — see "The fix"
-at the end.
-
-`skiparith` (subst.c) balances parens while looking for the colon that cuts
-`${x:off:len}` in two, and an unbalanced `(` makes it run off the end. bash
-then reports that as a **bad substitution** naming the whole bounds text, before
-either bound is evaluated. osh implements the balancing (that is what makes
-`${z:(1?2:3):1}` cut in the right place) but not the complaint, so the text
-reaches the evaluator and produces an arithmetic diagnostic instead:
-
-| written | bash | osh |
-|---|---|---|
-| `${z:(1}` | ``bad substitution: no closing `)' in (1`` | ``z: (1: missing `)' (error token is "1")`` |
-| `${z:(1:2}` | ``… no closing `)' in (1:2`` | ``z: (1: missing `)'`` — and it cut at the colon |
-| `${z:((1:2}` | ``… no closing `)' in ((1:2`` | likewise |
-| `${z:1+(2}` | ``… no closing `)' in 1+(2`` | ``z: 1+(2: missing `)'`` |
-| `${a[@]:(1}` | ``… no closing `)' in (1`` | arithmetic error |
-| `${@:(1}` | ``… no closing `)' in (1`` | arithmetic error |
-
-Both are rc=1, so only the message differs — but the message differs in class,
-not just wording: bash's is the DISCARD-class `bad substitution` family, raised
-by the cut, and it names the bounds text rather than the parameter.
-
-Three things scope it precisely, all measured:
-
-* It is the **whole bounds text** that is checked, once, before the cut — the
-  message quotes `(1:2` entire, the colon never having split it.
-* It is only the text the *cut* walks. Once a colon has been found with the
-  depth back at zero, an unbalanced `(` in the length is an ordinary arithmetic
-  error: `${z:0:(1}` is ``z: (1: missing `)'`` in bash too, and osh matches.
-* A stray `)` at depth zero is not an error at all: `${z:)1}` is
-  `)1: syntax error: operand expected` in both.
-
-**Where:** `userspace/oils/src/parser.rs`, `slice_split_colon` — which already
-tracks the depth and would only need to report a non-zero one at the end — and
-its three call sites in `parse_braced_param_in`, which currently turn the
-`None` that means "empty bounds" into `WordPart::BadSubst(raw)`.
-
-**Proper fix:** `slice_split_colon` reports the unbalanced case distinctly from
-the empty one, and the call sites raise ``bad substitution: no closing `)' in
-<bounds text>``. That message shape already exists in
-`userspace/oils/src/interp.rs` (`b"bad substitution: no closing `)' in "`,
-~35600) but it names the whole *word*, whereas this one names the bounds text
-only, so it needs its own carrier on the word part rather than a reuse of
-`BadSubst`, whose printer names `${…}` entire.
-
-**Blocked:** one row of the corpus case
-`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`,
-which said so in its header and left the shape out. Now measured there.
-
-**How it was found:** measuring bash's slice bounds exhaustively while fixing
-TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND. It
-was the last of four divergences that measurement turned up, and the only one
-not fixed there.
-
-**The fix (2026-08-14).** Two things, because measuring the first turned up the
-second.
-
-**(1) The complaint.** `slice_split_colon` now returns the depth it ended at
-beside the split index, `parse_slice_bounds` carries a non-zero one as
-`SliceBounds::unclosed`, and both `WordPart::ParamSubstr` and
-`WordPart::ArraySlice` gained an `unclosed: Option<Str>` field for it. It is a
-field on the operator rather than a `WordPart::BadSubst`, because *where* it is
-raised is the whole of what distinguishes the two: `${z:}` is a bad
-substitution even for an unset parameter, while `${u:(1}` with `u` unset is
-silently empty. So the check sits exactly where the offset would have been
-evaluated — `Shell::slice_bounds_unclosed`, called from `scalar_slice`,
-`assoc_slice` and the indexed path of `slice_elements_resolved`, each after its
-own "nothing to measure" exit. Every ordering measured lines up: an empty
-array, an empty `$@`, `set -u`, and a set-but-empty scalar (which *does* report,
-having one position).
-
-`no_longjmp_on_fatal_error` — `Shell::prompt_expanding` — **suppresses** the
-complaint rather than rewording it, so under `${x@P}` or `PS4` the characters go
-on to the evaluator and the arithmetic error is what comes out. That is the
-`if (no_longjmp_on_fatal_error == 0)` guard the report sits behind, and it is
-why osh's *old* answer was right in those two contexts and only those two.
-
-**(2) The walk is quote-aware.** Measuring (1) showed the walk steps over a
-`' … '` run, a `" … "` run and a backslash-escape whole — all three counters
-included, not just the paren one. `${z:"1:2"}` does not split (the evaluator
-meets `1:2` as one bound and says so), `${z:1"?"2:3}` does split (the quoted `?`
-buys no colon), and `${z:0"("}`, `${z:0'('}`, `${z:0\(}` and `${z:(1"("2)}` are
-all balanced. osh's walk saw none of that, so before this fix it both cut in the
-wrong place and complained where bash did not. Note this is about the *walk*
-only: the quote characters stay in the bound, and the arithmetic reading each
-half is given removes them (or does not — a `' … '` keeps its second reading).
-
-The walk is over the text **as written**, which the same measurement pins down
-from the other side: `p="("; ${z:$p 1}` and `${z:$(echo "(1")}` are ordinary
-arithmetic errors, each being balanced as written however unbalanced its value.
-
-**Verified:** 37 further rows in
-`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`, the
-lib suite and a full sweep.
-
-### [B] TD-OILS-THE-WAIT-NO-OPERANDS-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP. The job holding `$!` is not spared, once per many sweeps — 2026-08-14 — OPEN
-
-**Where:** `userspace/oils/tests/corpus/wait-with-no-operands-and-a-job-that-just-ended.sh`,
-the group "only the last one backgrounded is spared", against
-`Shell::builtin_wait`'s operand-less arm and `Shell::drain_jobs`
-(`userspace/oils/src/interp.rs`).
-
-**What — and this time the whole row was captured.** One full
-`scripts/osh-bash-diff.py` sweep came back `654 matched, 0 waived, 1 failed`
-with **one line** of the case different, everything else in it identical:
-
-```sh
-( exit 3 ) & ( exit 4 ) & sleep 0.4; wait; echo "  noargs=$?"
-VAR=stale; wait -n -p VAR; echo "  n=$? $(pvar)"
-```
-
-| | bash 5.2.37 | osh (this sweep) |
-|---|---|---|
-| `noargs=` | 0 | 0 (agreed) |
-| `n=` | `4 a pid` | **`127 unset`** |
-
-So osh had nothing left to report where bash still had the last-backgrounded
-job. Re-run on its own immediately after: `1 matched, 0 waived, 0 failed`.
-Saved report:
-`target/dvscratch/corpus-failures/20260814-145703/wait-with-no-operands-and-a-job-that-just-ended.txt`.
-
-**What a 127 requires, read out of the code rather than guessed.** The spare is
-`builtin_wait`'s operand-less arm: after `drain_jobs`, every job with a status
-is marked `notified` *except* the one whose pid is `last_bg_pid`, and
-`cleanup_dead_jobs` then drops exactly the notified ones. But `drain_jobs`
-itself marks `notified` for every job it *waited for*, and it waits for any job
-not already in its `known` snapshot — `known` being the jobs whose `exit_seen`
-was set **before** the wait was reached. So the spare survives only when the
-`$!` job's `exit_seen` was already set, which the unit-boundary
-`cleanup_dead_jobs` does for a job that is both finished and older than
-`JOB_EXIT_NOTICE_GRACE` (20 ms). A 127 means that did not happen for the `$!`
-job specifically: had it been the *other* job that was late, `drain_jobs` would
-have waited that one and the spare would still stand.
-
-**The margin is not thin, which is what makes this odd.** Both shells were
-measured at four margins (`build/pgS.sh`), and they agree exactly:
-
-| `sleep` before the `wait` | bash | osh |
-|---|---|---|
-| none | `127 unset` | `127 unset` |
-| 0.01 | `4 a pid` | `4 a pid` |
-| 0.05 | `4 a pid` | `4 a pid` |
-| 0.4 | `4 a pid` | `4 a pid` |
-
-The flip is between 0 and 0.01, so the case's `sleep 0.4` is a ~40x margin — not
-the ~1x margin that
-TD-OILS-THE-COMPGEN-JOB-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP turned out to
-be. **Do not assume the same diagnosis and just widen the sleep.**
-
-**Loads that do NOT reproduce it — do not spend the time again.** The job is
-thread-backed, not a process (`( exit 4 ) & echo $!` prints the synthetic
-`900000`, where `sleep 0.4 &` prints a real pid), so both of the obvious
-starvation stories were tried and neither bit:
-
-- 20 serial runs of the group alone: clean.
-- 119 runs of the group at 8-way concurrency: clean.
-- 64 runs of the *whole case* at 8-way concurrency: clean.
-- 36 runs under a process-spawn storm (6 loops spawning `osh -c :` and
-  `bash -c :` back to back, this host's documented ~200-290 ms spike source):
-  clean.
-- 30 runs under CPU saturation (24 busy-loop processes on 12 cores): clean.
-
-Probes are `build/repro-wait.sh` (the group), `build/repro-wait2.sh` (the whole
-case), `build/spawnstorm.sh`, `build/cpuburn.py` — all in the gitignored
-`build/`, so re-create them from this entry if they are gone.
-
-**Proper fix.** Unknown, and deliberately not guessed at. The next sighting
-should establish which of the two conditions failed — whether the `$!` job's
-body was genuinely unfinished at the unit-boundary poll, or whether the poll did
-not run — by instrumenting `poll_jobs` to record, per job, `is_finished` and
-`born_at.elapsed()` at each call, and dumping that when `wait -n` answers 127.
-That distinguishes "the thread really was 400 ms late" from a bookkeeping fault,
-and only the first is a case-margin problem.
-
-**Impact.** An intermittently red sweep, which is the gate on every commit —
-and the sweep takes ~19 minutes, so a re-run to disambiguate is expensive.
-
-**Sighting 2026-08-14, in the *unit* suite, and fixed there.**
-`interp::tests::wait_n_ignores_a_job_whose_status_was_already_reported` failed
-once under `cargo test -p oils --lib` (`wait -n` answered 127 where 3 was due,
-i.e. the operand-less `wait` had *not* spared the job) and passed when re-run
-alone. Same shape as this entry, but with a cause the test owned: it backgrounded
-`( exit 3 ) &` and then slept a constant `0.2` to make the job finish first, and
-no constant is long enough to promise that on a loaded machine. Fixed properly
-rather than by lengthening the sleep — a new `settle_jobs` test helper (the
-whole-table form of the existing `settle_job`) polls `poll_jobs` until every job
-has a status, after the same `JOB_EXIT_NOTICE_GRACE`. That removes this test from
-the flaky family; the *corpus* case above is untouched and stays open.
-
----
-
-### TD-OILS-AN-ARITHMETIC-SCAN-REPORTS-NONE-OF-THE-READS-IT-MAKES. `$(( … ))` swallows the diagnostics its nested `$( … )` should raise, and loses the text after a read that stopped early — 2026-08-14
-
-**Where:** `userspace/oils/src/interp.rs` — `Shell::arith_extent_expand` /
-`arith_extent_frame` and the `$((` route out of `Shell::arith_extent_route`.
-
-**What is wrong.** `param_expand` reaches a `$((` through
-`extract_command_subst` with `SX_COMMAND` (subst.c:10575), so the paren count
-*does* recurse into a nested `$( … )` — a real parse, reported where it is met.
-osh runs the count but never reports, and in one shape stops in the wrong place.
-Measured against bash 5.2.37 (`build/pgX.sh` rows a/c, `build/pgY.sh` d4/d5):
-
-| word (inside `v='…'`, via `"${v@P}"`) | bash | osh |
-|---|---|---|
-| `A$((1+$(echo hi⏎q` | reports EOF, `[A]` | reports EOF, `[Ahi]` |
-| `A$((1+$(for⏎q))B` | reports **twice** (`for`, then `` `(1+$(for' ``), `[AB]` | silent, `[A]` |
-| `A$((1+$(for⏎xB` | reports `for`, `[A]` | reports `for`, **runs `fo`**, `[A⏎xB]` |
-
-Rows 1 and 3 report because the read runs from `Shell::arith_nested_read`,
-which does call `Shell::comsub_reparse_read`; what those two get wrong is the
-*value*, both by performing the abandoned extent the way the string level does
-and the brace level does not. Row 2 is the substantive one: the read stopped
-part way, so bash's count resumed after the `for`'s line and found the `))`,
-leaving `B` to the word. osh consumes to the end and loses it — and so never
-reaches the read at all, which is why it is the one row that is also silent.
-
-**What the proper fix looks like.** The `$((` count needs the same two-outcome
-treatment `${ … }` got on 2026-08-14: `Shell::comsub_reparse_read` for the
-report (which also decides jump vs. no-jump), and
-`Shell::failed_extent_split`'s resume point for where the count carries on.
-`Lexer::unread_comsub_stop` already puts the lexer in the right place; what is
-missing is the interp half — an `arith`-side counterpart of
-`Shell::unclosed_brace_reads`.
-
-**Impact.** Diagnostics only for two of the three rows; a wrong value for the
-third. Needs `@P`/`PS4`/here-doc text to be reachable at all.
-
----
-
-### TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN. A `<(`/`>(` in it is never read, though the brace scan names it — 2026-08-14 — ✅ FIXED 2026-08-14
-
-**Where:** `userspace/oils/src/interp.rs` — `Shell::extent_read_of_rest` and
-`Shell::unclosed_brace_reads`, both of which lex their text with
-`crate::parser::dquote_word_from_source` → `crate::lexer::lex_dquote_body`.
-
-**What is wrong.** `extract_dollar_brace_string` names `$(`, `<(` and `>(`
-together and hands each to the same `extract_command_subst` (subst.c:1881-1950),
-**whatever the quoting** — that is why `x='A${z#<(fi)}B'` reports the parse
-twice. A double-quoted *run*, by contrast, has no process substitution in it at
-all: at string level bash and osh agree that `v='A<(echo hi⏎q'` is literal
-text. So `lex_dquote_body` is the right lexer for a string-level remainder and
-the wrong one for text the **brace scan** is walking.
-
-Measured (`build/pgY.sh` d6), `A${z:-P1<(echo hi⏎S1}B` under `${…@P}`:
-
-| | bash 5.2.37 | osh |
-|---|---|---|
-| reports | `` unexpected EOF while looking for matching `)' `` **then** `…: bad substitution` | the `bad substitution` only |
-| value | undecoded word | same |
-
-The `$(` spelling of the same row (`build/pgW.sh` row 5) is byte-exact, so this
-is precisely the two openers `lex_dquote_body` cannot see. The dollar spelling
-of d7 — where the read stops early and the brace closes — is also exact,
-because that path re-lexes through `parse_braced_param_in` in
-`Quoting::Unread`, which *does* read them.
-
-**It is not only the two openers — the whole quote model is wrong** (measured
-2026-08-14, `build/pq1.sh` and `build/pq2.sh`). `extract_dollar_brace_string`
-**skips** a quoted run rather than walking it, and the two quotes skip
-differently:
-
-| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | what it shows |
-|---|---|---|
-| `A${z:-P1<(echo hi⏎S1}B` | reports EOF, `bad substitution` | the bare `<(` row **is** read |
-| `A${z:-P1"<(echo hi⏎S1"}B` | silent, `[AZZB]` | a `<(` inside `" … "` is **not** |
-| `A${z:-P1"$(echo hi⏎S1"}B` | reports EOF, `bad substitution` | a `$(` inside `" … "` **is** |
-| `A${z:-P1'$(echo hi⏎S1'}B` | silent, `[AZZB]` | a `$(` inside `' … '` is **not** |
-| `A${z:-P1'<(echo hi⏎S1'}B` | silent, `[AZZB]` | …nor a `<(` |
-| `A${z:-P1"<(echo hi⏎S1}B` | `bad substitution`, **no** read report | a lone `"` swallows to end of string |
-| `A${z:-P1'<(echo hi⏎S1}B` | `bad substitution`, **no** read report | …and so does a lone `'` |
-| `A${z:-"x"<(echo hi⏎S1}B` | reports EOF, `bad substitution` | a *closed* run does not suppress what follows |
-| `A${z:-P1\<(echo hi⏎S1}B` | silent, `[AZZB]` | a backslash escapes the opener |
-
-So the brace scan delegates a `" … "` run to a double-quote skipper that has
-the `$(` row and **not** the `<(`/`>(` row — bash's ordinary rule that there is
-no process substitution inside double quotes — and skips a `' … '` run whole,
-offering its interior to nothing.
-
-`lex_dquote_body` models neither — it treats both quote characters as ordinary
-literals, which is correct for `Q_DOUBLE_QUOTES`, where the string *is* already
-the quoted run. Measured (`build/pq1.sh`, `build/pq2.sh`, `build/pq3.sh`), osh
-nevertheless agrees with bash on every *quoted* row above, by a different
-mechanism in each case: where the run closes, the brace closes too and the word
-goes through `parse_braced_param_in`, which does model quotes; where the run does
-not close, `lex_dquote_body`'s missing `<(` row happens to suppress the same read
-bash's skip suppresses. Two rows were left where the mechanisms did not coincide;
-the first of them is now fixed:
-
-| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh |
-|---|---|---|
-| `A${z:-P1"$(echo hi⏎S1}B` | reports EOF, `bad substitution`, undecoded | ✅ same since 2026-08-14 |
-| `A${z:-'p$(echo hi'q$(fi⏎S1}B` | reports `fi`, `[AZZB]` | silent, `[AZZB]` |
-
-Row 1 was the serious one — a **spurious command execution**: osh reported the
-EOF, then ran `S1}` and produced `[Ahi]`. A lone `"` opens a run that swallows to
-end of string, leaving the brace nothing to close on, so bash condemns the word;
-osh instead let the failed read out of `read_opaque_span`'s `"`-run `$(` sub-arm,
-where [`Lexer::unclosed_seg`] degraded the whole word into a *string-level*
-`$( … )` and then performed it. Fixed 2026-08-14 by giving that sub-arm
-(`userspace/oils/src/lexer.rs`, `read_opaque_span`'s `'"'` arm) the same
-`Err(e) if self.unread_comsub(&e)` recovery the two `read_dollar_brace_body`
-arms already had: re-emit the `$(` into the raw text, take back what the reader
-consumed with `Lexer::unread_comsub_stop`, and `continue` the quoted-run loop.
-The read is still reported — it happened — and the run then swallows the rest,
-so the brace never closes and the word is condemned, exactly as in bash. The bug
-was **pre-existing**, not a regression: measured identical on the commit before
-the earlier 2026-08-14 brace-scan fix.
-
-Row 2 is a lost diagnostic only; the same row before the brace-scan fix had the
-wrong value *and* ran `f`, so it is much improved.
-
-**A second mechanism loses the same report where the brace *does* close**
-(measured 2026-08-14, `build/pr1.sh` r3). `A${z:-'i"t'<(fi⏎S1}B` reports `fi`
-in bash and expands to `[AZZB]`; osh now gets the value right (it was the
-undecoded word until the unmated-`"` fix of the same day) but still says
-nothing. That path never goes near `extent_read_of_rest`: the brace closed, so
-the reads are replayed off the *parsed operand*, and the operand lexer is
-`read_word_verbatim` in [`Verbatim::Dquote`] — which has a perfectly good `<(`
-row, but never reaches it, because the `"` inside the `' … '` run opens a
-quoted run that swallows `t'<(fi⏎S1` whole.
-
-Both scans are right about their own text and wrong about each other's, which
-is the shape of the whole issue: bash runs **two** passes over these bytes with
-**different quote rules** — `extract_dollar_brace_string`, where a `'` run is
-skipped and a `"` is a quote, and `expand_word_internal`, where a `'` is an
-ordinary character and a `"` is a quote. osh derives the reads from the
-expansion's lex in one path and from a string-level lex in the other, and
-neither is the scan's.
-
-**What the proper fix looks like.** A real lex entry for "text a brace scan is
-walking" — not `lex_dquote_body` with a row bolted on, and not the operand lex
-either. It needs, at its own level: the `<(`/`>(` openers beside `$(`; a `'`
-that consumes to the next `'` or to end of string, offering nothing inside it;
-and a `"` that consumes to the next `"` or to end of string, offering only `$(`
-(and `` ` ``) inside it. A backslash hides the byte after it. Then
-`extent_read_of_rest`, `unclosed_brace_reads` **and `brace_extent_scan`** all
-take their reads from that one pass, `lex_dquote_body` keeps its current
-string-level callers unchanged — the p1/p2 probe above confirms those answers
-are right as they stand — and the operand lex stops being asked a question it
-was never answering.
-
-These rows are the acceptance test the table above does not already cover — the
-ones that pin *which* quote wins when the two are interleaved (measured
-2026-08-14 against bash 5.2.37, `build/pr1.sh`):
-
-| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh today |
-|---|---|---|
-| `A${z:-"it's"$(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
-| `A${z:-"it's"<(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
-| `A${z:-'i"t'<(fi⏎S1}B` | reports `fi`, `[AZZB]` | ✅ same since 2026-08-14 |
-| `A${z:-P1\'<(echo hi⏎S1}B` | reports EOF, `bad substitution` | ✅ same since 2026-08-14 |
-| `A${z:->(echo hi⏎S1}B` | reports EOF, `bad substitution` | ✅ same since 2026-08-14 |
-| `A${z:-${y:-<(fi⏎S1}B` | reports `fi`, `bad substitution` | same |
-
-So a `'` inside a closed `" … "` run opens nothing (rows 1-2) and a `"` inside a
-closed `' … '` run opens nothing (row 3) — each quote is invisible inside the
-other's run — and a backslash spends itself on the quote it precedes, leaving
-the `<(` after it live (row 4).
-
-An attempt that added only the `<(`/`>(` row to `lex_dquote_body` was written
-and reverted on 2026-08-14, before being compiled, because these measurements
-showed it would have regressed the three suppressed rows above (they are silent
-in bash today and in osh today, and would have started reporting).
-
-**Fixed 2026-08-14**, along the lines above. Three pieces:
-
-- `Lexer::brace_scan` (`userspace/oils/src/lexer.rs`) — a flag saying "this
-  scan stands in for `extract_dollar_brace_string`, not for the expansion after
-  it". With it set, `read_double_quote_until` grows the scan's other two
-  openers: a `<(`/`>(` becomes a `SubBody::Unread` segment carrying its own
-  `SubDelim`, which the expansion prints straight back
-  (`SubDelim::is_performed` is false for both), so the word's **value** is
-  untouched and only the extent walk gains a construct to read. The new entry
-  `lexer::lex_brace_scan_body` → `parser::brace_scan_word_from_source` is what
-  `Shell::extent_read_of_rest` now lexes its remainder with, which is the
-  unclosed-brace half (rows 4-5 of the interleaving table above).
-- The closed-brace half (row 3) is the same flag turned on from
-  `read_word_verbatim`'s `"` arm, and **only** when that run opened inside a
-  `' … '` one — `in_run && self.here_text`. That is exactly the case where the
-  scan never saw a quote at all, because it stepped over the single quotes
-  whole. Outside a run the `"` is the scan's own, and there `skip_double_quoted`
-  reads the `$(` spelling alone, which is what the reader already did.
-- The quote state itself moved out of the lexer and into the walk, as
-  `ScanQuote` (`interp.rs`): two independent flags, because
-  `skip_single_quoted` hunts for a `'` and `skip_double_quoted` for a `"` and
-  neither knows the other character — so each quote is an ordinary byte inside
-  the other's run. `Shell::brace_scanned_subs_slice` tracks both over the
-  literal runs (a `\` still hides the byte after it) and suppresses the two
-  process-substitution spellings inside a `" … "` while letting `$(` through;
-  `brace_scanned_subs_in` no longer resets the state on entering a
-  `WordPart::DoubleQuoted` whose `"` the scan never saw.
-
-Corpus case:
-`userspace/oils/tests/corpus/the-brace-scan-reads-a-process-substitution-and-the-expansion-after-it-does-not.sh`
-— 14 shapes plus a here-document body, byte-identical to bash 5.2.37 including
-stderr.
-
-**Impact while it stood.** Diagnostics only — the values already agreed. A
-`<(`/`>(` at brace level lost its read report. The worst shape — a lone `"`
-before a `$( … )` making osh run a command bash does not, and yield the wrong
-value — was fixed earlier the same day (see row 1 of the two-row table above).
-Reachable only through `@P`/`PS4`/here-doc text holding a malformed `${ … }`.
-
-**Not fixed by this, and tracked separately:** row 2 of the two-row table,
-`A${z:-'p$(echo hi'q$(fi⏎S1}B`. That one is not about the openers but about
-where a construct *ends*; see
-`TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN`.
-
----
-
-### TD-OILS-AN-UNMATED-DOUBLE-QUOTE-GROWS-A-MATE-WHEN-THE-WORD-IS-PRINTED-BACK — 2026-08-14 — ✅ FIXED 2026-08-14
-
-**Where:** `userspace/oils/src/unparse.rs` — `part_src`'s
-`WordPart::DoubleQuoted` arm, which writes a `"` on both ends unconditionally;
-the run that has no closing `"` is built by `userspace/oils/src/lexer.rs`,
-`Lexer::read_word_verbatim`'s `'"'` arm under `ParseOpts::tolerant`.
-
-**Repro** (bash 5.2.37, `build/pr11.sh` t1):
-
-```sh
-z=ZZ
-v='A${z:-'"'"'i"t'"'"'$(fi)}B'; printf '[%s]\n' "${v@P}"
-```
-
-| | bash 5.2.37 | osh |
-|---|---|---|
-| remainder quoted by the read | `` `fi)}B' `` | `` `fi)"}B' `` |
-| word named by `bad substitution` | `A${z:-'i"t'$(fi)}B` | `A${z:-'i"t'$(fi)"}B` |
-| value | `[A${z:-'i"t'$(fi)}B]` | same |
-
-**What is wrong.** In text no parser read, a `"` with no mate is not an error:
-`string_extract_double_quoted` is handed a *finished word* and its walk ends at
-the end of the string as readily as at a quote (that is
-`ParseOpts::tolerant`, and the corpus case
-`a-double-quote-with-no-mate-in-an-operand-runs-to-the-end-of-the-operand.sh`
-pins the expansion of it). The resulting `WordPart::DoubleQuoted` therefore
-covers a run whose closing quote **was never in the source** — but the part
-does not record that, and `part_src` prints the pair back. Every consumer of
-`crate::unparse::word_src` then sees one byte that was not in the word.
-
-The value is unaffected, because quote removal drops the `"` either way. What is
-affected is everything derived from the *text*: `Shell::bad_sub_word` (the word
-`bad substitution` names), the tail `extract_command_subst` quotes back in its
-own diagnostic, and — in principle, though no divergence has been measured for
-it yet — `crate::wordscan::word_fault`, which re-scans `word_src` for the
-unclosed `${`/`` ` `` verdicts and could be pushed either way by a stray quote.
-
-The single-quote analogue exists in the same shape:
-`Lexer::read_single_quote` has a `None if self.opts.tolerant => return Ok(s)`
-arm, and `part_src`'s `WordPart::SingleQuoted` likewise writes both `'`s. No
-divergence has been measured for it, because the paths that produce an unmated
-`'` do not currently reach a diagnostic that prints the word back — but the
-defect is the same one and a fix should cover both.
-
-**What the proper fix looks like.** Record the missing mate on the part rather
-than guessing at print time: `Seg::Dq(Vec<Seg>)` → `Seg::Dq(Vec<Seg>, bool)`
-and `WordPart::DoubleQuoted(Vec<WordPart>)` → a `closed` field, exactly as
-`Seg::Sq(Str, bool)` already carries its own flag, with `part_src` writing the
-trailing quote only when it was there. About 27 sites mention `DoubleQuoted`
-across `ast.rs`, `parser.rs`, `interp.rs` and `unparse.rs`; most are matches
-that need only a `..`. The single-quote half is the same edit on
-`WordPart::SingleQuoted`.
-
-Not worth reaching for a cheaper trick: an unmated run always extends to the
-end of its text, so "omit the quote when the part is last" would be *nearly*
-right, and nearly-right quoting is how a word stops re-parsing.
-
-**Fixed 2026-08-14**, along the lines above. `read_double_quote_until` now
-reports whether a `"` really ended the run — it has exactly two `Ok` returns,
-one per case, so the flag falls straight out of the existing control flow — and
-that rides on `Seg::Dq(Vec<Seg>, bool)` into
-`WordPart::DoubleQuoted { parts, closed }`. `part_src` writes the trailing quote
-only when `closed`. The single-quote half is the same edit:
-`read_single_quote`'s tolerant arm answers `false`, `Seg::Sq` became a struct
-variant `{ text, escaped, closed }` rather than grow a second unnamed `bool`,
-and an unmated run prints as `'` + text instead of going through
-`sh_single_quote`, whose whole job is to supply the mate.
-
-Two returns needed thought rather than transcription: the pair inside
-`read_double_quote_until` that end the run on an *unclosed construct* absorbed
-into a `Seg::Unclosed` answer `false`, since the run ended on the construct and
-not on a quote; and the backslash spelling of `Seg::Sq` is unconditionally
-`closed: true`, having no quotes to match.
-
-Corpus case:
-`userspace/oils/tests/corpus/a-double-quote-with-no-mate-does-not-grow-one-when-the-word-is-printed-back.sh`
-— 8 shapes including `PS4` and a here-document body, byte-identical to bash
-5.2.37 including stderr.
-
-**Impact while it stood.** Diagnostics only — one spurious `"` in the two lines
-bash prints for a malformed `${ … }` whose operand holds a `"` opened inside a
-`' … '` run. Reachable only through `@P`/`PS4`/here-doc text.
-
----
-
-### TD-OILS-AN-UNMATED-SQUOTE-IN-A-SUBSCRIPT-LOSES-ITS-QUOTE-BYTES-FROM-THE-WORD-PRINTED-BACK — 2026-08-14 — ✅ FIXED 2026-08-14
-
-**Where:** `attach_subscript_reads` (`userspace/oils/src/parser.rs`), which gives
-each top-level `' … '` of an arithmetic fragment its interior parse.
-
-**Repro** (bash 5.2.37):
-
-```sh
-declare -a arr=(10 20 30)
-declare -A m=([k]=V)
-echo "[${arr['x${m:-']}]"
-```
-
-bash names `` 'x${m:-' `` — the whole fragment, quotes included. osh named
-`x${m:-` — the interior of the run alone.
-
-**Cause, which was not the one first written here.** The first note guessed the
-text came from `crate::unparse::word_src` by way of `crate::wordscan::word_fault`.
-It does not: `word_fault` returns `None` for these words, and the word source osh
-builds is byte-correct. The diagnostic comes from `Shell::expand_unclosed` on an
-`Unclosed::BadSubst` whose `text` the *interior's own lexer* filled in with
-`Lexer::whole_text` — the interior being a string of osh's making. bash has no
-such string: an arithmetic fragment is expanded with `Q_DOUBLE_QUOTES` set, which
-switches the single quote off, so `expand_word_internal` walks straight through
-the pair and the string it was handed is the fragment. Both "no closing"
-reporters echo that string (`report_error (…, string)`, subst.c:1498 for
-`$[ … ]`, subst.c:1972 for `${ … }`).
-
-That also explains the shape the note found puzzling — a name that begins one
-byte late and ends two bytes early is exactly the interior of a `' … '` run.
-There were not two faults there, but there is a second one beside it; see
-`TD-OILS-A-BRACE-WHOSE-NAME-SCAN-RUNS-OFF-A-FRAGMENT-TAKES-THE-OTHER-DIAGNOSTIC`.
-
-**Fix.** `attach_subscript_reads` already re-measures the fragment after parsing
-an interior — that is what `crate::unparse::attach_comsub_tails` does for a
-`$( … )`'s echoed remainder. It now also re-*names*: a new
-`name_unclosed_after_the_fragment` walks the interiors it just attached and gives
-every top-level `WordPart::Unclosed(Unclosed::BadSubst { text, .. })` the
-fragment's source for its `text`. Only the run's own level is renamed; a `" … "`
-inside the interior is carved out by `string_extract_double_quoted` as its own
-string and keeps naming itself, as one written a character to the left of the `'`
-would. `src` is left alone — it is the construct's spelling for a re-print, not a
-diagnostic's `%s`.
-
-Corpus:
-`a-construct-left-open-in-a-quoted-subscript-names-the-fragment-around-it.sh`
-(seven rows: a `${ … }` body scan running off, the same with text after the run,
-a `$[ … ]`, both substring bounds, and a run that closes nothing early).
-
----
-
-### TD-OILS-A-BRACE-WHOSE-NAME-SCAN-RUNS-OFF-A-FRAGMENT-TAKES-THE-OTHER-DIAGNOSTIC — 2026-08-14 — ✅ FIXED 2026-08-14
-
-**Where:** `Shell::expand_unclosed` (`userspace/oils/src/interp.rs`) and the
-`Unclosed::BadSubst` the lexer raises for it (`userspace/oils/src/lexer.rs`).
-
-**Repro** (bash 5.2.37):
-
-```sh
-declare -a arr=(10 20 30)
-declare -A m=([k]=V)
-echo "[${arr['x${m']}]"
-```
-
-| | |
-|---|---|
-| bash | `` 'x${m': bad substitution `` |
-| osh | ``bad substitution: no closing `}' in 'x${m'`` |
-
-The same string is named — that much was fixed the same day — but it is the
-wrong one of bash's two messages.
-
-**Why bash has two.** A `${ … }` in a string is read in two steps, and only the
-second one is `extract_dollar_brace_string`. First `parameter_brace_expand`
-extracts the *name* with `string_extract (string, &t_index, "#%^,~:-=?+/@}",
-SX_VARNAME)` (subst.c:9550), which stops at one of those operator characters or
-at the end of the string — `SX_VARNAME` stepping over a whole `[ … ]` subscript
-on the way. If it stopped at the end, `c` is `NUL` and the `switch (c)` falls to
-`default: case '\0': bad_substitution:` (subst.c:10018-10024), which is
-`report_error (_("%s: bad substitution"), string)` and no longjmp. Only if it
-stopped at an *operator* does the body go to `extract_dollar_brace_string`, whose
-own running-out is the "no closing" one that longjmps (subst.c:1972).
-
-So the two messages divide on whether the unclosed brace got as far as an
-operator, and the division is visible:
-
-| fragment | bash |
-|---|---|
-| `'x${m'` | `` 'x${m': bad substitution `` |
-| `'x${#m'` | `` 'x${#m': bad substitution `` |
-| `'x${m[0]'` | `` 'x${m[0]': bad substitution `` |
-| `'x${m['` | `` 'x${m[': bad substitution `` |
-| `'x${m:-'` | ``no closing `}' in 'x${m:-'`` |
-
-**Two things the entry got wrong, found while fixing it.**
-
-*It is not only a fragment.* A here-document body takes the same two messages,
-and osh had the same one answer for both — `cat <<E`/`a${m b`/`E` is
-`a${m b⏎: bad substitution` in bash. The `${x@P}` case really does collapse
-(`no_longjmp_on_fatal_error` makes `extract_dollar_brace_string` return `NULL`
-quietly and its caller fall to the same label), which is why the divergence
-looked narrower than it was.
-
-*The name scan is not the whole story.* Two checks between it and
-`extract_dollar_brace_string` also reach `bad_substitution:` with an operator
-already found — `valid_brace_expansion_word` on the name (subst.c:9803) and the
-length branch's `string[sindex-1] != RBRACE` (subst.c:9687). So `'x${m[a:b'`
-(the `:` *is* reached, but `m[a` is no name) and `'x${#q:-'` are both plain bad
-substitutions. A third check, `parameter_brace_expand_indir` (subst.c:9807),
-runs there too and reports in the missing brace's place: `a${!nosuch:-b` is
-`nosuch: invalid indirect expansion`, and a pointer holding `not a name` is
-`not a name: invalid variable name`.
-
-**The fix.** None of this needed new state on `Unclosed::BadSubst`. osh already
-had the whole decision procedure — `Shell::unterminated_brace_kind`, written for
-the arithmetic-string scanner, which answers `BadSub` / `NoClosing` /
-`Indir(name)` from the body text alone and has `Shell::arith_indir_resolves`
-beside it for the third. `Shell::expand_unclosed` now asks it, for `close ==
-'}'`, before anything else it does, and a new `Shell::unclosed_bad_substitution`
-reports the `BadSub` answer naming `text` (bash's `string`) with the
-`ErrexitOrPosix` class the `bad_substitution:` label carries.
-
-Asking it *first* matters, and is bash's own order: a `$( … )` written inside
-the name is walked over by `string_extract` without being parsed, so
-`a${m$(fi) b` names the bad substitution and never mentions the `fi` — where osh
-used to run `Shell::unclosed_brace_reads` first and report the `fi`.
-
-**Fixed by:** `Shell::expand_unclosed` + `Shell::unclosed_bad_substitution`
-(`userspace/oils/src/interp.rs`). Corpus:
-`a-brace-whose-name-scan-runs-off-the-text-is-a-bad-substitution-not-a-missing-brace.sh`
-— sixteen shapes covering the fragment, the here-document, the command
-substitution in each half, all three indirection outcomes and the prompt
-collapse, byte-identical to bash 5.2.37 including stderr.
-
----
-
-### TD-OILS-AN-UNCLOSED-ARITH-SUBSTITUTION-IN-A-QUOTED-SUBSCRIPT-IS-NOT-CAUGHT-BEFORE-EXPANSION — 2026-08-14
-
-**Where:** `crate::wordscan` (`userspace/oils/src/wordscan.rs`), the word-extent
-pass `Shell::begin_word` runs before a word is expanded.
-
-**Repro** (bash 5.2.37):
-
-```sh
-declare -a arr=(10 20 30)
-echo "$(touch RAN)[${arr['x$(( 1+ ']}]"
-```
-
-bash prints ``bad substitution: no closing `)' in "$(touch RAN)[${arr['x$(( 1+ ']}]"``
-— the **whole word** — and `RAN` is never created. osh prints
-``bad substitution: no closing `)' in 'x$(( 1+ '`` — the fragment — and the
-`touch` runs.
-
-The side effect is the real defect; the name follows from it. bash reaches this
-one on the *extent* pass, before any part of the word expands, so it names the
-string that pass was walking. osh reaches it only when the subscript is expanded,
-by which time the substitution ahead of it has already run.
-
-**Not the same as the two entries above.** Those are about which string a fault
-found *during* the fragment's expansion names. This one is about a fault bash
-finds before expansion starts and osh does not find at all until later.
-
-**What the proper fix looks like.** `wordscan::scan` has rows for `${`,
-`` ` ``, `$(`, `$[` and `<(`/`>(`, and its faults are `WordFault::Brace` and
-`WordFault::Backquote`. An unclosed `$((` inside a `' … '` in a subscript is a
-third: `extract_delimited_string`'s (subst.c:1498), which names the scanned
-string and closes it with `)`. Adding it means teaching `word_fault` a fault that
-carries its own closing delimiter, and teaching the subscript skip that a `'` in
-there does not hide a `$((` from the enclosing scan.
-
-**Impact.** A command substitution written before such a subscript runs when bash
-would not have run it. Narrow, but it is a side effect and not just text.
-
----
-
-### TD-OILS-A-BACKQUOTE-IN-A-QUOTED-SUBSCRIPT-IS-A-PARSE-ERROR-WHERE-BASH-EXPANDS — 2026-08-14 — ✅ FIXED 2026-08-14 (in-scope half; see the scope note at the end)
-
-**Where:** the `' … '` interior parse of an arithmetic fragment —
-`attach_subscript_reads` (`userspace/oils/src/parser.rs`) and the lexer path
-behind it.
-
-**Repro** (bash 5.2.37):
-
-```sh
-declare -a arr=(10 20 30)
-echo "[${arr['x`fi']}]"
-echo TAIL
-```
-
-| | |
-|---|---|
-| bash | ``bad substitution: no closing "`" in `fi'`` at line 2, then `TAIL` |
-| osh, before | ``unexpected EOF while looking for matching `` ` ``'`` at line 4 — the script never runs |
-| osh, now | identical to bash |
-
-osh turned a runtime diagnostic into a *parse* error, so the whole script was
-rejected. bash's parser stops at the `'` and resumes at its mate, so the
-backquote inside is text as far as any parse is concerned; it is met only by
-`param_expand`'s own `string_extract (…, SX_REQMATCH)` at expansion time
-(subst.c:11269), which names `string + t_index` — the text from the backquote on.
-
-**The fix.** Three parts:
-
-- `Lexer::read_word_verbatim`'s `` ` `` arm used a bare `?`, which let the
-  `LexError` escape as a parse error. It now converts to an `Unclosed::Backquote`
-  segment via `unclosed_seg`, exactly as the `$` arm does for an unmatched `${`.
-  This is the part that stopped the script being rejected.
-- `Unclosed::Backquote` gained a `text` field, because its `%s` is
-  `string + t_index` and not `string`: the report runs from the backquote to the
-  end of the **fragment**, whereas `src` is also what `part_src`/`parts_src`
-  re-print and so cannot be widened in place.
-- `name_unclosed_after_the_fragment` (`parser.rs`) widens that `text` with the
-  fragment tail past the run's interior — the run's own closing quote and
-  whatever follows it — mirroring what it already did for `BadSubst`.
-
-**Verified.** `userspace/oils/tests/corpus/an-unmated-backquote-in-a-quoted-subscript-is-met-at-expansion-and-not-by-a-parse.sh`
-is byte-identical to bash 5.2.37, as are probes `build/pr28.sh` and
-`build/pr29.sh`. Full sweep green.
-
-**SCOPE: one residue is out of frozen scope (§305) and is deliberately left
-unfixed.** Where the unmated backquote sits inside a *nested double quote* within
-the run — `build/pr30.sh` d2, `echo "[${arr['x"`fi"']}]"` — bash reports
-``no closing "`" in `fi"'`` and osh reports ``no closing "`" in `fi"``: osh is one
-trailing `'` short. Everything else matches, including the script surviving, the
-exit status and all other output. The cause is known:
-`name_unclosed_after_the_fragment` visits only the run's own top level and does
-not descend into a nested `DoubleQuoted` part (`crate::unparse::nested_parts_mut`
-would give the descent; note its `SingleQuoted { .. }` arm returns `Vec::new()`,
-so it can only supplement the outer loop, not replace it).
-
-This is **the exact substring an error message echoes**, which design-decisions
-§305 names as out of scope: nothing SlateOS runs will ever depend on it. Fix it only
-if it turns up as part of something that does. The in-scope half of this
-entry — a whole script being rejected where bash runs it — is closed.
-
-**Fixed by:** the corpus case named above, plus `lexer.rs` (`Unclosed::Backquote`
-`text` field, `read_word_verbatim`'s `` ` `` arm), `interp.rs`
-(`Unclosed::Backquote` report) and `parser.rs`
-(`name_unclosed_after_the_fragment`).
-
-### TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN. A `$( … )` opened inside one swallows the read that should have followed it — 2026-08-14
-
-**Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_word_verbatim`'s `$`
-arm in [`Verbatim::Dquote`], reached through
-`Shell::brace_extent_scan` → `Shell::brace_scanned_subs`.
-
-**Repro** (bash 5.2.37, `build/pr12.sh`):
-
-```sh
-z=ZZ
-v='A${z:-'"'"'p$(echo hi'"'"'q$(fi
-S1}B'; printf '[%s]\n' "${v@P}"
-```
-
-| | bash 5.2.37 | osh |
-|---|---|---|
-| reports | ``syntax error near unexpected token `fi' `` | **nothing** |
-| value | `[AZZB]` | same |
-
-**What is wrong.** The two passes bash makes over this word carve it into
-*different constructs*, not merely read the same constructs differently.
-
-- `extract_dollar_brace_string` meets the `'` and hands the run to
-  `skip_single_quoted`, which stops at the **mate**. So `'p$(echo hi'` is one
-  skipped run, the `$(` inside it is never seen at all, and the scan resumes at
-  `q` — where it meets `$(fi⏎S1}B`, reads it, and reports `fi`.
-- `expand_word_internal` has no `'` left to speak of, so its
-  `string_extract_double_quoted` meets the **first** `$(`, hands the rest of the
-  word to `extract_command_subst`, and — there being no `)` anywhere — takes
-  everything. One substitution, not two.
-
-osh derives the brace scan's reads from the expansion's lex, so it gets the
-second carving and the second `$(` is inside the first's body, where the walk
-never reaches it. `Shell::brace_scanned_subs_slice`'s single-quote bookkeeping
-then correctly suppresses the one construct it *can* see (it is inside the run),
-and the result is silence.
-
-This is the residue of
-`TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN`, which
-fixed the part of the same disagreement that was only about *which openers*
-count. Rows where the two passes agree on the extents but not on the openers are
-now handled by `Lexer::brace_scan`; this row is one where they disagree on the
-extents, and no flag on the expansion's lex can express it.
-
-**What the proper fix looks like.** `Shell::brace_extent_scan` has to run over
-the brace's **text**, with the scan's own carve, rather than over the parsed
-part. Concretely: keep the undecoded source of an unread `${ … }` on the part
-(or reach it through `crate::unparse`), and lex it once in
-`Lexer::brace_scan` mode with the single-quote rule the scan really has — a `'`
-consumes to its mate and offers nothing inside, so a `$(` in there can neither
-be read nor run past the mate. `read_word_verbatim` already computes that mate
-(`sq_close`); what it does not do is let it bound a substitution, because for
-the *expansion* it must not.
-
-Note that `Lexer::brace_scan` as it stands is deliberately the narrow version:
-it adds openers and leaves extents alone. Widening it to bound a `$( … )` at
-`sq_close` would be wrong for the same lexer's expansion duty, so the widening
-has to come with the second pass, not instead of it.
-
-**Impact.** Diagnostics only — the value is already right. Reachable only
-through `@P`/`PS4`/here-doc text holding a `${ … }` whose operand has both an
-unterminated `$( … )` inside a `' … '` run and a failing one after it.
-
----
-
-### TD-OILS-A-DOLLAR-BRACKET-BOUND-DOES-NOT-PERFORM-ITS-COMMAND-SUBSTITUTION. `$[ 1+$(… ]` reads the `$( … )` as an arithmetic operand token — 2026-08-14
-
-**Where:** `userspace/oils/src/interp.rs` — the evaluation of a
-`WordPart::ArithSub { bracket: true, … }` whose expression text holds an
-unclosed `$( … )`.
-
-**What is wrong.** `extract_arithmetic_subst` is
-`extract_delimited_string (string, sindex, "$[", "[", "]", 0)` (subst.c:1299) —
-flags `0`, so **no** `SX_COMMAND` and no nested read. The `$[` therefore closes
-at its `]` by plain delimiter counting, and the unclosed `$( … )` inside is met
-later, by the *arithmetic expansion* of the bounds text, which performs it under
-`Q_DOUBLE_QUOTES|Q_ARITH`: it reports, runs the abandoned extent, and yields
-nothing. osh instead hands the raw characters to its arithmetic tokenizer, which
-calls them a bad operand.
-
-Measured (`build/pgY.sh` d1/d2):
-
-| word (inside `v='…'`, via `"${v@P}"`) | bash | osh |
-|---|---|---|
-| `A$[1+$(for⏎x]B` | reports `for`, runs `fo`, `[A1B]` | silent, `[AA$[1+$(for⏎x]B]` |
-| `A$[1+$(echo hi⏎x]B` | reports EOF, `[A1B]` | silent, `[AA$[1+$(echo hi⏎x]B]` |
-
-Row d3 — the same body with no `]` at all — is byte-exact in both shells
-(silent, undecoded text), because there the `$[` genuinely never closes.
-
-**What the proper fix looks like.** Two things, in order. (1) `$[`'s lex must
-close at its `]` by plain delimiter counting, without the nested read — which
-means `Lexer::read_opaque_span` needs to know its enclosing close character, so
-that the `$((` spelling (SX_COMMAND) and the `$[` one (flags `0`) can part
-company. Routing that arm through `Lexer::unread_comsub_stop` was tried on
-2026-08-14 and reverted: it made the `$[` bounds text match bash on d1/d2, but
-it *regressed* the `$((` spelling in the corpus case
-`an-unterminated-construct-in-text-no-parser-read-is-a-runtime-failure`, whose
-`$((1+$(echo` row must report the read and stop rather than condemn the `$((`.
-A passing case outranks a documented divergence, so that arm keeps its `?`.
-(2) The arithmetic evaluator must perform a `$( … )` in its expression text
-with the unread-text rule rather than tokenizing it — which is what makes both
-rows' values follow.
-
-**Impact.** Wrong value and wrong diagnostic for a deprecated spelling of
-arithmetic expansion, in malformed input, reachable only through `@P`/`PS4`/
-here-doc text.
----
-
-### [A] B-SMP-FAST-CPU-INDEX-PANICS-BEFORE-APIC-INIT. `smp::fast_cpu_index()` reads the APIC before it is mapped — `debug_assert` panic in debug, wild read in release — FIXED 2026-08-14
-
-**Where:** `kernel/src/smp.rs` — the tier-3 fallback in `fast_cpu_index()`;
-`kernel/src/apic.rs:~214` — `apic_read()`'s `debug_assert!(base != 0, "APIC not
-initialized")`.
-
-**What.** `fast_cpu_index()` has three tiers: RDPID, then `rdtscp`, then an APIC
-MMIO read. On a CPU where neither RDPID nor `rdtscp` is advertised — which is
-exactly the boot-test configuration, `qemu64,+smep,+smap,+umip` under TCG —
-every call lands in tier 3 and does `crate::apic::read_id()`. Before
-`apic::init` has run, `APIC_BASE_VIRT` is still 0, so:
-
-- **debug builds:** `debug_assert!` fires → `KERNEL PANIC: APIC not initialized`.
-- **release builds:** *worse* — the assert is compiled out and `apic_read`
-  dereferences `(0 + offset) as *const u32`, a wild read of low memory. Silent
-  garbage, or a fault, depending on what is mapped there.
-
-**How it surfaced.** Wiring `frame_owner` ownership tagging into the frame
-allocator (TD-FRAME-OWNER-1GIB) made `current_owner()` — and therefore
-`fast_cpu_index()` — run on *every* frame allocation, including the allocator's
-own boot-time self-test. That self-test runs long before `apic::init`, so the
-kernel panicked at `[mm] Running frame allocator self-test...`:
-
-```
-!!! KERNEL PANIC !!!
-panicked at kernel\src\apic.rs:214:5:
-APIC not initialized
-  Task: 0 (""), priority 0, cpu 0
-```
-
-**Why it was latent.** The pre-existing tier-3 callers were all gated behind
-flags that only go true well after APIC init — the frame allocator's own
-per-CPU cache checks `PCPU_ENABLED` first, for instance. Nothing called
-`fast_cpu_index()` early, so the landmine was never stepped on. It was a real
-bug regardless: the function's contract claims tier 3 "always works", and any
-future early-boot caller would have hit it, in release builds silently.
-
-**Fix.** Added `apic::is_ready()` (`APIC_BASE_VIRT != 0`) and made tier 3 check
-it, returning CPU 0 when the APIC is not yet mapped. That is not a fudge: before
-`apic::init` the system is strictly uniprocessor (BSP only), so 0 is the
-*correct* index, not a fallback guess. Cost is one relaxed atomic load on the
-already-slowest tier; tiers 1 and 2 are untouched, so real hardware pays
-nothing.
-
-**Lesson.** A "this can't happen yet" precondition that is enforced only by the
-accident of who happens to call the function is not enforced at all. When the
-cheap tiers of a tiered fast path are unavailable, the "always works" fallback
-is the one that runs — so it is the one that has to actually always work.
-
-### [A] B-BENCH-COMPARATOR-CALLS-SUITE-WIDE-HOST-NOISE-A-REGRESSION. The run-over-run diff named six regressions in code that had not changed — FIXED 2026-08-14
-
-**Where:** `scripts/bench-history.py`, `diff()` / `report()`.
-
-**Symptom.** The first post-merge `--bench` run (commit `17dbde179`, host
-`Logoplex3`, BOOT_OK, exit 0) reported:
-
-```
-  REGRESSED (>25% slower):
-    firewall_check: 270ns -> 482ns (+79%)
-    shm_create_close: 58556ns -> 84996ns (+45%)
-    ipc_semaphore: 11676ns -> 16112ns (+38%)
-    net_veth_roundtrip: 47097ns -> 60102ns (+28%)
-    net_veth_send: 23240ns -> 29552ns (+27%)
-    io_ring_nop: 1948ns -> 2460ns (+26%)
-```
-
-**Why it was wrong.** `git diff bf26aabdb 17dbde179` over the perf-critical
-paths is **two files, +54/-8**: `kernel/src/syscall/number.rs` (doc comments)
-and `kernel/src/syscall/handlers.rs` (`sys_thread_join` moving its exit value
-to an out-pointer). Nothing under firewall, veth, shm, semaphore or io_uring
-changed at all, so not one of the six flagged benchmarks executes a line that
-differs between the two commits.
-
-The actual distribution over all 63 benchmarks: **median +6.1%, mean +9.4%,
-48 slower vs. 15 faster** — and the sorted tail is a smooth continuum,
-`24.4, 24.5, 24.6, 24.9, 26.3, 27.2, 27.6`. There is no gap anywhere near the
-threshold. A real regression is a few outliers standing clear of a ~0% median;
-what this was is a fixed 25% line drawn through the middle of a shifted
-distribution.
-
-**Root cause.** The module docstring claims run-over-run comparison "cancels
-the emulation constant". That holds across *hosts*, not across *runs on one
-host*: TCG is pure emulation and therefore CPU-bound, so whatever else the
-machine was doing scales the whole suite by a common factor. Shift a
-distribution whose own per-benchmark wobble already reaches ~20% by a further
-6% and its tail crosses 25%. The `diff()` docstring even anticipated the noise
-("a 10-20% wobble carries no information") but chose the wrong remedy — a
-coarser *absolute* threshold cannot subtract a *global* shift, it can only
-trade false positives for false negatives.
-
-**Fix.** Added `global_drift()`: the **median** of every benchmark's
-run-over-run ratio, used to normalise each ratio before thresholding, so the
-threshold applies to how a benchmark moved *relative to its peers on the same
-run*. The median (not the mean) is the estimator precisely because it is
-unaffected by a genuine regression in a minority of benchmarks — the signal
-that must not be subtracted away. Skipped below `MIN_SAMPLES_FOR_DRIFT = 8`,
-where the median means nothing and a handful of benchmarks can legitimately
-all move together. The report now prints the drift itself (information in its
-own right — it says the machine was busy), shouts if it exceeds 15%, and shows
-both numbers per entry (`+68% vs suite, +79% raw`) so no one has to trust the
-correction blindly.
-
-Replayed against the real data, the four pure-drift entries drop out and the
-report goes from six regressions to three.
-
-**Why this mattered enough to fix immediately.** It is the same class of defect
-as the bug that produced this harness in the first place
-(`TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE`): a report you cannot
-act on. A silent skip trains you not to notice; a comparator that cries wolf on
-every run trains you to skim past the one time it is right. Six false
-regressions on the *very first* run it was used in anger would have retired the
-feature within a week.
-
-**Related precedent:** `TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT`
-burned five boots on "ownership tagging costs 8500 cycles" that was also the
-emulator rather than the code. Same underlying trap, one level up.
-
-### [A] W-BENCH-THREE-BENCHMARKS-ABOVE-SUITE-DRIFT-WITH-NO-MATCHING-CODE-CHANGE. firewall_check / shm_create_close / ipc_semaphore — ✅ RESOLVED 2026-08-14: all three were noise
-
-**RESOLUTION (2026-08-14, third run `a18ea83a9`).** All three were noise, and
-the third run says so about as loudly as data can. They came back not merely
-to the suite median but to *below* their first-run values — and they are the
-**top three entries in the IMPROVED list**, in the same order they had
-occupied in REGRESSED:
-
-| benchmark | run 1 `bf26aabdb` | run 2 `17dbde179` | run 3 `a18ea83a9` | verdict |
-|---|---|---|---|---|
-| `firewall_check` | 270 ns | 482 ns | **228 ns** | run 2 is the outlier |
-| `shm_create_close` | 58 556 ns | 84 996 ns | **56 734 ns** | run 2 is the outlier |
-| `ipc_semaphore` | 11 676 ns | 16 112 ns | **11 219 ns** | run 2 is the outlier |
-
-Runs 1 and 3 agree to within 3–16 % in every case; run 2 stands alone. A real
-regression does not un-regress with no code change, so the correct reading is
-that run 2 was the anomaly, not run 3 — i.e. these were never regressions at
-all, and the flat 25 % threshold flagged them purely because their intrinsic
-spread exceeds it. The prediction recorded below — that `firewall_check` at
-270 ns would prove the noisiest by construction — held: its spread is 111 %,
-the second-widest in the suite.
-
-**Measured per-benchmark spread (max/min across the three runs), which is the
-number the comparator has been missing all along:**
-
-* median across all 63 benchmarks: **13 %**
-* but the tail is long: `crypto_ed25519_verify` 416 %, `firewall_check` 111 %,
-  `tcp_checksum_v6` 56 %, `shm_create_close` 50 %, `sched_pick_next` 49 %,
-  `syscall_dispatch` 44 %, `ipc_semaphore` 44 %.
-
-So a flat 25 % threshold is below the natural spread of at least seven
-benchmarks and far above that of the median one — it is simultaneously too
-tight and too loose, which is exactly the failure mode observed. **This
-promotes the "proper fix" named below from a suggestion to the next task:
-give the comparator a per-benchmark variance estimate.** Logged as
-TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE below.
-
-**Caveat recorded honestly: run 3 is partially contaminated, by me.** I ran
-greps, `git`, and `python` in the same window as the benchmark suite, having
-explicitly noted beforehand that the machine should be idle. Median drift
-correction removes a *uniform* slowdown; it cannot remove contention that
-lands on whichever benchmark happens to be running at the time. That is the
-most likely explanation for run 3's own new outliers —
-`crypto_ed25519_verify` (30.7M → 31.4M → **158.6M**, i.e. two tight samples
-then 5.1×) is the longest-running benchmark in the suite and therefore the
-most exposed to a contention window. Do **not** treat that as a regression on
-this evidence; see TD-BENCH-RUNS-ARE-CONTAMINATED-BY-THE-AGENTS-OWN-COMMANDS
-below.
-
-The original WATCH text follows unchanged.
-
----
-
-### [A] W-BENCH-THREE-BENCHMARKS-ABOVE-SUITE-DRIFT-WITH-NO-MATCHING-CODE-CHANGE (original entry). firewall_check / shm_create_close / ipc_semaphore — WATCH, needs a third data point
-
-**Where:** benchmarks `firewall_check`, `shm_create_close`, `ipc_semaphore`;
-history in `bench/history.jsonl` (host `Logoplex3`).
-
-**What.** After the drift correction above, three benchmarks still sit clear of
-the suite: `firewall_check +68%` (270→482ns), `shm_create_close +37%`
-(58556→84996ns), `ipc_semaphore +30%` (11676→16112ns). As established above,
-none of their source changed between `bf26aabdb` and `17dbde179`.
-
-**Why it is a WATCH and not a bug (yet).** `bench/history.jsonl` holds exactly
-**two** runs on this host, so there is no per-benchmark variance estimate — the
-drift correction removes the *common* factor but says nothing about how noisy
-an individual benchmark is around it. `firewall_check` at 270ns is the prime
-suspect for being intrinsically noisy: it is the shortest benchmark in the
-suite, and at TCG timer granularity a couple of hundred nanoseconds is very
-few ticks, so its relative variance should be the largest by construction.
-
-**How to resolve.** Take a third `--bench` run on an otherwise-idle machine and
-compare. If these three land back at the suite median they were noise, and the
-proper fix is to give the comparator a per-benchmark variance estimate (flag on
-deviation from a benchmark's own historical spread, not a flat percentage)
-rather than to keep hand-adjudicating. If they stay high, they are real, and
-the next question is whether the `handlers.rs` change shifted code layout
-(icache/alignment) — cheap to test by benchmarking `bf26aabdb` again.
-
-**Do not** act on either theory from the current two runs; that is exactly the
-inference-from-insufficient-samples mistake the entry above documents.
-
-### [A] TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE. A flat 25% threshold is below the natural spread of seven benchmarks and far above the median one's — 2026-08-14 — OPEN
-
-**Where:** `scripts/bench-history.py`, `diff()` / `THRESHOLD_PCT`.
-
-**What.** The comparator flags a benchmark when its drift-corrected change
-exceeds a fixed ±25 %. Three runs of history now show that a single flat
-threshold cannot work, because the suite's per-benchmark spread (max/min
-across runs, *with no code change explaining it*) ranges over an order of
-magnitude:
-
-* median benchmark: 13 % spread → 25 % is far too loose; a genuine 20 %
-  regression here would pass unnoticed.
-* `crypto_ed25519_verify` 416 %, `firewall_check` 111 %, `tcp_checksum_v6`
-  56 %, `shm_create_close` 50 %, `sched_pick_next` 49 %, `syscall_dispatch`
-  44 %, `ipc_semaphore` 44 % → 25 % is far too tight; these produce false
-  positives every single run.
-
-Two investigation cycles have now been spent hand-adjudicating false
-positives thrown by this threshold (see the RESOLVED entry above and
-B-BENCH-COMPARATOR-CALLS-SUITE-WIDE-HOST-NOISE-A-REGRESSION). That is the
-signal to fix the estimator rather than keep adjudicating its output.
-
-**Proper fix.** Give each benchmark its own noise band derived from its own
-history, and flag only moves outside it. Concretely: keep the existing
-whole-suite median drift correction (it removes the common factor correctly
-and is not in question), then compare the drift-corrected change against a
-robust per-benchmark dispersion — median absolute deviation of the log-ratios
-across the recorded runs — rather than a constant. Retain a flat *floor* so
-that a benchmark with an implausibly tight history cannot be flagged on a
-sub-noise move, and require a minimum number of runs (the existing
-`MIN_SAMPLES_FOR_DRIFT` precedent) before the per-benchmark band is trusted,
-falling back to the flat threshold until then.
-
-**Test it the same way the drift fix was tested:** replay the estimator
-against the recorded `bench/history.jsonl` and confirm it drops the three
-now-known-noise entries while still flagging a deliberately injected
-regression. Do not ship it on reasoning alone — that is the mistake this
-whole thread of entries keeps documenting.
-
-**Update 2026-08-14 — the fix above is DATA-BLOCKED; the unblocking step has
-landed.** Attempting the implementation established that it cannot be built
-*or* validated yet, which is worth recording so the next attempt does not
-rediscover it:
-
-* The MAD-of-log-ratios estimator needs the spread of each benchmark across
-  runs. `bench/history.jsonl` holds **3** records, all from one host — which
-  yields **2** consecutive run-over-run residuals per benchmark. A median
-  absolute deviation over 2 points is not an estimate of anything; with
-  residuals of `{+2 %, +406 %}` it returns ~204 %, a band so wide it would
-  flag nothing, and one more run could as easily make it 2 %, a band so tight
-  it flags everything. A minimum-runs gate (the fix's own proposal) would
-  simply keep it disabled.
-* The test requirement above is therefore *also* unsatisfiable today: with 3
-  records there is no held-out data to replay against. Shipping it anyway
-  would be exactly the "on reasoning alone" failure the entry warns about, so
-  it was not shipped.
-
-**What landed instead** (commit alongside this update): the harness now emits
-and records a per-benchmark **dispersion** figure, which supplies the missing
-noise scale *from a single run* rather than requiring history to accumulate.
-`kernel/src/bench.rs::print_scorecard` extends the machine-readable line to
-
-```text
-[bench] SCORE <name> <min_ns> <target_ns> <PASS|OVER> <mean_ns> <iters>
-```
-
-and `bench-history.py` stores `mean_ns` / `iterations` as sibling maps in each
-record. The trailing pair is optional in the parser, so the 3 existing records
-still load — `scripts/test-bench-history.py` pins that down against the real
-history file, because those records are ~9-minute boots on commits that are
-now in the past and cannot be regenerated.
-
-`mean/min` is a genuine per-benchmark noise scale and not a proxy for one: the
-scorecard reports `min` because it is the least-contaminated estimate, but a
-benchmark whose mean sits at 1.05× its min took a clean measurement on nearly
-every iteration, while `dashboard_api_status` at 6.6× (160.4 ms mean vs 24.4 ms
-min) was interrupted on most of them — so its reported min is whichever
-iteration happened to dodge the interference, and is correspondingly fragile
-run-to-run. That is precisely the property the band needs to size itself by,
-and the two entries plainly should not share one threshold.
-
-**Remaining work, in order.** (1) Accumulate ≥6 same-host records — this is a
-by-product of ordinary benchmarked boots, not a task. (2) Validate the
-`mean/min` → run-over-run-sigma mapping *empirically* against those records
-before using it; the causal story above is plausible but the coefficient is
-not known, and inventing one would just build a new false-positive generator
-with more decimal places. (3) Then implement the band, preferring the
-historical MAD where enough runs exist and falling back to the dispersion
-prior where they do not. Do **not** skip step (2).
-
-### [A] TD-BENCH-RUNS-ARE-CONTAMINATED-BY-THE-AGENTS-OWN-COMMANDS. I ran greps and git during a benchmark suite after noting the machine had to be idle — 2026-08-14 — OPEN
-
-**What.** The benchmark suite runs under QEMU TCG, which is pure emulation and
-entirely CPU-bound, so any other load on the host scales the measurements.
-During run 3 (`a18ea83a9`) I ran roughly a dozen `grep`, `git`, `python` and
-file-read commands in the same window, despite having stated at the start of
-the run that the machine needed to stay idle for the numbers to mean anything.
-
-**Why the existing drift correction does not save it.** The median-ratio
-correction removes a *uniform* whole-suite factor — a machine that is
-consistently 6 % slower for the whole run. Contention from a handful of short
-commands is not uniform: it lands on whichever benchmark is executing at that
-moment and leaves the rest untouched. It therefore shows up as exactly what a
-real regression looks like — one or two benchmarks clear of an unchanged
-median. `crypto_ed25519_verify` is the canary: 30.7M → 31.4M → 158.6M ns,
-i.e. two runs agreeing within 2 % and then a 5.1× jump, on a benchmark whose
-source did not change and which is the longest-running in the suite (so the
-most likely to overlap a command).
-
-**Proper fix — structural, not a discipline reminder.** "Remember to stay
-idle" is not a fix; it already failed once, the same day it was written down.
-Make contamination *detectable* instead: have the bench harness re-run one
-cheap, low-variance reference benchmark at the start and again at the end of
-the suite, and record both. If the two disagree by more than a few percent,
-the host load changed mid-run and the whole run should be marked contaminated
-in `history.jsonl` and excluded from comparison (or at minimum reported as
-such). This turns "the operator/agent must behave" into a property the data
-itself can verify — the same principle as the stall detectors: a check that
-cannot fire is indistinguishable from a check that passes.
-
-**Interim mitigation until that exists:** when a `--bench` run is in flight,
-do read-only work only if it is genuinely necessary, and prefer to simply
-wait. Treat any single-benchmark outlier in a run that overlapped agent
-activity as unproven.
-
-**[A] ✅ FIXED 2026-08-14 — and the first version of the fix was itself blind
-to the case it was built for.** Worth reading for the second half.
-
-*Stage 1 (commit `be167dd90`).* The reference memory-access cost that already
-calibrates every budget in `bench.rs` is now measured a second time at the end
-of the suite, emitted as `[bench] CANARY <start> <end> <pct>`, recorded by
-`bench-history.py` as a sibling key with a `contaminated` flag, and covered by
-11 checks in `test-bench-history.py`. The measurement was factored into one
-parameterless function used by both ends, because the comparison means nothing
-unless both ends measure precisely the same thing.
-
-*What the first real run showed (commit `be167dd90`, host Logoplex3).* Two
-things, one confirming the entry and one refuting the fix.
-
-Confirming: `crypto_ed25519_verify` came back at **30.0M ns**, against 30.7M
-and 31.4M in the two runs before the spike and 158.6M during it. Three runs
-now agree within 4% and the spike stands alone, so run `a18ea83a9` **was**
-contaminated, exactly as this entry argued. Whole-suite drift for the new run
-was −0.1%.
-
-Refuting: the canary reported the host stable to within **3%** (283 → 275
-cycles) — while in that same run `shm_rw_64bytes` (298 → 771), `tcp_checksum_v4`
-(20714 → 35410), `net_ipv4_parse` (933 → 1645) and `net_ethernet_parse`
-(873 → 1216) all sat 40–160% above their established values. So the run was
-contaminated and the canary passed it.
-
-*Why.* Endpoint sampling detects a **sustained** load change. The
-contamination described at the top of this entry is a **transient burst** that
-"lands on whichever benchmark is executing at that moment and leaves the rest
-untouched" — which by construction is invisible to a check that only looks at
-the two ends. The first fix was therefore a check that could not fire on its
-own motivating case: the failure mode this project keeps rediscovering, arrived
-at from the opposite direction.
-
-*Stage 2 (this commit).* The reference is now sampled **throughout** the suite
-— every 8th scored benchmark, giving ~8 samples across the 63 — and the verdict
-uses the min-to-max spread rather than the endpoint ratio. Sampling is hooked
-into `score()`, the one function every benchmark already calls, so it spreads
-automatically and stays correct as benchmarks are added or reordered; a
-hand-placed list of sample points in `run_all` would rot. The line gains four
-append-only fields, `[bench] CANARY <start> <end> <pct> <min> <max> <spread>
-<samples>`, so the single record written by stage 1 still reads back and is
-still judged by the endpoint rule it was written under.
-
-*Tolerance status.* Still 25%, still a placeholder. One clean-endpoint
-observation (3%) is not a distribution, and the mid-suite spread has now to be
-observed over several runs before the bound is tightened — the same discipline
-applied to `TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE`. The raw min/max
-are recorded on every run precisely so the bound can be retuned later against
-real data instead of being invented; a stored verdict alone could never be
-re-judged.
-
-*Consequence for the four elevated benchmarks above:* unproven, not regressions.
-They are diffed against `a18ea83a9`, a run this entry now shows was itself
-contaminated, so the comparison is contaminated at both ends. They need a clean
-run-over-clean-run comparison before anyone reads them as real.
-
-**[A] Update 2026-08-14 — stage 2 verified, and all four elevated benchmarks
-were indeed contamination.** Run `5a2002bac` reported `spread 2%` over **10**
-mid-suite samples (267–275 cycles), so the sampling works end to end. Against
-that clean run every one of the four returned to its established value:
-`shm_rw_64bytes` 771 → **414**, `tcp_checksum_v4` 35410 → **20182**,
-`net_ipv4_parse` 1645 → **952**, `net_ethernet_parse` 1216 → **829**. None was
-a regression, which is what the refusal to report them was protecting.
-
-**Honest limitation — the production check has not yet been observed firing.**
-The unit tests prove the *logic* fires (a 173% mid-suite spread with quiet
-endpoints reads as contaminated), and both real runs so far were clean, so the
-mid-suite path has only ever been seen returning "OK". Host contamination
-cannot be summoned on demand, so this is a check believed-good rather than
-demonstrated-good in production — the precise distinction this entry exists to
-insist on. It should not be described as proven until a real run trips it.
-Whole-suite drift for `5a2002bac` was +3.1%.
-
-**RECURRENCE 2026-08-14, run `fcd066231` — I did it again, and this time it
-landed on a number I then acted on.** During the ~58 s QEMU bench run I ran
-`grep` over the 60 000-line `known-issues.md`, `git log`, `git show`, and
-several `Read`s. The dispersion report for that run flagged five benchmarks at
-≥5x `mean/min`, and **`vfs_stat_root` was one of them at 12x**. I then took
-that run's `vfs_stat_root` = 5920 ns, called it "8.5x over its 700 ns target",
-committed that claim, and opened an investigation into the VFS dcache on the
-strength of it.
-
-The number may well still be broadly right — `score()` records `min_ns`, and a
-burst inflates the mean far more than the min. But "broadly right" is not the
-standard, and the specific escape hatch does not close here: this benchmark is
-**500 iterations at ~6 µs ≈ 3 ms of wall time**. A host load episode lasting
-longer than 3 ms — which is to say, essentially any of them — covers the
-*entire* benchmark and inflates min and mean together, leaving `mean/min`
-looking normal while every sample is uniformly slow. The 12x ratio says a
-burst happened *inside* those 3 ms; it says nothing about whether a slower,
-broader episode also raised the floor. So the honest status of 5920 ns is
-**unverified**, not "confirmed 8.5x over".
-
-Two things follow, and both were done rather than noted:
-
-1. The re-measurement (the `vfs_stat_breakdown` run) is executed with **no
-   agent commands issued while QEMU is running** — the read-only work is done
-   before the run starts or after it finishes, never during.
-2. The dcache finding is not being justified by the 5920 ns figure at all. It
-   rests on reading the code: `VfsDcache::lookup` is a linear scan over 1024
-   slots with a full `PathBuf` compare per slot, which is a design defect
-   under CLAUDE.md's "linear scans … must be O(1) or O(log n)" rule
-   independently of what any timer says. A contaminated benchmark can motivate
-   a code review; it must not be the evidence.
-
-**The pattern, stated plainly, because this is the second occurrence.** The
-first time, the contamination hit numbers I merely recorded. This time it hit
-a number I *reasoned from* within minutes of producing it. The entry above
-correctly predicted the mechanism and even built the detector that caught it —
-and the detector working did not stop me, because I read the dispersion list
-*after* I had already drawn the conclusion. A check that fires after the
-decision is documentation, not a gate. The ordering is the fix: read the
-dispersion report **before** quoting any number from a run, not after.
-
-### [A] B-BENCH-WATCHLIST-WATCHED-LESS-THAN-HALF-THE-SUITE-IT-GUARDS. `BENCH_CRITICAL_PATHS` omitted idt.rs, fs/, net/ and crypto.rs — FIXED 2026-08-14
-
-**Where:** `scripts/boot-test.sh`, `BENCH_CRITICAL_PATHS` (feeds
-`report_bench_absence`).
-
-**What.** The list added earlier the same day to close
-`TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE` held five entries —
-`kernel/src/{mm,sched,ipc,syscall,smp.rs}` — because it was derived from
-CLAUDE.md's perf-critical *table*, read as directory names. The suite it is
-supposed to guard measures far more than that. Against the 63 recorded
-benchmark names:
-
-- `isr_latency`, `page_fault` → **`kernel/src/idt.rs`**. CLAUDE.md's table
-  names both "interrupt dispatch" and "page fault handling", but the handlers
-  live in `idt.rs`, not under `mm/` — so the two benchmarks that measure them
-  were unwatched.
-- 8 × `vfs_*` (`read_256`, `write_256`, `readdir`, `stat_{root,3comp,deep}`,
-  `throughput_16k_{read,write}`) → **`kernel/src/fs`**. CLAUDE.md lists "VFS
-  path lookup" and "filesystem read/write" as critical.
-- ~20 × `net_*`, `tcp_checksum_*`, `dns_build_query`, `firewall_check`,
-  `http_*`, `dashboard_api_*` → **`kernel/src/net`** (`http.rs`,
-  `dashboard.rs` live under it).
-- 9 × `crypto_*` → **`kernel/src/crypto.rs`**.
-
-So **30+ of 63 benchmarks measured code the watch list did not watch**, and a
-change to any of them printed "No perf-critical changes since the last
-benchmarked commit, so skipping the suite is reasonable here." Confidently,
-and wrongly.
-
-**How it surfaced.** The `W-KERNEL-COW-WRITE` diagnostic commit edits
-`kernel/src/idt.rs`. The following boot reported no perf-critical changes —
-while the suite contains `isr_latency` and `page_fault`, both measured by code
-in that exact file. (No real regression: that diagnostic sits on the fatal
-path, which is not hot. The harness had no way to know that, and did not
-reason about it — it simply never looked.)
-
-**Fix.** Widened the list to the four missing paths and annotated **every**
-entry with the benchmarks it guards, so the mapping is auditable instead of
-implicit. Verified: `git diff --name-only 17dbde179 HEAD` over the new list
-now returns `kernel/src/idt.rs`, which the old list missed.
-
-**Lesson (the recurring one this week).** This is the third instance in a row
-of the same shape: `TD-BENCHMARKS-...` (the suite silently never ran),
-`B-BENCH-COMPARATOR-CALLS-SUITE-WIDE-HOST-NOISE-A-REGRESSION` (the diff
-confidently named innocent benchmarks), and now a watch list that confidently
-reported "nothing to see" about a file it had never been told to look at. A
-check that cannot fire is indistinguishable from a check that passes — and
-every one of these was *my own* freshly-written tooling, reporting success.
-When adding a guard, the first test should be "does it fire on a case I know
-is positive?", not "does it run cleanly?".
-
-### [A] B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x. A hot loop that straddles a 4 KiB guest page costs ~1.7x under TCG, deterministically per build — ROOT-CAUSED 2026-08-14, fix pending
-
-**Where:** `kernel/src/bench.rs`, `bench_net_tcp_checksum_v4` (3281) /
-`bench_net_tcp_checksum_v6` (3340) and their bench-local kernels
-`tcp_checksum_bench` (3309) / `tcp_checksum_v6_bench` (3366).
-
-**What.** In 3 of the 5 recorded runs on host `Logoplex3`, one member of the
-pair sits near ~35000 ns while the other sits near ~20000 ns; in the other 2
-runs both sit in the 20000–26000 band. Which member is the elevated one
-varies:
-
-| commit | `tcp_checksum_v4` | `tcp_checksum_v6` |
-|---|---|---|
-| `bf26aabdb` | 20667 | 23021 |
-| `17dbde179` | 25279 | 25751 |
-| `a18ea83a9` | 20714 | **35899** |
-| `be167dd90` | **35410** | 20953 |
-| `5a2002bac` | 20182 | **35039** |
-
-The two kernels are near-identical byte-at-a-time fold loops over the same
-1460-byte segment; v6 does 36 more pseudo-header bytes than v4, i.e. ~2.5%
-more work. A 1.7x gap between them — in either direction — is not explicable
-by the work they do.
-
-**What the dispersion data does and does not show.** The recorded figure is
-`result.min_ns`, the **minimum** over 2000 iterations, and since the
-append-only `mean_ns` extension landed we also record the mean, so `mean/min`
-is available as a within-run dispersion measure:
-
-| commit | benchmark | min | mean/min |
-|---|---|---|---|
-| `be167dd90` | `tcp_checksum_v4` (elevated) | 35410 | 1.16 |
-| `be167dd90` | `tcp_checksum_v6` | 20953 | 1.20 |
-| `5a2002bac` | `tcp_checksum_v4` | 20182 | 1.21 |
-| `5a2002bac` | `tcp_checksum_v6` (elevated) | 35039 | 1.33 |
-
-In both runs the elevated member's dispersion is indistinguishable from the
-other member's. Compare the visibly burst-hit numbers in the same records:
-`net_ethernet_parse` at 2.86 and `context_switch` at 10.62 in `be167dd90`.
-So the elevated member is uniformly ~1.7x slower across all 2000 iterations
-with normal spread.
-
-**This rules out a sub-benchmark burst, and nothing more — do not read it as
-"not contamination".** A first draft of this entry concluded that a normal
-`mean/min` proved the slowdown was a steady-state property of the build. That
-does not follow. 2000 iterations at ~20 µs is only ~40 ms of wall time, and a
-host load episode that spans the *entire* 40 ms window inflates the min and
-the mean by the same factor, leaving `mean/min` untouched. Such an episode is
-entirely ordinary on a desktop. So the dispersion data distinguishes "a spike
-during part of the benchmark" from "uniformly slower", and is silent on
-*why* it was uniformly slower. Both a build property and a benchmark-length
-contamination episode predict exactly what is in the table above.
-
-**Two live hypotheses, and the test that separates them.**
-
-1. *Code-layout sensitivity under QEMU TCG.* The two loops are compiled
-   separately (deliberately duplicated "to avoid depending on tcp module
-   internals"), so their alignment and translation-block boundaries shift with
-   every unrelated code change; whichever lands unluckily pays a fixed
-   per-iteration penalty.
-2. *A contamination episode long enough to cover one whole benchmark.* The
-   mid-suite canary samples every 8 scored benchmarks, so an episode lasting
-   one benchmark can slip between two samples and be reported as a quiet run —
-   which is what `5a2002bac` reported.
-
-**These are separated by re-running the bench on the *same commit*.** Hypothesis
-1 is a property of the binary and must reproduce: same member elevated, same
-factor. Hypothesis 2 re-rolls: the elevated member moves, or neither is
-elevated. This needs no new code, just a second `--bench` boot on an unchanged
-tree.
-
-**RESOLVED 2026-08-14 — hypothesis 1, decisively.** That run was done on a
-byte-identical binary (only markdown had changed since `5a2002bac`):
-
-| | `5a2002bac` | re-run, same binary | agreement |
-|---|---|---|---|
-| `tcp_checksum_v4` | 20182 | 20687 | 2.5% |
-| `tcp_checksum_v6` | **35039** | **35048** | **0.03%** |
-
-The same member is elevated, at the same value — and the host was *noisier*
-this run, not quieter (canary spread 16% over 10 samples, against 2% before),
-which rules out the contamination reading rather than merely failing to
-support it. It is a deterministic property of the binary.
-
-**Mechanism: the elevated member's hot loop straddles a 4 KiB guest page.**
-Disassembling the staged binary and locating the backward branch in each fold
-loop:
-
-| | fold loop | span | pages |
-|---|---|---|---|
-| `tcp_checksum_bench` (v4, fast) | `ffffffff805d7202` → `ffffffff805d73f7` | 501 B | `…805d7` → `…805d7`, **one page** |
-| `tcp_checksum_v6_bench` (v6, elevated) | `ffffffff805d9ea9` → `ffffffff805da086` | 477 B | `…805d9` → `…805da`, **straddles** |
-
-Under TCG a translation block is bounded by the guest page — a loop that
-crosses a page boundary cannot stay a single directly-chained TB, so every
-iteration pays a dispatcher round-trip instead of a direct jump. That predicts
-exactly what is observed: a *uniform* per-iteration penalty (so `mean/min` is
-untouched), perfectly reproducible on the same binary, and re-rolled whenever
-unrelated code shifts the function's address — which is why runs 1 and 2 show
-neither member elevated (in those builds neither loop straddled).
-
-**Falsifiable prediction, to be checked on the next bench run:** disassemble
-first, and whichever of the two fold loops straddles a page is the one that
-will come back elevated — with neither elevated if neither straddles. This
-entry should be treated as provisional until that prediction has been made
-*before* a run and held.
-
-**This generalises to the whole suite, and that is the real finding.** Nothing
-about the mechanism is specific to `tcp_checksum`. Any benchmark whose hot loop
-happens to straddle a 4 KiB page pays the same penalty, and which benchmarks do
-re-rolls at every build. So commit-to-commit comparison under TCG carries an
-irreducible per-benchmark noise floor of up to ~1.7x that is *deterministic
-within a run* — meaning neither the canary nor `mean/min` can ever detect it,
-because both look for variation and there is none. Every noise-suppression
-mechanism built for this suite so far is structurally blind to it.
-
-**It is also mostly the same bug as
-`B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL`, and mostly the same
-fix.** The straddle probability scales with the byte length of the hot loop. At
-`opt-level = 0` this fold loop is 117 instructions / ~500 bytes, giving it
-roughly a 1-in-8 chance of crossing any given page; optimised it would be a
-few dozen bytes, closer to 1-in-100. Building the bench kernel `--release`
-therefore shrinks this noise source by about an order of magnitude as a side
-effect. Do that first and re-measure before considering anything more invasive
-(forced function alignment via `-Z align-functions` costs padding across the
-whole kernel and would only paper over the loop-length problem).
-
-**Why it matters.** Both are on the `over_target` list (targets 2000/2200 ns,
-measured 20000–35000), so the absolute numbers are already known-bad under TCG
-and nobody is being misled about pass/fail. The damage is to the *comparator*:
-a 1.7x swing that re-rolls every build is pure noise in any commit-to-commit
-diff, and `TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE` will size its
-band from exactly this history. If the band is fitted without knowing this
-pair is bimodal, it will either be stretched wide enough to hide real
-regressions everywhere else, or it will keep flagging these two forever.
-
-**Remaining plan.** Steps 1 and 2 are done (above). What is left:
-
-1. Build the bench kernel `--release` (see
-   `B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL`) and re-measure.
-2. Make the straddle prediction *before* that run and record it, so the
-   mechanism is confirmed prospectively rather than fitted after the fact.
-3. If page straddling still moves benchmarks materially at `opt-level = 3`,
-   teach the comparator about it: the check is mechanical (disassemble, locate
-   the backward branch, compare `addr >> 12` at both ends) and could be emitted
-   alongside each score, which would turn an invisible deterministic bias into
-   a recorded per-benchmark flag.
-
-**Reproducing the disassembly.** `llvm-nm` / `llvm-objdump` ship with the
-rustup toolchain — no binutils install needed:
-`~/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/`.
-The two kernels are `_ZN6kernel5bench18tcp_checksum_bench…` at
-`ffffffff805d7130` and `_ZN6kernel5bench21tcp_checksum_v6_bench…` at
-`ffffffff805d9df0`. Note the symbol hash differs per build, so match on the
-demangled prefix rather than pasting a mangled name.
-
-**Incidental finding from the disassembly: the benchmarked kernel is built
-without optimisation.** `tcp_checksum_bench` spills every intermediate to the
-stack (`movl %eax, -0x64(%rbp)` after each add). That is consistent with the
-whole suite sitting ~10x over targets that were set from optimised reference
-implementations, and it means the absolute numbers measure debug codegen under
-TCG, not the code that would ship. Worth confirming against the boot-test
-build flags and recording separately — it is a much larger effect than the
-1.7x this entry is about, and it is not this entry's subject.
-
-**Related observation — `mean/min` sees contamination the canary missed.** The
-canary called run `5a2002bac` clean (spread 2% over 10 samples). In that same
-run `crypto_ed25519_verify` had mean 323487129 against min 31875588, a
-**10.15x** ratio; `context_switch` had 10.62x in the run before it. The canary
-samples the host *between* benchmarks; `mean/min` measures dispersion *inside*
-the benchmark that was running, so it catches a burst that fell between two
-canary samples. The data is already recorded per benchmark and needs no
-cross-record history to interpret, so a per-benchmark "this number is suspect"
-flag is implementable now.
-
-Neither measure dominates the other, and the reason is exactly the failure
-above: `mean/min` is blind to any slowdown that covers a whole benchmark
-uniformly — including a sustained load change, which is what the canary
-endpoints exist to catch — while the canary is blind to bursts shorter than
-its sampling interval. The comparator should consult both, and should treat
-"canary quiet **and** `mean/min` normal" as the only combination that
-licenses reading a number as real.
-
-**PROSPECTIVE PREDICTION, recorded 2026-08-14 BEFORE the first release-profile
-bench run.** This entry says above that the page-straddle mechanism "should be
-treated as provisional until that prediction has been made *before* a run and
-held." This section is that prediction. It was written from the disassembly of
-`target/x86_64-unknown-none/release/kernel` (built clean, 0 warnings, 9m25s)
-with **no release-profile measurement in existence yet** — the first such run
-has not been performed. Whatever the numbers turn out to be, this text is not
-to be edited afterwards; the result goes in a separate section below it.
-
-Structural facts read out of the release binary:
-
-| | v4 | v6 |
-|---|---|---|
-| closure inlined into the timed loop? | **yes** | **no** — `callq`+`ret` per iteration |
-| hot fold loop | `ffffffff80985cc2`–`…985cf7` | `ffffffff80976ba0`–`…976bc7` |
-| straddles a 4 KiB page? | **no** (all in `…985000`) | **no** (all in `…976000`) |
-| timed outer loop | `…985caa`–`…985d51` (page `…985`) | `…9864a5`–`…9864fd` (page `…986`) |
-| per-iteration indirect branch | none | one `ret` |
-| bytes consumed per loop iteration | 4 (2x unrolled) | 4 (2x unrolled) |
-
-So in the release build the *specific* mechanism this entry root-caused — a
-hot loop split across a guest page boundary — is **not active for either
-benchmark**. Both fold loops are comfortably interior to a page. If the 1.7x
-bimodal swing were caused by anything else, it should survive the profile
-change; if it was the straddle, it should vanish.
-
-Predictions, in falsifiable form:
-
-1. **The 1.7x v6/v4 gap collapses.** Predicted release ratio **1.00–1.20**.
-   A ratio still ≥1.5 falsifies the straddle explanation outright.
-2. **A residual v6 penalty is still expected, but small.** v6 pays one
-   out-of-line call and — the part that actually costs under TCG — one `ret`,
-   which is an *indirect* branch and cannot be direct-chained between
-   translation blocks; it takes a jump-cache lookup every iteration. But that
-   is one dispatch amortised over ~365 fold-loop iterations of real work, so
-   it should be a low-single-digit percentage, not a multiple. v6 also has the
-   genuinely larger 40-byte pseudo-header (the straight-line preamble at
-   `…976aa3`–`…976b8e`), which is real work and legitimately makes v6 slower.
-3. **Both numbers drop by roughly an order of magnitude** from the debug
-   figures (v4 ~20200–20700 ns, v6 ~35000 ns). The debug loop spilled every
-   intermediate to the stack and consumed 2 bytes per iteration; the release
-   loop is 10 instructions, register-only, 4 bytes per iteration. Predicted
-   release: **v4 ~2000–3000 ns, v6 ~2200–3500 ns** — i.e. at or near the
-   2000/2200 ns targets, which were set from optimised reference
-   implementations and have been failed by ~10x for the whole life of the
-   suite for exactly that reason.
-4. **The run is scored against no baseline.** `bench-history.py --profile
-   release` should report that no same-profile record exists and decline to
-   diff against the five debug records, rather than reporting a fabricated
-   ~10x "improvement". This is the profile-isolation change under test.
-
-If (1) holds and (3) holds, the mechanism is confirmed prospectively and the
-entry can be closed. If (1) fails while (3) holds, the optimisation level was
-a confound and the straddle explanation is wrong — in that case the same-binary
-re-run table above (v6 35048 vs 35039, 0.03%) still stands as proof the effect
-is deterministic per build, and a different per-build mechanism must be found.
-
-**RESULT of the prediction above — run `fcd066231`, release profile,
-2026-08-14T15:57:59.** Scored against the four predictions as written, with no
-edits to them:
-
-| | Predicted | Measured | Verdict |
-|---|---|---|---|
-| 1. v6/v4 ratio | 1.00–1.20 (≥1.5 falsifies) | **0.93** | central claim **holds**, band missed |
-| 2. v6 slightly slower than v4 | yes, low single-digit % | v6 **6.6% faster** | **WRONG** |
-| 3. both drop ~10x | v4 2000–3000 ns, v6 2200–3500 ns | v4 **1716**, v6 **1602** | order right, **both beat the band** |
-| 4. no cross-profile baseline diff | refuses to compare | refused, verbatim | **holds exactly** |
-
-Raw: `v4 min 1716 ns (6366 cyc), mean 1772` and `v6 min 1602 ns (5946 cyc),
-mean 1663`. Dispersion 1.03 and 1.04 — both clean, so neither number is a
-contaminated read. Against the debug records (v4 20182–35410, v6 20953–35899)
-that is **11.8x and 21.9x faster**, and both now pass their 2000/2200 ns
-targets — the first time either has, ever.
-
-The bimodality is gone outright. Across the six debug records the ~35000 band
-was occupied by v6, v6, v4, v6, v6 and neither (a middle run at 25279/25751);
-in release both members sit in a 1602–1716 band with no elevated member. So
-the entry's *central* claim is confirmed: **the 1.7x swing was an artefact of
-the build, not a property of the checksum code.**
-
-**But this run does not isolate the page-straddle mechanism, and it would be
-dishonest to close the entry as if it had.** Going from `opt-level = 0` to `3`
-rewrote the code completely — new instruction sequences, 2x unrolling, new
-addresses, new inlining decisions. The straddle hypothesis predicted the gap
-would vanish and it vanished; but so would *any* hypothesis of the form "this
-is a build artefact", which is a much weaker and much easier claim. I changed
-two variables at once and can only credit the one they share. The experiment
-confirms the **class**, not the **mechanism**.
-
-**Prediction 2 failing matters more than prediction 1 succeeding.** v6 does
-strictly more work than v4 — a 40-byte pseudo-header instead of 12 — *and* in
-this build pays an out-of-line `callq` plus a `ret` (an indirect branch, not
-direct-chainable between TCG translation blocks) on every one of its 2000
-iterations. It came out faster anyway. That is the same fine-grained "what
-costs what under TCG" reasoning the straddle story rests on, applied to a case
-where the answer was checkable, and it got the *sign* wrong. Confidence in the
-straddle attribution should be downgraded accordingly, not raised by
-prediction 1.
-
-**The experiment that would actually isolate it** (not yet done): stay within
-one profile and move a function's address deliberately — insert padding, or a
-`#[repr(align)]`/`.balign` on the hot loop — so that a loop which currently
-sits interior to a page is pushed across a boundary, with nothing else
-changed. Same optimisation level, same instructions, same trip count, one
-variable. Until that is run, "TCG translation blocks are page-bounded" remains
-a plausible and well-documented QEMU property that *fits* the data rather than
-a mechanism this project has demonstrated.
-
-**Much larger incidental result: the profile switch moved the whole suite.**
-`over_target` went **58–59 of 63 on every debug record to 15 of 63 on
-release** — scorecard `48/63 within hardware target`. The suite had been
-reporting a near-total failure that was overwhelmingly an artefact of
-measuring unoptimised codegen, exactly as
-`B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL` predicted. The 15
-remaining over-target entries (`syscall_dispatch` 661 ns vs 200,
-`futex_wake_empty` 944 vs 500, `futex_wait_mismatch` 1507 vs 500,
-`vfs_stat_root` 5920 vs 700, `vfs_stat_deep_2comp` 31046 vs 1400,
-`isr_latency` 164652 cyc vs 37000, …) are now the first *credible* performance
-findings this suite has produced, because they are the first measured on the
-code that would ship. They should be triaged on their own merits — `vfs_stat`
-at 22x and 8x target is the standout — and are not this entry's subject.
-
-**Caveat on those 15, added after the fact.** This run's dispersion report
-flagged five benchmarks at ≥5x `mean/min`, and `vfs_stat_root` — the one
-singled out as "the standout" above — was among them at **12x**. I ran greps
-and git commands during the QEMU boot, which is exactly the mistake recorded
-in `TD-BENCH-RUNS-ARE-CONTAMINATED-BY-THE-AGENTS-OWN-COMMANDS`. The
-over-target *set* is unlikely to be an artefact (a 22x miss does not come from
-host noise), but the individual magnitudes from this run should be treated as
-provisional until re-measured on an idle host. See the RECURRENCE note in that
-entry for why `min_ns` does not fully rescue a 3 ms benchmark.
-
-### [A] B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL. Every recorded benchmark ran at `opt-level = 0` and was scored against optimised-reference targets — **FIXED 2026-08-14, confirmed by measurement**
-
-> **Resolution.** `scripts/boot-test.sh` now builds `--release` and stages from
-> `target/x86_64-unknown-none/release/kernel` when `--bench` is passed, and
-> `bench-history.py` records/compares a `profile` field so release and debug
-> records are never diffed against each other. Confirmed end-to-end by run
-> `fcd066231`: the release kernel built clean (0 warnings, 9m25s), booted, and
-> **`over_target` fell from 58–59 of 63 on every debug record to 15 of 63** —
-> scorecard `48/63 within hardware target`. The comparator correctly refused
-> to diff against the six debug records. Quantified per-benchmark evidence is
-> in the RESULT section of
-> `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x` above (e.g. `tcp_checksum_v4`
-> 20667 → 1716 ns, `v6` 35048 → 1602 ns).
->
-> Two things this did **not** settle, both tracked elsewhere and neither a
-> reason to keep this entry open: (a) whether the *non-bench* boot test should
-> also build release — that is **Q46**, still with the operator, and the
-> default deliberately stays debug meanwhile; (b) the 15 benchmarks still over
-> target, which are now genuine findings rather than codegen artefacts and
-> need triage on their own merits.
-
-**Where:** `scripts/boot-test.sh:602` (`"$CARGO" build`) and `:218`
-(`KERNEL_BIN=".../target/x86_64-unknown-none/debug/kernel"`); `Cargo.toml`
-`[profile.dev]` (357–365) vs `[profile.release.package.kernel]` (370–373).
-
-**What.** The boot test builds with a bare `cargo build` — no `--release` — and
-stages the artefact out of `target/x86_64-unknown-none/**debug**/kernel`. The
-benchmark suite is compiled into the kernel unconditionally; `--bench` only
-changes which serial marker the script waits for (`BENCH_OK` instead of
-`BOOT_OK`), it does not change the build. `[profile.dev]` sets only
-`panic = "abort"`, and there is no `[profile.dev.package.kernel]`, so the
-kernel is built at **`opt-level = 0`**.
-
-So every number in `bench/history.jsonl` — all 5 records, all 63 benchmarks —
-measures unoptimised codegen, and every one of them is scored against
-`baselines.toml` targets taken from *optimised* Linux / Fuchsia / L4 / jemalloc
-implementations.
-
-**Evidence.** Disassembling the staged binary shows textbook `opt-level = 0`
-output. `tcp_checksum_bench` reloads and re-spills the accumulator to the stack
-around every single add:
-
-```
-805d7181:  addl  %ecx, %eax
-805d7183:  movl  %eax, -0x64(%rbp)
-805d7186:  movl  -0x64(%rbp), %eax     # reload of the value just stored
-```
-
-That is one store + one load per accumulation in a loop whose entire body is
-one accumulation. (`llvm-objdump` ships with the rustup toolchain — see the
-path in `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x` — so this needs no binutils
-install.)
-
-**The irony.** `[profile.release.package.kernel]` already exists and is
-deliberately tuned for exactly this — `opt-level = 3`, `codegen-units = 1`,
-`strip = "none"` — with a comment explaining the per-package override. The
-benchmark path has simply never used it.
-
-**Why it matters.** This invalidates the *absolute* verdicts wholesale, and
-they are the ones CLAUDE.md's benchmarking protocol is built on:
-
-- The `over_target` list is not a list of subsystems that are too slow. It is
-  mostly a list of subsystems compiled without optimisation. `tcp_checksum_v4`
-  at 20000 ns against a 2000 ns target is a 10x miss that says nothing about
-  the shipped code.
-- "If a change regresses a benchmark by more than 10%, investigate before
-  merging" cannot be applied to numbers whose baseline is debug codegen.
-- The scale is wrong in the direction that matters: `opt-level = 0` → `3` on
-  byte-loop code of this shape is routinely 5–20x. That dwarfs both the ~1.7x
-  swing in `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x` and the 25% canary
-  tolerance, which means the noise work done so far has been tuning the
-  measurement of the wrong binary.
-
-*Relative* commit-to-commit comparisons are not destroyed — both sides are
-debug — but they are still measuring optimisation-sensitive code paths whose
-debug/release ratio is not uniform, so a debug-visible change need not be a
-release-visible one.
-
-**Same family as the three before it.** `TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN`
-(the suite never ran), `B-BENCH-WATCHLIST-...` (the watch list never looked),
-`B-BENCH-COMPARATOR-CALLS-SUITE-WIDE-HOST-NOISE-A-REGRESSION` (the diff named
-innocents) — and now a suite that ran, reported, and was compared against
-targets, while measuring a binary nobody intends to ship. A check that measures
-the wrong thing is indistinguishable from a check that passes.
-
-**Proposed fix.** Build the kernel `--release` for `--bench` runs, staging from
-`target/x86_64-unknown-none/release/kernel`, and add an append-only `profile`
-field to each `bench/history.jsonl` record so the comparator only ever compares
-like with like. The 5 existing records must keep their meaning: absent
-`profile` reads as `"debug"`, and a release record must never be diffed against
-a debug one. This is a real cost — a second full kernel build, and a bench
-history that restarts from zero same-profile records, which also resets the
-≥6-record threshold that `TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE`
-is waiting on. It is still the only honest option: a benchmark that does not
-measure the shipped build is not a benchmark.
-
-**Open sub-question:** whether the *non*-bench boot test should stay debug.
-Keeping it debug preserves fast iteration and readable panics, at the cost of
-two kernel builds in the tree and the risk that release-only miscompiles or
-UB-dependent behaviour are only ever exercised on bench runs. Leaning toward
-keeping the default boot test debug and making release the `--bench` path, but
-this is worth the operator's view — see `open-questions.md`.
-
-### [A] AUDIT 2026-08-14 — the softirq × hard-IRQ shared-lock class is clean. No action needed; recorded so it is not re-audited
-
-**Why it was worth checking.** `softirq::process_pending` re-enables interrupts
-(`kernel/src/softirq.rs`, module docs 51–56), so any lock held by a softirq
-handler can be observed by a hard-IRQ handler that preempts it. That is
-structurally the same failure mode as the rtl8139 deadlock and as
-`B-COMPLETION-TIMER-IRQ-DEADLOCK`: the hard IRQ spins on a lock whose holder
-cannot run until the IRQ returns. The intersection was believed empty only
-because rtl8139 was the tree's single hard-IRQ lock acquisition — "empty by
-accident" is not a property that stays true, so it needed enumerating rather
-than assuming.
-
-**What was audited.** Every callee reachable from the three softirq handlers
-(`handle_timer` 355, `handle_sched` 434, `handle_irq_poll` 445):
-
-| Callee | Lock discipline | Verdict |
-|---|---|---|
-| `sched::process_sleep_wakeups` (sched/mod.rs 5248) | atomic scan of `SLEEP_QUEUE`, no lock | clean |
-| `sched::process_deferred_wakes` (sched/mod.rs 4897) | non-blocking wake path | clean |
-| `ipc::timer::process_timer_expirations` (ipc/timer.rs 211) | explicitly non-blocking on `CP_TABLE`/`SCHED`, leaves the timer un-advanced on contention so the next tick retries | clean, and documented against `B-COMPLETION-TIMER-IRQ-DEADLOCK` |
-| `ktimer::process_expirations` (ktimer.rs 323) | atomic scan of `TIMERS` | clean |
-| `fs::cache::try_flush_expired` (fs/cache.rs 906) | `try_lock`, result deliberately discarded — retries in ~5 s | clean |
-| `watchdog`, `kstat`, `loadavg`, `irq_storm`, `irqbalance`, `cpufreq`, `thermal` | zero `.lock()` calls; atomics only | clean |
-| `rcu::tick` → `process_callbacks` (rcu.rs 483) | all three `CALLBACKS.lock()` sites (403, 486, 547) wrapped in `cpu::without_interrupts`, popping one callback per critical section and invoking it with the lock released | clean, and the comment at 393–401 records the observed 2/10 boot hang that motivated it |
-
-`rcu` is the only softirq callee that takes a blocking lock at all, and it is
-the one already hardened — the fix predates this audit and cites the boot hang
-it was found by.
-
-**Result: the intersection is empty, and empty by construction rather than by
-luck.** Each site either uses atomics, uses `try_lock`, or masks interrupts for
-the lock-hold window. No change was made.
-
-**What would break it.** Adding a `.lock()` (not `try_lock`, not
-`without_interrupts`-wrapped) to any callee of `handle_timer` — which is a wide
-and growing list: it already fans out to 12 subsystems — while that same lock is
-reachable from a hard-IRQ handler. The `handle_timer` fan-out is the risk
-surface to re-check when a subsystem is added to it, not the whole kernel.
-
-### [A] B-BENCH-CANARY-CERTIFIES-CLEAN-RUNS-THAT-CONTAIN-MULTI-X-STALLS. All three runs it passed had 5–8 benchmarks stalled ≥5x — MITIGATED 2026-08-14
-
-**Where:** `kernel/src/bench.rs` (`maybe_canary_sample`, `CANARY_SAMPLE_EVERY = 8`)
-and `scripts/bench-history.py` (the `Canary OK` verdict).
-
-**What.** The mid-suite canary has never once fired. That was read as "the host
-has been quiet"; it is not what the data says. Cross-checking each run's canary
-verdict against the per-benchmark `mean/min` recorded in the same run:
-
-| run | canary verdict | benchmarks with `mean/min` ≥ 5x |
-|---|---|---|
-| `be167dd90` | clean (endpoints 97%) | **8** — `ipc_channel` 23x, `page_alloc_free` 19x, `syscall_dispatch` 16x, `pick_next` 16x, `context_switch` 11x, `crypto_ed25519_sign` 8x, `dashboard_api_status` 8x, `ipc_channel_sync` 6x |
-| `5a2002bac` | clean (spread 2%) | **5** — `page_alloc_free` 24x, `vfs_stat_deep` 15x, `vfs_stat_3comp` 12x, `crypto_ed25519_verify` 10x, `vfs_throughput_16k_write` 5x |
-| `f74f97b6d` | clean (spread 16%) | **6** — `context_switch` 21x, `vfs_stat_deep` 16x, `vfs_stat_3comp` 14x, `vfs_throughput_16k_write` 8x, `dashboard_api_health` 7x, `crypto_ed25519_verify` 7x |
-
-The run reported as the *cleanest* of the three — `5a2002bac`, spread 2%, the
-one used to certify that four earlier benchmarks had merely been contaminated —
-contained a benchmark whose mean was **24x its own minimum**.
-
-**Why the canary cannot see this.** It samples the host *between* benchmarks,
-once per 8 scored entries — 10 samples across 63 benchmarks. A stall confined
-to one benchmark falls between two samples and leaves no trace in it. The
-canary measures the gaps; the stalls are in the benchmarks.
-
-**Why `mean/min` can.** It is computed from the benchmark's own iterations, so
-it sees precisely the interval the canary skips. And the data was already being
-recorded — the append-only `mean_ns` extension landed for a different reason
-(the variance band) and turns out to answer this too.
-
-**These are not intrinsically noisy benchmarks.** That was the obvious
-alternative reading, and it is wrong. Across the three runs only
-`ipc_channel_sync` is *persistently* elevated (6.0 / 3.9 / 4.6). Every other
-high reading is spiky — `pick_next` 15.8 then 1.1 then 1.2; `syscall_dispatch`
-16.1 then 1.2 then 1.2; `page_alloc_free` 19.3, 24.4, then 1.3. A benchmark
-that is 16x dispersed in one run and 1.2x in the next is being disturbed, not
-behaving that way.
-
-**Nor is it one cold first iteration.** `vfs_stat_3comp` in `f74f97b6d`: min
-1334082, mean 18349532, max 758926475 over 500 iterations. The single worst
-iteration accounts for only ~8% of the total time, so the elevation is broad —
-many slow iterations, not one outlier. Same shape for `crypto_ed25519_verify`
-(max is ~7% of total over 50 iterations).
-
-**Mitigation applied.** `scripts/bench-history.py` now reports per-benchmark
-dispersion (`suspect_dispersion` / `report_dispersion`,
-`DISPERSION_SUSPECT_RATIO = 5.0`) and the canary's verdict line no longer
-claims "host load stable" — it now says only that the reference access cost was
-steady *between* benchmarks, and points at the dispersion line. 6 new tests
-(48 total, all passing), including the real `page_alloc_free` 24x shape from the
-run the canary called clean.
-
-**The threshold is deliberately unfitted.** Measured across the three records:
-median benchmark 1.26–1.59, the large majority under 2, excursions at 5–25x,
-and little in between. 5.0 sits in that empty band. It wants retuning once
-release-profile records exist, since optimised benchmarks run for less wall
-time and so present a smaller target to a burst.
-
-**Not yet done — this reports, it does not correct.** A flagged benchmark's
-recorded figure is still its *minimum*, which may well be sound; the flag says
-"do not read movement here as signal", not "this number is wrong". Deciding
-which is which needs a per-benchmark dispersion *baseline*, i.e.
-`TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE`, whose record count has just
-been reset to zero by the debug→release profile switch.
-
-**Lesson, the fourth of this shape.** After `TD-BENCHMARKS-...` (the suite never
-ran), `B-BENCH-WATCHLIST-...` (the watch list never looked), and
-`B-BENCH-COMPARATOR-...` (the diff named innocents): a canary that never fired,
-read as evidence of quiet. Its own motivating case had already refuted the
-first version of it, and the second version was written specifically to catch
-per-benchmark bursts — yet it was still reporting "host load stable" over runs
-containing 24x stalls. "It has never fired" is a claim about the check, never
-about the world.
-
----
-
-### B-VFS-STAT-ROOT-IS-12x-OVER-TARGET-AND-THE-DCACHE-IS-NOT-WHY — 2026-08-14 — OPEN (`kernel/src/fs/vfs.rs`, `kernel/src/ipc/namespace.rs`)
-
-`vfs_stat_root` — `Vfs::stat("/")`, the single cheapest path operation the VFS
-can perform — costs **6151 ns** on the release-profile run (`min` of 500
-iterations, and *not* flagged by the dispersion check in that run, so the number
-is clean). The CLAUDE.md target for a cached lookup is 200–500 ns per component.
-For a zero-component path that is roughly **12–30x over**.
-
-**The hypothesis I started with was wrong, and measurement is what killed it.**
-`VfsDcache::lookup` (`kernel/src/fs/vfs.rs:1189`) is an O(n) linear scan over
-`VFS_DCACHE_SIZE = 1024` slots, and CLAUDE.md explicitly forbids linear scans in
-VFS path lookup. It was the obvious culprit and I was one step from rewriting it
-as a hash table. Instrumenting first (`bench_vfs_stat_breakdown`, this commit)
-showed:
-
-```
-vfs_stat_breakdown: dcache 25 valid entries (of 1024), +550 hits +0 misses
-```
-
-**25 live entries, filled from index 0, 100% hit rate.** A hit-scan terminates
-in ~25 iterations, not 1024 — the cost of a linear scan is a function of
-*occupancy*, not capacity. The scan cannot account for microseconds. The
-1024-slot scan remains a latent defect (it degrades as occupancy grows, and it
-is the *miss* path that walks all 1024) and is tracked as such below — but it is
-**not** this bug's cause. Had I "fixed" it I would have burned a refactor and
-moved the number by nothing.
-
-**Where the time actually goes.** Splitting `Vfs::stat` at its own seam —
-`resolve_follow(path)` then `stat_resolved(&path)`:
-
-```
-vfs_stat_breakdown_full:      6191 ns
-vfs_stat_breakdown_resolved:  2442 ns
-  => resolve_follow ~3749 ns (61%) + stat_resolved 2442 ns (39%)
-```
-
-So path *resolution* is the larger half, and both halves are individually over
-target.
-
-**Prime suspect for the 3749 ns, not yet confirmed.** `resolve_follow`
-(`vfs.rs:1553`) calls `namespace::resolve_path` (`ipc/namespace.rs:721`), which
-via `resolve_path_for` (`:735`) takes **`PROCESS_NS.lock()`**, then
-**`PROCESS_ROOT.lock()`**, then conditionally **`PROCESS_MOUNTS.lock()`** — three
-global spinlocks — and performs `path.to_path_buf()`, a heap allocation, *even
-in the trivial `ROOT_NAMESPACE` pass-through case where the answer is the input
-unchanged*. That is a fixed per-resolution cost paid by every single VFS
-operation in the system. `validate_path`, `normalize_path` (another alloc), the
-`VFS_DCACHE.lock()`, and `entry.resolved.clone()` (another alloc) are the other
-candidates in that 3749 ns.
-
-**Explicitly not yet attributed.** The above is a reading of the code, not a
-measurement, and the last time I reasoned this way about a hot path
-(`B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x`, prediction 2) I got the *sign*
-wrong. The next step is to split `resolve_follow` the same way this commit split
-`stat` — `namespace::resolve_path` vs `validate_path`+`normalize_path` vs the
-dcache lock+clone — and let the numbers pick the target. Do not optimise any of
-the four candidates before that split exists.
-
-**Related, same shape, worse:** `vfs_stat_deep_2comp` = 33573 ns, ~16786 ns per
-component against a 200–500 ns/component target. If the fixed per-resolution
-prologue is the cause of `vfs_stat_root`, it does not explain this one — 2
-components cost 5.4x one component, so there is a *per-component* cost here too.
-Both need the same treatment.
-
-#### PROSPECTIVE PREDICTION (written and committed before the stage-split run)
-
-Same protocol as `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x`: the prediction is
-committed before the measurement exists, so it can be graded rather than
-rationalised. Last time this protocol caught me getting a *sign* wrong; the
-point is to let it do that again.
-
-**Primitive costs from the same release run** (`bench/history.jsonl`, commit
-`040049442`) — these are the anchors, not guesses:
-
-| primitive | measured | what it bounds |
-|---|---|---|
-| `heap_alloc_free_64` | 184 ns | one alloc+free pair ⇒ a single alloc ≲ 180 ns |
-| `sched_pick_next` | 40 ns | takes the run-queue lock ⇒ an uncontended spinlock is *cheap*, ≲ 20 ns |
-| `context_switch` | 1275 ns | nothing here should approach this |
-
-**What each stage actually does** (from the code, and this is the weak part —
-inspection is exactly what was wrong about the dcache):
-
-* `ns_translate` = `current_task_id()` + `owner_process()` (a `THREAD_OWNERS.lock()` + `BTreeMap::get`) + `PROCESS_NS.lock()` + get + `path.to_path_buf()` (**1 alloc**, of a 1-byte path) + `PROCESS_ROOT.lock()` + get → `None`. So **3 spinlocks + 3 map lookups + 1 alloc**.
-* `validate_normalize` = a byte scan of `"/"` + `normalize_path` (**1 alloc**).
-* `dcache_hit` = `VFS_DCACHE.lock()` + ~25 path compares + `entry.resolved.clone()` (**1 alloc**).
-
-**Predictions, falsifiable:**
-
-1. `ns_translate` < 400 ns.
-2. `validate_normalize` < 400 ns.
-3. `dcache_hit` < 500 ns.
-4. **Therefore the three stages sum to well under the 3749 ns that subtraction
-   attributed to `resolve_follow` — I predict the sum is < 1500 ns.** Three
-   allocations at ≤180 ns and six-ish uncontended spinlocks at ≤20 ns simply
-   do not reach 3.7 µs.
-5. **If (4) holds, the subtraction is what was wrong.** The specific mechanism I
-   expect: `Vfs::stat` feeds `stat_resolved` the *resolved* path, while the
-   isolated `vfs_stat_breakdown_resolved` benchmark feeds it the literal `"/"`.
-   If `resolve_path("/")` returns something longer than `"/"`, then the
-   `stat_resolved` inside `stat` is doing strictly more work than the isolated
-   measurement of it, and subtraction charges that surplus to `resolve_follow`.
-   **In that case the real culprit is `stat_resolved` — `resolve_mount`'s
-   `VFS.lock()` + linear mount scan + `to_path_buf()` + `Arc::clone`, then
-   `fs.lock().stat()` — and I will have misattributed the cost twice in a row
-   on this one benchmark.**
-
-This run therefore carries a direct measurement of `resolve_follow`
-(`Vfs::resolve_path` is a public alias for it) *alongside* the subtraction, plus
-a print of what `resolve_path("/")` actually returns. Prediction 5 is decided by
-those two lines and needs no further argument.
-
-**Standing caution, restated:** predictions 1–3 lean on the same
-fine-grained cost reasoning that got the tcp_checksum sign wrong. Treat a hit as
-weak confirmation and a miss as strong disconfirmation.
-
-#### RESULT — 2026-08-14, release profile, commit `f9807f73a` (`build/stage-split.log`)
-
-```
-vfs_stat_breakdown: full 6423ns = resolve_follow ~3843ns + stat_resolved 2580ns
-vfs_stat_breakdown: resolve_follow measured directly 3504ns (vs 3843ns by subtraction)
-vfs_stat_breakdown: resolve_follow 3504ns = ns_translate 1948ns + validate_normalize 318ns + dcache_hit ~1238ns
-vfs_stat_breakdown: resolve_path("/") -> "/" (1 bytes)
-vfs_stat_breakdown: dcache 25 valid entries (of 1024), +1100 hits +0 misses over the run
-```
-
-| # | prediction | actual | verdict |
-|---|---|---|---|
-| 1 | `ns_translate` < 400 ns | **1948 ns** | **MISS, 4.9x** |
-| 2 | `validate_normalize` < 400 ns | 318 ns | hit |
-| 3 | `dcache_hit` < 500 ns | **~1238 ns** | **MISS, 2.5x** |
-| 4 | three stages sum < 1500 ns | **3504 ns** | **MISS, 2.3x** |
-| 5 | "the subtraction is what was wrong" | subtraction was **right** | **disconfirmed** |
-
-**Prediction 5 was wrong in the way that matters most: it was an escape
-hatch.** It said that if the stages came out cheap, the *subtraction* must be
-the error and the real culprit would be `stat_resolved`. Both halves are
-refuted outright by the two lines this run was built to print:
-`resolve_path("/")` returns `"/"` unchanged (1 byte), so the different-inputs
-hazard that would have made subtraction unsound never existed on this path; and
-the direct measurement (3504 ns) agrees with the subtraction (3843 ns) to within
-9.7%. `resolve_follow` really is ~55% of the whole stat, exactly where
-subtraction put it. I did **not** misattribute the cost twice — I misattributed
-it once, to the dcache, and then predicted I had misattributed it again in the
-opposite direction. The second guess was as wrong as the first.
-
-**Why 1 and 3 missed: a bad anchor, and it was bad by misreading the code.**
-The prediction leaned on "`sched_pick_next` = 40 ns, and it takes the run-queue
-lock, therefore an uncontended spinlock is ≲ 20 ns." That premise is simply
-false about the benchmark. `bench_sched_pick_next` builds a **local**
-`PriorityRoundRobin::new()` on the stack and calls `rq.pick_next()` directly —
-it never touches `SCHED.lock()`. **It takes no lock at all.** So the one number
-in the anchor table that was supposed to bound lock cost was measuring a
-lock-free path, and the 20 ns figure was manufactured from nothing. This is the
-same failure as the dcache: a claim about what the code does, asserted from
-reading rather than from measuring, load-bearing for the conclusion.
-
-**The cost model the measurement actually supports.** Solving the three stages
-against their contents (3 locks + 3 map lookups + 1 alloc = 1948; 1 lock + ~25
-path compares + 1 alloc = 1238; a byte scan + 1 alloc = 318) gives a consistent
-fit at roughly:
-
-| primitive | implied cost under QEMU-TCG |
-|---|---|
-| uncontended **global spinlock** acquire+release | **~500 ns** |
-| heap alloc (small) | ~180 ns (matches `heap_alloc_free_64`) |
-| one dcache path compare | ~21 ns |
-
-A lock is ~3x an allocation here, and the whole path is **lock-dominated**: 4
-global spinlocks across `resolve_follow` alone, ~2000 ns of its 3504. Every
-optimisation instinct I had was aimed at allocations and at scan length, and
-both are minor terms.
-
-**But that model is derived, not measured, and deriving is what just failed
-twice.** So the next run adds `bench_spinlock_uncontended` to measure the
-primitive directly. The suite has anchors for allocation, context switch and
-syscall dispatch but none for the single most common operation in the kernel,
-which is precisely why a fabricated 20 ns figure went unchallenged.
-
-**Consequences (tracked as `B-NAMESPACE-RESOLVE-TAKES-3-GLOBAL-LOCKS-TO-RETURN-ITS-INPUT` below).**
-`ns_translate` is 1948 ns — 56% of `resolve_follow`, 30% of the entire stat —
-and for a process in the root namespace with no chroot and no volume mounts
-(i.e. every process on a normal desktop) it does all of that work to **return
-its input unchanged**.
-
----
-
-### B-NAMESPACE-RESOLVE-TAKES-3-GLOBAL-LOCKS-TO-RETURN-ITS-INPUT — 2026-08-14 (`kernel/src/ipc/namespace.rs`)
-
-**Measured, not inferred:** `ns_translate` = **1948 ns**, which is 56% of
-`resolve_follow` and **30% of an entire `stat("/")`**. See the RESULT section of
-`B-VFS-STAT-ROOT-IS-12x-OVER-TARGET-AND-THE-DCACHE-IS-NOT-WHY` above.
-
-`namespace::resolve_path` is called before **every** path operation in the VFS —
-read, write, stat, open, mkdir, unlink, all of it. For a process in the root
-namespace with no chroot and no volume mounts — which is every process on a
-normal desktop, and every process in this kernel today — the entire function
-body is:
-
-1. `current_task_id()` — cheap, an atomic load.
-2. `owner_process(task_id)` → **`THREAD_OWNERS.lock()`** + map get.
-3. **`PROCESS_NS.lock()`** + map get → `ROOT_NAMESPACE`.
-4. `path.to_path_buf()` — a heap allocation.
-5. **`PROCESS_ROOT.lock()`** + map get → `None`.
-6. Return the path, byte-for-byte identical to the input.
-
-**Three global spinlock acquisitions and one heap allocation, to return the
-argument unchanged.** At the measured ~500 ns per uncontended global spinlock
-under TCG, the locks alone are ~1500 of the 1948 ns.
-
-This is not a micro-optimisation target, it is a missing fast path. The
-structure charges every path operation in the system for a feature (containers)
-that is not in use, and the charge is paid in the most expensive primitive
-available.
-
-**The fix** — a global "namespace features are in use" flag, checked with one
-relaxed atomic load before any lock is taken:
-
-* An `AtomicBool` (`NS_FEATURES_ACTIVE`) set with `Release` ordering at the
-  three sites that can make namespace state non-trivial: inserting into
-  `PROCESS_NS`, into `PROCESS_ROOT`, and into `PROCESS_MOUNTS`.
-* `resolve_path_for` loads it with `Acquire`; if clear, it returns immediately.
-* **The flag is never cleared.** Clearing it on the last teardown would
-  introduce a race with a resolve already in flight, and the cost of staying on
-  the slow path after containers have been used once is exactly the cost we have
-  today. Monotonic is the sound choice and it is deliberate, not an oversight.
-
-This is the standard rarely-used-feature pattern (Linux's static keys). It does
-not change behaviour for any process: with the flag clear, no process has a
-namespace, a root, or a volume, so every branch the slow path could take is the
-identity branch — which is what makes the fast path a refactor rather than a
-semantic change.
-
-**The allocation in step 4 survives this fix** and is the correct next target:
-`resolve_path` returns `PathBuf`, so the pass-through allocates a copy that
-`resolve_prologue` immediately re-allocates in `normalize_path`. Returning
-`Cow<'_, Path>` would remove one of the two. Deferred until the lock fix is
-measured, because at ~180 ns it is a third of a single lock and chasing it first
-would have been another instance of optimising the minor term.
-
-#### PROSPECTIVE PREDICTION (recorded before the fix is built)
-
-Same protocol, and this time with a directly measured anchor rather than a
-fabricated one — the next run also adds `bench_spinlock_uncontended`.
-
-1. `bench_spinlock_uncontended` comes out in **300–700 ns**. This is the load-
-   bearing one: the whole cost model above stands or falls on it. If it lands
-   below ~150 ns, the lock attribution is wrong and something else in
-   `ns_translate` is the real cost.
-2. `ns_translate` drops from 1948 ns to **< 150 ns** (one atomic load, one
-   allocation removed only if the `Cow` change lands too — so expect ~180 ns if
-   the allocation stays; I predict the allocation is skipped entirely on the
-   fast path, hence < 150).
-3. `resolve_follow` drops from 3504 ns to **1700–2000 ns**, now dominated by
-   `dcache_hit`.
-4. Full `vfs_stat_root` drops from ~6151 ns to **~4400–4700 ns**, a ~28%
-   improvement on a benchmark I twice tried to fix by looking at the wrong
-   subsystem.
-
-**If (1) holds but (2) does not**, the fast path is not being taken — most
-likely because some process really did set one of the three maps during boot,
-which would itself be worth knowing and is why the benchmark prints the flag.
-
-#### RESULT — 2026-08-14, two post-fix release boots ✅ FIXED
-
-The first post-fix boot reported `namespace fast path DISABLED
-(NS_FEATURES_ACTIVE=true)` — the pre-registered fallback clause above, firing
-verbatim. The cause was not "some process set one of the maps during boot" but
-something better: **the namespace self-tests themselves**.
-`test_process_attach_detach`, `test_process_root` and `test_volume_mounts` call
-`attach`/`set_root`/`add_volume`, which arm the monotonic flag, and nothing
-disarmed it. So the self-tests were permanently degrading the VFS of the kernel
-they had just finished validating — every path operation for the rest of the
-boot paid three global spinlocks to exercise a feature that no longer had a
-user. Fixed by asserting `reset_ns_features_if_trivial()` at the end of
-`self_test()`, which doubles as a leak check: it can only succeed if every
-namespace test cleaned up its process state.
-
-Two boots after that fix (the first aborted on an unrelated flake — see
-`B-FASTPY-SLEEP-SELF-TEST-IS-FLAKY` — so both are reported):
-
-| # | prediction | pre-fix | run A | run B | grade |
-|---|---|---|---|---|---|
-| 1 | uncontended tracked lock **300–700 ns** | 628 | 448 | 632 | **HIT** (all three in band) |
-| 2 | `ns_translate` **< 150 ns** | 1670 | 347 | 264 | **MISS** (1.8x over) |
-| 3 | `resolve_follow` **1700–2000 ns** | 3138 | 2488 | 1627 | **UNPROVEN** (band narrower than the noise) |
-| 4 | `vfs_stat_root` **4400–4700 ns** | 5930 | 2971 | 4394 | **HIT** (run B lands 0.14% under the band) |
-
-**(1) HIT, and it was the load-bearing one.** The previous prediction on this
-benchmark failed because its lock cost came from a *fabricated* anchor; this one
-was measured first, and everything built on it held.
-
-**(2) MISS, and the miss was avoidable by reading a type signature.** The
-prediction said "I predict the allocation is skipped entirely on the fast path,
-hence < 150". It cannot be: `resolve_path` returns `PathBuf`, so *every* return
-allocates, fast path or not. The residual ~264 ns is one atomic load plus that
-allocation. This is not a measurement surprise — it is a claim contradicted by
-the function's own declaration, which was there to be read. It also promotes the
-deferred `Cow<'_, Path>` change from "the correct next target" to "the only
-remaining term".
-
-**(3) UNPROVEN, and that is the more useful result.** 1627 and 2488 straddle the
-band. The two runs differ by 1.53x while the band spans 1.18x — the prediction
-was finer-grained than the instrument meant to grade it. Predicting to a
-precision the measurement cannot resolve yields a verdict that is noise wearing
-a grade's clothes, which is worse than no verdict. See
-`TD-BENCH-STAGE-SPLIT-HAS-NO-COHERENCE-CHECK` below, where the same two runs
-disagree by 1.67x on two byte-identical benchmarks.
-
-**(4) HIT.** Predicted "~28% improvement"; measured −26% (5930 → 4394). This is
-the benchmark twice attacked in the wrong subsystem (first the dcache, then the
-subtraction). The third attempt — measure the anchor, then follow the
-measurement — worked on the first try.
-
----
-
-### B-LOCKDEP-CLASS-LOOKUP-IS-A-LINEAR-SCAN-ON-EVERY-LOCK — 2026-08-14 (`kernel/src/lockdep.rs`)
-
-**Measured, and it is the largest single overhead found this session.** The lock
-microbenchmark added to grade the namespace fix answered a question nobody had
-asked it:
-
-```
-lock acquire+release: raw 30ns, tracked 632ns, no-lockdep 232ns, no-stats 656ns
-lock overhead: total +602ns = lockdep 400ns + preempt 29ns + rdtsc 57ns + unexplained 116ns
-```
-
-`raw` is `spin::Mutex`; `tracked` is `crate::sync::Mutex`, the type every global
-in the kernel uses. **The tracked mutex costs 21x the raw one, and two thirds of
-the difference is lockdep.** Confirmed across both post-fix boots: 400/602 ns
-(66%) and 281/430 ns (65%).
-
-The cause is not that validation is expensive. It is that the *lookup* is
-`O(classes)`:
-
-```rust
-fn find_or_register_class(lock_addr: usize, name: &[u8]) -> Option<u16> {
-    let count = CLASS_COUNT.load(Ordering::Relaxed) as usize;
-    for i in 0..count.min(MAX_CLASSES) {          // <-- up to 128 iterations
-        if unsafe { CLASSES[i].id } == lock_addr { return Some(i as u16); }
-    }
-    ...
-```
-
-and `find_class` — called from `lock_release` — is the same scan again. So every
-lock operation in the kernel walks the class table **twice**, and `MAX_CLASSES`
-is 128. This is exactly the "linear scan on a hot path" CLAUDE.md's performance
-section forbids, hiding inside the *debugging* infrastructure rather than the
-code being debugged, which is why no amount of reading the subsystem under
-investigation would ever have found it.
-
-Two further consequences worth stating because they distort the whole benchmark
-suite:
-
-* **The cost is positional.** A lock class registered early is found in a few
-  iterations; one registered late pays the full scan. So the same lockdep call
-  is cheap or expensive depending on *boot order*, and a benchmark's own lock —
-  registered last, at benchmark time — pays the worst case. The 400 ns figure is
-  therefore an upper bound on the average, not the average.
-* **Every benchmark in this suite that takes a lock is partly measuring this.**
-  `syscall_dispatch` (653–699 ns), `futex_wake_empty` (953 ns) and the VFS
-  numbers all include it.
-
-**The fix** (implemented in the same change as this entry): an open-addressed
-hash index from lock address to class slot, Fibonacci-hashed and linearly
-probed, 512 buckets for 128 classes so the load factor stays at 25%. This is
-what Linux does (`classhash_table`, `kernel/locking/lockdep.c`). Entries are
-append-only, so a probe run is contiguous and stopping at the first empty bucket
-is correct.
-
-**This fix is what makes the tempting question go away.** The obvious reaction to
-"lockdep costs 400 ns per lock" is to gate it to debug builds, as Linux does with
-`CONFIG_PROVE_LOCKING` — trading deadlock detection in production for lock speed.
-That would have been a real architectural fork worth escalating. It is moot: the
-validator was never inherently expensive, its index was. Keep both.
-
-**The optimisation is guarded by a test that can actually fail.** A hash that
-silently *misses* a registered class is the dangerous failure: `find_or_register_class`
-would then register a second class for the same lock, that lock's dependency
-edges would split across two graph nodes, no cycle would ever be found through
-it, and lockdep would go quiet — looking exactly as healthy as a kernel with no
-deadlocks. So the linear scan is not deleted, it is demoted to an oracle:
-`test_class_hash_index()` asserts the hash and the scan agree on every registered
-class, agree on absence, that double registration yields one class, and — using
-a colliding address it *searches for* rather than hopes for — that the probe
-sequence survives a bucket collision.
-
-#### PROSPECTIVE PREDICTION (recorded before the fix is booted)
-
-1. `lock_tracked` drops from ~632 ns to **250–330 ns**, i.e. close to the
-   measured `no-lockdep` figure (232 ns) plus a hash lookup and probe (~2 memory
-   references, call it 20–80 ns under TCG). If it lands *below* 232 ns something
-   is wrong — the index cannot be cheaper than not running at all.
-2. `lockdep` in the overhead split drops from ~400 ns to **< 100 ns**.
-3. The knock-on: `syscall_dispatch` (653–699 ns across four boots, target 200)
-   improves by **at least 15%**, because it takes tracked locks. This is the
-   riskiest of the three — if syscall dispatch does *not* move, then either it
-   takes no tracked lock or the lock is registered early enough to have been
-   cheap already, and the "every benchmark is partly measuring lockdep" claim
-   above is overstated and must be narrowed.
-4. `lockdep classes registered` (newly printed) comes out **> 40**. If it is in
-   single digits, the scan was never long and the 400 ns has some *other* cause
-   inside `lock_acquire` — most likely `smp::current_cpu_index()` or the
-   re-entrancy guard — and this whole diagnosis is wrong.
-
-#### RESULT — 2026-08-14, release boot ✅ FIXED
-
-```
-[lockdep]   class hash: OK (3 classes verified vs scan, bucket collision handled)
-[bench]   lock acquire+release: raw 25ns, tracked 274ns, no-lockdep 223ns, no-stats 301ns
-[bench]   lock context: 43 lockdep classes registered
-[bench]   lock overhead: total +249ns = lockdep 51ns + preempt 29ns + rdtsc 56ns + unexplained 113ns
-[bench] SCORE lock_uncontended 274 500 PASS
-```
-
-| # | prediction | before | after | grade |
-|---|---|---|---|---|
-| 1 | `lock_tracked` **250–330 ns** | 632 | **274** | **HIT** |
-| 2 | lockdep's share **< 100 ns** | 400 | **51** | **HIT** (7.8x) |
-| 3 | `syscall_dispatch` improves **≥ 15%** | 653–699 | **699** | **MISS** (0%) |
-| 4 | **> 40** classes registered | — | **43** | **HIT** |
-
-**The tracked mutex went from 21x the raw spinlock to 11x, and
-`lock_uncontended` moved from OVER to PASS** (274 vs the 500 ns target). Knock-on
-in the same boot: `vfs_stat_root` 4394 → **3344 ns**, so with the namespace fast
-path the total on that benchmark is **5930 → 3344, −44%**.
-
-**(3) MISS, and the pre-registered consequence is honoured rather than
-explained away.** The prediction said: *"if syscall dispatch does not move, then
-the 'every benchmark is partly measuring lockdep' claim is overstated and must be
-narrowed."* It did not move — 699 ns, identical to the best of the four pre-fix
-boots. **Narrowing it: the claim was overstated.** Lockdep taxed benchmarks that
-take `crate::sync::Mutex` *specifically*, which is the VFS/namespace path, not
-"every benchmark that takes a lock". `syscall_dispatch` evidently takes none, or
-takes a different lock type (`PreemptSpinMutex`, which is a distinct type with
-distinct overhead — a distinction this session already had to write a comment
-about in `bench.rs`). `syscall_dispatch` at 3.5x its 200 ns target is therefore
-still unexplained and remains open.
-
-**The coherence gates from `TD-BENCH-STAGE-SPLIT-HAS-NO-COHERENCE-CHECK` shipped
-in the same boot and reported a clean run:** drift 3331 → 3353 ns (0%),
-parts/whole 96%. That is the *quiet* outcome, so it proves only that the gates do
-not fire spuriously — **it does not prove they fire.** They have not yet been
-observed rejecting a run, and until they have, they carry exactly the weakness
-this file keeps documenting. The two incoherent runs that motivated them are
-recorded above, so the next drifting boot is the test.
-
-**Weak spot in the new test, recorded rather than glossed:** `test_class_hash_index()`
-runs from `lockdep::self_test()`, which executes early in boot when only **3**
-classes are registered — but the pathology it guards against (a probe run
-walking into a collision) needs a *populated* table, and by benchmark time there
-are 43. The synthetic collision case is what carries the test today; the
-verify-every-registered-class part is checking 3 of the eventual 43. It should be
-re-run late in boot as well. Tracked as
-`TD-LOCKDEP-HASH-TEST-RUNS-BEFORE-THE-TABLE-IS-POPULATED`.
-
----
-
-### TD-LOCKDEP-HASH-TEST-RUNS-BEFORE-THE-TABLE-IS-POPULATED — 2026-08-14 — ✅ FIXED 2026-08-14 (`kernel/src/lockdep.rs`, `kernel/src/main.rs`)
-
-`test_class_hash_index()` verifies the O(1) class index against a linear-scan
-oracle, but it is called from `lockdep::self_test()` during early boot, when the
-class table holds **3** entries. By the time the kernel is doing real work it
-holds **43**. So the "every registered class is found at the index the scan
-reports" assertion — the one that would catch a probe-sequence bug — is
-exercised at 7% of the table size it needs to defend.
-
-The synthetic part of the test (register a fresh address, then register a
-deliberately colliding one and check both resolve) does not depend on table size
-and is doing the real work today. That is why this is tech debt and not a hole:
-the collision path *is* covered, just not at realistic occupancy.
-
-**Proper fix:** expose it as `pub fn verify_class_index()` and call it a second
-time late in boot — after driver/subsystem init, when the table is full — so the
-oracle comparison runs against all 43 classes. It must run on every boot, not
-only `--bench` boots, or it inherits the "check that only runs when you're
-already looking" problem.
-
-> **Resolution.** Done as described; the call takes a `when` label so the two
-> runs are distinguishable in the log and the vacuous early pass cannot be
-> misread as the meaningful one:
->
-> ```
-> [lockdep]   class hash (early): OK (3 classes verified vs scan, bucket collision handled)
-> [lockdep]   class hash (populated): OK (31 classes verified vs scan, bucket collision handled)
-> ```
->
-> **The placement was itself the interesting part, and got it wrong on the first
-> attempt.** The late call went in next to the deferred-benchmark spawn, which
-> reads as "late in boot" — but that sits *after* `BOOT_OK`, and
-> `boot-test.sh` kills QEMU at `BOOT_OK` unless `--bench` is given. So the first
-> version printed nothing on a normal boot test: a check that would have run only
-> on benchmark boots, i.e. only when someone was already looking, which is the
-> precise failure mode it was added to prevent. Moved above the `BOOT_OK` marker,
-> with a comment at the site saying why it must stay there. Verified by the
-> absence-then-presence of the line across two boots, not by reading the code.
-
-**Residual, not worth a separate entry:** 31 classes at `BOOT_OK` versus 43 by
-benchmark time — the last dozen register during post-boot activity. Coverage is
-now 72% of the eventual table rather than 7%, and the synthetic collision case
-covers the probe path independently of occupancy.
-
----
-
-### TD-BENCH-STAGE-SPLIT-HAS-NO-COHERENCE-CHECK — 2026-08-14 (`kernel/src/bench.rs`)
-
-Two byte-identical benchmarks, in the same boot, disagreed by 1.67x:
-
-```
-SCORE vfs_stat_root 2971 ...
-[bench] vfs_stat_breakdown_full: min=25808 cycles (4976ns) ...
-```
-
-Both are `run(..., 500, || black_box(Vfs::stat("/")))`. Nothing distinguishes
-them but *when in the boot they ran*. In the next boot the same pair came out
-4394 and 4306 — coherent. So the harness's min-of-500 is sometimes accurate and
-sometimes 1.7x off, and **nothing in the output says which kind of run you are
-reading.**
-
-The consequences are not hypothetical; they are the two runs above:
-
-* Run A attributed `stat_resolved` 2531 → 4109 ns, a 62% "regression" caused by
-  a change that cannot touch it.
-* Run B printed `full 4306ns = resolve_follow ~0ns + stat_resolved 5762ns` — the
-  subtraction saturated at zero because a *part* measured larger than the
-  *whole*. That is arithmetically impossible and it was printed without comment.
-* Run A's parts summed to 133% of its whole. Also printed without comment.
-
-This is the project's recurring defect class in its purest form: the check was
-*there* — the code deliberately measures `resolve_follow` both directly and by
-subtraction, with a comment explaining that a disagreement would indict the
-subtraction — and then prints both numbers side by side and says nothing when
-they disagree by 2.9x. **A check whose failure is not distinguishable from its
-success is not a check, it is a decoration.**
-
-> **Resolution (same change).** Two gates, both of which say the word WARNING:
->
-> * **Drift gate.** The first measurement (`vfs_stat_breakdown_full`) is repeated
->   verbatim at the *end* of the block as `..._full2`. The two are the same code
->   over the same input, so any difference is pure measurement drift across the
->   width of the block, and it bounds how much of every stage difference is real.
->   Over 25% and the run is declared not internally coherent and unusable for
->   attribution.
-> * **Parts/whole gate.** `resolve_direct + stat_resolved` must land within
->   75–125% of `full`, or the stage attribution is declared "not arithmetic, it
->   is noise".
->
-> The same discipline is applied to the new lock benchmark, which prints
-> `unexplained` as an explicit residual and warns when the components exceed the
-> total they were subtracted from.
-
-**Not fixed:** the harness still reports a single `min` with no confidence
-interval, so a *single* benchmark with no in-block replicate (i.e. all the
-others) remains ungraded for coherence. The proper fix is for `run()` itself to
-take two interleaved sample sets and report their disagreement, making every
-benchmark self-checking rather than just this one. Tracked here; not blocking.
-
----
-
-### B-FASTPY-SLEEP-SELF-TEST-IS-FLAKY — 2026-08-14 (`kernel/src/proc/spawn.rs:15508`)
-
-`self_test_fastpy_slateos_sleep()` failed one release boot and passed the next
-with no relevant code change in between:
-
-```
-[spawn]   FAIL: fastpy-sleep (ring 3) — reached Zombie but exit code was Some(3),
-          expected 0 (3 = a clock read was 0 or the observed sleep delta was < 40000000 ns)
-```
-
-The tool printed its measured delta: **36 818 000 ns for a `time.sleep(0.05)`**,
-i.e. the sleep returned **26% early**, against a 40 ms lower bound. The kernel's
-own `[sched] sleep_ns` test in the same boot passed (`slept 20.459ms for 20ms
-request`), so whatever is short is not the scheduler's `sleep_ns` at a 20 ms
-scale.
-
-Two candidate causes, not yet separated:
-
-1. **The sleep genuinely returns early at 50 ms** — a wakeup-deadline rounding or
-   timer-phase bug that a 20 ms request happens not to expose.
-2. **`clock_realtime()` advances more slowly than real time** during the sleep,
-   so a correct 50 ms sleep *reads* as 36.8 ms. Ratio 50/36.818 = 1.358, which is
-   suspiciously close to nothing in particular, but the two clocks the test
-   compares (the scheduler's timer and `clock_realtime`) are different sources
-   and their agreement is exactly what the test implicitly assumes and never
-   checks.
-
-Distinguishing them is cheap and should be done before touching anything: have
-the harness log its own `clock_realtime()` delta across the child's lifetime
-next to the child's measured delta. It already reads both — guard #2 in the
-doc comment — but only compares each against the bound, never against each
-other. If the kernel-side delta is ~50 ms while the child's is ~37 ms, it is
-cause (2) and the bug is in the userspace clock path, not the sleep.
-
-Impact today: an intermittently red boot test, which is corrosive — a suite that
-cries wolf gets its failures ignored, and this is the only ring-3 test of the
-blocking-sleep path. Not lane-A-exclusive (the tool is fastpy/userspace), but
-the timekeeping and `SYS_SLEEP` sides are, and the harness is in
-`kernel/src/proc/spawn.rs`.
-
-#### CORRECTION 2026-08-14 — the proposed discriminator cannot discriminate
-
-The plan above ("have the harness log its own `clock_realtime()` delta next to
-the child's") **would not have separated the two causes**, because the two
-numbers it compares come from *the same clock*. `SYS_CLOCK_REALTIME` returns
-`timekeeping::clock_realtime()`; the harness calls
-`timekeeping::clock_realtime()`. Under cause (2) — that clock running slow —
-both readings compress by the same factor and the comparison shows nothing.
-The test would have been "instrumented" and still blind: one more instance of
-this file's recurring defect, *a check that cannot fire is indistinguishable
-from a check that passes.*
-
-The real discriminator was already in the tree, unread. Reading the call chain:
-
-| stage | clock |
-|---|---|
-| `sleep_ns` computes and enforces its deadline | `hrtimer::now_ns()` → **HPET** (`kernel/src/hrtimer.rs:147`) |
-| the child, and the harness, measure the elapsed time | `timekeeping::clock_realtime()` → **TSC**, via `clock_monotonic()` (`kernel/src/timekeeping.rs:154`) |
-
-So the sleep is *enforced* against one oscillator and *measured* against
-another, and the test silently assumes the two agree. That assumption is the
-untested one, and it is the whole bug surface:
-
-- If HPET and TSC agree across the window, the sleep really did return early —
-  **cause (1)**, a deadline/timer-phase bug in `sleep_ns`.
-- If HPET says ~50 ms while TSC says ~37 ms, the sleep was correct and the
-  **TSC calibration** (`bench::tsc_freq()`) is off by that ratio — cause (2),
-  and then it is not a userspace clock bug at all but a kernel calibration one,
-  which would also skew every `clock_realtime()` consumer and every
-  wall-clock-derived figure in the tree.
-
-Note the observed ratio: 50 / 36.818 = **1.358**. The entry above called that
-"suspiciously close to nothing in particular" — but as a *TSC calibration*
-error it needs no numerological explanation; a mis-measured `tsc_freq` can land
-anywhere, and under TCG the calibration loop is exactly the kind of thing a
-busy host perturbs. That reading also explains the flakiness the entry opens
-with: a calibration performed once per boot, on a host whose load varies, gives
-a different scale factor on each boot — so the same correct sleep reads 50 ms
-on a quiet boot and 37 ms on a busy one. **The intermittency is evidence for
-cause (2), and the original framing had no account of it at all.**
-
-The instrument therefore is: sample **both** `hrtimer::now_ns()` and
-`timekeeping::clock_realtime()` either side of the child's lifetime, print both
-deltas and their ratio, and print them on the *failure* path too — today
-`kernel_elapsed` is computed at `spawn.rs:15623`, *after* the guard-#1 early
-return at 15611, so on the exact runs that fail, the one number that would
-explain the failure is never printed.
-
-**Prediction P16** (registered before the measurement exists): on a boot where
-the child reports < 40 ms, the HPET delta will exceed the TSC delta by >= 1.2x
-— cause (2). MISS if the two agree within 5%, which puts it back on `sleep_ns`.
-
----
-
-### TD-BASELINES-TOML-IS-INVALID-TOML-AND-NOTHING-READS-IT — 2026-08-14 — ✅ FIXED 2026-08-14 (`bench/baselines.toml`, `scripts/test-bench-history.py`)
-
-`bench/baselines.toml` — the file CLAUDE.md names as the place performance
-baselines live, and which ~30 comments across `kernel/src/bench.rs` cite as
-their source — **did not parse as TOML.** It carried two `[compositor_frame_4k]`
-tables, at lines 296 and 389, which is a hard error in every conforming parser:
-
-```
-tomllib.TOMLDecodeError: Cannot declare ('compositor_frame_4k',) twice
-                         (at line 389, column 21)
-```
-
-The two disagreed about the **unit**: `target_ns = 2000000` in one,
-`target_ms = 2.0` in the other. Only one carried the measured figure and the
-optimisation history (48.6 ms → 21.4 → 15.8 → 11.9 → 10.6 ms). So the file had
-been carrying two contradictory records of the same benchmark, and a parser
-that tolerated duplicates would have silently taken whichever came last.
-
-**Why it survived: nothing reads the file.** Every reference to it in the tree
-is a *comment*. `kernel/src/bench.rs` hard-codes each target as a literal with
-`// Target from baselines.toml: < 200 ns` beside it; `scripts/bench-history.py`
-never opens the file. So the file *looked* like the authority while the real
-authority was ~60 scattered literals in Rust, and no parser was ever pointed at
-the thing that was supposed to be the source of truth.
-
-**This is the fifth instance of the same defect class**, after
-`TD-BENCHMARKS-...` (the suite never ran), `B-BENCH-WATCHLIST-...` (the watch
-list never looked), `B-BENCH-COMPARATOR-...` (the diff named innocents) and
-`TD-BENCH-CANARY-...` (the canary never fired). The invariant keeps holding: *a
-check that cannot fire is indistinguishable from a check that passes.* Here it
-went one step further — the artefact could not even be **loaded**, and that too
-was indistinguishable from health, because loading was never attempted.
-
-> **Resolution.** The duplicate table is merged (the poorer one removed, with a
-> comment at the site recording why). `scripts/test-bench-history.py` gained
-> `test_baselines_is_valid_toml()`, which `tomllib.load`s the real file — so the
-> file is now machine-read for the first time and a duplicate or syntax error
-> fails the suite. The test also asserts every table names a target in some
-> unit, matched by `target*` **prefix** rather than an enumerated list (the
-> units are open-ended by design: `target_accesses_over_nop` and
-> `target_accesses_delta` exist because TCG harness overhead swamps the
-> absolute number, and an enumerated list would silently under-report the day
-> it wasn't extended). Calibration constants and host metadata opt out via a
-> declarative `not_a_target = true` in the data rather than a name list in the
-> test. Writing that assertion immediately found four more tables to classify.
-> 16 checks pass.
-
-**Not fixed — the duplication itself.** Targets still live in two places: this
-file and the literals in `bench.rs`, with nothing keeping them in sync, so they
-can drift silently and at least one (`vfs_stat_root`: 700 ns in the file) should
-be re-derived anyway. The proper fix is for the kernel's scorecard to be checked
-against the parsed file by `bench-history.py`, so the file becomes the authority
-it already claims to be. Blocked on nothing but effort; tracked here.
-
-#### FOLLOW-UP 2026-08-14: with the file finally parseable, the drift is measurable — and it is near-total
-
-Making `baselines.toml` load was worth doing for its own sake, but the first
-thing a working parser bought was a number for the damage. Matching the 63
-benchmark names the kernel prints against the 57 baseline tables:
-
-| | count |
-|---|---|
-| benchmarks measured by the kernel | 63 |
-| baseline tables in the file | 57 |
-| **matched by name** | **30** |
-| measured with no baseline at all | 33 |
-| baselines naming a benchmark never measured | 27 |
-
-**Less than half of what runs has a baseline it can be compared to.** And the
-two lists are not describing different work — they are largely the *same*
-benchmarks under two names, drifted apart because nothing ever had to reconcile
-them:
-
-| kernel prints | baselines.toml calls it |
-|---|---|
-| `syscall_dispatch` | `syscall_trivial` |
-| `page_fault` | `page_fault_anon` |
-| `tcp_checksum_v4` | `net_tcp_checksum_v4_1460b` |
-| `tcp_checksum_v6` | `net_tcp_checksum_v6_1460b` |
-| `vfs_stat_deep` | `vfs_stat_deep_2comp` |
-| `vfs_throughput_16k_read`/`_write` | `vfs_throughput_16k` |
-| `heap_alloc_free_64` | `heap_alloc_small` |
-| `ipc_channel` | `ipc_channel_roundtrip` |
-| `ipc_pipe` | `ipc_pipe_roundtrip` |
-| `ipc_eventfd` | `eventfd_signal_read` |
-| `ipc_semaphore` | `semaphore_signal_wait` |
-| `firewall_check` | `net_firewall_inbound_check` |
-| `dns_build_query` | `net_dns_build_a_query` |
-| `io_ring_nop` | `iouring_sqe_submit` |
-| `isr_latency` | `interrupt_dispatch` |
-| `service_connect` | `service_connect_accept` |
-| `cp_notify_wait_rt` | `cp_notify_wait_roundtrip` |
-| `net_tcp_conn_lookup` | `net_tcp_conn_table_scan` |
-
-That is 18 of the 33 unmatched accounted for as pure renames. The remainder
-split into benchmarks genuinely lacking a baseline (`vfs_stat_root`,
-`vfs_read_256`, `vfs_write_256`, `vfs_readdir`, `vfs_stat_3comp`,
-`http_gzip_*`, `ipc_channel_sync`, `net_arp_lookup`, `net_checksum`,
-`net_ethernet_parse`, `net_ipv4_parse`, `pick_next`, `sched_pick_next`) and
-baselines for work that is not benchmarked at all (`futex_uncontended`,
-`futex_contended_wake`, `futex_wait_mismatch`, `compositor_frame_4k` — the last
-is Lane C's and is measured by a host-side `cargo test`, not by this suite).
-
-**Note what this does to the headline number.** The `over_target` count the
-kernel reports (15 of 63 on the release run) is computed from the literals in
-`bench.rs`, not from this file — so it is not wrong, but it is also not
-*checkable* against the stated baselines for the 33 unmatched. Ranking the
-release run against the parsed file yields only 7 over-target entries, and that
-smaller number is an artefact of the missing half, not good news. Notably
-`vfs_stat_root` — the benchmark currently under investigation at 8.5x over — has
-**no** table here at all; its 700 ns target exists only as a comment in
-`bench.rs` citing a file that does not mention it.
-
-**Proper fix, unchanged but now specified.** `bench-history.py` should parse
-this file and check each recorded entry against it, reporting unmatched names
-in both directions as a failure rather than silence. That requires first
-reconciling the names — one canonical name per benchmark, used by both the
-`run()` call in `bench.rs` and the table here. The rename table above is the
-work list. Until then the parse test added today guarantees only that the file
-is *loadable*, not that it is *true*.
-
-
-#### FOLLOW-UP 2026-08-14 (2): the file is now *checked*, and 11 targets disagree
-
-`bench-history.py` gained `load_baselines()` + `report_baselines()`, which
-compare the target the kernel prints on each `SCORE` line — the literal in
-`bench.rs` — against the target this file states. The very first run of that
-check, against `build/serial-test.txt` (63 benchmarks):
-
-```
-Baselines: 11 disagree, 15 unbaselined, 7 unused
-  context_switch:      kernel says   5000ns, file says  10000ns
-  crypto_aead_1KiB:    kernel says 100000ns, file says  70000ns
-  crypto_sha256_1KiB:  kernel says  50000ns, file says  40000ns
-  dns_build_query:     kernel says  40000ns, file says   2000ns   (20x)
-  firewall_check:      kernel says   2000ns, file says   1000ns
-  heap_alloc_free_64:  kernel says    400ns, file says    200ns
-  http_mime_type:      kernel says   2000ns, file says    500ns   (4x)
-  io_ring_nop:         kernel says    200ns, file says    300ns
-  ipc_channel:         kernel says   2000ns, file says   3000ns
-  page_fault:          kernel says  10000ns, file says   8000ns
-  syscall_dispatch:    kernel says    200ns, file says   1200ns   (6x)
-```
-
-**Every PASS/OVER verdict for those 11 has been graded against a number its own
-documentation contradicts.** The direction matters case by case: `syscall_dispatch`
-measured 653 ns is *OVER* against the kernel's 200 ns and would *PASS* against
-the file's 1200 ns. Which is correct is not obvious — 200 ns is the CLAUDE.md
-hardware figure (Linux getpid ~100 ns, "within 2x"), while 1200 ns looks like a
-TCG-adjusted budget. That is exactly why the check **reports and does not
-reconcile**: picking a side automatically is how the two drifted apart.
-
-The check distinguishes three failure modes deliberately, because they are
-different problems: *disagree* (one side edited without the other), *unbaselined*
-(the Rust literal is the only record of the target — 15 benchmarks, including
-`vfs_stat_root`), and *unused* (the file claims coverage that does not exist — 7).
-It also refuses to conflate an unparseable file with an agreeing one, printing
-`UNVERIFIED`; that distinction is the entire lesson of this entry and is pinned
-by a test.
-
-Table renames brought name-matching from 30/63 to 48/63 (the tables moved, not
-the benchmarks — `history.jsonl` is append-only and its names cannot change
-without orphaning every historical record). 23 checks pass, up from 13.
-
-**Still open:** the 11 disagreements need adjudicating one at a time, and the 15
-unbaselined benchmarks need tables with real provenance. Both are now *visible on
-every bench run* rather than invisible, which is the change that matters.
-
-#### FOLLOW-UP 2026-08-14 (3): the 11 disagreements were mostly ONE bug — two kinds of target merged into one number
-
-Adjudicating the 11 turned up a structural cause rather than eleven clerical
-errors. `bench.rs` says it plainly in its own comments:
-
-```rust
-// OpenSSL SHA-256 1KiB: ~1500ns.  QEMU target: 50000ns.
-score("crypto_sha256_1KiB", &result, 50000);
-
-// DNS query build includes a heap allocation (Vec::with_capacity) which
-// is expensive under QEMU (~35us).  Target set to 40us to track regressions
-// without false-failing on the allocation overhead.
-score("dns_build_query", &result, 40000);
-```
-
-**Those are TCG budgets, not hardware references** — and `baselines.toml` was
-storing the hardware reference under the same key. Comparing them reported a
-20x "disagreement" where in truth the two files were each right about a
-different quantity. Two more (`heap_alloc_free_64`, `http_mime_type`) were the
-same shape one level down: a *scope* difference, where the benchmark measures a
-fixed multiple of the per-operation target (alloc+free is 2x an alloc; the MIME
-benchmark does 4 lookups).
-
-Worse, `bench-history.py` printed this on every run:
-
-> *(The 'target' column in the scorecard above is a **hardware** reference and
-> cannot be met under TCG — see bench/baselines.toml.)*
-
-which is **false for at least six benchmarks**, whose targets are explicit QEMU
-budgets. The line explaining the number misdescribed it, and so did the
-scorecard headline: "48/63 within hardware target" counts passes that were
-scored against TCG budgets.
-
-**Fix: make the two kinds separate keys.** `target_ns` stays the hardware
-reference; `tcg_target_ns` is the budget the suite is graded against under
-emulation, and the cross-check prefers it when present. The explanatory line now
-says the column is a mix and points at which key records which.
-
-**Three were real disagreements.** Two are settled by CLAUDE.md's performance
-table, which outranks the file:
-
-* `context_switch`: file said 10 µs, spec says *"Target: < 5 µs"* → file corrected.
-* `page_fault`: file said 8 µs, spec says *"Target: < 10 µs"* → file corrected.
-* `ipc_channel`: file said 3 µs, spec says *"Target: < 2 µs round-trip"* → file corrected.
-* `syscall_dispatch`: file said 1200 ns, derived by doubling a **638 ns WSL2
-  measurement of a full syscall including spectre mitigations** — not the same
-  quantity as dispatch. Spec says *"Linux: ~100 ns for getpid. Target: within 2x"*
-  → 200 ns. **This one changes a verdict:** the measured 653 ns is OVER at
-  200 ns and would have PASSed at 1200 ns. The 638 ns figure is kept as context,
-  not as a derivation.
-* `io_ring_nop`: file said 300 ns (2x a 150 ns measurement), spec says
-  *"~100-200 ns per SQE; same order"* → 200 ns.
-
-Result: **11 disagreements → 1.**
-
-**The last one is instructive and is deliberately still open.** `firewall_check`
-carries the comment `// Target from baselines.toml: 2000ns` in `bench.rs` while
-the file says 1000 ns — a citation that is simply false, and the direction
-(2x looser) means the kernel silently relaxed its own target at some point.
-Both pass comfortably (measured 55 ns), so nothing is hidden by it; it is left
-for the next `bench.rs` change rather than fixed now, because a kernel edit
-during an in-flight release build would produce a binary that does not
-correspond to any commit. Recorded here so it is not lost.
-
 ---
 
 
@@ -52727,3 +52739,352 @@ named after the bug; before the fix only a bystander test caught it.
 Three breaks were run against the final code (reinstate the emptiness guess;
 stop folding in `Property::new`; make `Property::new` return `Heading`). All
 three are caught, each by at least two named tests.
+
+
+## TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE — ✅ **RESOLVED 2026-08-16**
+
+**What.** Of HarfBuzz's six complex shapers we have two: Arabic (joining) and
+Indic (reordering). The other four — Khmer, Myanmar, Thai/Lao, and the
+Universal Shaping Engine that covers roughly ninety further scripts — are not
+written, so a run in any of those scripts gets the default shaper: `ccmp`,
+`locl`, the ligature features, and nothing positional or reordering.
+
+**Symptom.** Unmeasured. No string in the sweep corpus is Khmer, Myanmar, Thai
+(as *shaped* text — the Thai string in the corpus exercises mark fallback on
+faces that do not cover it), Tibetan, Javanese or any other USE script, so the
+sweep reports zero disagreement for them because it never asks. The expected
+failure is the same shape as Devanagari's was before the Indic shaper: pre-base
+vowels drawn after their consonant, conjuncts not forming, and in Khmer the
+coeng-joined subscripts drawn as full-size letters on the baseline.
+
+**Why it is filed rather than fixed.** It is the largest single piece of
+shaping left and it wants its own measurement first. The sweep's corpus has to
+gain strings for each family before the work can be checked, and the host's 556
+faces have to be surveyed for which of them cover those scripts at all — on a
+Windows development host that is likely to be very few, which is itself an
+argument for doing it after the things the host *can* measure.
+
+**The survey has now been run** (2026-08-15, `gui/font/tools/script_survey.py`,
+579 faces), and it contradicts the guess above. Counting only faces that both
+cover the script *and* register its tag in `GSUB` — the sharper test, since a
+face that declares nothing gives both implementations nothing to do and agrees
+trivially:
+
+| shaper | script | measuring faces |
+|---|---|---|
+| Thai | Thai | **8** |
+| Thai | Lao | **19** |
+| Khmer | Khmer | 3 |
+| Myanmar | Myanmar | 2 |
+| USE | Tifinagh | 6 |
+| USE | Buginese | 4 |
+| USE | Tibetan / Javanese / Balinese / Sinhala / Cham | 1 each |
+| USE | Tai Tham | 0 (covered by one face, declared by none) |
+| *(control)* Indic | Devanagari | 5 |
+| *(control)* Arabic | Arabic | 43 |
+
+The control row is the point: **Devanagari, already written and measured from
+`misplaced 13` to `0`, had only five faces to measure against.** Thai has eight
+and Lao nineteen. So the host is not thin for these scripts at all — it is
+thin for exactly one of the four families, USE, where most scripts have a
+single face and Tai Tham has none.
+
+**Proper fix — order revised by the survey.** ~~USE first, since it subsumes
+the most scripts.~~ USE subsumes the most scripts and is the *least*
+measurable of the four; writing it first means writing the largest piece of
+shaping left with an oracle that can barely disagree with it. Take them in
+order of how well the host can check the work:
+
+1. **Thai/Lao first** — best measured (27 faces between them) and smallest.
+   It is not a reordering shaper at all: it is the PUA fallback for Thai fonts
+   with no `GSUB`, plus a `ccmp`-like normalization of the vowel/tone order.
+2. **Khmer, then Myanmar** — 3 and 2 faces, variants of the Indic model that
+   can reuse `initial_reordering_syllable`'s base-finding.
+3. **USE last** — the cluster grammar from the Unicode Shaping Engine spec,
+   the same stage driver `indic_shape.rs` already has, and `Plan`'s probing of
+   what the face declares. By then the three smaller shapers will have shaken
+   out the stage driver against faces that can actually object.
+
+Each step needs its corpus strings added to `harfbuzz_sweep.py` first, or the
+sweep reports agreement it never tested.
+
+**Step 1 of 3 done — Thai/Lao, 2026-08-15** (`gui/font/src/thai.rs`, commits
+`48597037a` and `a7130c6b4`). Both halves the survey predicted, and both
+measured:
+
+* **SARA AM decomposition.** U+0E33 (Lao U+0EB3) is one character drawn as two
+  marks in two places, and Unicode gives it no canonical decomposition, so we
+  were asking faces for a glyph almost none have. `thai::preprocess` splits it
+  into nikhahit + sara aa and walks the nikhahit back over any above-base
+  marks, which is HarfBuzz's `preprocess_text_thai` — Uniscribe's behaviour,
+  not the MS OT Thai spec's. It runs from `norm::normalize` *between*
+  decomposition and the mark sort, and the ordering is load-bearing rather
+  than incidental: sorting first puts the nikhahit on the wrong side of a
+  tone mark. Host sweep, 556 faces: **agree 18806 → 21015, reordered 3 → 0,
+  differ 3382 → 1176**, every Thai and Lao string now agreeing on every face.
+  The residual 1176 is entirely the pre-existing NFC bucket, untouched.
+* **The private-use fallback.** `thai::pua_shape`, two state machines
+  transcribed from `hb-ot-shaper-thai.cc`, gated on HarfBuzz's
+  `!plan->map.found_script[0]` — the face's `GSUB` did not name `thai`.
+  Note that this is *not* `Face::shapes_as_default`, which answers false for a
+  face with no `GSUB` at all; a face with no `GSUB` is exactly the font the
+  pass exists for, and using the wrong predicate made the pass never fire.
+
+  This one could not be measured against the host at all: **not one of the 556
+  installed faces carries a single Thai private-use glyph** (probed directly),
+  because every Thai font Windows ships today describes its shaping in `GSUB`,
+  which turns the fallback off. A host sweep would have reported agreement it
+  never tested. So the oracle was built instead —
+  `gui/font/tools/gen_thai_legacy.py` synthesizes three faces with no
+  `GSUB`/`GPOS`/`GDEF` (Windows forms, Mac forms, and none), and
+  `thai-pua-corpus.txt` names one string per edge of the two machines plus
+  controls. **78 of 78 agree**, including the vendor preference and the
+  no-private-use face, which the pass must leave untouched.
+
+`harfbuzz_sweep.py` gained a `--corpus FILE` flag along the way, so each of
+the remaining steps can bring its own corpus without editing the built-in one.
+
+**Step 2 of 3 done — Khmer, 2026-08-15** (`gui/font/src/khmer.rs`, commits
+`1897b9b19` and `8f1247264`). The shaper, the oracle that could disagree with
+it, and the bug that oracle found in a shaper that had been shipping for weeks:
+
+* **The shaper.** Khmer is the Indic model with two moves and one structural
+  difference. The moves: a COENG+RO pair jumps to the head of its syllable and
+  takes `pref`, and everything it jumped over takes `cfar`; a pre-base vowel
+  moves to the head as well, ahead of a fronted pair. The five split vowels
+  (U+17BE–U+17C5) get no canonical decomposition from Unicode, so they are
+  split by hand into U+17C1 plus a second half before the syllables are cut.
+  The structural difference is that the reordering runs *before the first
+  lookup* rather than after `locl`/`ccmp` as Indic does. The syllable-serial
+  stamping the two shapers share came out into `gui/font/src/syllabic.rs` at
+  the same time. `cfar` was appended to `gsub::FEATURES` (and to
+  `langsys_survey.py`'s `WANTED`, which `otl.rs` pins equal to it).
+* **The host measurement.** 556 faces: **agree 27421 → 27687**, differ back
+  down to the same 1176 pre-existing NFC baseline, **reordered 0, misplaced 0**
+  — every Khmer string agreeing on every face.
+* **The oracle, per §431 of `design-decisions.md`.** That host number is worth
+  much less than it looks. Only three installed faces register `khmr` at all
+  (the Leelawadee UI family), and **not one face on this machine has a `cfar`
+  lookup**, nor `pres`, nor `psts` — probed directly. So the sweep was
+  reporting agreement about masks it never applied. `gui/font/tools/
+  gen_khmer_probe.py` builds `KhmerProbe.ttf`, where each of thirteen features
+  has one lookup rewriting every Khmer glyph as *itself followed by a marker
+  glyph unique to that feature*, so a glyph run spells out which features
+  reached it and in what order. It is a one-to-two substitution on purpose: the
+  base has to survive so the next feature still matches it, and `cfar` — which
+  is applied after `blwf`, on the very glyphs `blwf` is set on — is precisely
+  the feature a one-to-one substitution would have hidden. Markers carry zero
+  advance so a wrong mask can never smear into the positions.
+  `khmer-corpus.txt` is one string per edge of the shaper rather than sampled
+  text. **43 of 45 agree.**
+* **What it found.** `locl`, `ccmp`, `blwf`, `abvf` and `pstf` were each being
+  applied **twice** — named in an early stage and then again in the final
+  `ALL_FEATURES` stage, which `gsub::apply_stages` does not deduplicate.
+  HarfBuzz gives each feature exactly one stage (`hb_ot_map_builder_t::compile`
+  merges duplicate tags at the `hb_min` of their stages), so this was a real
+  divergence. **The Indic shaper had the same bug**, and 556 installed faces
+  had hidden it for as long as that shaper has existed: a duplicate application
+  is invisible unless a lookup is not idempotent, and real faces' lookups
+  overwhelmingly are. Fixed in both by masking the earlier stages out of the
+  last one; `stages()` was factored out of `shape` in each so the "one feature,
+  one stage" invariant is four tests rather than a comment.
+* **The two that still differ** are the joiner strings, and are not a Khmer
+  bug: HarfBuzz emits the face's space glyph for a default-ignorable character
+  (ZWJ, ZWNJ, soft hyphen …) once shaping is done, and deletes it outright if
+  the face has no space. We emit the character's own glyph. That is crate-wide
+  and script-independent — a soft hyphen would draw a visible hyphen mid-word
+  on any face that maps it — so it is tracked separately under
+  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES` rather than here.
+
+**Step 3 of 3 done — Myanmar, 2026-08-15** (`gui/font/src/myanmar.rs`,
+`myanmar_machine.rs`, `tools/gen_myanmar_machine.py`). The shaper is the
+smallest of the three, and the pass it forced open — mark positioning — was
+the largest thing found in this whole exercise.
+
+* **The shaper.** Myanmar is syllabic like Indic and Khmer and shares their
+  category table and machine generator, but it reorders by a different
+  mechanism: it assigns a `Position` to *every* glyph of the syllable and then
+  **stably sorts** by it, rather than rotating a fixed few. Three things move —
+  a kinzi (`Ra + Asat + virama`) sorts to just after the base, a medial RA
+  (U+103C) to `PreC`, and a pre-base vowel (U+1031) to `PreM`, with a run of
+  several pre-base vowels flipped, the same repair Indic makes. The base search
+  is forwards and stops at the first consonant: there is no reph to guess at,
+  because a Myanmar kinzi is spelled out and recognised by that spelling.
+  `rphf`, `pref`, `blwf` and `pstf` each get a stage of their own with a pause,
+  where Khmer runs its basic features in one. The reordering runs *after*
+  `locl`/`ccmp` — Khmer's most surprising property inverted.
+
+* **Measured.** Myanmar sweep (`mmrtext.ttf`, `mmrtextb.ttf`): **58 of 58
+  agree**, `misplaced 0`. Full host sweep, 556 faces × 89 strings: `agree
+  48087`, `reordered 0`, `misplaced 170`, `differ 1178`, `mixed 49` — the 170
+  being the deliberate ignorable-caret divergence recorded under
+  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES`, unchanged.
+
+* **What it found: our mark fallback had HarfBuzz's *two* zeroing routes fused
+  into one.** HarfBuzz zeroes a mark's advance by two independent routes, and
+  we had been approximating them with a single union.
+  - *Route 1*, `zero_mark_widths_by_gdef`, is gated on the per-script
+    `plan->zero_marks` — which eleven scripts turn off — and zeroes every glyph
+    whose `GDEF` class is mark, **or**, only when the face has no `GDEF`
+    classes at all, every glyph whose general category is `Mn`. Either/or,
+    never both: a face that classifies has *stated* which glyphs are marks and
+    the character's category must not second-guess it.
+  - *Route 2*, `_hb_ot_shape_fallback_mark_position`, zeroes only the marks it
+    actually places (combining class ≠ 0), plus — when the base has no
+    extents — every `Mn` in the cluster.
+
+  We had the two `||`-ed together and the per-script gate missing entirely.
+  `scaled.rs` now encodes them separately: `zeroed_at` carries `zero_marks`
+  per segment, `marks` is the either/or, and `synthesize_marks` is a two-phase
+  transcription of `position_cluster_impl`/`position_around_base` — walk the
+  clusters and apply route-2 zeroing, *then* compute the pens, *then* place.
+  See `design-decisions.md` §436.
+
+* **And the bug that made it visible.** A mark whose combining class is zero is
+  not placed and not zeroed, which made it look exactly like a base to the old
+  cluster splitter, so the measurement **restarted at it** and every mark after
+  it was measured against the wrong glyph. In `ကို့` the dot below landed two
+  letters right of where HarfBuzz draws it. HarfBuzz cuts clusters on the
+  general *category* and takes the base as the first non-mark; the class only
+  decides whether a mark is moved once the base is known. Fixed, and pinned by
+  `scaled.rs`'s `a_class_zero_mark_does_not_start_a_new_cluster` and
+  `only_the_marks_the_fallback_places_lose_their_advance`. It was the whole of
+  the remaining `simsun.ttc` divergence (`0;-128;0` → HarfBuzz's `0;-640;0`).
+
+**One known gap, believed unreachable — the cluster splitter reads `Mn` where
+HarfBuzz reads `Mn|Mc|Me`.** `norm::is_mark` is `Mn`-only, which is exactly
+right for route 1 (it transcribes `hb_synthesize_glyph_classes`, which is also
+`Mn`-only) but is *narrower* than the `_hb_glyph_info_is_unicode_mark` that
+cuts fallback clusters. A spacing combining mark (`Mc` — an Indic matra) or an
+enclosing one (`Me`) would therefore end a cluster here and continue one in
+HarfBuzz. It cannot arise in NFC text: reaching it needs an `Mc` followed by a
+non-zero-class `Mn` inside one cluster, i.e. a matra with a nukta after it,
+which canonical ordering does not produce — and every path into this pass has
+already normalised. Filed rather than fixed because the fix is a second
+general-category predicate (`is_unicode_mark`) used by the splitter only, and
+adding an untestable one costs more than it buys. If a corpus string is ever
+found that reaches it, that is the fix.
+
+USE is next, and is now the only shaper left. Note for it: like Myanmar, it
+zeroes mark advances *before* `GPOS` rather than after, so its script tags have
+to join `mym2` in `fallback::Zeroing::BeforeGpos`.
+
+**Where.** `gui/font/src/sfnt.rs` — `Face::substitute`, which dispatches on
+`Script::shaping` and would gain the other families; `gui/font/src/indic.rs`
+and `indic_machine.rs` — the models to copy; `gui/font/tools/harfbuzz_sweep.py`
+— `CORPUS`, which needs a string per family before any of this is measurable.
+
+**Step 4 of 4 done — the Universal Shaping Engine, 2026-08-16. This entry is
+closed: all five complex shapers now exist** (`gui/font/src/universal.rs`,
+`universal_machine.rs`, `universal_tables.rs`, `tools/gen_universal_machine.py`,
+`tools/gen_universal_table.py`, `tools/use-corpus.txt`, `tools/hb_use_oracle.py`).
+
+* **The shaper.** One engine for eighty-eight scripts, and the only one of the
+  five that does not encode a writing system's rules. It encodes the *shape*
+  those rules share — a cluster is a base with modifiers hung on it — and leaves
+  the particulars to the font. Its own contribution is to say where a cluster
+  ends, which glyphs a repha and a pre-base vowel move past, and which of the
+  four positional forms a cluster takes. `Category` and its ranges are generated
+  from Unicode plus the `ms-use` override files HarfBuzz vendors and checked
+  against HarfBuzz's packed table code point by code point; `Cluster` and its
+  DFA are generated from the ten regular expressions of the ragel grammar.
+  Neither is hand-transcribed.
+
+* **Three things make it unlike the other three syllabic shapers**, and each is
+  a class of bug the others cannot have.
+  - *The machine reads a **filtered** view of the run.* Indic, Khmer and Myanmar
+    hand their machines every glyph; USE first hides the `CGJ` category (the
+    combining grapheme joiner, ZWJ and the variation selectors) and a ZWNJ whose
+    next visible glyph is a combining mark, so that neither can cut a cluster in
+    half. The hidden glyphs are not removed — they stay in the run and belong to
+    whichever cluster the machine was in when it stepped over them, and a run
+    that *begins* with a hidden glyph leaves it in no cluster at all.
+  - *The **font** decides what a repha is.* Indic recognises a reph by spelling
+    (`Ra` + virama) and Myanmar a kinzi likewise. USE runs the font's `rphf`
+    feature alone, as a stage of its own, and then asks which glyph the font
+    rewrote; `pref` is treated the same way and a glyph it rewrote becomes a
+    pre-base vowel. Neither question can be answered without having run the
+    lookup, which is why `SubGlyph::substituted` exists.
+  - *The positional forms are per **cluster**, not per letter.* For most USE
+    scripts `isol`/`init`/`medi`/`fina` are not cursive joining at all: they are
+    handed out by asking whether the *previous cluster* joined. The eleven USE
+    scripts that really do join cursively take the ordinary `joining` path.
+
+* **The corpus, and why it is the host's real fonts this time.** Unlike Khmer
+  and Myanmar — where §431 of `design-decisions.md` forced a synthesized probe
+  because the host could not falsify the pass — `script_survey.py` reports faces
+  declaring `tibt`, `java`, `bali`, `sinh`, `tfng`, `cham` and `bugi`. Seven
+  scripts is not eighty-eight, but between them they cover the three things the
+  engine actually does: cluster the run, move a pre-base vowel, and give a broken
+  cluster a dotted circle. `tools/use-corpus.txt` is 58 strings, one per edge,
+  and lines in scripts no installed face declares are kept deliberately — they
+  shape to boxes on both sides today and are the regression test for the day a
+  face for them is installed.
+
+* **Measured: 556 faces × 58 strings — `agree 32203`, `reordered 0`,
+  `misplaced 40`, `differ 0`, `mixed 5`.** No unexplained disagreement remains.
+  The 40 `misplaced` are the pre-existing ignorable-caret divergence recorded
+  under `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES` — they predate USE and are
+  not USE's. The 5 `mixed` are the *itemizer*, not the shaper: two corpus lines
+  run more than one script, HarfBuzz guesses a single script for the whole
+  buffer where we itemize, and the difference that comes back is not a question
+  the two halves can be asked the same way. They are counted apart because of it
+  (a leading `!` on a corpus line, which `read_corpus` now reads — the marker
+  lives next to the string it describes rather than in a second list in another
+  file that would go stale the first time a corpus line was edited). The full
+  89-string host sweep is byte-identical before and after: `agree 48087`,
+  `reordered 0`, `misplaced 170`, `differ 1178`, `mixed 49`. Khmer probe 45/45,
+  Myanmar probe 48/48, both unchanged.
+
+* **What it found, and it was not in the shaper: we were recomposing split
+  vowels.** A dozen scripts spell one vowel as a single character that is *drawn*
+  as two marks on opposite sides of its consonant, and Unicode records the
+  canonical decomposition. `norm::pieces` was gluing the two halves back into one
+  character before the shaper ever saw them, so the pre-base half could not be
+  moved — the Sinhala line `\u0D9A\u0DDC` was wrong on every face that can draw
+  it. HarfBuzz covers this by name: `compose_use` and `compose_indic` are both
+  the plain Unicode composition guarded by `/* Avoid recomposing split matras. */
+  if (HB_UNICODE_GENERAL_CATEGORY_IS_MARK (general_category (a))) return false;`.
+  We take it as one switch on the normalizer rather than a hook per shaper,
+  having first enumerated the affected set exhaustively: of every canonical
+  two-part decomposition in Unicode 16 whose first half is `Mn|Mc|Me` there are
+  59, 12 are composition exclusions that never recompose, and the remaining
+  **47 all belong to scripts shaped by Indic or USE**. A test walks the table and
+  asserts both the predicate and the count, so a regeneration that adds a script
+  outside the two engines fails the build.
+
+* **And the correction that cost the most: HarfBuzz's decomposition is
+  font-aware, and ours was not.** Splitting unconditionally regressed the sweep
+  to `differ 555` — one per face, `ours [0,0,0] vs harfbuzz [0,0]` — on faces
+  with no Sinhala coverage whatsoever. Reading `hb-ot-shape-normalize.cc` gives
+  the reason: `decompose()` refuses outright when the *second* half has no glyph,
+  and falls back to the whole character when the first half has no glyph and does
+  not decompose further. So on a face that can draw none of it HarfBuzz emits one
+  notdef box and we were emitting two. `norm::rejoin_split_vowels` is the font
+  half of the rule — rejoin an adjacent pair when the first is a mark, the two
+  share a cluster offset, and the face cannot draw **both** halves. Sharing a
+  cluster offset is the provenance test that keeps this from becoming a second
+  composition pass: halves at the same offset came from one character this crate
+  took apart, halves at different offsets were two characters the author typed,
+  and only the former may be put back. It runs *after* `fit_to_face` and not
+  before, because the two would otherwise fight. See `design-decisions.md` §439.
+
+* **Zeroing.** As the note left by step 3 predicted, USE zeroes mark advances
+  *before* `GPOS` rather than after, so its script tags join `mym2` in
+  `fallback::Zeroing::BeforeGpos`.
+
+**What is deliberately not here.** *Vowel constraints* — HarfBuzz's
+`preprocess_text_use` inserts a dotted circle between a consonant and an
+independent vowel Unicode says may not follow it. That is a table of its own and
+a separate pass, and this crate has neither, for USE or for Indic. It is a
+missing *diagnostic*, not a missing shaping rule: text that triggers it is
+ill-formed either way, and the divergence is that HarfBuzz marks the error
+visibly and we render it silently.
+
+**One thing worth doing later, not blocking.** Per §431, the host declares only
+seven of the eighty-eight scripts, and none for Tai Tham, Batak, Brahmi or the
+Egyptian hieroglyphs the corpus exercises — those lines agree because both sides
+draw boxes. A `gen_use_probe.py` on the pattern of `gen_khmer_probe.py` would
+turn that agreement into a measurement. Tracked in `todo.txt`.
+
+---

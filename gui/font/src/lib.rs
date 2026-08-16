@@ -76,6 +76,9 @@ mod skip;
 mod syllabic;
 pub mod system;
 mod thai;
+mod universal;
+mod universal_machine;
+mod universal_tables;
 mod would;
 
 use alloc::collections::BTreeMap;

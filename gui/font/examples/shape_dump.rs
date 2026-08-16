@@ -175,7 +175,13 @@ fn entry(line: &str) -> (Option<Lang>, String) {
     (lang, unescape(text))
 }
 
-/// Expand `\uXXXX` and `\\`, so a corpus of combining marks is still legible.
+/// Expand `\uXXXX`, `\UXXXXXXXX` and `\\`, so a corpus of combining marks is
+/// still legible.
+///
+/// The eight-digit form is not decoration: half the scripts the Universal
+/// Shaping Engine covers — Chakma, Brahmi, Adlam, Sharada, the Egyptian
+/// hieroglyphs — live above the BMP, and the four-digit form cannot spell any
+/// of them.
 fn unescape(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut chars = line.chars();
@@ -185,10 +191,11 @@ fn unescape(line: &str) -> String {
             continue;
         }
         match chars.next() {
-            Some('u') => {
-                let hex: String = chars.by_ref().take(4).collect();
+            Some(marker @ ('u' | 'U')) => {
+                let width = if marker == 'u' { 4 } else { 8 };
+                let hex: String = chars.by_ref().take(width).collect();
                 let cp = u32::from_str_radix(&hex, 16)
-                    .unwrap_or_else(|_| panic!("bad \\u escape: {hex:?}"));
+                    .unwrap_or_else(|_| panic!("bad \\{marker} escape: {hex:?}"));
                 out.push(char::from_u32(cp).unwrap_or(char::REPLACEMENT_CHARACTER));
             }
             Some('\\') => out.push('\\'),

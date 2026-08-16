@@ -54088,3 +54088,34 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##
 ## TRIGGER: when a userspace read path for fs::fontsettings exists, or when the
 ## operator reports that changing the monospace font in Settings does nothing.
+
+================================================================================
+## TOOLING TRAP (lane A, 2026-08-16): never pipe a long cargo/QEMU run into
+## `head` or `tail`.
+##
+## Cost ~20 minutes twice in one session, in two different ways, and neither
+## looked like a hang from the outside -- both looked like "the build is slow".
+##
+## (a) `cargo build 2>&1 | head -30` DEADLOCKS. `head` exits after 30 lines and
+##     closes the read end; under MSYS the writer does not reliably get EPIPE, so
+##     cargo blocks forever on a full pipe buffer -- while still holding the
+##     target-directory lock. Any second cargo in the same worktree then waits on
+##     that lock forever too. That is what happened: two `cargo build -p kernel`
+##     tasks sat at 0 bytes of output for 20 minutes, and the second was blameless.
+##
+## (b) `cargo build 2>&1 | tail -25` (and `boot-test.sh ... | tail -60`) does not
+##     deadlock but buffers everything until exit, so the background task's output
+##     file stays 0 bytes for the whole run. Progress is invisible, and "empty
+##     output file" is indistinguishable from "process wedged" -- which is what
+##     sent me looking for a deadlock that, that time, was not there.
+##
+## DO INSTEAD: redirect to a file and read it incrementally.
+##     python scripts/run-timeout.py --poll 60 900 cargo build -p kernel \
+##         > build/kbuild.log 2>&1
+## Then `tail` the FILE, not the pipe. run-timeout.py also bounds the hang and
+## kills the whole process tree, which is what makes (a) recoverable rather than
+## something to notice half an hour later.
+##
+## Symptom to recognise: a background task whose .output file is exactly 0 bytes
+## long after the command should have printed something. Check for a `head`/`tail`
+## in the command before assuming the build is merely slow.

@@ -58894,9 +58894,9 @@ operator's own `LithicBackup.exe` was also running (started 03:38, ~16 h).
    file that had to be removed by hand before retrying. Worth remembering when a
    tool reports a write failure: check the file, do not assume it is untouched.
 
-### [A] B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY-EVEN-ON-A-CLEAN-RUN — 2026-08-16 — ⚠️ OPEN (measured A/A, 2 false "REGRESSED" verdicts on identical code)
+### [A] B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY-EVEN-ON-A-CLEAN-RUN — 2026-08-16 — ✅ FIXED 2026-08-16 (`scripts/bench-history.py`, replication gate)
 
-**Status:** OPEN. Follows on from
+**Status:** FIXED. Follows on from
 `### B-BENCH-COMPARES-TO-ONE-PRIOR-RUN-NOT-THE-DISTRIBUTION`, whose
 2026-08-15 fix added each benchmark's **own recent range** as a second
 gate precisely so a verdict could not be made from a single run-over-run
@@ -59016,6 +59016,62 @@ already computes a whole-suite median, so the material is present:
 `scripts/boot-test.sh --bench` (invocation), `bench/history.jsonl` (the
 34-run record the A/A above was drawn from; the last two entries share
 commit `602fc62e0` and are the pair in question).
+
+**What was done (2026-08-16).** Both bullets above, and one more that the
+replay made obvious. `scripts/bench-history.py` gained:
+
+1. **A replication gate** (`replication_verdict`, `values_for_commit`).
+   Every movement that crossed the threshold *and* left its band is now
+   asked one further question: did this same commit produce it more than
+   once? Three outcomes, and the asymmetry between the last two is the
+   design. `REPLICATED` — every recorded run of the commit shows it —
+   keeps the word `REGRESSED`. `CONTRADICTED` — another run of the same
+   binary landed back inside the range — is withdrawn under a
+   `NOT REPLICATED` heading and does **not** fail the build.
+   `UNREPLICATED` — the commit was measured once — prints as
+   `REGRESSED, UNREPLICATED` and **still fails**, because excusing it
+   would silence the check in the ordinary case (one run per commit is
+   the norm), and that is the same failure as a check that cannot fire.
+   Only a positively-evidenced contradiction withdraws a claim, exactly
+   the standard `MODE_UNDECIDED` is already held to.
+2. **The A/A comparison is named outright.** If the baseline record and
+   the current run share a commit, the whole run-over-run diff is an A/A
+   test and no movement in it can have been caused by code — arithmetic,
+   not statistics, since the difference has no code term. The report says
+   so above every list and the run-over-run claims stop failing the
+   build. Sustained shifts are deliberately *not* excused: `level_shifts`
+   measures against a baseline drawn from earlier commits, so that
+   comparison is not self-referential. This is what the entry above was
+   missing — it covers the movements with too little history for a band,
+   which the per-benchmark gate declines to judge and which would
+   otherwise still have printed as `REGRESSED, UNCONFIRMED` on a binary
+   compared with itself.
+3. **The per-benchmark A/A noise floor is printed** wherever repeats
+   exist, which is the second bullet above falling out of the first as
+   predicted: `same-commit runs: [363, 680] -- a 87% spread with no code
+   change`.
+
+`TUKEY_K` and `SPEED_WINDOW` were not touched, per the third bullet.
+
+**Verified against the data that caused it, not only synthetically.**
+`test_replication_declines_the_measured_false_positives` replays run B
+against run A out of the real `bench/history.jsonl`: `report()` returned
+True before and returns False now, `page_alloc_free` and
+`vfs_stat_breakdown_full` are both withdrawn by name, and no benchmark
+gets the confirmed heading. Six new tests, 43 assertions. Both directions
+were mutation-tested — forcing the verdict to `REPLICATED` fails 14
+assertions, forcing it to `CONTRADICTED` fails 5 (including "a
+replicated movement fails the build") — because a gate that only ever
+withdraws is indistinguishable from deleting the check, and a test that
+cannot fail is the thing this whole file exists to catch.
+
+**What deliberately remains.** A first, single run of a genuinely quiet
+commit that hits a tail outlier still fails the build as
+`REGRESSED, UNREPLICATED`, and that is the intended trade: the report now
+tells the reader it is one run and names the exact command that settles
+it (`./scripts/boot-test.sh --bench` again, no rebuild, ~2 min). The
+alternative — treating unmeasured as absolved — buys a quiet report by
+making the check unable to fire.
 
 **Standing lesson this is another instance of.** Conservation is not
 placement, and a clean instrument is not a correct conclusion: run B's

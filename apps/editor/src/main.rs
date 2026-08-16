@@ -744,6 +744,46 @@ impl Document {
     // Cursor movement
     // ======================================================================
 
+    /// Replace bytes `start..end` of line `n` with `text`. Returns whether
+    /// anything was replaced.
+    ///
+    /// Find/replace records its matches against whichever document was
+    /// searched, and nothing stops a caller handing a *different* document
+    /// to `replace_all`, or editing the buffer between the search and the
+    /// replace. `String::replace_range` panics on both of those — a range
+    /// past the end, or one that lands inside a character — so the check
+    /// lives here, once, instead of being forgotten at one of the call
+    /// sites.
+    fn replace_in_line(&mut self, n: usize, start: usize, end: usize, text: &str) -> bool {
+        let Some(line) = self.lines.get_mut(n) else {
+            return false;
+        };
+        if start > end
+            || end > line.len()
+            || !line.is_char_boundary(start)
+            || !line.is_char_boundary(end)
+        {
+            return false;
+        }
+        line.replace_range(start..end, text);
+        true
+    }
+
+    /// The text of line `n`, or `""` if the buffer has no such line.
+    ///
+    /// Every caller wants "the characters on that line", and the only honest
+    /// answer for a line that is not there is "none". Indexing instead took
+    /// the whole editor down — and with it every unsaved buffer in every
+    /// other tab, not just the one whose index had gone stale.
+    fn line(&self, n: usize) -> &str {
+        self.lines.get(n).map_or("", String::as_str)
+    }
+
+    /// The text of the line the cursor is on.
+    fn cursor_line_text(&self) -> &str {
+        self.line(self.cursor_line)
+    }
+
     /// The character immediately before the cursor, if the cursor is not at the
     /// start of its line.
     ///
@@ -776,7 +816,7 @@ impl Document {
             self.cursor_col -= ch.len_utf8();
         } else if self.cursor_line > 0 {
             self.cursor_line -= 1;
-            self.cursor_col = self.lines[self.cursor_line].len();
+            self.cursor_col = self.cursor_line_text().len();
         }
     }
 
@@ -792,14 +832,14 @@ impl Document {
     pub fn move_up(&mut self) {
         if self.cursor_line > 0 {
             self.cursor_line -= 1;
-            self.cursor_col = snap_to_boundary(&self.lines[self.cursor_line], self.cursor_col);
+            self.cursor_col = snap_to_boundary(self.cursor_line_text(), self.cursor_col);
         }
     }
 
     pub fn move_down(&mut self) {
         if self.cursor_line + 1 < self.lines.len() {
             self.cursor_line += 1;
-            self.cursor_col = snap_to_boundary(&self.lines[self.cursor_line], self.cursor_col);
+            self.cursor_col = snap_to_boundary(self.cursor_line_text(), self.cursor_col);
         }
     }
 
@@ -808,7 +848,7 @@ impl Document {
     }
 
     pub fn move_end(&mut self) {
-        self.cursor_col = self.lines[self.cursor_line].len();
+        self.cursor_col = self.cursor_line_text().len();
     }
 
     pub fn move_to_start(&mut self) {
@@ -817,8 +857,8 @@ impl Document {
     }
 
     pub fn move_to_end(&mut self) {
-        self.cursor_line = self.lines.len() - 1;
-        self.cursor_col = self.lines[self.cursor_line].len();
+        self.cursor_line = self.lines.len().saturating_sub(1);
+        self.cursor_col = self.cursor_line_text().len();
     }
 
     /// Total line count.
@@ -879,7 +919,9 @@ impl Document {
         let mut idx = tree.enclosing_range(sel_start, sel_end);
         // If the selection already equals this node's range, expand to its
         // parent (so repeated invocations grow outward through the tree).
-        let node = &tree.nodes[idx];
+        let Some(node) = tree.node(idx) else {
+            return false;
+        };
         let at_node_bounds = node.start == sel_start && node.end == sel_end;
         if at_node_bounds {
             if let Some(p) = node.parent {
@@ -888,7 +930,9 @@ impl Document {
                 return false; // already at the root
             }
         }
-        let target = &tree.nodes[idx];
+        let Some(target) = tree.node(idx) else {
+            return false;
+        };
         // Don't snap to the synthetic root if there's nothing useful there.
         if target.kind == syntree::NodeKind::Root && target.children.is_empty() {
             return false;
@@ -965,25 +1009,33 @@ impl FindState {
             return;
         }
 
-        let query = if self.case_sensitive {
-            self.query.clone()
-        } else {
-            self.query.to_lowercase()
-        };
-
         for (line_idx, line) in doc.lines.iter().enumerate() {
-            let search_line = if self.case_sensitive {
-                line.clone()
-            } else {
-                line.to_lowercase()
-            };
-
             let mut start = 0;
-            while let Some(pos) = search_line[start..].find(&query) {
-                let abs_pos = start + pos;
-                self.matches
-                    .push((line_idx, abs_pos, abs_pos + query.len()));
-                start = abs_pos + 1;
+            while let Some(rest) = line.get(start..) {
+                let hit = if self.case_sensitive {
+                    rest.find(&self.query).map(|p| {
+                        let at = start.saturating_add(p);
+                        (at, at.saturating_add(self.query.len()))
+                    })
+                } else {
+                    rest.char_indices().find_map(|(off, _)| {
+                        let at = start.saturating_add(off);
+                        folded_match_end(line, at, &self.query).map(|end| (at, end))
+                    })
+                };
+                let Some((at, end)) = hit else { break };
+                self.matches.push((line_idx, at, end));
+                // Resume *past* the match, not one byte into it. Stepping one
+                // byte reported overlapping occurrences -- three "aa" in
+                // "aaaa" -- and `replace_all` then rewrote overlapping ranges
+                // one after another, shredding the line. A one-byte step also
+                // lands inside a multi-byte character, where the old
+                // `search_line[start..]` panicked outright.
+                start = if end > at {
+                    end
+                } else {
+                    at.saturating_add(1)
+                };
             }
         }
 
@@ -996,7 +1048,9 @@ impl FindState {
             return;
         }
         self.current_match = (self.current_match + 1) % self.matches.len();
-        let (line, col, _) = self.matches[self.current_match];
+        let Some(&(line, col, _)) = self.matches.get(self.current_match) else {
+            return;
+        };
         doc.cursor_line = line;
         doc.cursor_col = col;
     }
@@ -1007,11 +1061,13 @@ impl FindState {
             return;
         }
         if self.current_match == 0 {
-            self.current_match = self.matches.len() - 1;
+            self.current_match = self.matches.len().saturating_sub(1);
         } else {
             self.current_match -= 1;
         }
-        let (line, col, _) = self.matches[self.current_match];
+        let Some(&(line, col, _)) = self.matches.get(self.current_match) else {
+            return;
+        };
         doc.cursor_line = line;
         doc.cursor_col = col;
     }
@@ -1021,10 +1077,12 @@ impl FindState {
         if self.matches.is_empty() {
             return;
         }
-        let (line, start, end) = self.matches[self.current_match];
-        let current_line = &mut doc.lines[line];
-        current_line.replace_range(start..end, &self.replace_text);
-        doc.modified = true;
+        let Some(&(line, start, end)) = self.matches.get(self.current_match) else {
+            return;
+        };
+        if doc.replace_in_line(line, start, end, &self.replace_text) {
+            doc.modified = true;
+        }
         self.find_all(doc);
     }
 
@@ -1033,13 +1091,19 @@ impl FindState {
         if self.matches.is_empty() {
             return 0;
         }
-        let count = self.matches.len();
-        // Replace from end to start to preserve indices
+        // Replace from end to start to preserve indices. The count is of
+        // replacements actually made, not matches recorded: a match whose
+        // range no longer fits the document is skipped, and reporting it as
+        // replaced would be a lie the user can see in the buffer.
+        let mut count = 0_usize;
         for &(line, start, end) in self.matches.iter().rev() {
-            let current_line = &mut doc.lines[line];
-            current_line.replace_range(start..end, &self.replace_text);
+            if doc.replace_in_line(line, start, end, &self.replace_text) {
+                count = count.saturating_add(1);
+            }
         }
-        doc.modified = true;
+        if count > 0 {
+            doc.modified = true;
+        }
         self.matches.clear();
         count
     }
@@ -1049,12 +1113,175 @@ impl FindState {
 // Editor state (multi-tab)
 // ============================================================================
 
+/// The open documents, and which one is in front.
+///
+/// The editor is never in a state with no document open — closing the last
+/// tab opens a fresh empty one — and every screen the editor draws needs
+/// *the* active document, not an optional one. Expressing that as a plain
+/// `Vec` plus an index made the invariant a convention: five call sites
+/// indexed straight into the vector, `close_tab` called `Vec::remove` with
+/// an index nothing had re-checked, and two places computed `len() - 1` on
+/// a vector that the type system was happy to let be empty. Any one of
+/// those panics the whole editor, losing every unsaved buffer, not just the
+/// one whose index went stale.
+///
+/// Splitting the first document out of the vector makes "at least one
+/// document" a fact the compiler knows, which is what lets [`Tabs::active`]
+/// hand back a `&Document` with no unwrap and no panic. The index is
+/// private for the same reason: it can only be moved through
+/// [`Tabs::set_active`], which clamps.
+pub struct Tabs {
+    /// The first tab. Always present — that is the whole point of storing
+    /// it outside `rest`.
+    head: Document,
+    /// Tabs 1..n. `rest[i]` is tab `i + 1`.
+    rest: Vec<Document>,
+    /// Index of the tab in front, in the combined numbering. Kept in range
+    /// by every method that can disturb it; `active`/`active_mut` fall back
+    /// to the first tab rather than panicking if it ever is not.
+    active: usize,
+}
+
+impl Tabs {
+    /// A single empty untitled document.
+    pub fn new() -> Self {
+        Self {
+            head: Document::new(),
+            rest: Vec::new(),
+            active: 0,
+        }
+    }
+
+    /// Number of open tabs. Never zero — which is why this is `count` and
+    /// not `len`: a `len` invites an `is_empty` whose answer is always
+    /// `false`, and a reader who has to check that is a reader the type was
+    /// supposed to reassure.
+    pub fn count(&self) -> usize {
+        self.rest.len().saturating_add(1)
+    }
+
+    /// Index of the tab in front.
+    pub fn active_index(&self) -> usize {
+        self.active
+    }
+
+    /// Bring tab `i` to the front, clamping to the last tab.
+    pub fn set_active(&mut self, i: usize) {
+        self.active = i.min(self.count().saturating_sub(1));
+    }
+
+    pub fn get(&self, i: usize) -> Option<&Document> {
+        match i.checked_sub(1) {
+            None => Some(&self.head),
+            Some(j) => self.rest.get(j),
+        }
+    }
+
+    pub fn get_mut(&mut self, i: usize) -> Option<&mut Document> {
+        match i.checked_sub(1) {
+            None => Some(&mut self.head),
+            Some(j) => self.rest.get_mut(j),
+        }
+    }
+
+    /// The tab in front.
+    pub fn active(&self) -> &Document {
+        self.get(self.active).unwrap_or(&self.head)
+    }
+
+    /// The tab in front, mutably.
+    pub fn active_mut(&mut self) -> &mut Document {
+        match self.active.checked_sub(1) {
+            None => &mut self.head,
+            // Borrowck sees `rest` and `head` as disjoint fields, so the
+            // fallback is allowed even though `get_mut` borrowed `rest`.
+            Some(j) => match self.rest.get_mut(j) {
+                Some(doc) => doc,
+                None => &mut self.head,
+            },
+        }
+    }
+
+    /// Every open tab, in tab order.
+    pub fn iter(&self) -> impl Iterator<Item = &Document> {
+        std::iter::once(&self.head).chain(self.rest.iter())
+    }
+
+    /// Append a tab and bring it to the front. Returns its index.
+    pub fn open(&mut self, doc: Document) -> usize {
+        self.rest.push(doc);
+        self.active = self.count().saturating_sub(1);
+        self.active
+    }
+
+    /// Close the tab in front. Closing the only tab replaces it with a fresh
+    /// empty one rather than leaving nothing open.
+    pub fn close_active(&mut self) {
+        match self.active.checked_sub(1) {
+            // Closing tab 0: the next tab is promoted to `head`, or — if
+            // there is no next tab — `head` becomes a new empty document.
+            None => {
+                self.head = if self.rest.is_empty() {
+                    Document::new()
+                } else {
+                    self.rest.remove(0)
+                };
+            }
+            Some(j) => {
+                if j < self.rest.len() {
+                    self.rest.remove(j);
+                }
+            }
+        }
+        self.active = self.active.min(self.count().saturating_sub(1));
+    }
+}
+
+impl Default for Tabs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Byte offset just past a case-folded match of `needle` starting exactly at
+/// byte offset `at` in `haystack`, or `None` if there is no match there.
+///
+/// The offsets are into `haystack` -- the *real* line -- which is the whole
+/// point. Find used to search a `to_lowercase()` copy of the line instead, but
+/// `to_lowercase` is not length-preserving (Turkish `I` with a dot above folds
+/// to two characters, three bytes, from two), so an offset found in the folded
+/// copy does not point at the same place in the line the user is looking at.
+/// The editor then selected, or replaced, the wrong bytes -- or a span past
+/// the end of the line, which `String::replace_range` turns into a panic.
+///
+/// The match length in `haystack` can differ from the needle's, for the same
+/// reason, so the *end* is returned rather than assumed.
+fn folded_match_end(haystack: &str, at: usize, needle: &str) -> Option<usize> {
+    let rest = haystack.get(at..)?;
+    let mut needle_folded = needle.chars().flat_map(char::to_lowercase);
+    let mut want = needle_folded.next();
+    let mut end = at;
+    for (off, hc) in rest.char_indices() {
+        if want.is_none() {
+            break;
+        }
+        for hf in hc.to_lowercase() {
+            match want {
+                Some(nf) if nf == hf => want = needle_folded.next(),
+                // A mismatch, or the needle running out partway through a
+                // haystack character. Neither is a match we could select.
+                _ => return None,
+            }
+        }
+        end = at.saturating_add(off).saturating_add(hc.len_utf8());
+    }
+    want.is_none().then_some(end)
+}
+
 /// Complete editor application state.
 pub struct EditorState {
-    /// Open documents (tabs).
-    pub documents: Vec<Document>,
-    /// Active document index.
-    pub active_tab: usize,
+    /// Open documents (tabs), and which is in front.
+    pub tabs: Tabs,
     /// Find & replace state.
     pub find: FindState,
     /// Whether find panel is visible.
@@ -1114,8 +1341,7 @@ impl EditorState {
     pub fn new() -> Self {
         let font_size = 14.0;
         Self {
-            documents: vec![Document::new()],
-            active_tab: 0,
+            tabs: Tabs::new(),
             find: FindState::new(),
             find_visible: false,
             window_width: 900,
@@ -1128,42 +1354,38 @@ impl EditorState {
     }
 
     pub fn active_document(&self) -> &Document {
-        &self.documents[self.active_tab]
+        self.tabs.active()
     }
 
     pub fn active_document_mut(&mut self) -> &mut Document {
-        &mut self.documents[self.active_tab]
+        self.tabs.active_mut()
     }
 
     /// Open a file in a new tab.
     pub fn open_file(&mut self, path: &std::path::Path) -> std::io::Result<()> {
-        // Check if already open
-        for (i, doc) in self.documents.iter().enumerate() {
-            if doc.path.as_deref() == Some(path) {
-                self.active_tab = i;
-                return Ok(());
-            }
+        // Check if already open. The search is a separate statement so the
+        // borrow of `tabs` ends before `set_active` takes a mutable one.
+        let already_open = self
+            .tabs
+            .iter()
+            .position(|doc| doc.path.as_deref() == Some(path));
+        if let Some(i) = already_open {
+            self.tabs.set_active(i);
+            return Ok(());
         }
 
         let doc = Document::from_file(path)?;
-        self.documents.push(doc);
-        self.active_tab = self.documents.len() - 1;
+        self.tabs.open(doc);
         Ok(())
     }
 
     /// Close the active tab.
     pub fn close_tab(&mut self) -> bool {
-        if self.documents[self.active_tab].modified {
+        if self.tabs.active().modified {
             // Would need to prompt user — return false to indicate unsaved
             return false;
         }
-        self.documents.remove(self.active_tab);
-        if self.documents.is_empty() {
-            self.documents.push(Document::new());
-            self.active_tab = 0;
-        } else if self.active_tab >= self.documents.len() {
-            self.active_tab = self.documents.len() - 1;
-        }
+        self.tabs.close_active();
         true
     }
 
@@ -1190,10 +1412,8 @@ impl EditorState {
         if self.external_prompt.is_some() {
             return false;
         }
-        let tab = self.active_tab;
-        let Some(doc) = self.documents.get(self.active_tab) else {
-            return false;
-        };
+        let tab = self.tabs.active_index();
+        let doc = self.tabs.active();
         match doc.disk_changed() {
             DiskChange::Unchanged => false,
             DiskChange::Modified { disk } => {
@@ -1206,7 +1426,7 @@ impl EditorState {
                     true
                 } else {
                     // No local edits at risk — just adopt the disk version.
-                    if let Some(doc) = self.documents.get_mut(tab) {
+                    if let Some(doc) = self.tabs.get_mut(tab) {
                         doc.reload_from_disk(&disk);
                     }
                     false
@@ -1241,7 +1461,7 @@ impl EditorState {
 
         match choice {
             ExternalChoice::KeepCurrent => {
-                if let Some(doc) = self.documents.get_mut(tab) {
+                if let Some(doc) = self.tabs.get_mut(tab) {
                     // For a deletion, there is no disk mtime to record; keep the
                     // buffer (marked modified) so a save recreates the file.
                     doc.keep_current();
@@ -1250,19 +1470,19 @@ impl EditorState {
                 self.external_prompt = None;
             }
             ExternalChoice::Reload => {
-                if let (Some(doc), Some(disk)) = (self.documents.get_mut(tab), disk) {
+                if let (Some(doc), Some(disk)) = (self.tabs.get_mut(tab), disk) {
                     doc.reload_from_disk(&disk);
                 }
                 self.external_prompt = None;
             }
             ExternalChoice::Merge => {
-                if let (Some(doc), Some(disk)) = (self.documents.get_mut(tab), disk) {
+                if let (Some(doc), Some(disk)) = (self.tabs.get_mut(tab), disk) {
                     doc.merge_from_disk(&disk);
                 }
                 self.external_prompt = None;
             }
             ExternalChoice::Review => {
-                if let (Some(doc), Some(disk)) = (self.documents.get(tab), disk.as_ref()) {
+                if let (Some(doc), Some(disk)) = (self.tabs.get(tab), disk.as_ref()) {
                     let review = MergeReview::new(doc.merge_preview(disk));
                     if let Some(prompt) = self.external_prompt.as_mut() {
                         prompt.review = Some(review);
@@ -1294,7 +1514,7 @@ impl EditorState {
         };
         let merged = review.accepted_text();
         let disk = disk.clone();
-        if let Some(doc) = self.documents.get_mut(tab) {
+        if let Some(doc) = self.tabs.get_mut(tab) {
             doc.apply_merged(&merged, &disk);
         }
         self.external_prompt = None;
@@ -1352,9 +1572,9 @@ impl EditorState {
         tree.fill_rect(0.0, 0.0, self.window_width as f32, tab_h, Color::from_hex(0x181825));
 
         let mut x = 0.0;
-        for (i, doc) in self.documents.iter().enumerate() {
+        for (i, doc) in self.tabs.iter().enumerate() {
             let tab_w = 160.0;
-            let bg = if i == self.active_tab {
+            let bg = if i == self.tabs.active_index() {
                 Color::from_hex(0x1E1E2E)
             } else {
                 Color::from_hex(0x11111B)
@@ -1637,7 +1857,7 @@ impl EditorState {
         tree.fill_rect(dx, dy, dw, 32.0, Color::from_hex(0x313244));
 
         let name = self
-            .documents
+            .tabs
             .get(prompt.tab)
             .map_or("file", |d| d.name.as_str());
 
@@ -1701,7 +1921,7 @@ impl EditorState {
         tree.fill_rect(dx, dy, dw, 32.0, Color::from_hex(0x313244));
 
         let name = self
-            .documents
+            .tabs
             .get(prompt.tab)
             .map_or("file", |d| d.name.as_str());
         let header = format!(
@@ -1810,15 +2030,15 @@ fn main() {
     doc.insert_char('o');
     println!(
         "  After typing 'Hello': \"{}\"",
-        doc.lines[0]
+        doc.line(0)
     );
 
     doc.undo();
     doc.undo();
-    println!("  After 2x undo: \"{}\"", doc.lines[0]);
+    println!("  After 2x undo: \"{}\"", doc.line(0));
 
     doc.redo();
-    println!("  After redo: \"{}\"", doc.lines[0]);
+    println!("  After redo: \"{}\"", doc.line(0));
 
     // Demonstrate structural editing on a small Rust snippet.
     let mut sample = Document::new();
@@ -1861,6 +2081,11 @@ fn main() {
 
 #[cfg(test)]
 mod caret_tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
     use guitk::render::RenderCommand;
 
@@ -1978,18 +2203,18 @@ mod caret_tests {
 
         // Backspace removes the character, not one of its bytes.
         doc.backspace();
-        assert_eq!(doc.lines[0], "caf au lait");
+        assert_eq!(doc.line(0), "caf au lait");
         assert_eq!(doc.cursor_col, 3);
 
         // …and typing it back leaves the line as it was.
         doc.insert_char('é');
-        assert_eq!(doc.lines[0], "café au lait");
+        assert_eq!(doc.line(0), "café au lait");
         assert_eq!(doc.cursor_col, 5);
 
         // Delete takes the whole character from in front of the cursor.
         doc.cursor_col = 3;
         doc.delete_forward();
-        assert_eq!(doc.lines[0], "caf au lait");
+        assert_eq!(doc.line(0), "caf au lait");
     }
 
     /// A column carried between lines is a byte offset that meant something on
@@ -2032,6 +2257,11 @@ mod caret_tests {
 /// which makes the second of those affordable cannot go stale.
 #[cfg(test)]
 mod highlight_render_tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
     use guitk::render::RenderCommand;
 
@@ -2264,10 +2494,10 @@ mod highlight_render_tests {
         doc.cursor_line = 0;
         doc.cursor_col = 1;
         doc.insert_char('\u{e9}');
-        assert_eq!(doc.lines[0], "a\u{e9}b");
+        assert_eq!(doc.line(0), "a\u{e9}b");
         doc.undo();
         assert_eq!(
-            doc.lines[0], "ab",
+            doc.line(0), "ab",
             "undo removed the character after the one it inserted"
         );
     }
@@ -2279,6 +2509,11 @@ mod highlight_render_tests {
 
 #[cfg(test)]
 mod undo_tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     fn doc_with(lines: &[&str], line: usize, col: usize) -> Document {
@@ -2494,6 +2729,11 @@ mod undo_tests {
 
 #[cfg(test)]
 mod doc_syntree_tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     fn rust_doc(src: &str) -> Document {
@@ -2573,6 +2813,11 @@ mod doc_syntree_tests {
 
 #[cfg(test)]
 mod external_merge_tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
     use std::io::Write;
     use std::time::SystemTime;
@@ -2760,5 +3005,188 @@ mod external_merge_tests {
         assert_eq!(editor.active_document().buffer_text(), "remote");
         assert!(!editor.active_document().modified);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod tab_tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+
+    use super::{Document, FindState, Tabs};
+
+    fn named(name: &str) -> Document {
+        let mut d = Document::new();
+        d.name = name.to_string();
+        d
+    }
+
+    fn names(tabs: &Tabs) -> Vec<String> {
+        tabs.iter().map(|d| d.name.clone()).collect()
+    }
+
+    #[test]
+    fn there_is_always_a_document_open() {
+        // The editor draws *the* active document on every frame; there is no
+        // "no document" screen. Closing the last tab therefore has to leave a
+        // fresh empty one rather than an empty list.
+        let mut tabs = Tabs::new();
+        assert_eq!(tabs.count(), 1);
+        tabs.close_active();
+        assert_eq!(tabs.count(), 1);
+        assert_eq!(tabs.active_index(), 0);
+        assert_eq!(tabs.active().buffer_text(), "");
+    }
+
+    #[test]
+    fn closing_the_first_tab_promotes_the_next_one() {
+        // The first tab is stored apart from the rest, so closing it is the
+        // one case that has to move a document rather than remove one.
+        let mut tabs = Tabs::new();
+        tabs.open(named("b"));
+        tabs.open(named("c"));
+        tabs.set_active(0);
+        tabs.close_active();
+        assert_eq!(names(&tabs), ["b", "c"]);
+        assert_eq!(tabs.active().name, "b");
+    }
+
+    #[test]
+    fn closing_the_last_tab_moves_the_selection_back_one() {
+        let mut tabs = Tabs::new();
+        tabs.open(named("b"));
+        tabs.open(named("c"));
+        assert_eq!(tabs.active().name, "c");
+        tabs.close_active();
+        assert_eq!(names(&tabs), ["Untitled", "b"]);
+        assert_eq!(tabs.active().name, "b");
+    }
+
+    #[test]
+    fn closing_a_middle_tab_leaves_the_others_in_order() {
+        let mut tabs = Tabs::new();
+        tabs.open(named("b"));
+        tabs.open(named("c"));
+        tabs.set_active(1);
+        tabs.close_active();
+        assert_eq!(names(&tabs), ["Untitled", "c"]);
+        assert_eq!(tabs.active().name, "c");
+    }
+
+    #[test]
+    fn a_tab_index_past_the_end_is_clamped_not_fatal() {
+        // The index used to be a public field, so any stale value reached
+        // `documents[active_tab]` and took the editor — and every unsaved
+        // buffer in it — down. It can now only move through `set_active`.
+        let mut tabs = Tabs::new();
+        tabs.open(named("b"));
+        tabs.set_active(99);
+        assert_eq!(tabs.active_index(), 1);
+        assert_eq!(tabs.active().name, "b");
+        assert!(tabs.get(99).is_none());
+    }
+
+    #[test]
+    fn replacing_a_match_that_no_longer_fits_the_line_is_skipped() {
+        // Find records byte ranges against the document it searched. Handing
+        // a *different* (or since-shortened) document to `replace_all` used
+        // to reach `String::replace_range` with an out-of-range span, which
+        // panics. The count reports replacements made, not matches recorded.
+        let mut doc = Document::new();
+        doc.lines = vec!["aaaa".to_string(), "aaaa".to_string()];
+        let mut find = FindState::new();
+        find.query = "aa".to_string();
+        find.find_all(&doc);
+        assert_eq!(find.matches.len(), 4);
+
+        // Shrink the buffer out from under the recorded matches.
+        doc.lines = vec!["a".to_string()];
+        assert_eq!(find.replace_all(&mut doc), 0);
+        assert_eq!(doc.buffer_text(), "a");
+        assert!(!doc.modified);
+    }
+
+    #[test]
+    fn replacing_a_match_that_lands_inside_a_character_is_skipped() {
+        // `replace_range` also panics on a boundary that is not a character
+        // boundary, which a stale byte offset easily is once the line's
+        // contents have changed.
+        let mut doc = Document::new();
+        doc.lines = vec!["xx".to_string()];
+        let mut find = FindState::new();
+        find.query = "x".to_string();
+        find.find_all(&doc);
+        doc.lines = vec!["é".to_string()]; // two bytes, one character
+        assert_eq!(find.replace_all(&mut doc), 0);
+        assert_eq!(doc.buffer_text(), "é");
+    }
+
+    #[test]
+    fn cursor_movement_on_a_line_that_is_not_there_does_not_panic() {
+        // `lines` is public, so a caller can shrink it without touching the
+        // cursor. Every movement key then asks for a line that is gone.
+        let mut doc = Document::new();
+        doc.lines = vec!["one".to_string(), "two".to_string()];
+        doc.cursor_line = 7;
+        doc.cursor_col = 3;
+        doc.move_end();
+        assert_eq!(doc.cursor_col, 0);
+        doc.move_up();
+        doc.move_down();
+        doc.move_left();
+        doc.move_right();
+        doc.move_to_end();
+        assert_eq!(doc.cursor_line, 1);
+        assert_eq!(doc.cursor_col, 3);
+    }
+
+    #[test]
+    fn overlapping_occurrences_are_not_counted_or_replaced_twice() {
+        // `find_all` used to resume one byte into the match it had just
+        // recorded, so "aaaa" reported three occurrences of "aa" — and
+        // `replace_all`, rewriting overlapping ranges back to front, shredded
+        // the line.
+        let mut doc = Document::new();
+        doc.lines = vec!["aaaa".to_string()];
+        let mut find = FindState::new();
+        find.query = "aa".to_string();
+        find.replace_text = "b".to_string();
+        find.find_all(&doc);
+        assert_eq!(find.matches, [(0, 0, 2), (0, 2, 4)]);
+        assert_eq!(find.replace_all(&mut doc), 2);
+        assert_eq!(doc.buffer_text(), "bb");
+    }
+
+    #[test]
+    fn a_case_insensitive_match_is_found_at_its_offset_in_the_real_line() {
+        // `İ` is two bytes but lowercases to three, so the offset of anything
+        // after it differs between the line and a `to_lowercase()` copy of
+        // it. Searching the copy — which is what find used to do — put the
+        // match past the end of the real line, where the replace either hit
+        // the wrong bytes or panicked.
+        let mut doc = Document::new();
+        doc.lines = vec!["İx".to_string()];
+        let mut find = FindState::new();
+        find.query = "X".to_string();
+        find.replace_text = "y".to_string();
+        find.find_all(&doc);
+        assert_eq!(find.matches, [(0, 2, 3)]);
+        assert_eq!(find.replace_all(&mut doc), 1);
+        assert_eq!(doc.buffer_text(), "İy");
+    }
+
+    #[test]
+    fn a_search_never_resumes_inside_a_character() {
+        // The old one-byte resume step landed inside a multi-byte character,
+        // where slicing the line panicked outright. Every occurrence here is
+        // three bytes wide.
+        let mut doc = Document::new();
+        doc.lines = vec!["日本日本".to_string()];
+        let mut find = FindState::new();
+        find.query = "日本".to_string();
+        find.find_all(&doc);
+        assert_eq!(find.matches, [(0, 0, 6), (0, 6, 12)]);
     }
 }

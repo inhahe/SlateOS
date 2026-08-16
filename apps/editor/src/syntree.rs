@@ -126,6 +126,18 @@ impl SyntaxTree {
         }
     }
 
+    /// Node `idx`, if the tree has one.
+    ///
+    /// Node indices travel around this module as bare `usize`s — in
+    /// `children`, in `parent`, and back out through `enclosing` — so a
+    /// caller that has held one across a rebuild is holding a stale index
+    /// into a different tree. Indexing turned that into a panic in the
+    /// editor's paint path; an `Option` turns it into a feature that
+    /// declines to do anything, which is what a stale selection deserves.
+    pub fn node(&self, idx: usize) -> Option<&Node> {
+        self.nodes.get(idx)
+    }
+
     /// Returns the index of the deepest node whose range contains `pos`.
     /// Falls back to the root (index 0) when no inner node matches.
     pub fn enclosing(&self, pos: Pos) -> usize {
@@ -133,9 +145,9 @@ impl SyntaxTree {
     }
 
     fn enclosing_from(&self, idx: usize, pos: Pos) -> usize {
-        let node = &self.nodes[idx];
+        let Some(node) = self.node(idx) else { return idx };
         for &child in &node.children {
-            if self.nodes[child].contains(pos) {
+            if self.node(child).is_some_and(|c| c.contains(pos)) {
                 return self.enclosing_from(child, pos);
             }
         }
@@ -153,8 +165,9 @@ impl SyntaxTree {
     }
 
     fn enclosing_range_from(&self, idx: usize, start: Pos, end: Pos) -> usize {
-        for &child in &self.nodes[idx].children {
-            let c = &self.nodes[child];
+        let Some(node) = self.node(idx) else { return idx };
+        for &child in &node.children {
+            let Some(c) = self.node(child) else { continue };
             if c.start <= start && end <= c.end {
                 return self.enclosing_range_from(child, start, end);
             }
@@ -171,7 +184,7 @@ impl SyntaxTree {
     }
 
     fn outline_walk(&self, idx: usize, depth: usize, out: &mut Vec<(usize, String)>) {
-        let node = &self.nodes[idx];
+        let Some(node) = self.node(idx) else { return };
         // Skip the synthetic root in the listing.
         if idx != 0 && node.is_multiline() {
             out.push((depth.saturating_sub(1), node.header.clone()));
@@ -331,10 +344,14 @@ impl<'a> Parser<'a> {
         // Close any unclosed scopes at end-of-buffer.
         let eof = Pos::new(self.lines.len(), 0);
         while let Some(idx) = self.stack.pop() {
-            self.nodes[idx].end = eof;
+            if let Some(node) = self.nodes.get_mut(idx) {
+                node.end = eof;
+            }
         }
         // Set root's end to end-of-buffer for consistency.
-        self.nodes[0].end = eof;
+        if let Some(root) = self.nodes.first_mut() {
+            root.end = eof;
+        }
     }
 
     fn current_parent(&self) -> usize {
@@ -375,7 +392,9 @@ impl<'a> Parser<'a> {
             // String literal: scan until terminating quote on same line. We
             // intentionally drop multi-line strings on the floor — they are
             // rare in the languages we support without triple-quote handling.
-            let b = bytes[i];
+            let Some(b) = bytes.get(i).copied() else {
+                break;
+            };
             if let Some(&(_, close, _ml)) = self
                 .dialect
                 .strings
@@ -383,8 +402,7 @@ impl<'a> Parser<'a> {
                 .find(|(open, _, _)| (*open as u32) == b as u32 && b < 0x80)
             {
                 i += 1;
-                while i < bytes.len() {
-                    let ch = bytes[i];
+                while let Some(ch) = bytes.get(i).copied() {
                     if ch == b'\\' && i + 1 < bytes.len() {
                         i += 2;
                         continue;
@@ -418,7 +436,9 @@ impl<'a> Parser<'a> {
                             children: Vec::new(),
                             header,
                         });
-                        self.nodes[parent].children.push(new_idx);
+                        if let Some(p) = self.nodes.get_mut(parent) {
+                            p.children.push(new_idx);
+                        }
                         self.stack.push(new_idx);
                         i += 1;
                         continue;
@@ -429,11 +449,13 @@ impl<'a> Parser<'a> {
                             b')' => NodeKind::Paren,
                             _ => NodeKind::Bracket,
                         };
-                        if let Some(&top) = self.stack.last() {
-                            if self.nodes[top].kind == want {
+                        if let Some(&top) = self.stack.last()
+                            && let Some(node) = self.nodes.get_mut(top)
+                        {
+                            if node.kind == want {
                                 self.stack.pop();
                                 // Close at position one past the delimiter.
-                                self.nodes[top].end = Pos::new(line_idx, i + 1);
+                                node.end = Pos::new(line_idx, i + 1);
                             } else {
                                 // Mismatched close: tolerate by skipping; the
                                 // open scope stays open until EOF.
@@ -453,17 +475,18 @@ impl<'a> Parser<'a> {
 
 fn bytes_starts_with(haystack: &[u8], at: usize, needle: &str) -> bool {
     let n = needle.as_bytes();
-    if at + n.len() > haystack.len() {
-        return false;
-    }
-    &haystack[at..at + n.len()] == n
+    haystack.get(at..at.saturating_add(n.len())) == Some(n)
 }
 
 /// Step forward by the UTF-8 byte length of the codepoint at `at`, or by 1
 /// for invalid input. We always advance at least one byte to guarantee
 /// progress.
 fn utf8_step(bytes: &[u8], at: usize) -> usize {
-    let b = bytes[at];
+    // Past the end there is nothing to measure, and the caller's loop only
+    // needs a nonzero step to keep making progress.
+    let Some(b) = bytes.get(at).copied() else {
+        return 1;
+    };
     if b < 0x80 {
         1
     } else if b < 0xC0 {
@@ -499,6 +522,11 @@ fn make_header(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     fn build(lang: Language, src: &str) -> SyntaxTree {

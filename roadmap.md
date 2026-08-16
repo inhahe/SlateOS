@@ -468,7 +468,10 @@ assigned. Pick the top unclaimed item in your own lane.
 Roadmap:
 
 - `[A]` Ada/SPARK FFI bridge for kernel-space drivers (line ~345)
-- `[A]` Enable LLVM CFI as default for C/C++ compilation (line ~282)
+- ~~`[A]` Enable LLVM CFI as default for C/C++ compilation~~ (line ~282) —
+  **do not pick this up.** Deferred by the operator (`design-decisions.md`
+  §201); waiting in `deferred-questions.md` → D-Q2 until the first substantial
+  C port. Everything not gated on that answer is already done (2026-08-16).
 - `[A]` TCP/IP stack kernel side + `SYS_NET_RAW_*` shim (line ~1044) — see joint task
 - `[A]` Later: NTFS read support, Btrfs/ZFS CoW, F2FS (line ~1041, §5.4)
 - `[A]` Port AMDGPU / Intel i915-xe drivers (lines ~4569–4571) — kernel-side DRM
@@ -1091,7 +1094,16 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] #CP exception handler (vector 21) with error code parsing
   - [x] Self-test validating detection and API consistency
   - Note: actual enablement gated on kernel compiled with -fcf-protection=full
-- [ ] `[A]` Enable LLVM CFI as default for C/C++ compilation
+- [~] `[A]` Enable LLVM CFI as default for C/C++ compilation — **blocked by an
+  operator decision, not by remaining work.** `design-decisions.md` §201 defers
+  it ("not yet", 2026-08-15); it waits in `deferred-questions.md` → **D-Q2**,
+  trigger = *the first substantial C port entering the build*. Do not switch it
+  on before then. The parts that do **not** depend on that decision are done:
+  feasibility is measured end-to-end (working flag set, the mandatory `-flto`,
+  the `zig cc` ignorelist gotcha — see the D-Q2 amendment of 2026-08-16), and
+  the kernel now decodes and names the resulting traps (`kernel/src/idt.rs`
+  `decode_ud_trap`). Note clang emits **`ud1`**, not `ud2`, so verifying CFI by
+  grepping a binary for `ud2` returns a false negative.
 
 ### 1.6 Process management
 - [x] ELF binary loader

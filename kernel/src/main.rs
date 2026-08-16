@@ -4761,6 +4761,15 @@ extern "C" fn kernel_main() -> ! {
     // Keeps `smep_smap`'s SMAP-enable gate honest about what the stubs do.
     idt::ac_on_entry_self_test();
 
+    // Step 22e⅞+: #UD trap-decode self-test.
+    // Sits with the other IDT self-tests because it guards what the #UD
+    // handler *says*, not what it does: a CFI violation in a C program is a
+    // ring-3 `ud1`, and until this decoder existed the kernel could only
+    // report it as an undecoded byte dump.  Pinned to byte sequences captured
+    // from real clang output, so a toolchain bump that changes the encoding
+    // fails here rather than silently mis-naming every fault thereafter.
+    idt::ud_trap_decode_self_test();
+
     // Step 22e⅞+: Serial print re-entrancy self-test.
     // Guards the escape hatch that keeps a fault taken *during* a print from
     // deadlocking on the console lock — the difference between a diagnosable

@@ -2040,6 +2040,306 @@ extern "C" fn handle_bound_range(frame: &InterruptStackFrame, _error: u64) {
     cpu::halt_loop();
 }
 
+/// A trapping instruction decoded from the bytes at a faulting RIP.
+///
+/// The only #UD encodings we decode are the ones a compiler emits *on
+/// purpose*, because those are the ones where the bytes carry a diagnosis.
+/// Everything else is left as a raw hex dump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UdTrap {
+    /// `ud2` (`0F 0B`) — the generic "unreachable" trap emitted by rustc's
+    /// panic-free paths and by `__builtin_trap()`.
+    Ud2,
+    /// `ud1` (`0F B9 /r`) — clang/LLVM's `-fsanitize-trap` encoding.  The
+    /// check that failed is carried in the instruction's displacement byte,
+    /// so a trap is self-describing even with no runtime library linked.
+    Sanitizer {
+        /// Trap-reason ordinal (clang's `SanitizerHandler` enum).
+        reason: u8,
+        /// Instruction length in bytes, `0x67` prefix included.
+        len: usize,
+    },
+}
+
+/// Decode the trapping instruction at a faulting RIP, if it is one a compiler
+/// emitted deliberately.
+///
+/// # The `ud1` encoding, and why it is not `ud2`
+///
+/// With `-fsanitize-trap=<check>` clang does **not** call a runtime handler;
+/// it emits `ud1 <reason>(%eax), %eax`, which assembles to an address-size
+/// prefix (`0x67`, because the addressing register is 32-bit `%eax`) followed
+/// by `0F B9` and a ModRM byte.  The failing check's ordinal is the ModRM
+/// displacement — `mod=01` puts it in a `disp8`, and `mod=00` means an
+/// implicit displacement of zero, i.e. reason 0.
+///
+/// This matters more than it looks: the obvious way to verify that a
+/// sanitizer is actually enabled in a build is to scan the output for a trap
+/// instruction, and the obvious instruction to scan for is `ud2` (`0F 0B`) —
+/// which clang never emits for a sanitizer check.  That scan reports "no
+/// traps" on a fully instrumented binary.  A check that cannot fire is
+/// indistinguishable from a check that passes; this decoder exists so the
+/// kernel is not the next thing to make that mistake.
+///
+/// Returns `None` for any other byte sequence, including `ud1` in an
+/// addressing form clang does not emit (SIB or RIP-relative) — reporting a
+/// reason read out of a byte that is not a displacement would be worse than
+/// reporting nothing.
+pub(crate) fn decode_ud_trap(bytes: &[u8]) -> Option<UdTrap> {
+    // `ud2` first: two bytes, no operands.
+    if bytes.first() == Some(&0x0F) && bytes.get(1) == Some(&0x0B) {
+        return Some(UdTrap::Ud2);
+    }
+
+    // `ud1`, with the address-size prefix clang emits (and tolerating its
+    // absence, since the prefix is not architecturally required).
+    let (body, prefix_len) = if bytes.first() == Some(&0x67) {
+        (bytes.get(1..)?, 1usize)
+    } else {
+        (bytes, 0usize)
+    };
+    if body.first() != Some(&0x0F) || body.get(1) != Some(&0xB9) {
+        return None;
+    }
+    let modrm = *body.get(2)?;
+    let (md, rm) = (modrm >> 6, modrm & 0b111);
+    match (md, rm) {
+        // rm=100 selects a SIB byte and mod=00/rm=101 selects RIP-relative
+        // addressing; in both the next byte is not a displacement.  clang
+        // emits neither, so refuse rather than misread one.
+        (0b00, 0b100 | 0b101) | (0b01, 0b100) => None,
+        // mod=00: no displacement encoded, so the reason is 0.
+        (0b00, _) => Some(UdTrap::Sanitizer {
+            reason: 0,
+            len: prefix_len.saturating_add(3),
+        }),
+        // mod=01: reason in the disp8.
+        (0b01, _) => Some(UdTrap::Sanitizer {
+            reason: *body.get(3)?,
+            len: prefix_len.saturating_add(4),
+        }),
+        // mod=10 (disp32) and mod=11 (register operand) are not shapes clang
+        // emits for a trap.
+        _ => None,
+    }
+}
+
+/// Name the sanitizer check behind a `-fsanitize-trap` reason ordinal.
+///
+/// # Provenance
+///
+/// Every name below was **measured**, not read out of clang's header: each
+/// was produced by compiling a one-line C (or C++) function with exactly one
+/// `-fsanitize=<check> -fsanitize-trap=<check>` and byte-scanning `.text` for
+/// the resulting `ud1`.  Twenty of the twenty-five ordinals clang defines are
+/// covered that way; the five that are not (4, 7, 9, 14, 15 — Objective-C
+/// casts, nullability attributes and implicit-conversion, none of which we
+/// compile) deliberately return `None` and print as a bare number rather than
+/// carry a name nobody verified.
+///
+/// The table is versioned by nothing: clang's ordinals are assigned by
+/// declaration order in `SanitizerHandler`, so inserting a check renumbers
+/// everything after it.  If a future toolchain bump makes these names look
+/// wrong in a log, re-run the measurement rather than trusting this comment.
+pub(crate) fn sanitizer_trap_name(reason: u8) -> Option<&'static str> {
+    Some(match reason {
+        0 => "add-overflow",
+        1 => "builtin-unreachable",
+        2 => "CFI check failed (indirect call to a non-matching target)",
+        3 => "divrem-overflow",
+        5 => "float-cast-overflow",
+        6 => "function-type-mismatch",
+        8 => "invalid-builtin",
+        10 => "load-invalid-value",
+        11 => "missing-return",
+        12 => "mul-overflow",
+        13 => "negate-overflow",
+        16 => "nonnull-arg",
+        17 => "nonnull-return",
+        18 => "out-of-bounds",
+        19 => "pointer-overflow",
+        20 => "shift-out-of-bounds",
+        21 => "sub-overflow",
+        22 => "type-mismatch (null / misaligned / wrong-size access)",
+        23 => "alignment-assumption",
+        24 => "vla-bound-not-positive",
+        _ => return None,
+    })
+}
+
+/// Boot self-test for [`decode_ud_trap`], over byte sequences captured from
+/// real clang output.
+///
+/// It is a boot self-test rather than a `#[cfg(test)]` unit test for the same
+/// reason as [`df_on_entry_self_test`]: the kernel binary cannot be built for
+/// the host harness (duplicate `panic_impl` lang item), so a `#[cfg(test)]`
+/// module here would never be compiled, let alone run — the exact
+/// "check that cannot fire" this decoder was written to stop us repeating.
+///
+/// The three sanitizer encodings below were emitted by
+/// `zig cc --target=x86_64-linux-none -O2 -fsanitize=X -fsanitize-trap=X`
+/// (clang/LLVM 21) for `signed-integer-overflow`, `unreachable`, and
+/// `cfi-icall` respectively.  They are copied verbatim, so if a toolchain
+/// bump changes the encoding this test fails at boot instead of the kernel
+/// quietly mis-naming faults forever.
+pub fn ud_trap_decode_self_test() {
+    serial_println!("[idt] Running #UD trap-decode self-test...");
+
+    // `ud2` — what rustc and `__builtin_trap()` emit.
+    assert_eq!(
+        decode_ud_trap(&[0x0F, 0x0B, 0x90, 0x90]),
+        Some(UdTrap::Ud2),
+        "idt: failed to decode `ud2`"
+    );
+
+    // Measured: `-fsanitize=signed-integer-overflow` on an add.  mod=00, so
+    // there is no displacement byte and the reason is an implicit 0.
+    assert_eq!(
+        decode_ud_trap(&[0x67, 0x0F, 0xB9, 0x00]),
+        Some(UdTrap::Sanitizer { reason: 0, len: 4 }),
+        "idt: failed to decode the mod=00 (implicit reason 0) `ud1` form"
+    );
+
+    // Measured: `-fsanitize=unreachable`.  mod=01, reason in the disp8.
+    assert_eq!(
+        decode_ud_trap(&[0x67, 0x0F, 0xB9, 0x40, 0x01, 0x66]),
+        Some(UdTrap::Sanitizer { reason: 1, len: 5 }),
+        "idt: failed to decode the mod=01 (disp8 reason) `ud1` form"
+    );
+
+    // Measured: `-fsanitize=cfi-icall`.  This is the one that matters — it is
+    // what a CFI violation in a ring-3 C program looks like.
+    assert_eq!(
+        decode_ud_trap(&[0x67, 0x0F, 0xB9, 0x40, 0x02, 0xCC]),
+        Some(UdTrap::Sanitizer { reason: 2, len: 5 }),
+        "idt: failed to decode the CFI (`cfi_check_fail`) trap"
+    );
+    assert_eq!(
+        sanitizer_trap_name(2),
+        Some("CFI check failed (indirect call to a non-matching target)"),
+        "idt: CFI trap reason 2 lost its name"
+    );
+
+    // The prefix is not architecturally required, so a `ud1` without it must
+    // still decode.
+    assert_eq!(
+        decode_ud_trap(&[0x0F, 0xB9, 0x40, 0x14]),
+        Some(UdTrap::Sanitizer { reason: 20, len: 4 }),
+        "idt: failed to decode an unprefixed `ud1`"
+    );
+
+    // Negative cases.  A decoder that says "sanitizer trap" for arbitrary
+    // bytes is worse than no decoder: it would attach a confident, wrong
+    // cause to a genuine bad-opcode bug.
+    assert_eq!(decode_ud_trap(&[]), None, "idt: decoded an empty slice");
+    assert_eq!(
+        decode_ud_trap(&[0x0F]),
+        None,
+        "idt: decoded a truncated opcode"
+    );
+    assert_eq!(
+        decode_ud_trap(&[0x67, 0x0F, 0xB9]),
+        None,
+        "idt: decoded a `ud1` with no ModRM byte"
+    );
+    assert_eq!(
+        decode_ud_trap(&[0x67, 0x0F, 0xB9, 0x40]),
+        None,
+        "idt: read a disp8 reason that was not present"
+    );
+    assert_eq!(
+        decode_ud_trap(&[0x0F, 0x1F, 0x40, 0x00]),
+        None,
+        "idt: mistook a multi-byte nop for a trap"
+    );
+    // mod=00 rm=101 is RIP-relative and mod=01 rm=100 selects a SIB byte; in
+    // neither is the following byte a reason.
+    assert_eq!(
+        decode_ud_trap(&[0x67, 0x0F, 0xB9, 0x05, 0x11, 0x22, 0x33, 0x44]),
+        None,
+        "idt: read a RIP-relative displacement as a trap reason"
+    );
+    assert_eq!(
+        decode_ud_trap(&[0x67, 0x0F, 0xB9, 0x44, 0x24, 0x08]),
+        None,
+        "idt: read a SIB byte as a trap reason"
+    );
+    // mod=11 is a register operand — not a shape clang emits.
+    assert_eq!(
+        decode_ud_trap(&[0x67, 0x0F, 0xB9, 0xC0]),
+        None,
+        "idt: decoded a register-form `ud1` as a sanitizer trap"
+    );
+
+    // Unmeasured ordinals must print as numbers, not as guesses.
+    assert_eq!(
+        sanitizer_trap_name(7),
+        None,
+        "idt: named an ordinal that was never measured"
+    );
+    assert_eq!(sanitizer_trap_name(200), None, "idt: named a bogus ordinal");
+
+    serial_println!("[idt]   ud2 / ud1 sanitizer trap decode: OK");
+}
+
+/// Print a one-line diagnosis for a trap already decoded by
+/// [`decode_ud_trap`].
+fn report_ud_trap(trap: UdTrap) {
+    match trap {
+        UdTrap::Ud2 => {
+            serial_println!(
+                "  Likely cause: UD2 instruction (intentional trap / unreachable code)"
+            );
+        }
+        UdTrap::Sanitizer { reason, len } => match sanitizer_trap_name(reason) {
+            Some(name) => serial_println!(
+                "  Likely cause: UD1 sanitizer trap, reason {} = {} ({}-byte encoding)",
+                reason, name, len
+            ),
+            None => serial_println!(
+                "  Likely cause: UD1 sanitizer trap, reason {} (unrecognised; \
+                 re-measure the clang SanitizerHandler ordinals) ({}-byte encoding)",
+                reason, len
+            ),
+        },
+    }
+}
+
+/// Read up to 8 bytes of instruction stream from the faulting user address.
+///
+/// Copies one byte at a time and stops at the first unreadable one, because
+/// the faulting instruction may sit at the end of the last mapped page — a
+/// single 8-byte validated copy would then fail wholesale and we would learn
+/// nothing about an instruction we can perfectly well read most of.
+///
+/// Returns the number of bytes successfully read.
+///
+/// # Why this cannot deadlock in fault context
+///
+/// `copy_from_user` walks the current page table and consults the thread
+/// table, both of which take locks — normally forbidden in an ISR, since a
+/// fault taken while the kernel already holds one would re-enter it.  The
+/// single caller reaches here only under `is_userspace_exception`, i.e. the
+/// faulting CS had RPL 3, so the interrupted context was ring-3 code, which
+/// holds no kernel lock on this CPU.  Do not call this from the ring-0 path.
+fn read_user_insn_bytes(rip: u64, out: &mut [u8; 8]) -> usize {
+    let mut got = 0usize;
+    for (i, slot) in out.iter_mut().enumerate() {
+        let Some(addr) = rip.checked_add(i as u64) else {
+            break;
+        };
+        // SAFETY: `slot` is a live, writable single byte in this stack frame.
+        // `copy_from_user` validates `addr` against the current address space
+        // before touching it, so an unmapped or non-user address returns an
+        // error instead of faulting inside the fault handler.
+        if unsafe { crate::mm::user::copy_from_user(addr, slot, 1) }.is_err() {
+            break;
+        }
+        got = got.saturating_add(1);
+    }
+    got
+}
+
 /// Handle #UD (Invalid Opcode, vector 6).
 ///
 /// Ring 3: SEH dispatch.  Ring 0: halt.
@@ -2049,6 +2349,23 @@ extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
     log_exception(6, frame.rip, 0);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
+        // Decode before dispatching.  A ring-3 #UD that a handler catches
+        // still leaves no trace of *why* it trapped, and a CFI violation —
+        // the whole point of compiling userspace with `-fsanitize=cfi-icall`
+        // — is precisely a ring-3 #UD.  Reporting it only for un-handled
+        // faults would hide exactly the case the check exists to catch.
+        // Nothing is printed for an ordinary bad opcode, so this cannot
+        // become log spam from a program probing CPU features.
+        let mut bytes = [0u8; 8];
+        let got = read_user_insn_bytes(frame.rip, &mut bytes);
+        if let Some(trap) = decode_ud_trap(bytes.get(..got).unwrap_or(&[])) {
+            serial_println!(
+                "EXCEPTION: Invalid Opcode (#UD) at {:#x} in userspace \
+                 (deliberate compiler trap)",
+                frame.rip
+            );
+            report_ud_trap(trap);
+        }
         dispatch_or_kill_userspace("Invalid Opcode (#UD)", frame, ExceptionCode::InvalidOpcode, 0);
         return;
     }
@@ -2073,10 +2390,12 @@ extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
             bytes[8], bytes[9], bytes[10], bytes[11],
             bytes[12], bytes[13], bytes[14], bytes[15]
         );
-        // Common causes: 0x0F 0x0B = `ud2` (intentional trap, e.g., unreachable),
-        //                 0x0F 0x1F = nop variants that older CPUs reject.
-        if bytes[0] == 0x0F && bytes[1] == 0x0B {
-            serial_println!("  Likely cause: UD2 instruction (intentional trap / unreachable code)");
+        // Deliberate compiler traps carry their own diagnosis in the encoding:
+        // `0F 0B` = `ud2`, `[67] 0F B9 /r` = clang's `-fsanitize-trap` `ud1`
+        // with the failing check's ordinal in the displacement.  Anything else
+        // (e.g. `0F 1F` nop variants an older CPU rejects) stays a raw dump.
+        if let Some(trap) = decode_ud_trap(&bytes) {
+            report_ud_trap(trap);
         }
     }
 

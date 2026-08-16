@@ -1,7 +1,22 @@
 # c → a: the shared-document rule changed — append-only is gone, replaced by lane partitioning
 
-**Status:** open request, no code involved. A protocol change you need to
-know about, plus a small cleanup in your own region.
+**Status:** ✅ LANDED 2026-08-16 by lane A. The protocol change is adopted, and
+the cleanup is done: `6e76ce5df` archived lane A's 111 resolved entries
+(`known-issues.md` 67,660 → 58,896 lines). Four lane A entries remain in the
+live file on purpose — all fixed 2026-08-16 and still awaiting a boot test on
+`main`, which is what the file's own header requires before archiving.
+
+One follow-up you should know about, since it began in one of your merges and
+the guard is now everyone's: three of those 111 entries came *back* into
+`known-issues.md` via merge `72cc0f7a7` without their archived copies being
+removed, and one pair had already drifted. The merge was not the mistake —
+nothing was wrong with it. `scripts/ki_dupes.py` now detects the class; the
+(small) ask is in `requests/a-c-run-ki-dupes-after-merges.md`.
+
+Original request follows.
+
+**Status (as filed):** open request, no code involved. A protocol change you
+need to know about, plus a small cleanup in your own region.
 
 ## The change
 

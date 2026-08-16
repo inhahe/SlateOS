@@ -78,6 +78,14 @@ for i in $(seq 1 "$MAX_ITERS"); do
     echo "########## soak iter $n/$MAX_ITERS ($(date +%H:%M:%S)) ##########"
     rm -f "$REGS"
     stdout_log="$OUTDIR/soak-$RUNSTAMP-iter$n.stdout.txt"
+    # BOOT_LABEL tags this iteration's row in bench/boot-history.jsonl.  The
+    # archives written just below live under gitignored build/ and do not
+    # survive a clean; the history row does, so a soak's outcomes stay
+    # distinguishable from routine boots afterwards.  boot-test.sh does the
+    # recording itself, from its EXIT trap -- nothing further is needed here,
+    # and in particular the soak must NOT record on boot-test's behalf: that
+    # would double-count every iteration.
+    BOOT_LABEL="soak-$RUNSTAMP-iter$n" \
     bash scripts/boot-test.sh --hard-lockup-watchdog --no-stage \
         --timeout="$TIMEOUT" --stall-secs="$STALL_SECS" \
         > "$stdout_log" 2>&1

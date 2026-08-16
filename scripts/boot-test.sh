@@ -1053,6 +1053,75 @@ print_bench_results() {
     fi
 }
 
+# Record this run's outcome to bench/boot-history.jsonl.
+#
+# Called from ONE place -- the EXIT trap -- and deliberately not from the ~12
+# sites that call `exit`.  A recorder wired into each exit site is wrong the
+# first time someone adds a thirteenth, and wrong in the direction that hurts:
+# the site nobody remembered to wire up is a *failure* site, so the omission
+# reads downstream as a clean streak.  boot-history.py therefore derives the
+# verdict from the pair (exit code, serial log) rather than being told it.
+#
+# Why record at all: four open kernel issues (W1, B-FORKEXEC-BOOT-HANG,
+# B-PTHREAD-TEARDOWN-PF, W-KERNEL-COW-WRITE) have closure conditions that are
+# counts of consecutive clean boots, and nothing counted them -- W1's status
+# line has read "clean streak 7" since 2026-06-14 while many dozens of boots
+# have passed.  This is the boot-outcome twin of bench-history.py, which stores
+# numbers this file does not see (it only gains a record on a --bench run that
+# reached its marker, so it is structurally blind to hangs).
+#
+# It must never change our exit status: a broken recorder turning a green boot
+# red is strictly worse than no recorder.  Hence `|| true` and no use of $?
+# after the call.
+record_boot_outcome() {
+    local rc="$1"
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        return 0
+    fi
+
+    local args=(--serial "$SERIAL_FILE" --exit-code "$rc"
+                --marker "$WAIT_MARKER" --profile "${BENCH_PROFILE:-debug}")
+    if [ -n "${BOOT_LABEL:-}" ]; then
+        args+=(--label "$BOOT_LABEL")
+    fi
+    if [ -n "${QEMU_START_EPOCH:-}" ]; then
+        local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))
+        if [ "$wall" -ge 0 ]; then
+            args+=(--wall-seconds "$wall")
+        fi
+    fi
+
+    "$py" "$SCRIPT_DIR/boot-history.py" "${args[@]}" || true
+}
+
+# Everything that must happen on the way out, once, however we leave.
+#
+# `reason` distinguishes a normal exit from a signal.  Ctrl-C is not a boot
+# outcome -- recording it would enter an operator's interruption into a series
+# that exists to measure the kernel, and would reset every hang streak every
+# time someone stopped a run early.  The once-guard matters because bash runs
+# the INT/TERM handler *and then* the EXIT handler, so without it every
+# interrupted run would clean up twice.
+_BOOT_EXIT_DONE=0
+on_boot_exit() {
+    local rc="$1"
+    local reason="$2"
+    if [ "$_BOOT_EXIT_DONE" -eq 1 ]; then
+        return 0
+    fi
+    _BOOT_EXIT_DONE=1
+    kill_qemu "$QEMU_PID"
+    if [ "$reason" = "exit" ]; then
+        record_boot_outcome "$rc"
+    fi
+    release_boot_lock
+}
+
 # The single place that decides a boot passed, and the only place that prints
 # the PASSED banner.
 #
@@ -1500,7 +1569,15 @@ QEMU_PID=$!
 # release-only trap installed at lock-acquisition time, and bash keeps just one
 # handler per signal.  Reaping qemu first is deliberate: the next lane must not
 # be handed the lock while our emulator is still burning CPU.
-trap 'kill_qemu "$QEMU_PID"; release_boot_lock' EXIT INT TERM
+#
+# `$?` is captured as the handler's FIRST argument, before anything else runs:
+# on_boot_exit reaps qemu and invokes the outcome recorder, either of which
+# would otherwise overwrite the status we are trying to record.  EXIT and
+# INT/TERM get separate handlers only so the recorder can tell an interrupted
+# run (not a boot outcome) from a completed one; on_boot_exit's own once-guard
+# keeps the cleanup single even though bash runs both on a signal.
+trap 'on_boot_exit "$?" signal' INT TERM
+trap 'on_boot_exit "$?" exit' EXIT
 
 # Wait for BOOT_OK or timeout
 ELAPSED=0

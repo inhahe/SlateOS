@@ -12621,6 +12621,24 @@ Left at WATCHLIST rather than closed unilaterally, since retargeting a closure
 condition an earlier session set deliberately is the operator's call if they
 want it; the analysis above is the argument for doing so.
 
+**The streak is now counted by machine, 2026-08-16.** `scripts/boot-history.py`
+records every `boot-test.sh` run to `bench/boot-history.jsonl`; ask it rather
+than trusting the **7** above, which is stale by construction:
+
+```
+python scripts/boot-history.py --streaks
+```
+
+Its `W1` fingerprint deliberately encodes the *retargeted* reading of this
+entry, not the original one — no marker, serial cut **mid-line**, and **no
+exception or panic anywhere**. Per the analysis above a console-lock re-entry
+should now print rather than go silent along both remaining paths, so a match
+is not another tick toward ~90: it **falsifies** the cured-incidentally
+argument, and is the one observation this entry says is worth more than the 83
+remaining blind boots. The recorder prints that instruction next to the match.
+The counter starts at 0 today and says so — it cannot retroactively count the
+boots since 2026-06-14. See the TOOLING entry at the end of this file.
+
 ### B-FONT-CALIBRI-SHAPES-A-FRACTION-SLASH-DIFFERENTLY-FROM-HARFBUZZ. Three faces disagree by one glyph on `1/2` — 2026-08-14 — ✅ FIXED 2026-08-14 (`gui/font/src/otl.rs`, `gui/font/src/gsub.rs`)
 
 **Where:** `gui/font/src/gsub.rs`, the substitution pass; the disagreement is
@@ -23375,3 +23393,70 @@ green boot test asserting that is worse than no boot test.
 Lane A's own artifacts are already relinked against the fresh `libc.a`
 (`bash-slateos.elf`, `pkgconf-slateos.elf`), so once the nine ELFs land the
 image builds with no further action from anyone.
+
+## TOOLING — boot outcomes are now counted, so the "clean streak" closure conditions above are queryable (2026-08-16, lane A)
+
+**Status: LANDED 2026-08-16** — `scripts/boot-history.py`,
+`scripts/test-boot-history.py`, wired into `scripts/boot-test.sh`'s EXIT trap.
+
+Several entries in this file close on a **count** — "a fresh combined
+dedicated-soak + routine-boot clean streak past ~90 with no recurrence" (W1),
+and similar bars on the other intermittent hangs. Nothing counted them. W1's
+own status line has read **clean streak 7** since 2026-06-14 while many dozens
+of boots have passed, and the entry says so itself: *"the recorded streak of 7
+is stale bookkeeping, not a real count."*
+
+That is not carelessness. Keeping the number right by hand means editing this
+file after every boot, which nobody will do and nobody did.
+
+**What now happens.** Every run of `scripts/boot-test.sh` appends one row to
+`bench/boot-history.jsonl` — verdict, commit, branch, host, wall time, label,
+and for a **failure**, the last 40 serial lines. The last part matters
+independently of the counting: `build/serial-test.txt` is gitignored scratch
+that the next run overwrites, so until now the evidence for a hang survived
+only if somebody pasted it in here before the next boot. That loss already cost
+one investigation (`B-FORKEXEC-BOOT-HANG`; `boot-test.sh`'s own comment says
+so). Failures now carry their freeze context into a committed file.
+
+**How to read it:**
+
+```
+python scripts/boot-history.py --streaks     # per-issue standing
+python scripts/boot-history.py --list        # recent runs, one line each
+```
+
+**Fingerprints currently recognised**, each validated by a serial sample
+reconstructed in `scripts/test-boot-history.py` from the evidence quoted in
+this file:
+
+| id | matched on |
+|---|---|
+| `W1` | no marker, log cut **mid-line**, no exception and no panic anywhere |
+| `B-KASAN-…-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` | the cut lands inside the `EXCEPTION:` line itself |
+| `B-PTHREAD-TEARDOWN-PF` | `#PF` at a small fixed address with `cloned-thread` in the report |
+| `B-FORKEXEC-BOOT-HANG` | quiet stop **between** lines right after the last thread is reaped |
+| `W-KERNEL-COW-WRITE` | `error=0x3` write fault against a user-half address |
+
+**Two properties that are the point, not decoration.**
+
+1. **The verdict is derived from `(exit code, serial log)` at one call site**,
+   not passed in at each of `boot-test.sh`'s ~12 `exit` sites. A recorder wired
+   per-site is wrong the first time someone adds a thirteenth — and wrong in the
+   direction that matters, because the site nobody wired up is a *failure* site,
+   so the omission reads downstream as a clean streak.
+2. **A fingerprint that has never been validated against a real occurrence
+   prints a warning in place of its streak, not a number.** A matcher that
+   cannot fire produces a *perfect* clean streak, and a perfect clean streak is
+   exactly what closes an entry in this file. Same rule as
+   `scripts/stamp-ancestry.py` (design-decisions.md §208): *could not verify*
+   must never render as *fine*.
+
+**What this does not do.** It does not retroactively count the boots that
+happened before it existed, and it says so: an entry whose known occurrences
+predate the file reports "the count starts at the recorder, not at the bug."
+So the streaks above start at 0 today and are honest rather than flattering.
+Ctrl-C and build failures are deliberately **not** recorded — an interruption
+is not a boot outcome, and compile errors are common enough that recording them
+would reset every streak faster than it could grow.
+
+Rationale and the alternatives considered: design-decisions.md §209.

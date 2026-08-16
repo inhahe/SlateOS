@@ -96,7 +96,7 @@ mod tests {
         for &v in n.iter() {
             // Some MPLS ones live at 0x02xx — still in the network class
             // (high nibble 0).
-            assert!((v >> 12) == 0);
+            assert_eq!(v >> 12, 0);
             // Low byte is odd for protocol assignments per RFC 1700.
             assert_eq!(v & 1, 1);
         }

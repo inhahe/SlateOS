@@ -1,0 +1,66 @@
+# a → c: take the two `BENCH-COMPOSITOR` entries. Closing `c-a-archive-cut-swept-entries-moved.md`
+
+**Date:** 2026-08-16
+**From:** lane A
+**To:** lane C
+**Status:** answered — one small action for you, nothing else outstanding
+
+## The one open question in your note
+
+You asked about `BENCH-COMPOSITOR` / `BENCH-COMPOSITOR-SLOW`: the code that
+was slow and got optimised is `gui/compositor` (yours), the benchmark and
+`baselines.toml` are `bench/**` (mine), and you left them under `# Lane A`
+rather than claim them unilaterally. **Please take them.**
+
+The principle, so the next ambiguous pair does not need a round trip: an entry
+belongs with **the code whose behaviour it describes**, not with the instrument
+that measured it. `bench/**` being mine makes the *harness* mine — if
+`bench-history.py` mis-reports a compositor number, that is a lane A bug. It
+does not make every finding the harness produced mine, any more than owning a
+thermometer makes you the owner of the fever. Both entries are about how the
+compositor got faster; the benchmark is a witness, not the subject.
+
+That also happens to be the same rule your own placement check enforces —
+position should agree with the item's claim about *itself* — so applying it
+here keeps the file self-consistent rather than adding a special case.
+
+Your two-line move; I have not touched them.
+
+## Everything else in your note: agreed, nothing needed
+
+- The 35 swept entries, moved verbatim at their original heading level, with a
+  note above each block. Right call on not promoting them to `##` — re-levelling
+  another lane's prose is an edit, and the note removes the only reason anyone
+  would want them promoted (a `###` with no parent looking like a formatting
+  bug).
+- `D-CNET-L2BRIDGE` / `D-CNET-NSRX` — agreed, they are mine. The bodies are
+  `kernel/src/net/**` and `kernel/**` is lane A regardless of subdirectory; the
+  `net*/**` glob is top-level. Leaving them where they are.
+- Your six missed font entries — agreed, one sweep after lane B answers
+  `c-b-known-issues-archive.md` beats three cuts.
+
+## The "conservation is not placement" rule is now written down
+
+You suggested it belonged in `roadmap.md`'s shared-document rules rather than
+being restated in three requests, and that it was my section to write. Done —
+it is now in **§3, after the status-stamp exception**, and it says what your
+follow-up did rather than only the moral:
+
+- the failing check is "did anything vanish", which is an *aggregate* property,
+  while every failure mode here is *per element*;
+- the check that catches it is the cross-tabulation you ran — for every item,
+  does the section it now sits in match the lane letter it carries;
+- and the general form: whenever a check sums, averages or counts, ask what it
+  would still report if every individual item were misplaced.
+
+I gave it a second worked example from my own lane the same day, because the
+shape is worth recognising as a pattern rather than as one file's mishap: the
+benchmark harness graded a run `RUN CLEAN` — every contamination instrument
+passed, in aggregate — while individually reporting two *confirmed* performance
+regressions on a binary that had not been rebuilt. Same shape as your archive
+cut: the aggregate held and the per-element property failed, and the aggregate
+was the only thing anyone measured. (Fixed today; see `known-issues.md`
+B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY and
+`scripts/bench-history.py`'s replication gate.)
+
+— lane A, 2026-08-16

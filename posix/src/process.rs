@@ -3163,13 +3163,24 @@ unsafe fn process_vm_validate(
 /// transfer pages explicitly rather than peeking at another task's
 /// address space).
 ///
-/// # Capability gate (Phase 200)
+/// # Authority (§314; was a Phase-200 `CAP_SYS_PTRACE` gate)
 ///
-/// Linux gates cross-process memory access on `CAP_SYS_PTRACE` via
-/// `mm_access()` → `__ptrace_may_access()`, checked **after** all
-/// argument validation.  A caller passing bad flags or a bad pid
-/// sees the argument error (EINVAL / ESRCH), not EPERM; only a
-/// caller with fully valid arguments and no capability sees EPERM.
+/// Linux gates cross-process memory access on `mm_access()` →
+/// `__ptrace_may_access()`, which permits the access when the caller's
+/// credentials match the target's **and** the target is dumpable, **or** when
+/// the caller holds `CAP_SYS_PTRACE`.  libc can evaluate neither conjunct: it
+/// cannot read another task's credentials, and we do not model dumpability at
+/// all.
+///
+/// Since this function transfers nothing either way, an `EPERM` here would
+/// report a privilege failure for an operation that does not happen under any
+/// privilege — telling a port to go find a capability when what it actually
+/// needs is for the call to be written.  `ENOSYS` is the answer that is true,
+/// and it is now returned regardless of the capability words.
+///
+/// Argument validation is unaffected and still runs first: a caller passing
+/// bad flags or a bad pid sees `EINVAL`/`ESRCH`, because those are questions
+/// about its own arguments rather than about authority.
 ///
 /// # Safety
 ///
@@ -3192,12 +3203,8 @@ pub extern "C" fn process_vm_readv(
         errno::set_errno(e);
         -1
     } else {
-        // Phase 200: CAP_SYS_PTRACE gate — same check Linux
-        // performs inside mm_access() after finding the target.
-        if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_PTRACE) {
-            errno::set_errno(errno::EPERM);
-            return -1;
-        }
+        // No CAP_SYS_PTRACE gate (§314): the transfer is unimplemented, so
+        // the honest report is that, not a privilege failure.
         errno::set_errno(errno::ENOSYS);
         -1
     }
@@ -3209,10 +3216,13 @@ pub extern "C" fn process_vm_readv(
 /// opposite direction — same argument-domain checks apply via
 /// [`process_vm_validate`].
 ///
-/// # Capability gate (Phase 200)
+/// # Authority (§314; was a Phase-200 `CAP_SYS_PTRACE` gate)
 ///
-/// Same `CAP_SYS_PTRACE` gate as [`process_vm_readv`] — placed
-/// after validation so argument errors take priority.
+/// No libc-side capability test, for exactly the reasons given under
+/// [`process_vm_readv`]: libc cannot evaluate either conjunct of Linux's
+/// `__ptrace_may_access()`, and the transfer is unimplemented anyway, so
+/// `ENOSYS` is the true answer where `EPERM` would be an invented one.
+/// Argument validation still runs first and is unaffected.
 ///
 /// # Safety
 ///
@@ -3235,11 +3245,7 @@ pub extern "C" fn process_vm_writev(
         errno::set_errno(e);
         -1
     } else {
-        // Phase 200: CAP_SYS_PTRACE gate — see process_vm_readv.
-        if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_PTRACE) {
-            errno::set_errno(errno::EPERM);
-            return -1;
-        }
+        // No CAP_SYS_PTRACE gate (§314) — see process_vm_readv.
         errno::set_errno(errno::ENOSYS);
         -1
     }
@@ -3298,13 +3304,22 @@ pub const KCMP_TYPES: i32 = 8;
 ///    `struct kcmp_epoll_slot`; a NULL pointer fails the
 ///    copy_from_user in the kernel.  `idx2 == 0`              → `EFAULT`
 ///
-/// # Capability gate (Phase 202)
+/// # Authority (§314; was a Phase-202 `CAP_SYS_PTRACE` gate)
 ///
-/// Linux gates kcmp on `CAP_SYS_PTRACE` via two
-/// `ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS)` calls —
-/// one for each target pid — after finding the tasks.  The gate
-/// runs after all argument-domain checks (ESRCH, EINVAL, EBADF,
-/// EFAULT) so callers with bad arguments see the argument error.
+/// Linux gates kcmp on two `ptrace_may_access(task,
+/// PTRACE_MODE_READ_REALCREDS)` calls — one per target pid — and
+/// `__ptrace_may_access()` permits the access when the caller's credentials
+/// match the target's **and** the target is dumpable, **or** when the caller
+/// holds `CAP_SYS_PTRACE`.  The capability is the alternative, not the rule,
+/// and libc can evaluate neither conjunct of the other half: it cannot read
+/// another task's credentials, and dumpability is not modelled here at all.
+/// Two of them, in this case — kcmp's predicate is a conjunction over *both*
+/// targets.
+///
+/// Since the comparison is unimplemented, an `EPERM` would report a privilege
+/// failure for something no privilege enables.  `ENOSYS` is returned
+/// regardless of the capability words.  Argument-domain checks (ESRCH,
+/// EINVAL, EBADF, EFAULT) still run first and are unaffected.
 ///
 /// After validation we return `ENOSYS`: the microkernel doesn't
 /// expose kernel-object identity to userspace through this debugging
@@ -3341,14 +3356,9 @@ pub extern "C" fn kcmp(pid1: i32, pid2: i32, type_: i32, idx1: u64, idx2: u64) -
         return -1;
     }
 
-    // Phase 202: CAP_SYS_PTRACE gate.  Linux's kcmp calls
-    // ptrace_may_access() twice — once for each target pid.  We
-    // check the cap once after all argument validation so callers
-    // with bad arguments see the argument error, not EPERM.
-    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_PTRACE) {
-        errno::set_errno(errno::EPERM);
-        return -1;
-    }
+    // No CAP_SYS_PTRACE gate (§314): ptrace_may_access() is "same creds and
+    // dumpable, OR the capability", and libc can evaluate only the arm that
+    // reads false most often.  See the doc comment above.
 
     // All arguments validated; kernel-object identity comparison not
     // exposed.
@@ -9773,12 +9783,24 @@ mod tests {
     }
 
     // =================================================================
-    // Phase 200 — CAP_SYS_PTRACE gate on process_vm_readv / writev
+    // §314 — process_vm_readv / writev have NO libc CAP_SYS_PTRACE gate
     //
-    // Linux gates cross-process memory access on CAP_SYS_PTRACE via
-    // mm_access() → __ptrace_may_access().  The gate runs after all
-    // argument-domain checks, so bad flags/pid/iovecs still see their
-    // original EINVAL/ESRCH/EFAULT errors regardless of cap state.
+    // Linux gates cross-process memory access on mm_access() →
+    // __ptrace_may_access(), which is "the caller's credentials match the
+    // target's AND the target is dumpable, OR the caller holds
+    // CAP_SYS_PTRACE".  libc can evaluate neither conjunct of the first arm,
+    // and after §312 the capability word is a conservative projection that
+    // reads false for authority the system would grant — so a
+    // capability-only test is a strictly narrower rule, not Linux's.  Since
+    // the transfer is unimplemented anyway, ENOSYS is the true answer.
+    //
+    // NOTE — these tests have been through two states.  Phase 200 asserted
+    // EPERM when the cap was dropped; §314 asserts the answer does NOT
+    // depend on the cap.  If a future change makes you want to "restore"
+    // the EPERM assertions, read §314 in design-decisions.md first: the
+    // capability state deliberately does not reach the return value here.
+    // These tests keep the cap-dropping machinery precisely so that a
+    // reinstated gate fails loudly instead of silently narrowing the API.
     // =================================================================
 
     mod phase200_pvm_cap {
@@ -9840,7 +9862,7 @@ mod tests {
         }
     }
 
-    // -- per-error class: cap held → ENOSYS (unchanged) -------------------
+    // -- cap held → ENOSYS ------------------------------------------------
 
     /// With CAP_SYS_PTRACE (default), valid process_vm_readv still
     /// reaches ENOSYS.
@@ -9855,35 +9877,69 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    // -- per-error class: cap dropped → EPERM -----------------------------
+    // -- cap dropped → still ENOSYS, never EPERM --------------------------
 
-    /// Without CAP_SYS_PTRACE, valid process_vm_readv → EPERM.
+    /// Without CAP_SYS_PTRACE, valid process_vm_readv is still ENOSYS —
+    /// the projected capability is not evidence of a denial (§314).
     #[test]
-    fn test_phase200_process_vm_readv_no_cap_eperm() {
+    fn test_process_vm_readv_no_cap_is_enosys_not_eperm() {
         let _g = phase200_pvm_cap::CapGuard::snapshot();
         phase200_pvm_cap::drop_cap_sys_ptrace();
         crate::errno::set_errno(0);
         let ret = process_vm_readv(1, core::ptr::null(), 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ENOSYS,
+            "a missing CAP_SYS_PTRACE must not turn an unimplemented \
+             transfer into a reported privilege failure (§314)"
+        );
     }
 
-    /// Without CAP_SYS_PTRACE, valid process_vm_writev → EPERM.
+    /// Same for process_vm_writev.
     #[test]
-    fn test_phase200_process_vm_writev_no_cap_eperm() {
+    fn test_process_vm_writev_no_cap_is_enosys_not_eperm() {
         let _g = phase200_pvm_cap::CapGuard::snapshot();
         phase200_pvm_cap::drop_cap_sys_ptrace();
         crate::errno::set_errno(0);
         let ret = process_vm_writev(1, core::ptr::null(), 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ENOSYS,
+            "a missing CAP_SYS_PTRACE must not turn an unimplemented \
+             transfer into a reported privilege failure (§314)"
+        );
     }
 
-    // -- ordering: argument errors beat EPERM -----------------------------
-
-    /// Bad flags + no cap → EINVAL (argument check runs before cap).
+    /// Dropping and restoring the capability around one call site must
+    /// produce the same answer both times: the cap does not reach the
+    /// return value at all.
     #[test]
-    fn test_phase200_process_vm_readv_bad_flags_einval_before_eperm() {
+    fn test_process_vm_readv_cap_state_does_not_change_the_answer() {
+        crate::errno::set_errno(0);
+        let with = process_vm_readv(1, core::ptr::null(), 0, core::ptr::null(), 0, 0);
+        let with_errno = crate::errno::get_errno();
+        let (without, without_errno) = {
+            let _g = phase200_pvm_cap::CapGuard::snapshot();
+            phase200_pvm_cap::drop_cap_sys_ptrace();
+            crate::errno::set_errno(0);
+            let r = process_vm_readv(1, core::ptr::null(), 0, core::ptr::null(), 0, 0);
+            (r, crate::errno::get_errno())
+        };
+        assert_eq!(with, without);
+        assert_eq!(
+            with_errno, without_errno,
+            "process_vm_readv must answer identically with and without \
+             CAP_SYS_PTRACE (§314)"
+        );
+    }
+
+    // -- ordering: argument errors still come first -----------------------
+
+    /// Bad flags + no cap → EINVAL (argument check runs first).
+    #[test]
+    fn test_phase200_process_vm_readv_bad_flags_einval_precedes_everything() {
         let _g = phase200_pvm_cap::CapGuard::snapshot();
         phase200_pvm_cap::drop_cap_sys_ptrace();
         crate::errno::set_errno(0);
@@ -9899,13 +9955,13 @@ mod tests {
         assert_eq!(
             crate::errno::get_errno(),
             crate::errno::EINVAL,
-            "EINVAL for bad flags must precede EPERM"
+            "EINVAL for bad flags must precede the ENOSYS body"
         );
     }
 
-    /// Bad pid + no cap → ESRCH (pid check before cap).
+    /// Bad pid + no cap → ESRCH (pid check runs first).
     #[test]
-    fn test_phase200_process_vm_readv_bad_pid_esrch_before_eperm() {
+    fn test_phase200_process_vm_readv_bad_pid_esrch_precedes_everything() {
         let _g = phase200_pvm_cap::CapGuard::snapshot();
         phase200_pvm_cap::drop_cap_sys_ptrace();
         crate::errno::set_errno(0);
@@ -9921,13 +9977,13 @@ mod tests {
         assert_eq!(
             crate::errno::get_errno(),
             crate::errno::ESRCH,
-            "ESRCH for bad pid must precede EPERM"
+            "ESRCH for bad pid must precede the ENOSYS body"
         );
     }
 
     /// Excessive iovec count + no cap → EINVAL.
     #[test]
-    fn test_phase200_process_vm_readv_big_liovcnt_einval_before_eperm() {
+    fn test_phase200_process_vm_readv_big_liovcnt_einval_precedes_everything() {
         let _g = phase200_pvm_cap::CapGuard::snapshot();
         phase200_pvm_cap::drop_cap_sys_ptrace();
         crate::errno::set_errno(0);
@@ -9949,7 +10005,8 @@ mod tests {
 
     // -- restoration: CapGuard drop re-enables ----------------------------
 
-    /// After restoring CAP_SYS_PTRACE, valid calls reach ENOSYS again.
+    /// The CapGuard really does restore the capability — without this the
+    /// tests above would silently stop exercising the drop path.
     #[test]
     fn test_phase200_process_vm_readv_cap_restore() {
         {
@@ -9958,7 +10015,7 @@ mod tests {
             crate::errno::set_errno(0);
             let ret = process_vm_readv(1, core::ptr::null(), 0, core::ptr::null(), 0, 0);
             assert_eq!(ret, -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         }
         assert!(crate::sys_capability::has_capability(
             crate::sys_capability::CAP_SYS_PTRACE,
@@ -10164,15 +10221,20 @@ mod tests {
     }
 
     // =================================================================
-    // Phase 202 — CAP_SYS_PTRACE gate on kcmp()
+    // §314 — kcmp() has NO libc CAP_SYS_PTRACE gate
     //
-    // Linux gates kcmp on CAP_SYS_PTRACE (two ptrace_may_access calls).
-    // Our gate runs after all argument validation (ESRCH, EINVAL,
-    // EBADF, EFAULT).  Reuses the phase200_pvm_cap helpers which
-    // already handle CAP_SYS_PTRACE.
+    // Linux gates kcmp on two ptrace_may_access() calls, one per target,
+    // and each is "same credentials AND dumpable, OR CAP_SYS_PTRACE".  The
+    // capability is the alternative, not the rule; libc cannot evaluate the
+    // other arm for either target.  The comparison is unimplemented, so
+    // ENOSYS is the true answer and the capability does not reach it.
+    //
+    // NOTE — as with process_vm_readv above, the Phase-202 versions of
+    // these tests asserted EPERM.  Do not "restore" them; see §314.  The
+    // cap-dropping machinery is kept so a reinstated gate fails loudly.
     // =================================================================
 
-    // -- cap held: kcmp reaches ENOSYS (unchanged) ------------------------
+    // -- cap held: kcmp reaches ENOSYS ------------------------------------
 
     /// With CAP_SYS_PTRACE (default), valid kcmp reaches ENOSYS.
     #[test]
@@ -10186,22 +10248,27 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    // -- cap dropped: kcmp → EPERM ----------------------------------------
+    // -- cap dropped: kcmp still ENOSYS, never EPERM ----------------------
 
-    /// Without CAP_SYS_PTRACE, valid kcmp → EPERM.
+    /// Without CAP_SYS_PTRACE, valid kcmp is still ENOSYS (§314).
     #[test]
-    fn test_phase202_kcmp_no_cap_eperm() {
+    fn test_kcmp_no_cap_is_enosys_not_eperm() {
         let _g = phase200_pvm_cap::CapGuard::snapshot();
         phase200_pvm_cap::drop_cap_sys_ptrace();
         crate::errno::set_errno(0);
         let ret = kcmp(1, 2, KCMP_VM, 0, 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ENOSYS,
+            "a missing CAP_SYS_PTRACE must not turn an unimplemented \
+             comparison into a reported privilege failure (§314)"
+        );
     }
 
-    /// Without cap, all valid kcmp types → EPERM.
+    /// Without cap, every valid kcmp type still reports ENOSYS.
     #[test]
-    fn test_phase202_kcmp_all_types_no_cap_eperm() {
+    fn test_kcmp_all_types_no_cap_are_enosys() {
         let _g = phase200_pvm_cap::CapGuard::snapshot();
         phase200_pvm_cap::drop_cap_sys_ptrace();
         for type_ in 0..KCMP_TYPES {
@@ -10212,17 +10279,17 @@ mod tests {
             assert_eq!(ret, -1, "type {type_} must fail");
             assert_eq!(
                 crate::errno::get_errno(),
-                crate::errno::EPERM,
-                "type {type_} must return EPERM without cap"
+                crate::errno::ENOSYS,
+                "type {type_} must report ENOSYS, not EPERM, without cap"
             );
         }
     }
 
-    // -- ordering: argument errors beat EPERM -----------------------------
+    // -- ordering: argument errors still come first -----------------------
 
-    /// Bad pid1 + no cap → ESRCH (pid check before cap).
+    /// Bad pid1 + no cap → ESRCH.
     #[test]
-    fn test_phase202_kcmp_bad_pid_esrch_before_eperm() {
+    fn test_phase202_kcmp_bad_pid_esrch_precedes_everything() {
         let _g = phase200_pvm_cap::CapGuard::snapshot();
         phase200_pvm_cap::drop_cap_sys_ptrace();
         crate::errno::set_errno(0);
@@ -10231,13 +10298,13 @@ mod tests {
         assert_eq!(
             crate::errno::get_errno(),
             crate::errno::ESRCH,
-            "ESRCH for bad pid must precede EPERM"
+            "ESRCH for bad pid must precede the ENOSYS body"
         );
     }
 
-    /// Bad type + no cap → EINVAL (type check before cap).
+    /// Bad type + no cap → EINVAL.
     #[test]
-    fn test_phase202_kcmp_bad_type_einval_before_eperm() {
+    fn test_phase202_kcmp_bad_type_einval_precedes_everything() {
         let _g = phase200_pvm_cap::CapGuard::snapshot();
         phase200_pvm_cap::drop_cap_sys_ptrace();
         crate::errno::set_errno(0);
@@ -10246,13 +10313,13 @@ mod tests {
         assert_eq!(
             crate::errno::get_errno(),
             crate::errno::EINVAL,
-            "EINVAL for bad type must precede EPERM"
+            "EINVAL for bad type must precede the ENOSYS body"
         );
     }
 
     /// KCMP_FILE with overflowing idx + no cap → EBADF.
     #[test]
-    fn test_phase202_kcmp_file_overflow_ebadf_before_eperm() {
+    fn test_phase202_kcmp_file_overflow_ebadf_precedes_everything() {
         let _g = phase200_pvm_cap::CapGuard::snapshot();
         phase200_pvm_cap::drop_cap_sys_ptrace();
         crate::errno::set_errno(0);
@@ -10261,13 +10328,13 @@ mod tests {
         assert_eq!(
             crate::errno::get_errno(),
             crate::errno::EBADF,
-            "EBADF for fd overflow must precede EPERM"
+            "EBADF for fd overflow must precede the ENOSYS body"
         );
     }
 
     /// KCMP_EPOLL_TFD with null idx2 + no cap → EFAULT.
     #[test]
-    fn test_phase202_kcmp_epoll_tfd_efault_before_eperm() {
+    fn test_phase202_kcmp_epoll_tfd_efault_precedes_everything() {
         let _g = phase200_pvm_cap::CapGuard::snapshot();
         phase200_pvm_cap::drop_cap_sys_ptrace();
         crate::errno::set_errno(0);
@@ -10276,13 +10343,13 @@ mod tests {
         assert_eq!(
             crate::errno::get_errno(),
             crate::errno::EFAULT,
-            "EFAULT for null epoll slot must precede EPERM"
+            "EFAULT for null epoll slot must precede the ENOSYS body"
         );
     }
 
     // -- restoration: cap drop/restore cycle ------------------------------
 
-    /// After restoring CAP_SYS_PTRACE, kcmp reaches ENOSYS again.
+    /// A drop/restore cycle around kcmp answers identically both times.
     #[test]
     fn test_phase202_kcmp_cap_restore() {
         {
@@ -10291,7 +10358,7 @@ mod tests {
             crate::errno::set_errno(0);
             let ret = kcmp(1, 2, KCMP_FILE, 0, 0);
             assert_eq!(ret, -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         }
         assert!(crate::sys_capability::has_capability(
             crate::sys_capability::CAP_SYS_PTRACE,

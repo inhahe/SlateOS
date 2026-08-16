@@ -2996,13 +2996,29 @@ pub fn ptrace_request_known(request: i32) -> bool {
 /// 3. All other requests: `pid <= 0` → `ESRCH` (no such process).
 ///    Linux performs this via `find_get_task_by_vpid(pid)` which
 ///    returns `-ESRCH` for non-positive pids.
-/// 4. `!capable(CAP_SYS_PTRACE)` → `EPERM`  (Phase 200).
-///    In Linux this is checked inside `ptrace_may_access()` after
-///    finding the target task and checking thread-group membership.
-///    We place it after the `ESRCH` guard because a non-positive pid
-///    is always invalid regardless of privilege — the kernel never
-///    reaches the capability check for such pids.
-/// 5. All validated → `ENOSYS`.
+/// 4. All validated → `ENOSYS`.
+///
+/// # Authority (§314; was a Phase-200 `CAP_SYS_PTRACE` gate)
+///
+/// There is deliberately no capability step in that list.  Linux's
+/// `__ptrace_may_access()` permits the attach when the caller's credentials
+/// match the target's **and** the target is dumpable, **or** when the caller
+/// holds `CAP_SYS_PTRACE` — and it is short-circuited entirely for a target
+/// in the caller's own thread group.  libc can evaluate none of those: it
+/// cannot read another task's credentials, does not model dumpability, and
+/// does not track thread groups.  A capability-only test is therefore not
+/// Linux's rule minus a clause but a strictly narrower rule, and after §312
+/// made the capability words a conservative projection it would read false
+/// for authority the system would grant.
+///
+/// The Phase-200 comment argued that `EPERM` was "the correct signal for
+/// 'you don't have permission' vs. 'this syscall isn't implemented'".  That
+/// reasoning inverts: nothing here is implemented, so no privilege makes the
+/// call succeed, and `EPERM` would send a porting effort hunting for a
+/// capability when what it needs is for ptrace to be written.  `ENOSYS` is
+/// the answer that is true.  When a real ptrace lands, the check belongs in
+/// the kernel call that performs the attach, where the target's credentials
+/// are in scope.
 ///
 /// Things we cannot validate yet (will become real checks once the
 /// process subsystem exposes traced-state):
@@ -3028,18 +3044,9 @@ pub extern "C" fn ptrace(request: i32, pid: i32, _addr: u64, _data: u64) -> i64 
         errno::set_errno(errno::ESRCH);
         return -1;
     }
-    // Phase 200: CAP_SYS_PTRACE gate.  In Linux, ptrace_may_access()
-    // runs after finding the target task (ESRCH already screened) and
-    // checking thread-group membership.  A same-thread-group attach
-    // can bypass the cap check, but we don't track thread groups yet,
-    // so we gate all non-TRACEME requests uniformly.  An unprivileged
-    // caller with a valid pid sees EPERM rather than ENOSYS, which is
-    // the correct signal for "you don't have permission" vs. "this
-    // syscall isn't implemented."
-    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_PTRACE) {
-        errno::set_errno(errno::EPERM);
-        return -1;
-    }
+    // No CAP_SYS_PTRACE gate (§314): ptrace_may_access() is "same creds and
+    // dumpable, OR the capability", short-circuited for a same-thread-group
+    // target, and libc can evaluate none of those three.  See the doc above.
     // TODO(ptrace): ESRCH for non-existent pid, EFAULT for bad
     // addr/data — require process-model hooks we don't have yet.
     errno::set_errno(errno::ENOSYS);
@@ -10303,12 +10310,20 @@ mod tests {
     }
 
     // =====================================================================
-    // Phase 200 — CAP_SYS_PTRACE gate on ptrace (non-TRACEME requests)
+    // §314 — ptrace() has NO libc CAP_SYS_PTRACE gate
     //
-    // Linux's ptrace_may_access() checks CAP_SYS_PTRACE after finding the
-    // target task.  In our stub, the cap gate runs after the pid <= 0 →
-    // ESRCH check.  PTRACE_TRACEME bypasses the gate (tracing yourself
-    // doesn't need ptrace capability).
+    // Linux's __ptrace_may_access() permits the attach when the caller's
+    // credentials match the target's AND the target is dumpable, OR when the
+    // caller holds CAP_SYS_PTRACE — and it is short-circuited entirely for a
+    // target in the caller's own thread group.  libc can evaluate none of
+    // those three, so a capability-only test is a strictly narrower rule
+    // rather than Linux's rule minus a clause.  ptrace is a stub, so ENOSYS
+    // is the answer that is true for every request.
+    //
+    // NOTE — the Phase-200 versions of these tests asserted EPERM when the
+    // capability was dropped.  Do not "restore" them; read §314 in
+    // design-decisions.md first.  The cap-dropping machinery is retained
+    // deliberately, so that reinstating a gate fails loudly here.
     // =====================================================================
 
     // -- cap helpers (scoped to this phase) --------------------------------
@@ -10379,7 +10394,7 @@ mod tests {
     // -- per-error class: cap held ----------------------------------------
 
     /// With CAP_SYS_PTRACE held (default), valid ptrace requests reach
-    /// ENOSYS (unchanged from pre-Phase 200 behavior).
+    /// ENOSYS.
     #[test]
     fn test_phase200_ptrace_attach_with_cap_reaches_enosys() {
         assert!(crate::sys_capability::has_capability(
@@ -10391,46 +10406,74 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
-    // -- per-error class: cap dropped → EPERM -----------------------------
+    // -- cap dropped → still ENOSYS, never EPERM --------------------------
 
-    /// Without CAP_SYS_PTRACE, PTRACE_ATTACH → EPERM.
+    /// Without CAP_SYS_PTRACE, PTRACE_ATTACH is still ENOSYS (§314).
     #[test]
-    fn test_phase200_ptrace_attach_no_cap_eperm() {
+    fn test_ptrace_attach_no_cap_is_enosys_not_eperm() {
         let _g = phase200_cap_helpers::CapGuard::snapshot();
         phase200_cap_helpers::drop_cap_sys_ptrace();
         errno::set_errno(0);
         let ret = ptrace(PTRACE_ATTACH, 1, 0, 0);
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(
+            errno::get_errno(),
+            errno::ENOSYS,
+            "a missing CAP_SYS_PTRACE must not turn an unimplemented \
+             attach into a reported privilege failure (§314)"
+        );
     }
 
-    /// Without CAP_SYS_PTRACE, PTRACE_SEIZE → EPERM.
+    /// Without CAP_SYS_PTRACE, PTRACE_SEIZE is still ENOSYS.
     #[test]
-    fn test_phase200_ptrace_seize_no_cap_eperm() {
+    fn test_ptrace_seize_no_cap_is_enosys_not_eperm() {
         let _g = phase200_cap_helpers::CapGuard::snapshot();
         phase200_cap_helpers::drop_cap_sys_ptrace();
         errno::set_errno(0);
         let ret = ptrace(PTRACE_SEIZE, 42, 0, 0);
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
-    /// Without CAP_SYS_PTRACE, PTRACE_PEEKTEXT → EPERM.
+    /// Without CAP_SYS_PTRACE, PTRACE_PEEKTEXT is still ENOSYS.
     #[test]
-    fn test_phase200_ptrace_peektext_no_cap_eperm() {
+    fn test_ptrace_peektext_no_cap_is_enosys_not_eperm() {
         let _g = phase200_cap_helpers::CapGuard::snapshot();
         phase200_cap_helpers::drop_cap_sys_ptrace();
         errno::set_errno(0);
         let ret = ptrace(PTRACE_PEEKTEXT, 100, 0x1000, 0);
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
-    // -- PTRACE_TRACEME bypasses the cap gate -----------------------------
+    /// The same-thread-group case Linux short-circuits entirely: a
+    /// debugger attaching within its own thread group needs no capability
+    /// at all, so libc must not invent one.  We cannot name a real sibling
+    /// tid here, but our own pid is unambiguously in our own thread group.
+    #[test]
+    fn test_ptrace_attach_own_pid_no_cap_is_not_libc_denied() {
+        let _g = phase200_cap_helpers::CapGuard::snapshot();
+        phase200_cap_helpers::drop_cap_sys_ptrace();
+        // `max(1)` keeps this a `pid > 0` case even on a host build where
+        // getpid may be unavailable — otherwise the ESRCH arm would take
+        // over and the test would prove nothing.
+        let target = crate::process::getpid().max(1);
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_ATTACH, target, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::ENOSYS,
+            "an attach Linux permits without any capability must not be \
+             refused by libc (§314)"
+        );
+    }
 
-    /// PTRACE_TRACEME does not require CAP_SYS_PTRACE — tracing
-    /// yourself is always allowed (subject to "already traced" check,
-    /// which we stub as ENOSYS).
+    // -- PTRACE_TRACEME ---------------------------------------------------
+
+    /// PTRACE_TRACEME reaches the same ENOSYS.  This was the one request
+    /// the Phase-200 gate already exempted; under §314 it is no longer a
+    /// special case, but it must not regress.
     #[test]
     fn test_phase200_ptrace_traceme_no_cap_still_enosys() {
         let _g = phase200_cap_helpers::CapGuard::snapshot();
@@ -10441,15 +10484,15 @@ mod tests {
         assert_eq!(
             errno::get_errno(),
             errno::ENOSYS,
-            "TRACEME must bypass CAP_SYS_PTRACE gate"
+            "TRACEME must never report a privilege failure"
         );
     }
 
-    // -- ordering: EIO before EPERM, ESRCH before EPERM -------------------
+    // -- ordering: argument errors still come first -----------------------
 
     /// Unknown request + no cap → EIO (request check runs first).
     #[test]
-    fn test_phase200_ptrace_unknown_request_eio_before_eperm() {
+    fn test_phase200_ptrace_unknown_request_eio_precedes_everything() {
         let _g = phase200_cap_helpers::CapGuard::snapshot();
         phase200_cap_helpers::drop_cap_sys_ptrace();
         errno::set_errno(0);
@@ -10458,13 +10501,13 @@ mod tests {
         assert_eq!(
             errno::get_errno(),
             errno::EIO,
-            "EIO for unknown request must precede EPERM"
+            "EIO for unknown request must precede the ENOSYS body"
         );
     }
 
-    /// pid <= 0 + no cap → ESRCH (pid check runs before cap check).
+    /// pid <= 0 + no cap → ESRCH.
     #[test]
-    fn test_phase200_ptrace_bad_pid_esrch_before_eperm() {
+    fn test_phase200_ptrace_bad_pid_esrch_precedes_everything() {
         let _g = phase200_cap_helpers::CapGuard::snapshot();
         phase200_cap_helpers::drop_cap_sys_ptrace();
         errno::set_errno(0);
@@ -10473,13 +10516,16 @@ mod tests {
         assert_eq!(
             errno::get_errno(),
             errno::ESRCH,
-            "ESRCH for bad pid must precede EPERM"
+            "ESRCH for bad pid must precede the ENOSYS body"
         );
     }
 
-    // -- restoration: CapGuard drop re-enables ptrace ---------------------
+    // -- restoration: CapGuard drop really does restore -------------------
 
-    /// After restoring CAP_SYS_PTRACE, valid ptrace reaches ENOSYS again.
+    /// A drop/restore cycle around ptrace answers identically both times —
+    /// the capability does not reach the return value at all (§314).  The
+    /// second half also proves the CapGuard restores, without which the
+    /// tests above would silently stop exercising the drop path.
     #[test]
     fn test_phase200_ptrace_cap_restore_re_enables() {
         {
@@ -10488,7 +10534,11 @@ mod tests {
             errno::set_errno(0);
             let ret = ptrace(PTRACE_ATTACH, 1, 0, 0);
             assert_eq!(ret, -1);
-            assert_eq!(errno::get_errno(), errno::EPERM, "must fail without cap");
+            assert_eq!(
+                errno::get_errno(),
+                errno::ENOSYS,
+                "must report ENOSYS, not EPERM, without cap"
+            );
         }
         assert!(crate::sys_capability::has_capability(
             crate::sys_capability::CAP_SYS_PTRACE,

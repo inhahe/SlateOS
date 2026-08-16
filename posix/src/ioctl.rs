@@ -319,6 +319,12 @@ const KERNEL_NCCS: usize = 19;
 /// Must equal `kernel/src/tty.rs`'s `TERMIOS_BYTES`.
 const KERNEL_TERMIOS_BYTES: usize = 4 * 4 + 1 + KERNEL_NCCS;
 
+/// Byte length of the four flag words at the front of the wire format.
+///
+/// Named so the marshalling functions can split the buffer at it rather than
+/// spell `16` twice and drift from [`KERNEL_TERMIOS_BYTES`].
+const FLAG_BYTES: usize = 4 * 4;
+
 /// Baud-rate field inside `c_cflag` (Linux `CBAUD`, including `CBAUDEX`).
 ///
 /// The kernel wire format has no `c_ispeed`/`c_ospeed`; Linux encodes the
@@ -336,20 +342,23 @@ const CBAUD: u32 = 0o010017;
 fn termios_to_wire(t: &Termios) -> [u8; KERNEL_TERMIOS_BYTES] {
     let mut buf = [0u8; KERNEL_TERMIOS_BYTES];
     let cflag = (t.c_cflag & !CBAUD) | (t.c_ospeed & CBAUD);
-    for (i, word) in [t.c_iflag, t.c_oflag, cflag, t.c_lflag].iter().enumerate() {
-        let bytes = word.to_le_bytes();
-        // `i` is 0..4 and each write is 4 bytes inside a 36-byte buffer, so
-        // the slice always exists; `get_mut` keeps this free of indexing
-        // panics regardless.
-        if let Some(slot) = buf.get_mut(i * 4..i * 4 + 4) {
-            slot.copy_from_slice(&bytes);
-        }
+    let words = [t.c_iflag, t.c_oflag, cflag, t.c_lflag];
+
+    // Walk the three regions the wire format defines — four little-endian
+    // u32s, the `c_line` byte, then the control characters — instead of
+    // computing an offset for each write.  `chunks_exact_mut` and `zip` make
+    // every write in-bounds by construction, so there is no index arithmetic
+    // to get wrong (and none for `clippy::arithmetic_side_effects` to flag).
+    // `zip` is also what truncates `c_cc` to the kernel's 19 entries: the
+    // destination slice is that long, so the user array's extra padding slots
+    // are dropped without a length check.
+    let (flag_bytes, rest) = buf.split_at_mut(FLAG_BYTES);
+    for (slot, word) in flag_bytes.chunks_exact_mut(4).zip(words) {
+        slot.copy_from_slice(&word.to_le_bytes());
     }
-    if let Some(slot) = buf.get_mut(16) {
-        *slot = t.c_line;
-    }
-    for i in 0..KERNEL_NCCS {
-        if let (Some(dst), Some(src)) = (buf.get_mut(17 + i), t.c_cc.get(i)) {
+    if let Some((line, cc)) = rest.split_first_mut() {
+        *line = t.c_line;
+        for (dst, src) in cc.iter_mut().zip(t.c_cc.iter()) {
             *dst = *src;
         }
     }
@@ -362,26 +371,35 @@ fn termios_to_wire(t: &Termios) -> [u8; KERNEL_TERMIOS_BYTES] {
 /// reported from `c_cflag`'s `CBAUD` bits — the inverse of [`termios_to_wire`],
 /// so `tcgetattr` after `tcsetattr` returns what was set.
 fn termios_from_wire(buf: &[u8; KERNEL_TERMIOS_BYTES]) -> Termios {
-    let word = |i: usize| -> u32 {
+    // The exact inverse of `termios_to_wire`, written the same way: split the
+    // fixed regions apart once, then iterate. Destructuring `words` rather
+    // than indexing it keeps the flag order stated in one place and readable.
+    let (flag_bytes, rest) = buf.split_at(FLAG_BYTES);
+    let mut words = [0u32; 4];
+    for (word, src) in words.iter_mut().zip(flag_bytes.chunks_exact(4)) {
         let mut b = [0u8; 4];
-        if let Some(src) = buf.get(i * 4..i * 4 + 4) {
-            b.copy_from_slice(src);
-        }
-        u32::from_le_bytes(b)
-    };
-    let c_cflag = word(2);
-    let mut c_cc = [0u8; NCCS];
-    for i in 0..KERNEL_NCCS {
-        if let (Some(dst), Some(src)) = (c_cc.get_mut(i), buf.get(17 + i)) {
-            *dst = *src;
-        }
+        b.copy_from_slice(src);
+        *word = u32::from_le_bytes(b);
     }
+    let [c_iflag, c_oflag, c_cflag, c_lflag] = words;
+
+    // A wire buffer is always long enough for these — the length is in the
+    // type — but the empty fallback keeps the function total rather than
+    // relying on that for panic-freedom.
+    let (c_line, wire_cc) = rest.split_first().unwrap_or((&0, &[]));
+    let mut c_cc = [0u8; NCCS];
+    // Control characters beyond the kernel's 19 stay zero: `wire_cc` is only
+    // that long, so `zip` stops there.
+    for (dst, src) in c_cc.iter_mut().zip(wire_cc.iter()) {
+        *dst = *src;
+    }
+
     Termios {
-        c_iflag: word(0),
-        c_oflag: word(1),
+        c_iflag,
+        c_oflag,
         c_cflag,
-        c_lflag: word(3),
-        c_line: buf.get(16).copied().unwrap_or(0),
+        c_lflag,
+        c_line: *c_line,
         c_cc,
         c_ispeed: c_cflag & CBAUD,
         c_ospeed: c_cflag & CBAUD,

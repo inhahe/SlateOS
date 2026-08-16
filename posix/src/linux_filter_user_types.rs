@@ -149,7 +149,7 @@ mod tests {
         let s = [BPF_W, BPF_H, BPF_B];
         for &b in &s {
             // Size field occupies bits 3..4: values 0,8,16.
-            assert!(b & 0x18 == b);
+            assert_eq!(b & 0x18, b);
         }
         for i in 0..s.len() {
             for j in (i + 1)..s.len() {

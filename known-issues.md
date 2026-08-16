@@ -600,15 +600,22 @@ was pasted 27 times, so it has 27 copies of one bug.
 
 Whether a given copy is visibly broken depends only on whether its bound is a
 power of two, because an odd factor in the bound makes the remainder depend on
-the whole word again and the period comes back. Confirmed degenerate call sites:
+the whole word again and the period comes back. But **an even bound is enough
+to matter even when it is not a power of two**, because `x % n` for even `n`
+preserves the parity of `x` — so any draw with an even bound has a *parity* that
+alternates with the draw counter, whatever else it does. That is how the
+battleship defect below works, with a bound of 10.
 
-| crate | bound | what repeats |
-|---|---:|---|
-| `apps/simon` | 4 | the whole colour sequence (fixed) |
-| `apps/asteroids` | 4 | — |
-| `apps/pipes` | 4 | — |
-| `apps/sliding` | 4 | — |
-| `apps/battleship` | 2 | — |
+Confirmed degenerate call sites, with the measured symptom where one has been
+measured:
+
+| crate | bound | what it did | status |
+|---|---:|---|---|
+| `apps/simon` | 4 | dealt Green, Red, Yellow, Blue for ever, at every seed | fixed `8d135ad07` |
+| `apps/battleship` | 2, 10 | every AI ship's bow on an odd `row + col` — one colour of the checkerboard, over all 1999 seeds tried | fixed `7544fdb3c` |
+| `apps/sliding` | 4 | 499 seeds produced **two** distinct 4×4 boards between them | fixed |
+| `apps/asteroids` | 4 | not yet measured | open |
+| `apps/pipes` | 4 | not yet measured | open |
 
 `apps/life`'s `next_bool` uses `% 100`; 100 = 4 × 25, and the odd factor 25
 restores a long period, so it is mild. That is exactly why the defect survived
@@ -643,6 +650,22 @@ Each of those is worth reading rather than re-baselining: a test that pins a
 layout is asserting a photograph, and the question it should have been asking
 (is the board solvable, are the ships non-overlapping, does the sequence vary)
 is usually one line away and would have survived the fix.
+
+**Three ways a test can look like it covers this and not.** All three were
+found in the first two migrations, and all three are worth checking for in the
+remaining twenty-four:
+
+- **A distribution check cannot see it.** `simon`'s broken draw used all four
+  colours exactly equally; only the order was fixed. A histogram is the right
+  answer and the sequence is still worthless.
+- **A marginal check cannot see it.** `battleship`'s rows were uniform and its
+  columns were uniform. Only the *joint* distribution — row against column —
+  was degenerate, and that is where the parity coupling lives.
+- **Two samples cannot see it.** `sliding`'s `test_shuffle_different_seeds`
+  compared seed 1 against seed 2 and asserted they differed. They did. There
+  were only ever two boards in the whole seed space, and the test happened to
+  draw one of each. "Are these two different?" cannot distinguish two outcomes
+  from a thousand; count distinct results over a hundred seeds instead.
 
 ### Sweep progress: `contacts` 83 → 0, all lint classes (2026-08-16)
 

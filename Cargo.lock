@@ -9535,6 +9535,7 @@ name = "sliding"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]

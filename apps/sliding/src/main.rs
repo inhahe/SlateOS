@@ -44,31 +44,16 @@ const OVERLAY0: Color = Color::from_hex(0x6C7086);
 // ── Tile colors (cycle for visual appeal) ──
 const TILE_COLORS: [Color; 8] = [BLUE, GREEN, PEACH, MAUVE, TEAL, YELLOW, RED, LAVENDER];
 
-// ── Seeded LCG RNG ──
-struct Rng {
-    state: u64,
-}
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    fn next_range(&mut self, max: usize) -> usize {
-        if max == 0 {
-            return 0;
-        }
-        (self.next() % max as u64) as usize
-    }
-}
+// ── Randomness ──
+//
+// From `randrange`, not a local LCG. The local one reduced with `state % max`,
+// which on a modulus-2^64 generator hands back the low bits, and those bits are
+// a counter rather than noise: the low two have period exactly 4. `shuffle`
+// drew a direction with `next_range(4)`, so the candidate directions were
+// Up, Down, Left, Right, Up, Down, Left, Right … for ever, at every seed.
+// Measured before the fix: 499 different seeds produced **two** distinct 4×4
+// boards between them. See `known-issues.md` and `design-decisions.md` §447.
+use randrange::Rng;
 
 // ── Direction ──
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -208,10 +193,19 @@ impl Board {
         let mut last_dir: Option<Direction> = None;
 
         for _ in 0..move_count {
-            // Pick a random direction, avoid immediately undoing
-            loop {
-                let idx = rng.next_range(4);
-                let dir = dirs[idx];
+            // Pick a random direction, avoiding an immediate undo.
+            //
+            // The attempt cap is not cosmetic: a board with no legal move at
+            // all — a 1×1 — made this an unbounded `loop` that never slid and
+            // never exited, hanging the app rather than producing a bad
+            // shuffle. Bounded, it simply makes no move, which is the only
+            // honest answer for a board that cannot be shuffled.
+            let mut attempts = 0_u32;
+            while attempts < 1000 {
+                attempts = attempts.saturating_add(1);
+                let Some(&dir) = rng.choose(&dirs) else {
+                    break;
+                };
                 if let Some(last) = last_dir
                     && dir == last.opposite()
                 {
@@ -862,17 +856,29 @@ mod tests {
         assert_eq!(b1.tiles, b2.tiles);
     }
 
+    /// Two seeds are not enough to see whether a shuffle shuffles.
+    ///
+    /// This test used to compare seeds 1 and 2 alone, and it passed against a
+    /// generator that produced exactly **two** distinct 4×4 boards across 499
+    /// seeds — because those two seeds happened to be one of each. A test that
+    /// asks "are these two different?" cannot tell two outcomes from a
+    /// thousand. It now counts distinct boards over a hundred seeds and
+    /// requires most of them to be distinct, which is a claim about the
+    /// shuffle rather than about a lucky pair.
     #[test]
     fn test_shuffle_different_seeds() {
-        let mut rng1 = Rng::new(1);
-        let mut b1 = Board::new(4);
-        b1.shuffle(&mut rng1, 100);
-
-        let mut rng2 = Rng::new(2);
-        let mut b2 = Board::new(4);
-        b2.shuffle(&mut rng2, 100);
-
-        assert_ne!(b1.tiles, b2.tiles);
+        let mut boards = std::collections::BTreeSet::new();
+        for seed in 1..=100_u64 {
+            let mut rng = Rng::new(seed);
+            let mut b = Board::new(4);
+            b.shuffle(&mut rng, 100);
+            boards.insert(b.tiles.clone());
+        }
+        assert!(
+            boards.len() > 90,
+            "100 seeds gave only {} distinct boards",
+            boards.len()
+        );
     }
 
     // ── Solved detection ──
@@ -905,37 +911,21 @@ mod tests {
         assert_eq!(Direction::Right.opposite(), Direction::Left);
     }
 
-    // ── RNG ──
+    // ── Shuffling a board that cannot be shuffled ──
+    //
+    // The generator's own properties are tested in `randrange`, which owns it
+    // now. What is left here is the one thing this crate does with it.
 
+    /// A 1×1 board has no legal move, and shuffling it must return rather than
+    /// spin. Before the attempt cap this was an unbounded `loop` whose only
+    /// exit was a successful slide, so this call hung the process — the test
+    /// would time out rather than fail.
     #[test]
-    fn test_rng_deterministic() {
-        let mut r1 = Rng::new(42);
-        let mut r2 = Rng::new(42);
-        for _ in 0..100 {
-            assert_eq!(r1.next(), r2.next());
-        }
-    }
-
-    #[test]
-    fn test_rng_different_seeds() {
-        let mut r1 = Rng::new(1);
-        let mut r2 = Rng::new(2);
-        assert_ne!(r1.next(), r2.next());
-    }
-
-    #[test]
-    fn test_rng_range() {
-        let mut r = Rng::new(123);
-        for _ in 0..1000 {
-            let v = r.next_range(10);
-            assert!(v < 10);
-        }
-    }
-
-    #[test]
-    fn test_rng_range_zero() {
-        let mut r = Rng::new(1);
-        assert_eq!(r.next_range(0), 0);
+    fn shuffling_a_board_with_no_legal_move_terminates() {
+        let mut rng = Rng::new(1);
+        let mut b = Board::new(1);
+        b.shuffle(&mut rng, 100);
+        assert_eq!(b.tiles, vec![0]);
     }
 
     // ── Game state ──

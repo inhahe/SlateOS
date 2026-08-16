@@ -222,6 +222,31 @@ one file whose whole job is knowing what is open; and if two lanes stamp the
 same entry, the conflict is *itself the finding* — two lanes thought they
 fixed the same bug — and should be read, not avoided.
 
+**When you restructure one of these files, check placement — not only
+conservation.** The natural check after moving entries around is "did
+anything vanish?", and it is the wrong one: it is an *aggregate* property,
+and every failure mode here is *per element*. Lane C's `known-issues.md`
+archive cut on 2026-08-16 preserved every byte — the line multiset was
+provably unchanged — and still filed 18 lane A and 17 lane B entries
+under a lane C heading, because nothing checked that each entry's new
+position agreed with the entry's own claim about itself. The check that
+catches it is a cross-tabulation: for every item, does the section it now
+sits in match the lane letter it carries? Lane C's follow-up ran exactly
+that (137 `###` under `# Lane A`, 17 under `# Lane B`, 21 under
+`# Lane C`, each verified against its own heading) and it is the form to
+copy. State the invariant per element, then count.
+
+This generalises past these files and is worth recognising by shape: an
+aggregate that holds while the per-element property fails is one of the
+recurring bug patterns in this repo — the same shape as a benchmark
+harness whose run-level verdict reads `RUN CLEAN` while individual
+verdicts are wrong (`known-issues.md`
+B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY), and as the
+duplicate feature stage the Khmer shaping probe found. Whenever a check
+sums, averages, or counts, ask what it would still report if every
+individual item were misplaced. (Written at lane C's request —
+`requests/c-a-archive-cut-swept-entries-moved.md`.)
+
 ### 4. `Cargo.toml` at the workspace root
 
 Append-only, one line at a time, and only inside `members` /

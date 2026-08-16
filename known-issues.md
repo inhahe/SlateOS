@@ -262,15 +262,45 @@ That totals 15. The scan also reports gaps in `run_all`, `timed`, `run`,
 infrastructure, not measurements — and are the clearest evidence that the static
 count cannot be trusted on its own.
 
-The two clusters at the top are the ones that actually need a decision, and they
-are likely to decide *differently*. A `…_breakdown` function exists to attribute
-cost across the stages of one operation, so its six sub-measurements are
-diagnostics whose sum is already covered by the parent benchmark — recording each
-stage separately would add six regression checks on quantities that are only
-meaningful relative to each other. `bench_lock_primitives`, by contrast, measures
-six genuinely independent primitives and records one; the other five look like
-real benchmarks that were simply never wired up, and a lock primitive regressing
-silently is exactly what this instrument exists to catch.
+**Correction, same day — the prediction that stood here was wrong, and reading
+the code is what corrected it.** It claimed the two clusters would decide
+*differently*: that `bench_syscall_dispatch_breakdown`'s stages are diagnostics,
+but that `bench_lock_primitives` "measures six genuinely independent primitives"
+of which five were "real benchmarks that were simply never wired up." Only the
+first half survived inspection.
+
+`bench_syscall_dispatch_breakdown` is indeed a decomposition: it measures the
+stages of one operation in isolation and prints an explicit `unexplained`
+residual, while the parent `syscall_dispatch` is the thing actually scored. Its
+six sub-measurements should stay print-only.
+
+`bench_lock_primitives` is **the same shape, not the opposite one.** Its six
+`run()` calls are `lock_raw_spin` / `lock_tracked` / `lock_no_lockdep` /
+`lock_tracked_no_stats` — one lock operation under four instrumentation
+settings, toggled via `lockdep::set_enabled` and `sync::set_tracking_enabled` —
+plus `preempt_pair` and `rdtsc_pair`, the two suspected components measured
+directly rather than differenced out. They feed a `lock overhead: total =
+lockdep + preempt + rdtsc + unexplained` line. Recording them individually would
+regression-track configurations the kernel never actually runs in.
+
+And the sixth is already scored, under a **different name**:
+`score("lock_uncontended", &tracked, 500)` records the measurement that `run()`
+labelled `lock_tracked`. So the static table over-counts this function by one on
+top of misclassifying the rest.
+
+Two lessons, both about this entry rather than about the benchmarks:
+
+- The static scan was labelled "not the authority" one paragraph earlier and
+  then used as one anyway. A count of `run()` minus `record()` cannot see *what
+  is being measured*, which is the entire question. The table above is retained
+  as a navigation aid only — every row still needs the code read before it can
+  be classified.
+- The name mismatch is precisely the failure the runtime soundness check was
+  written for, and it had a live instance on the first run. `lock_uncontended`
+  sits on the scorecard having never been measured under that name, so a
+  name-based diff reports `lock_tracked` as uncovered when it is fully covered.
+  That is why the coverage instrument asserts the mismatch rather than assuming
+  it away.
 
 ## Byte-indexed display truncation panics on non-ASCII text (lane C)
 

@@ -713,8 +713,8 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
                     continue;
                 }
                 // Single char: 'x'
-                if j + 1 < len && bytes[j + 1] == b'\'' {
-                    i = j + 2;
+                if at(bytes, j.saturating_add(1)) == Some(b'\'') {
+                    i = j.saturating_add(2);
                     push_token(&mut tokens, start, i, Token::String);
                     continue;
                 }
@@ -877,69 +877,46 @@ fn highlight_python_normal(
         }
 
         // Triple-quoted string (must check before single-quoted)
-        if (b == b'"' || b == b'\'') && i + 2 < len && bytes[i + 1] == b && bytes[i + 2] == b {
-            // Check for f-string prefix
-            let actual_start = if i > start_offset {
-                let prev = bytes[i - 1];
-                if prev == b'f' || prev == b'F' || prev == b'b' || prev == b'B'
-                    || prev == b'r' || prev == b'R'
-                {
-                    // Rewrite the previous token if it was a plain single-char ident.
-                    if let Some(last) = tokens.last() {
-                        if last.end == i && last.start == i - 1 {
-                            let prev_start = last.start;
-                            tokens.pop();
-                            prev_start
-                        } else {
-                            i
-                        }
-                    } else {
-                        i
+        if let Some((needle, delimiter)) = triple_at(bytes, i) {
+            // An `f`/`b`/`r` prefix immediately before the quote belongs to
+            // the string, not to the identifier the scanner already emitted
+            // for it — so take that token back and start the string there.
+            let prefixed = i > start_offset
+                && at(bytes, i.saturating_sub(1)).is_some_and(|prev| {
+                    matches!(prev, b'f' | b'F' | b'b' | b'B' | b'r' | b'R')
+                });
+            let actual_start = if prefixed {
+                match tokens.last() {
+                    Some(last)
+                        if last.end == i && last.start == i.saturating_sub(1) =>
+                    {
+                        let prev_start = last.start;
+                        tokens.pop();
+                        prev_start
                     }
-                } else {
-                    i
+                    _ => i,
                 }
             } else {
                 i
             };
-            let delimiter = if b == b'"' {
-                StringDelimiter::TripleDouble
-            } else {
-                StringDelimiter::TripleSingle
-            };
-            let needle: &[u8] = if b == b'"' { b"\"\"\"" } else { b"'''" };
-            i += 3; // past opening triple quote
-            loop {
-                if i + 2 >= len {
-                    // Multi-line string — extends to next line.
-                    *state = HighlightState::MultiLineString {
-                        delimiter,
-                    };
-                    push_token(tokens, actual_start, len, Token::String);
-                    return Vec::new();
-                }
-                if bytes[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if starts_with_at(bytes, i, needle) {
-                    i += 3;
-                    break;
-                }
-                i += 1;
+            if let Some(end) = scan_to_delimiter(bytes, i.saturating_add(3), needle) {
+                push_token(tokens, actual_start, end, Token::String);
+                i = end;
+                continue;
             }
-            push_token(tokens, actual_start, i, Token::String);
-            continue;
+            // Unterminated — the string carries onto the next line.
+            *state = HighlightState::MultiLineString { delimiter };
+            push_token(tokens, actual_start, len, Token::String);
+            return Vec::new();
         }
 
         // f-string / b-string / r-string prefix before quote
-        if (b == b'f' || b == b'F' || b == b'b' || b == b'B' || b == b'r' || b == b'R')
-            && i + 1 < len
-            && (bytes[i + 1] == b'"' || bytes[i + 1] == b'\'')
+        if matches!(b, b'f' | b'F' | b'b' | b'B' | b'r' | b'R')
+            && let Some(quote) = at(bytes, i.saturating_add(1))
+            && (quote == b'"' || quote == b'\'')
         {
             let start = i;
-            i += 1; // skip prefix
-            let quote = bytes[i];
+            i = i.saturating_add(1); // skip prefix
             let end = scan_string(bytes, i, quote);
             push_token(tokens, start, end, Token::String);
             i = end;
@@ -1244,20 +1221,14 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
         // Template literal
         if b == b'`' {
             let start = i;
-            i += 1;
-            while i < len {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if bytes[i] == b'`' {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-            // Check if it closed.
-            if i <= len && i > start + 1 && bytes[i - 1] == b'`' {
+            // The old form decided whether the literal had closed by reading
+            // the byte *behind* the cursor, and needed an `i <= len` guard to
+            // do it — because the escape step could leave `i` at `len + 1`,
+            // where `bytes[i - 1]` is `bytes[len]`. `scan_to_delimiter`
+            // answers the question directly, and its `None` is precisely the
+            // "runs onto the next line" case.
+            if let Some(end) = scan_to_delimiter(bytes, i.saturating_add(1), b"`") {
+                i = end;
                 push_token(&mut tokens, start, i, Token::String);
             } else {
                 *state = HighlightState::MultiLineString {
@@ -1270,38 +1241,37 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
         }
 
         // Regex literal — simple heuristic: `/` after `=`, `(`, `,`, `[`, `!`, `&`, `|`, `:`, `;`, `{`, `}`, `return`, newline start
-        if b == b'/' && i + 1 < len && bytes[i + 1] != b'/' && bytes[i + 1] != b'*' {
-            let is_regex = if i == 0 {
-                true
-            } else {
-                let prev_non_ws = bytes[..i]
-                    .iter()
-                    .rposition(|&c| c != b' ' && c != b'\t');
-                match prev_non_ws {
-                    Some(p) => matches!(
-                        bytes[p],
-                        b'=' | b'(' | b',' | b'[' | b'!' | b'&' | b'|' | b':' | b';' | b'{' | b'}'
-                    ),
-                    None => true,
-                }
+        if b == b'/'
+            && at(bytes, i.saturating_add(1)).is_some_and(|c| c != b'/' && c != b'*')
+        {
+            // Whether a `/` opens a regex or divides depends on what came
+            // before it. Anything that cannot end an expression — an
+            // operator, an opening bracket, a separator — means the `/` must
+            // start something rather than continue it.
+            let is_regex = match bytes
+                .get(..i)
+                .and_then(|before| before.iter().rposition(|&c| c != b' ' && c != b'\t'))
+                .and_then(|p| at(bytes, p))
+            {
+                Some(prev) => matches!(
+                    prev,
+                    b'=' | b'(' | b',' | b'[' | b'!' | b'&' | b'|' | b':' | b';' | b'{' | b'}'
+                ),
+                // Nothing but whitespace before it, so there is no expression
+                // for it to divide.
+                None => true,
             };
             if is_regex {
                 let start = i;
-                i += 1;
-                while i < len {
-                    if bytes[i] == b'\\' {
-                        i += 2;
-                        continue;
-                    }
-                    if bytes[i] == b'/' {
-                        i += 1;
-                        // Regex flags
-                        while i < len && bytes[i].is_ascii_alphabetic() {
-                            i += 1;
-                        }
-                        break;
-                    }
-                    i += 1;
+                // A regex body escapes with backslashes exactly as a string
+                // does, so the same scanner serves — and the same clamp
+                // matters: the old loop stepped `i += 2` past a trailing
+                // backslash and pushed a token ending at `len + 1`, which
+                // panics the renderer the moment it slices the line.
+                i = scan_to_delimiter(bytes, i.saturating_add(1), b"/").unwrap_or(len);
+                // Regex flags (`/re/gi`) belong to the literal.
+                while at(bytes, i).is_some_and(|c| c.is_ascii_alphabetic()) {
+                    i = i.saturating_add(1);
                 }
                 push_token(&mut tokens, start, i, Token::String);
                 continue;
@@ -1343,7 +1313,7 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
                 Token::Keyword
             } else if is_keyword(word, JS_BUILTINS) {
                 Token::Builtin
-            } else if i < len && bytes[i] == b'(' {
+            } else if at(bytes, i) == Some(b'(') {
                 Token::Function
             } else {
                 Token::Plain
@@ -1384,7 +1354,6 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
 fn highlight_json(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
     let _ = state; // JSON has no multi-line constructs we need to track.
     let bytes = line.as_bytes();
-    let len = bytes.len();
     let mut tokens = Vec::new();
     let mut i = 0;
 
@@ -1398,10 +1367,10 @@ fn highlight_json(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
             let end = scan_string(bytes, i, b'"');
             // Look ahead for `:` to decide key vs value.
             let mut j = end;
-            while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
-                j += 1;
+            while at(bytes, j).is_some_and(|c| c == b' ' || c == b'\t') {
+                j = j.saturating_add(1);
             }
-            let kind = if j < len && bytes[j] == b':' {
+            let kind = if at(bytes, j) == Some(b':') {
                 Token::Function // Use Function colour for keys (blue).
             } else {
                 Token::String
@@ -1412,10 +1381,10 @@ fn highlight_json(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         }
 
         // Number
-        if b.is_ascii_digit() || b == b'-' || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
+        if b.is_ascii_digit() || b == b'-' || (b == b'.' && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit())) {
             // For `-`, only treat as number start if followed by digit.
             if b == b'-' {
-                if i + 1 < len && bytes[i + 1].is_ascii_digit() {
+                if at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()) {
                     let start = i;
                     i += 1; // skip minus
                     let end = scan_number(bytes, i);
@@ -1571,8 +1540,8 @@ fn highlight_toml(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
             }
 
             if b.is_ascii_digit()
-                || (b == b'-' && i + 1 < len && bytes[i + 1].is_ascii_digit())
-                || (b == b'+' && i + 1 < len && bytes[i + 1].is_ascii_digit())
+                || (b == b'-' && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+                || (b == b'+' && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
             {
                 let start = i;
                 if b == b'-' || b == b'+' {
@@ -1646,29 +1615,28 @@ fn highlight_markdown(line: &str, state: &mut HighlightState) -> Vec<StyledToken
     let mut i = 0;
 
     // Heading: lines starting with `#`
-    if bytes[0] == b'#' {
+    if at(bytes, 0) == Some(b'#') {
         push_token(&mut tokens, 0, len, Token::Heading);
         return tokens;
     }
 
     // Unordered list marker
-    if len >= 2
-        && (bytes[0] == b'-' || bytes[0] == b'*' || bytes[0] == b'+')
-        && bytes[1] == b' '
+    if at(bytes, 0).is_some_and(|c| matches!(c, b'-' | b'*' | b'+')) && at(bytes, 1) == Some(b' ')
     {
         push_token(&mut tokens, 0, 2, Token::Keyword);
         i = 2;
     }
 
     // Ordered list marker: `1. `, `12. ` etc.
-    if bytes[0].is_ascii_digit() {
+    if at(bytes, 0).is_some_and(|c| c.is_ascii_digit()) {
         let mut j = 0;
-        while j < len && bytes[j].is_ascii_digit() {
-            j += 1;
+        while at(bytes, j).is_some_and(|c| c.is_ascii_digit()) {
+            j = j.saturating_add(1);
         }
-        if j < len && bytes[j] == b'.' && j + 1 < len && bytes[j + 1] == b' ' {
-            push_token(&mut tokens, 0, j + 2, Token::Keyword);
-            i = j + 2;
+        if at(bytes, j) == Some(b'.') && at(bytes, j.saturating_add(1)) == Some(b' ') {
+            let after = j.saturating_add(2);
+            push_token(&mut tokens, 0, after, Token::Keyword);
+            i = after;
         }
     }
 
@@ -1758,37 +1726,36 @@ fn highlight_shell(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         // Variable: $VAR, ${VAR}, $0-$9, $$, $?, $!, $@, $*
         if b == b'$' {
             let start = i;
-            i += 1;
-            if i < len {
-                if bytes[i] == b'{' {
-                    // ${VAR}
-                    i += 1;
-                    while i < len && bytes[i] != b'}' {
-                        i += 1;
-                    }
-                    if i < len {
-                        i += 1; // include `}`
-                    }
-                } else if bytes[i] == b'(' {
-                    // $(command) — treat as variable.
-                    i += 1;
-                    let mut paren_depth = 1u32;
-                    while i < len && paren_depth > 0 {
-                        if bytes[i] == b'(' {
-                            paren_depth += 1;
-                        } else if bytes[i] == b')' {
-                            paren_depth -= 1;
-                        }
-                        i += 1;
-                    }
-                } else if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
-                    while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                        i += 1;
-                    }
-                } else {
-                    // Special variables: $$, $?, $!, $@, $*, $#
-                    i += 1;
+            i = i.saturating_add(1);
+            match at(bytes, i) {
+                // ${VAR} — runs to the closing brace, or to the end of the
+                // line if the user has not typed it yet.
+                Some(b'{') => {
+                    i = close_or_end(bytes, i.saturating_add(1), b"}");
                 }
+                // $(command) — treat as one variable, matching nested parens.
+                Some(b'(') => {
+                    i = i.saturating_add(1);
+                    let mut paren_depth = 1_u32;
+                    while paren_depth > 0 {
+                        match at(bytes, i) {
+                            Some(b'(') => paren_depth = paren_depth.saturating_add(1),
+                            Some(b')') => paren_depth = paren_depth.saturating_sub(1),
+                            Some(_) => {}
+                            None => break,
+                        }
+                        i = i.saturating_add(1);
+                    }
+                }
+                Some(c) if c.is_ascii_alphanumeric() || c == b'_' => {
+                    while at(bytes, i).is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') {
+                        i = i.saturating_add(1);
+                    }
+                }
+                // Special variables: $$, $?, $!, $@, $*, $#
+                Some(_) => i = i.saturating_add(1),
+                // A bare `$` at the end of the line.
+                None => {}
             }
             push_token(&mut tokens, start, i, Token::Variable);
             continue;
@@ -1824,10 +1791,11 @@ fn highlight_shell(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         // Pipe, redirect, background
         if b == b'|' || b == b'>' || b == b'<' || b == b'&' {
             let start = i;
-            // Handle `||`, `&&`, `>>`, `<<`, `|&`
-            i += 1;
-            if i < len && (bytes[i] == bytes[i - 1] || bytes[i] == b'&') {
-                i += 1;
+            // Handle `||`, `&&`, `>>`, `<<`, `|&`. `b` is the byte at `start`,
+            // so the doubling test needs no backwards read.
+            i = i.saturating_add(1);
+            if at(bytes, i).is_some_and(|c| c == b || c == b'&') {
+                i = i.saturating_add(1);
             }
             push_token(&mut tokens, start, i, Token::Operator);
             continue;
@@ -2015,6 +1983,9 @@ mod tests {
             "1.",       // decimal point with no fraction
             "r#\"",     // unterminated Rust raw string
             "`",        // unterminated JS template literal
+            "`\\",      // open JS template literal, dangling escape
+            "/\\",      // open JS regex literal, dangling escape
+            "/ab\\",    // open JS regex literal with a body, dangling escape
             "<",        // unterminated HTML tag
             "&",        // unterminated HTML entity
             "$",        // shell expansion with no name
@@ -2022,18 +1993,34 @@ mod tests {
         // Prefixes put the ending somewhere other than offset 0, and the
         // non-ASCII ones also exercise `advance`'s truncation clamp.
         let prefixes = ["", "let x = ", "日本語", "😀", "a\u{300}"];
+        // Fresh state, and again resuming from each multi-line state, since
+        // those re-enter the scanners mid-construct — which is the case the
+        // per-line state memo actually replays on every keystroke.
+        let states = [
+            HighlightState::Normal,
+            HighlightState::BlockComment { depth: 1 },
+            HighlightState::MultiLineString {
+                delimiter: StringDelimiter::TripleDouble,
+            },
+            HighlightState::MultiLineString {
+                delimiter: StringDelimiter::TripleSingle,
+            },
+            HighlightState::MultiLineString {
+                delimiter: StringDelimiter::Backtick,
+            },
+            HighlightState::MultiLineString {
+                delimiter: StringDelimiter::RustRaw { hashes: 1 },
+            },
+            HighlightState::CodeFence,
+        ];
 
         let mut checked = 0_usize;
         for &lang in ALL_LANGUAGES {
             for prefix in prefixes {
                 for ending in endings {
                     let line = format!("{prefix}{ending}");
-                    // Fresh state, and again resuming from each multi-line
-                    // state, since those re-enter the scanners mid-construct.
-                    for mut state in [
-                        HighlightState::Normal,
-                        HighlightState::BlockComment { depth: 1 },
-                    ] {
+                    for state in &states {
+                        let mut state = state.clone();
                         let toks = highlight_line(&line, lang, &mut state);
                         for t in &toks {
                             assert!(
@@ -2062,7 +2049,7 @@ mod tests {
         }
         assert_eq!(
             checked,
-            ALL_LANGUAGES.len() * prefixes.len() * endings.len() * 2,
+            ALL_LANGUAGES.len() * prefixes.len() * endings.len() * states.len(),
             "sweep did not cover every combination"
         );
     }

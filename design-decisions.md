@@ -14123,7 +14123,49 @@ into the measurement list, so a window is covered precisely when *that window*
 was handed to `record` — which leaves benchmark naming free rather than making
 it load-bearing for an unrelated instrument.
 
+**Where the `track`/`diagnostic` line actually falls: a scaling sweep is
+tracked, a decomposition is not.** The first boot under the new instrument
+forced this distinction to be stated rather than felt. `bench_pick_next_scaling`
+measures run-queue pick cost at five depths; `bench_syscall_dispatch_breakdown`
+measures six stages of one syscall. Both are "a group of related numbers", and a
+rule of thumb about groups would have put them in the same bucket. The rule that
+decides them is instead **what each number claims on its own**:
+
+- A *decomposition*'s stages are meaningless apart from their siblings — stage 3
+  of a syscall is not an operation anyone performs, and a comparator handed its
+  history has nothing to compare it against. Diagnostics.
+- A *scaling sweep*'s points are each a complete measurement of the same
+  operation under a different load, and the claim being made is **the shape they
+  trace**. Tracked. The in-kernel verdict tests only the two endpoints against a
+  4x threshold with generous headroom, so a regression that bent the middle of
+  the curve — the exact failure the sweep exists to detect — passed it silently.
+  Recording each point is what makes the shape diffable across boots.
+
+That fix needed a rename, not just a wiring change, which is the sharper lesson:
+all five depths ran under one name, and five history entries under one key is
+not a series but four values overwriting each other. A measurement's name is
+part of whether it *can* be recorded at all.
+
+**A second failure of the static scan, in the other direction.** The rejected
+alternative above records that a name diff produces false *positives*. The audit
+script that replaced it produced a false *negative* on this same sweep: it
+searched forward from `run()` for a `score`/`track` naming the same binding and
+matched a `&result` belonging to a different function sixty lines downstream.
+Two independent static approaches, two opposite errors, one runtime instrument
+that got it right — which is the argument for keeping the authority at runtime
+rather than adding a third scanner.
+
+**The invariant is asserted, not just printed.** `scripts/boot-test.sh` gained
+`check_bench_coverage()`. A coverage line nobody greps is prose, and this project
+has a precedent for what prose costs: `BUG-LIVENESS-DEADLINE-FALSE-FIRE` required
+a clean liveness log from 2026-07-27 and runs that violated it still exited 0.
+The one design point worth recording is the **absent** case — under `--bench` the
+line is *required*, because a missing coverage line means the instrument stopped
+running, and scoring that as "nothing to complain about" would reproduce this
+very bug one level up. It was confirmed to fire against the real pre-fix log
+before being trusted on a passing one.
+
 **Where it lives:** `kernel/src/bench.rs` — `MEASUREMENTS`, `note_measurement`,
 `declare_diagnostic`, `run_diagnostic`, `record`, and the coverage block in
-`print_scorecard`. Written up in `known-issues.md` under the scorecard-coverage
-entry.
+`print_scorecard`; `scripts/boot-test.sh` — `check_bench_coverage`. Written up in
+`known-issues.md` under the scorecard-coverage entry.

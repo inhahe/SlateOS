@@ -360,6 +360,47 @@ is the intended behaviour — a run missing a benchmark is a run not comparable 
 its predecessor — and `page_alloc_zeroed_pool` was already conditional and
 recorded, so this is precedent rather than a new hazard.
 
+*The instrument then found a ninth on its very first boot* — and a worse one
+than the eight, because it could not have been fixed by wiring alone.
+`bench_pick_next_scaling` sweeps five run-queue depths (1, 8, 64, 256, 1024) and
+ran **all five under the single name `sched_pick_next_isolated`**, scoring only
+the deepest under the separate name `sched_pick_next`. Five history entries
+under one key is not a series; it is four values overwriting each other. So the
+four shallow points had to be *renamed* before they could be recorded at all:
+they are now `sched_pick_next_d{1,8,64,256}` and tracked, while the deepest
+keeps its scored name so its history stays unbroken.
+
+Tracked, not declared diagnostics — the opposite call from the `_breakdown`
+stages, and the distinction is about what the benchmark asserts. A
+decomposition's stages are meaningless apart from their siblings: there is
+nothing for a comparator to compare. A scaling sweep's points are each a
+complete measurement of the same operation at a different load, and the claim
+*is* the shape they trace. The in-kernel verdict only tests the two endpoints
+against a 4x threshold with generous headroom, so a regression that bent the
+middle of the curve passed it silently.
+
+This is also the **second** concrete instance of the lesson above that a static
+scan cannot be the authority here, and the first *false negative*: the audit
+script searched forward from the `run()` call for a `score`/`track` naming the
+same binding, and matched a `&result` belonging to a different function ~60
+lines downstream. It reported the site as recorded. Only the runtime instrument
+saw the four windows.
+
+*The invariant is now asserted by the harness*, not merely printed.
+`scripts/boot-test.sh` gained `check_bench_coverage()`, alongside
+`check_liveness_failures()` and for the same reason: `BUG-LIVENESS-DEADLINE-
+FALSE-FIRE` had required a clean liveness log in prose since 2026-07-27 while
+runs violating it still exited 0. It fails on a non-zero `unjudged` count and on
+the orphan-`seq` `NOTE` — the latter *even when `unjudged` reads 0*, since an
+orphan marks some other window covered and so makes a clean count unbelievable.
+Under `--bench` the coverage line is **required**: `run_all()` prints it before
+`BENCH_OK` on both the deferred and the inline-fallback path, so "`BENCH_OK` but
+no coverage line" means the instrument stopped running, which is precisely what
+it exists to catch — treating that as a pass would reproduce this bug one level
+up. Confirmed to fire on the real pre-fix log (it flags the `4 unjudged` line
+and names all four windows), so a green boot means the fix holds rather than the
+check being asleep.
+
 Also fixed in the same pass: `run_all()` cleared `SCORECARD` but not the
 `SPLIT_TALLY_*` atomics. Since the coverage figure was a subtraction of one from
 the other, a second `run_all()` in one boot would not have degraded the report

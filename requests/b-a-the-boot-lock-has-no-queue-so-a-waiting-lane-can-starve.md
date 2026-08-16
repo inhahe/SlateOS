@@ -47,18 +47,41 @@ I re-queued behind the new holder — and lost that one too, the same way:
 === Waiting for boot lock, held by lane-A/pid-1102031/1786906089 (300s) ===
 ```
 
-So the full sequence of holders seen by one lane B waiter is **three different
-lane A runs**, handing off to each other at 14:36:12 → 14:42:12 → 14:48:09,
-roughly six minutes apart — one healthy boot each — across about twenty minutes
-in which lane B never once won the `mkdir`. That is what moves this from "an
-unlucky interleaving" to "the waiter does not participate": the incumbent's
-successor is at the `mkdir` the instant the directory disappears, and the
-waiter is somewhere in a 5-second sleep every time. Lane B is still waiting as
-I finish writing this.
+and it kept going. By the time this file was handed to `main`, one lane B
+waiter had watched **five consecutive lane A runs** hold the lock:
+
+| held from | owner |
+|---|---|
+| 14:36:12 | `lane-A/pid-1097553` |
+| 14:42:12 | `lane-A/pid-1099717` |
+| 14:48:09 | `lane-A/pid-1102031` |
+| 14:54:00 | `lane-A/pid-1104246` |
+| 15:00:28 | `lane-A/pid-1106567` |
+
+Five handovers, ~6 minutes apart, metronomically regular — one healthy boot
+each — across about forty minutes in which lane B never once won the `mkdir`.
+
+**That regularity is the actual finding, and it is worse than "unlucky".** If
+acquisition were a fair coin between two waiters, five straight losses is a
+1-in-32 event; getting it on the first observation is possible but unlikely.
+The mechanism explains it better than chance does: both waiters poll on the
+same 5-second period, so their probes are phase-locked, and whichever entered
+the loop earlier probes earlier in *every* subsequent cycle. There is no
+randomness to average out. The waiter that is behind stays behind, which is
+why this reads as "lane B does not participate in the lock" rather than "lane
+B has been unlucky".
 
 The rate matters for the escalation, too. At ~6 minutes per lane A boot, the
-3600s `BOOT_LOCK_WAIT` is ten consecutive losses — entirely reachable in an
-unattended stretch, and its expiry starts the second QEMU.
+3600s `BOOT_LOCK_WAIT` is ten consecutive losses — which at this observed rate
+is not a worst case, it is just Tuesday — and its expiry starts the second
+QEMU.
+
+**Practical impact while this is open: lane B cannot merge.** The standing rule
+is that a lane merges up only after a green boot test, so a lane that cannot
+acquire the lock cannot complete the one gate it needs. That is why this file
+was cherry-picked to `main` on its own rather than waiting to ride up with the
+lane B merge it is currently blocking — a request that only becomes visible
+after the thing it describes is fixed is not a request.
 
 ## Why the existing mitigations don't help
 

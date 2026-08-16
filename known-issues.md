@@ -23576,13 +23576,23 @@ releasing and a new lane A run re-taking the lock, with lane B's waiter never
 once winning the `mkdir`. The wait counter keeps climbing straight across the
 handover, so in a log the only tell is the owner string.
 
-It then happened again to the re-queued run, so the full sequence one lane B
-waiter saw is **three different lane A runs** handing off at 14:36:12 →
-14:42:12 → 14:48:09 — about six minutes apart, one healthy boot each — over
-roughly twenty minutes in which lane B never once won the `mkdir`. That is what
-makes this "the waiter does not participate" rather than "an unlucky
-interleaving". At ~6 min per boot, the 3600s `BOOT_LOCK_WAIT` is ten
-consecutive losses, which is reachable in one unattended stretch.
+It kept going. One lane B waiter watched **five consecutive lane A runs** hold
+the lock — 14:36:12, 14:42:12, 14:48:09, 14:54:00, 15:00:28 — metronomically
+~6 minutes apart, one healthy boot each, across about forty minutes without
+winning the `mkdir` once.
+
+The regularity is the finding. Five straight losses on a fair coin is 1-in-32,
+so chance is a poor explanation; the mechanism is a better one. Both waiters
+poll on the same 5-second period, so their probes are phase-locked and
+whichever entered the loop earlier probes earlier in *every* subsequent cycle.
+Nothing averages out. At ~6 min per boot the 3600s `BOOT_LOCK_WAIT` is ten
+consecutive losses, which at the observed rate is unremarkable rather than a
+worst case.
+
+**Practical impact: lane B cannot merge while this is open** — merging up
+requires a green boot test, and the boot test cannot be obtained. That is why
+the request file was cherry-picked to `main` on its own instead of riding up
+with the lane B merge it is blocking.
 
 ### Why the existing backstops miss it
 

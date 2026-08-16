@@ -459,6 +459,76 @@ question asked but means it must be tie-broken with `a.cmp(b)` before it backs
 an `Ord` impl — otherwise `cmp` and `==` disagree, which is exactly the bug
 found in `explorer` below. That requirement is documented on the function.
 
+### Sweep progress: `paint` 234 → 139, `indexing_slicing` 0 (2026-08-16)
+
+Fourth crate, and the one the shared `Canvas` was extracted for. `apps/paint`
+went from 89 `indexing_slicing` findings to **0**, 20 `float_cmp` to 0, and 234
+total warnings to 139. Tests 155 → 158. Two reachable panics fell out, recorded
+below.
+
+The bulk of it was one deletion: `PixelBuffer` — 222 lines, the third
+independent implementation of `Vec<u8>` + width + height in this tree — is gone,
+replaced by `guitk::canvas::Canvas`. The conversion was almost mechanical (85
+type references, 147 accessor calls, 16 field accesses the compiler found for us
+because `Canvas`'s fields are private) and it took the crate's whole pixel-buffer
+lint surface with it.
+
+What remained after that were four smaller instances of the same two patterns:
+
+- **Pattern 1, the bound stated twice.** `decode_bmp` proved `data.len() >= 54`
+  in one statement and then restated it at twenty-two byte indexes; a
+  `header_field::<N>(data, at)` helper states it at the read. `windows(2)`,
+  `chunks_exact(2)` and `pts.iter().zip(pts.iter().cycle().skip(1))` replaced
+  three hand-written index pairings in the polygon code, each of which had
+  encoded "and the next one" as arithmetic guarded from a distance.
+- **Pattern 2, parallel arrays.** The colour-picker dialog held
+  `slider_labels`, `slider_values` and `slider_colors` plus a hard-coded
+  `0..4` — four places that must agree on how many sliders exist, with nothing
+  checking that they do. One array of `(label, value, colour)` rows makes
+  adding a channel a single line that cannot half-happen. The OK/Cancel buttons
+  had the same shape at two elements.
+
+The 139 that remain are all `arithmetic_side_effects` and every one was read:
+Bresenham and midpoint-ellipse integer stepping, brush-radius squares, and
+run-length spans whose endpoints both come from the same loop. Each is guarded
+by a proof within a few lines. None is reachable.
+
+## Two reachable panics in `apps/paint`, found by the lint sweep (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Both are the same defect in two
+functions, and both tests were verified by reverting the fix and watching them
+panic at the exact line named.
+
+`PaintApp::layers` and `PaintApp::active_layer` are both public fields, and
+nothing in the type ties them together. "The index is in range" is a convention
+maintained by ten separate assignment sites — and `delete_layer` reached
+`Vec::remove(self.active_layer)` and `merge_layer_down` reached
+`self.layers[self.active_layer]` with whatever the field happened to say. The
+only guards were `layers.len() <= 1` and `active_layer == 0`, neither of which
+is a bound on the index. Setting the field directly, or restoring a
+`HistorySnapshot` of one's own construction — equally public — takes the editor
+down. No malformed input needed.
+
+Both now check the bound where they use it and return `false` otherwise, which
+is the answer both functions already had for "cannot do this".
+
+`merge_layer_down` was additionally reordered. It used to remove the upper layer
+and *then* look up the lower one, so any failure between the two would have lost
+a layer without merging it into anything. It now borrows both at once via
+`split_at_mut_checked` and does the blend first, removing only after the work
+succeeded — the failure mode is structurally absent rather than merely
+improbable. Pinned by
+`merging_down_leaves_the_document_whole_when_it_declines`.
+
+A third finding was investigated and is **not** a live bug, recorded so the next
+reader does not re-derive it: `decode_bmp`'s `offset + w * 4 * h` cannot in fact
+wrap on this target, because three 32-bit header fields cannot exceed a 64-bit
+`usize`. That is an accident of the word size rather than something the
+expression states, and it stops holding on a 32-bit target, where a wrapped
+`needed` is small and passes the length check that exists to reject it. It is
+written with `checked_*` now for that reason, not because a crafted BMP could
+reach it here.
+
 ## Two more reachable bugs in `apps/markdowneditor`, found by the lint sweep (lane C)
 
 **Status: FIXED 2026-08-16** (lane C), commit `2a5c23082`. Neither was caught

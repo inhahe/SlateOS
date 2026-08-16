@@ -14,3 +14,6 @@
 
 # rustfmt: reformat the posix crate (Lane B)
 06ad616e0e9e57ed0a3dab2c66d60e09bc7355e0
+
+# rustfmt: reformat the kernel crate (Lane A) -- 733 files
+c33bfa34ffea15c6be689a0757470947a95e4e25

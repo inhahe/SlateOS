@@ -71644,7 +71644,7 @@ delete.
 directory before it completes, and observe that a partial checkout looks
 identical to a failed one.
 
-### [A] B-BENCH-THE-ACCESS-FLOOR-CLAMP-BINDS-ON-EVERY-RUN-AND-SAYS-IT-MEASURED-SOMETHING — 2026-08-15 — ⚠️ OPEN
+### [A] B-BENCH-THE-ACCESS-FLOOR-CLAMP-BINDS-ON-EVERY-RUN-AND-SAYS-IT-MEASURED-SOMETHING — 2026-08-15 — 🔧 FIXED in `90457f629`, two constants pending re-derivation
 
 **In short:** the benchmark suite calibrates two of its budgets against "how
 much does one memory access cost on this machine", measures that as **5
@@ -71718,3 +71718,53 @@ the suite depends on the floor, and the SCORE lines that gate `BENCH_OK` do
 not, so this is a silently-dead check rather than a wrong number — which is
 the failure mode this project keeps rediscovering: a check that cannot fire is
 indistinguishable from a check that passes.
+
+**Fix landed — `90457f629`.** Half 2 went in as written above: three outcomes
+(`measured` / `CLAMPED` / `UNMEASURED`), and the CLAMPED branch states plainly
+that the budgets are looser than the machine warrants, so a PASS is weak
+evidence while a SLOW still counts.
+
+Half 1 went in **differently from the proposal above, and the difference
+matters**, so the reasoning is recorded here rather than lost:
+
+- *Proposed:* measure quantity 2 directly, as the dispersion of the nop arm
+  across the interleaved rounds — free, since it is already computed and
+  discarded.
+- *Implemented:* measure the cost of a **scattered** access —
+  `measure_scattered_access_cost` walks a 512 KiB buffer at a 4 KiB stride, a
+  distinct guest page per store, so each store pays its own softmmu lookup the
+  way real allocator code does.
+- *Why the change:* the proposal accepted the entry's own framing that the
+  budgets want "the noise floor of a single-shot measurement". They do not.
+  They want *the cost of the kind of access the code under test actually
+  makes*, which is a physical property of the workload, not of the instrument.
+  The nop-dispersion figure would have been an honest measurement of the wrong
+  thing — a number that moves when the harness gets noisier and stays put when
+  the memory system gets slower, which is backwards for a budget. The
+  scattered cost satisfies the noise constraint too (it is one to two orders
+  of magnitude above the hot cost, hence well clear of the ~200-cycle wander),
+  so one honest measurement discharges both requirements instead of trading
+  one confusion for another.
+- The clamp is *retained* as the noise guard, because that is the one job the
+  entry correctly identified for it — but it is now a floor that announces
+  itself rather than a silent override, so a machine where the scattered cost
+  genuinely came out under 100 cycles would say so instead of pretending.
+
+The scattered measurement carries its own scale-invariance check, which
+**halves** the store count rather than doubling it: doubling would run past
+the end of the 512 KiB buffer and wrap onto already-resident pages, quietly
+re-measuring the hot case and certifying it as scattered.
+
+**Still open — the two budget constants.** `mmio_suspicion`'s `4` and
+`OWNER_TAG_BUDGET_ACCESSES`'s `150` were both sized against the clamp, so each
+has always meant a flat cycle count (400 and 15000) wearing an "N accesses"
+label. Both are flagged `PENDING RE-DERIVATION` in the source. They are not
+guessed at here because re-deriving them needs a boot that prints the measured
+scattered floor, which had not run when this was written. The arithmetic is
+already in the source comments and points the same way in both cases — the
+`fast_cpu_index` comment says a healthy lookup "is one access or less" and
+healthy boots measure 274-282 cycles, i.e. about *one* scattered access, not
+four; the owner-tag comment reasons in "~16 accesses at TCG's
+few-hundred-cycles-each" while the code divided by a 5-cycle one. Until they
+are re-derived both budgets are merely loose, which is the direction that
+cannot manufacture a false alarm.

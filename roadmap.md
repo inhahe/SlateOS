@@ -571,7 +571,10 @@ Roadmap:
   ⛔ **Scope frozen 2026-08-14 — see design-decisions.md §305 before touching it.**
   bash itself runs on SlateOS; osh parity work is now gated by §305's stopping
   criterion, and the `TD-OILS-*` backlog is **not** a queue to burn down.
-- `[B]` Enough of POSIX libc for gcc/coreutils/bash/CPython (line ~1477)
+- `[B]` Enough of POSIX libc for gcc/coreutils/bash/CPython (line ~2151).
+  **CPython half measured and closed 2026-08-16:** CPython 3.12.3 links against
+  our `libc.a` with zero missing symbols (`scripts/cpython-spike/README.md`).
+  Linking, not running — the stdlib/rootfs and a real pty layer are still ahead.
 - `[B]` Translate POSIX calls to native syscalls (line ~1738)
 - `[B]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5343)
 - `[B]` Rust toolchain, CPython, fastpy compiler self-hosting (lines ~5344–5346)
@@ -2415,6 +2418,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] recv MSG_PEEK/MSG_DONTWAIT: flags passed through to kernel; O_NONBLOCK on fd auto-adds MSG_DONTWAIT
   - [x] shutdown half-close: delegates to SYS_TCP_SHUTDOWN for proper SHUT_RD/SHUT_WR/SHUT_RDWR semantics
   - [x] Error translation fix: translate_net_error() aligned to actual KernelError enum values
+  - [x] **CPython 3.12.3 links (2026-08-16).** The "…for Python (CPython)" half of this task now has a measurement behind it instead of an intention. `scripts/cpython-spike/` cross-builds CPython 3.12.3 (`--disable-shared`, zig 0.13.0 → `x86_64-linux-musl`) and links `libpython3.12.a` + `Programs/python.o` against SlateOS's own `toolchain/sysroot/lib/libc.a`, computing the missing-symbol set **twice by unrelated means** (nm set-difference vs. ld.lld's own report) as a cross-check. First run: 363 external references, 350 provided, **13 missing** — `syscall`, `pthread_kill`, `pthread_getcpuclockid`, `sigwaitinfo`, `ttyname_r`, `openpty`/`forkpty`/`login_tty`, the four `posix_spawnattr_set{sigmask,sigdefault,schedpolicy,schedparam}`, `__sched_cpucount`. All thirteen implemented in `5531f816c` (new `posix/src/pty.rs`; `sys_syscall.rs` rewritten as a Linux→crate translation table). Re-run: `MISSING_BY_SET_DIFFERENCE=0`, `MISSING_AT_LINK=0`, `SLATE_LINK_EXIT=0`, output `python-slateos` — 26,038,688-byte static x86-64 ET_EXEC. **This is a linked interpreter, not a running one**: a working `python3` still needs the stdlib staged in a rootfs and an `importlib` bootstrap, plus the real pty layer (`posix_openpt` is still ENOSYS, so `openpty` correctly fails with ENOSYS today) and a task-id-targeted signal syscall (peer-thread `pthread_kill` currently degrades to process-directed — see todo.txt). Full write-up: `scripts/cpython-spike/README.md`.
 - [-] `[B]` Translate POSIX calls to native syscalls
 - [x] /proc, /sys equivalents (for programs that need them)
   - [x] procfs mounted at /proc: 10K+ lines, 70+ root files (version, uptime, meminfo, cpuinfo, stat, vmstat, buddyinfo, net, etc.) + per-PID directories (status, cmdline, stat, maps, caps)

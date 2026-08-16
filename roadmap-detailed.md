@@ -1308,7 +1308,7 @@ _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso
 
 ### 2.5 POSIX Compatibility Layer
 
-- [x] Enough POSIX libc for: gcc, coreutils, bash, CPython (extensive coverage: stdio, string, stdlib, time, locale, socket, fcntl, stat, mmap, spawn, environ, pthread stubs, and more)
+- [x] Enough POSIX libc for: gcc, coreutils, bash, CPython (extensive coverage: stdio, string, stdlib, time, locale, socket, fcntl, stat, mmap, spawn, environ, pthread stubs, and more). **Verified by linking, not by assertion (2026-08-16):** bash 5.2 and pkgconf 2.3.0 both link and run; CPython 3.12.3 links with zero missing symbols after `5531f816c` closed the 13-symbol gap `scripts/cpython-spike/` measured.
 - [x] Translate POSIX calls to native syscalls (fd table maps POSIX fds to kernel handles by type; read/write/close dispatch by HandleKind)
 - [x] Userspace memory allocator (malloc/free/calloc/realloc/posix_memalign/aligned_alloc/valloc/memalign)
   - Current design: per-allocation mmap — every malloc() gets its own mmap region with a 16-byte header (mmap_base + total_size). free() calls munmap(). This is correct, safe, and handles all alignment requirements, but every allocation is a syscall. Suitable for bootstrapping and programs with moderate allocation rates.
@@ -2354,7 +2354,7 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 #### Compilers and Toolchains
 - [ ] gcc, cmake, make, pkg-config (via POSIX layer)
 - [ ] Rust toolchain (for kernel recompilation)
-- [ ] CPython (latest, for ecosystem compatibility and fastpy bootstrapping)
+- [-] CPython (latest, for ecosystem compatibility and fastpy bootstrapping) — **links, does not yet run (2026-08-16).** `scripts/cpython-spike/` cross-builds CPython 3.12.3 and links it against SlateOS's `libc.a` with **zero** missing symbols, producing a 26 MB static x86-64 ELF. The libc gap it measured was 13 functions, all implemented in `5531f816c`. Remaining before an interpreter actually runs: stdlib staged in a rootfs, `importlib` bootstrap, a real pty layer (`posix_openpt` is still ENOSYS), and task-id-targeted signals. Pinned at 3.12 rather than "latest" because a CPython 3.11+ cross-build needs a host interpreter of the same major.minor. See `scripts/cpython-spike/README.md`.
 - [ ] fastpy compiler **hosted on SlateOS** (AOT Python compiler — first-class language for OS userspace). Note the distinction: *cross*-compiling Python to SlateOS binaries from the dev machine already works and is in use (60+ `services/fastpy-*` binaries — see Phase 0 → "Integrate fastpy compiler into build system"). This item is the compiler **running on the OS itself**, which needs CPython ported first (fastpy is written in Python and bridges to the CPython runtime for binary-extension imports — `design-decisions.md` §9).
 - [ ] Custom Rust target for the OS
 - [ ] Port Rust std library to native syscalls

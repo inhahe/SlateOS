@@ -103,12 +103,25 @@ mkdir -p "$SLATE_SPIKE" "$SLATE_TMP" 2>/dev/null || true
 # rediscovering: the recipe looked fine because the one tree anybody tested it
 # in happened to have the missing piece lying around.
 slate_ensure_zig() {
-    # 1. A per-worktree copy, which is how the original spikes were provisioned.
-    #    Preferred when present so existing checkouts neither re-download nor
-    #    silently switch toolchain underneath a half-finished build tree.
+    # 1. A per-worktree copy, which is how the original spikes were
+    #    provisioned. Preferred when present so existing checkouts neither
+    #    re-download nor silently switch toolchain underneath a half-finished
+    #    build tree — but only if it *is* the pinned version. Accepting it
+    #    unconditionally, as this branch first did, reintroduces exactly the
+    #    hole the pin exists to close: a hand-placed zig of unknown vintage in
+    #    a gitignored directory would silently outrank the verified one, and
+    #    the build would once again depend on undocumented local state. The
+    #    check is `zig version` rather than a hash because a hand-placed tree
+    #    may legitimately have been extracted, moved or symlinked; the version
+    #    string is what the pin actually asserts.
     if [ -x "$SLATE_SPIKE/zig/zig" ]; then
-        SLATE_ZIG="$SLATE_SPIKE/zig/zig"
-        return 0
+        local local_ver
+        local_ver="$("$SLATE_SPIKE/zig/zig" version 2>/dev/null)"
+        if [ "$local_ver" = "$SLATE_ZIG_VERSION" ]; then
+            SLATE_ZIG="$SLATE_SPIKE/zig/zig"
+            return 0
+        fi
+        echo "worktree.sh: ignoring $SLATE_SPIKE/zig/zig — reports '${local_ver:-<no version>}', pin is $SLATE_ZIG_VERSION" >&2
     fi
 
     local dir="$SLATE_ZIG_CACHE/zig-linux-x86_64-$SLATE_ZIG_VERSION"

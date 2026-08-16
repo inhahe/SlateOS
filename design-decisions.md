@@ -15549,3 +15549,133 @@ crate to the kernel build to remove a risk that already announces itself.
 **105/105 verification conditions discharged, zero unproved, zero warnings.**
 
 ---
+
+## §317 — A libc function with no backend is *composed over the missing primitive*, not stubbed
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** CPython needs three functions — `openpty`, `forkpty`, `login_tty`
+— that create a *pseudo-terminal* (a fake keyboard-and-screen pair that lets
+one program drive another as if a human were typing at it; this is how `ssh`,
+`script`, `expect` and every terminal window work). SlateOS does not have
+pseudo-terminals yet. The choice was whether to write these three as
+placeholders that pretend to succeed, or to write them properly *now* — as real
+code on top of the primitive that is missing, so they fail honestly today and
+start working by themselves the day the primitive arrives. We wrote them
+properly.
+
+**The two options.**
+
+| | Stub | Compose over the missing primitive |
+|---|---|---|
+| *What changes:* | `os.openpty()` returns a plausible-looking pair of numbers that are not a terminal | `os.openpty()` fails with `ENOSYS` ("this system call is not implemented"), which is true |
+| When the pty layer lands | someone must remember to come back and rewrite all three | they work, with no edit |
+| Error a caller sees | invented by the stub | the real one, from `posix_openpt` |
+| Cost today | ~10 lines | ~490 lines, five tests |
+
+**Why compose.** The whole point of the CPython spike was to replace a claim
+with a measurement. A stub would have restored the claim: the symbol table
+would say `openpty` exists, the linker would be satisfied, and the first
+program to actually open a terminal would get silent nonsense instead of a
+diagnosable failure. `ENOSYS` from `posix_openpt`, propagated verbatim, is a
+*better* outcome than a fake success — it names the missing piece and points at
+the file that will supply it.
+
+The composition is not speculative. `openpty` is the standard
+`posix_openpt` → `grantpt` → `unlockpt` → `ptsname_r` → `open(slave)` dance;
+all five already exist as entry points, four of them functional, and only
+`posix_openpt` returns `ENOSYS`. `login_tty` is fully functional *today* —
+`setsid` + `TIOCSCTTY` + three `dup2`s — and `forkpty` carries musl's
+`O_CLOEXEC` synchronisation pipe so a `login_tty` failure inside the child is
+reported to the parent rather than yielding a child whose stdio silently is not
+the pty. A test pins the property that matters: `openpty` reports
+`posix_openpt`'s errno rather than one of its own, so the day `posix_openpt`
+stops returning `ENOSYS` the test still passes and the function starts working.
+
+**Against.** Composing costs ~50× the lines of a stub for zero present-day
+capability, and it front-loads work whose requirements could still change — if
+the eventual pty layer does not expose a `/dev/ptmx`-shaped interface, some of
+this glue is rewritten anyway. That risk is small and bounded (the glue is thin
+and the interface is 40 years old and specified), and it is the *right* kind of
+risk to take: the failure mode is wasted effort, whereas the stub's failure
+mode is a program that misbehaves for reasons nothing in the system explains.
+
+**Generalisation.** This is now the rule for the `posix` crate: when a symbol
+is required but its backend is not built, implement it against the backend's
+real entry point and let the honest error propagate. Do not stub, and do not
+`unimplemented!()`. Where the honest behaviour is a *degradation* rather than a
+failure — as with `pthread_kill` on a peer thread, which currently delivers
+process-directed because the kernel has no per-task pending set — document the
+degradation at the call site *and* in `todo.txt` with the kernel change that
+would remove it.
+
+**Where it lives.** `posix/src/pty.rs` (new in `5531f816c`).
+
+---
+
+## §318 — `syscall()` is a translation table, not a trap door
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** Unix has a function called `syscall()` that lets a program ask the
+kernel for something directly, by number, bypassing the C library. CPython uses
+it for a handful of things its libc might be too old to expose. The problem is
+that the numbers are *Linux's* numbers, and SlateOS's own numbers are unrelated
+— they happen to overlap, so forwarding one to the other would not error out,
+it would call the wrong thing. Our `syscall()` therefore translates a small,
+fixed set of Linux numbers into calls on functions in this crate, and refuses
+everything else.
+
+**The collision is not hypothetical.** SlateOS's `SYS_EXIT` is **1**, which is
+Linux's `write`. A naive `syscall(n, …) → SYSCALL n` forwarder handed
+`SYS_WRITE` (Linux 1) would have exited the process. A test now pins this:
+`test_linux_numbers_are_linux_numbers` asserts both that our `SYS_EXIT` differs
+from `crate::syscall::SYS_EXIT` and that `crate::syscall::SYS_EXIT` equals
+Linux's `SYS_WRITE`, so the overlap cannot silently drift back.
+
+**Three options were on the table.**
+
+| | *What changes:* |
+|---|---|
+| Forward to the kernel | wrong function called, silently — rejected outright |
+| Translate every Linux number | a second, parallel libc, maintained forever |
+| Translate the numbers real callers issue; `ENOSYS` for the rest | `syscall(SYS_gettid)` works; `syscall(SYS_write, …)` fails cleanly |
+
+We took the third. The table covers what CPython actually issues —
+`sched_yield`, `getpid`, `getppid`, `gettid`, `get{,e}{u,g}id`,
+`gettimeofday`, `getrandom`, `pidfd_open`, `pidfd_send_signal` — every one of
+which is a thin query with an existing crate function behind it.
+
+**Why the libc-bypass numbers are *deliberately* absent.** `read`, `write`,
+`close`, `fork`, `execve` and `exit` are not missing by oversight; wrapping
+them would be actively wrong. A caller reaching those through `syscall()` is
+bypassing libc *on purpose* — to avoid our fd table, our `pthread_atfork`
+handlers, our CWD resolution — and quietly routing it back through the very
+layer it is evading would produce behaviour that matches neither what the
+caller asked for nor what Linux does. `ENOSYS` is the honest answer, and
+`test_bypass_syscalls_are_not_silently_wrapped` pins it.
+
+**Against.** A program that legitimately needs a number we have not tabulated
+gets `ENOSYS` and must be diagnosed, where a full forwarder would "just work"
+— except that it would not; it would call the wrong function. The real cost is
+that the table needs extending as new programs land, which is a small, visible,
+test-covered edit rather than a hidden hazard.
+
+**One implementation note worth keeping.** The seven arguments are typed
+`isize`, **not** `core::ffi::c_long`. `c_long` is 32 bits on the LLP64 host the
+tests run on and 64 bits on `x86_64-slateos` — declaring the signature with it
+produces a *different function* in the tested build than in the shipped one,
+truncating every pointer argument. The first compile caught it, and the type
+alias carries the explanation so it cannot recur silently. Seven fixed
+arguments rather than a variadic is ABI-identical on x86-64 SysV and avoids a
+feature gate the crate does not enable.
+
+**Where it lives.** `posix/src/sys_syscall.rs`, rewritten in `5531f816c`; the
+old header claimed its `SYS_*` constants "map Linux syscall names to our native
+syscall numbers" (they are verbatim Linux numbers) and globbed in
+`crate::syscall::*`, which is what forced the `SYS_EXIT_LINUX` alias. Both are
+gone; nothing consumed either.
+
+---

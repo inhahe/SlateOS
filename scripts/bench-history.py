@@ -43,8 +43,16 @@ name and the git commit, and diffs are only ever taken against the most recent
 previous record **from the same host**, because numbers from two different
 machines (or two different QEMU builds) are not comparable at all.
 
-Exit codes: 0 normally.  With --fail-on-regression, 1 if any benchmark
-regressed by more than the threshold.
+Exit codes: 0 normally.  With --fail-on-regression, 1 if any benchmark is still
+being *claimed* as a regression once the gates below have had their say.  A
+movement is not a claim merely because it crossed the threshold: it must also
+leave the benchmark's own recent range (`per_benchmark_bands`), survive the
+split-sample check on its own measurement window, and not have been
+contradicted by another run of the same binary (`replication_verdict`).  The
+word REGRESSED itself is reserved for movements every recorded run of the
+commit agrees on; a commit measured only once reports UNREPLICATED, which is
+weaker evidence but still fails the build, because "nobody looked twice" is not
+a finding of innocence.
 """
 
 from __future__ import annotations
@@ -1772,6 +1780,128 @@ def describe_mode_verdict(name, verdict):
     return []
 
 
+#: Replication verdicts for a movement that crossed the run-over-run threshold
+#: *and* left the benchmark's own band -- i.e. everything that would otherwise
+#: have been printed as a confirmed `REGRESSED`.
+#:
+#: `REPLICATED`   -- every recorded measurement of this same commit shows it.
+#: `UNREPLICATED` -- this commit has been measured once, so nothing has been
+#:                   shown either way.
+#: `CONTRADICTED` -- another run of this *same binary* did not show it.
+REPLICATED = "replicated"
+UNREPLICATED = "unreplicated"
+CONTRADICTED = "contradicted"
+
+#: How many measurements of one commit are needed before replication can be
+#: judged at all. Two, because one run cannot disagree with itself.
+REPLICATION_MIN_RUNS = 2
+
+#: What `git_commit()` returns when it could not read HEAD. It must never be
+#: treated as a commit identity: two runs that both failed to read HEAD are not
+#: two runs of the same binary, and matching them would manufacture exactly the
+#: replication this gate exists to demand.
+UNKNOWN_COMMIT = "unknown"
+
+ReplicationVerdict = collections.namedtuple("ReplicationVerdict", "verdict values")
+
+
+def values_for_commit(records, host, profile, name, commit):
+    """Every comparable measurement of `name` already recorded for `commit`."""
+    if not commit or commit == UNKNOWN_COMMIT:
+        return []
+    return [
+        value
+        for record in comparable_records(records, host, profile)
+        if record.get("commit") == commit
+        and (value := record.get("entries", {}).get(name)) is not None
+    ]
+
+
+def replication_verdict(records, host, profile, name, commit, observed, band):
+    """Did a second run of this *same binary* also produce this movement?
+
+    Why this gate exists, and why nothing cheaper works
+    ---------------------------------------------------
+    Two `boot-test.sh --bench` runs of commit `602fc62e0`, 2.5 minutes apart
+    with nothing rebuilt between them, were compared against each other -- an
+    A/A test, where every reported regression is a false positive by
+    construction. The harness reported three confirmed ones across the pair
+    (`pick_next` +92%, then `page_alloc_free` +85% and `vfs_stat_breakdown_full`
+    +36%), and the second of those runs was graded `RUN CLEAN` by every
+    contamination instrument while it did so. Drift-corrected, 5 of 83
+    benchmarks moved by more than 25% on identical code.
+
+    The band is not the weak link and cannot be made into the fix. It is
+    already Tukey's fence over quartiles, it was *right* about these values --
+    `page_alloc_free` sits at 293-453ns and genuinely measured 680 -- and a
+    sweep over the real history showed more history makes the fence *tighter*
+    (window 27 gives 309-427), because tail events this rare never move a
+    quartile. No `(window, k)` setting separates these false positives from
+    real regressions, because on the evidence available within one run the two
+    are not different.
+
+    What separates them is structural rather than statistical: **a code-caused
+    regression reproduces on the same binary and an environmental outlier does
+    not.** So the question asked here is not "how unlikely is this number?" but
+    "did this same binary produce it twice?", which is the only question whose
+    answer distinguishes the two causes. The cost is one extra boot with no
+    rebuild.
+
+    `records` must *exclude* the current run -- the same contract the band
+    computation in `report()` already relies on -- because `observed` is added
+    to the sample here. Passing a history that already contains this run would
+    count it twice and let a single run replicate itself.
+
+    A row with no band is `UNREPLICATED` regardless: there is no fence for a
+    repeat to land inside of, so nothing can be contradicted. Those rows are
+    already printed as UNCONFIRMED and are deliberately left alone rather than
+    judged against an invented fence.
+    """
+    if band is None:
+        return ReplicationVerdict(UNREPLICATED, [observed])
+    values = values_for_commit(records, host, profile, name, commit) + [observed]
+    if len(values) < REPLICATION_MIN_RUNS:
+        return ReplicationVerdict(UNREPLICATED, values)
+    _lo, hi, _median, _n = band
+    if min(values) > hi:
+        return ReplicationVerdict(REPLICATED, values)
+    return ReplicationVerdict(CONTRADICTED, values)
+
+
+def describe_replication(name, verdict, band):
+    """Lines to print beneath a contradicted movement.
+
+    Also states the benchmark's *measured* A/A spread, which these repeats are
+    the only source of: "this binary produced 367 and 680 ns" is a noise floor
+    for `name` on this host, and a floor of 85% is the fact that decides
+    whether any smaller movement in it is judgeable at all.
+    """
+    if verdict.verdict != CONTRADICTED or not verdict.values:
+        return []
+    _lo, hi, _median, _n = band
+    values = sorted(verdict.values)
+    # The smallest sample *is* the contradicting one -- it is precisely what
+    # `replication_verdict` compared against `hi` to reach CONTRADICTED -- and
+    # it is never this run's own value: a row only reaches the gate after
+    # `band_position` found it above `hi`, so the current value cannot be the
+    # minimum of a set whose minimum is at or below `hi`. Taking `min(values)`
+    # rather than filtering for `<= hi` and taking the minimum of *that* is the
+    # same number by construction, and cannot be an empty list.
+    lines = [
+        f"    -> {name}: another run of this same binary measured "
+        f"{values[0]:.0f}ns, inside the {hi:.0f}ns edge this claim depends "
+        f"on leaving. Same code, both numbers.",
+    ]
+    if values[0] > 0:
+        spread = (values[-1] / values[0] - 1.0) * 100.0
+        lines.append(
+            f"       same-commit runs: {[round(v) for v in values]} -- a "
+            f"{spread:.0f}% spread with no code change, which is this "
+            f"benchmark's measured noise floor on this host."
+        )
+    return lines
+
+
 def band_position(value, band, worse):
     """Is `value` outside `band` in the direction that matters?
 
@@ -1914,7 +2044,7 @@ def report_baseline_canary(previous):
 
 
 def report(previous, current_entries, threshold_pct,
-           records=None, host=None, profile=LEGACY_PROFILE):
+           records=None, host=None, profile=LEGACY_PROFILE, commit=None):
     """Print the run-over-run comparison. Returns True if anything regressed.
 
     `records`/`host`/`profile` are optional only so that callers interested
@@ -1930,6 +2060,11 @@ def report(previous, current_entries, threshold_pct,
     Without a history every movement comes back UNCONFIRMED rather than
     silently confirmed: a caller that supplies no records has not shown the
     benchmark to be stable, and must not be told that it has.
+
+    `commit` is this run's HEAD.  It is what makes the replication gate
+    possible -- without it no movement can be shown to have survived a second
+    run of the same binary, so every banded regression degrades to
+    UNREPLICATED.  See `replication_verdict`.
     """
     current = {name: vals[0] for name, vals in current_entries.items()}
 
@@ -1954,6 +2089,37 @@ def report(previous, current_entries, threshold_pct,
         f"{previous.get('timestamp', '?')} (commit {previous.get('commit', '?')}) ==="
     )
     report_baseline_canary(previous)
+
+    # Is the baseline the *same binary* as this run? Then the whole
+    # run-over-run comparison is an A/A test, and its result is known before it
+    # is computed: nothing in it can have been caused by code. That is not a
+    # statistical claim to be weighed against the numbers, it is arithmetic --
+    # the two runs share a commit, so the diff between them has no code term.
+    #
+    # Said here, above every list, because the failure it prevents is one that
+    # actually happened: a `pick_next` +92% from exactly this situation was
+    # written up as a scheduler regression, corroborated by a second statistic,
+    # and believed. The band cannot notice this and neither can the canary;
+    # only the commit field can, and it was already in the record.
+    same_binary = bool(
+        commit
+        and commit != UNKNOWN_COMMIT
+        and previous.get("commit") == commit
+    )
+    if same_binary:
+        print(
+            f"  !! A/A COMPARISON: the baseline run is the SAME commit "
+            f"({commit}) as this one, so no\n"
+            f"     movement below can have been caused by code -- every "
+            f"difference is this host's\n"
+            f"     measurement noise, by construction, and none of it is "
+            f"counted as a regression.\n"
+            f"     What such a pair *does* measure is the per-benchmark noise "
+            f"floor: the last one\n"
+            f"     moved 5 of 83 benchmarks by more than 25%. See "
+            f"known-issues.md\n"
+            f"     B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY."
+        )
     print(
         "  Comparison is run-over-run on this host, which cancels the TCG "
         "emulation constant; a movement is only called a regression if it "
@@ -2045,6 +2211,36 @@ def report(previous, current_entries, threshold_pct,
     imp_unjudged, imp_unjudged_void = _withdraw_unstable(imp_unjudged)
     void_rows = reg_void + reg_unjudged_void + imp_void + imp_unjudged_void
 
+    # The replication gate, applied last because it is the strongest claim and
+    # the one the word "REGRESSED" is now reserved for. A movement that left
+    # the band is asked one further question: did this *same binary* produce it
+    # more than once? Measured A/A evidence says nothing weaker discriminates
+    # (see replication_verdict.__doc__ and known-issues.md
+    # B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY).
+    #
+    # Three outcomes, and the asymmetry between the last two is the whole
+    # design. CONTRADICTED is withdrawn outright and does not fail the build:
+    # a repeat of the same binary landed back inside the range, so the
+    # excursion is demonstrably not in the code. UNREPLICATED keeps failing it:
+    # nobody has shown anything either way, and letting "measured once" excuse
+    # a movement would silence the check in the ordinary case -- one run per
+    # commit is the norm -- which is the same failure as a check that cannot
+    # fire. This mirrors MODE_UNDECIDED, which likewise only ever excuses a
+    # *positively evidenced* verdict.
+    reg_repl, reg_unrep, reg_contra = [], [], []
+    repl_verdicts = {}
+    for row in reg_out:
+        name, _before, after, _raw, _adj, band = row
+        rv = replication_verdict(records, host, profile, name, commit,
+                                 after, band)
+        repl_verdicts[name] = rv
+        if rv.verdict == REPLICATED:
+            reg_repl.append(row)
+        elif rv.verdict == CONTRADICTED:
+            reg_contra.append(row)
+        else:
+            reg_unrep.append(row)
+
     def _print_movements(header, rows, key):
         print(header)
         for name, before, after, raw, adj, band in sorted(rows, key=key):
@@ -2057,10 +2253,41 @@ def report(previous, current_entries, threshold_pct,
     worst_first = lambda r: -r[4]  # noqa: E731 - reads better inline
     best_first = lambda r: r[4]    # noqa: E731
 
-    if reg_out:
+    if reg_repl:
         _print_movements(
-            f"  REGRESSED (>{threshold_pct:g}% slower than the suite AND "
-            f"outside its own recent range):", reg_out, worst_first)
+            f"  REGRESSED (>{threshold_pct:g}% slower than the suite, outside "
+            f"its own recent range, AND replicated -- every recorded run of "
+            f"this commit shows it):", reg_repl, worst_first)
+    if reg_unrep:
+        _print_movements(
+            f"  REGRESSED, UNREPLICATED (>{threshold_pct:g}% slower than the "
+            f"suite and outside its own recent range, but this commit has "
+            f"been measured only once):", reg_unrep, worst_first)
+        print(
+            "    -> re-run `./scripts/boot-test.sh --bench` WITHOUT "
+            "rebuilding to confirm. Two runs of one\n"
+            "       unchanged binary have been measured moving 85% apart, so "
+            "a single run cannot tell a\n"
+            "       code regression from an environmental outlier. Still "
+            "counted as a regression until it is\n"
+            "       either replicated or contradicted -- unmeasured is not "
+            "the same as absolved."
+        )
+    if reg_contra:
+        print(
+            "  NOT REPLICATED (crossed the threshold and left its own range, "
+            "but another run of this SAME binary did not -- withdrawn, and "
+            "NOT counted as a regression):"
+        )
+        for name, before, after, raw, adj, band in sorted(reg_contra,
+                                                          key=worst_first):
+            print(
+                f"    {name}: {before}ns -> {after}ns "
+                f"({adj:+.0f}% vs suite, {raw:+.0f}% raw); "
+                f"{describe_band(band)}"
+            )
+            for line in describe_replication(name, repl_verdicts[name], band):
+                print(line)
     if reg_unjudged:
         _print_movements(
             f"  REGRESSED, UNCONFIRMED (>{threshold_pct:g}% slower than the "
@@ -2179,7 +2406,7 @@ def report(previous, current_entries, threshold_pct,
             )
         else:
             print(f"  No benchmark moved by more than {threshold_pct:g}%.")
-    elif not (reg_out or reg_unjudged or imp_out or imp_unjudged
+    elif not (reg_repl or reg_unrep or reg_unjudged or imp_out or imp_unjudged
               or added or removed or shifts):
         # Everything that crossed the threshold was demoted or withdrawn. Say
         # so, rather than printing only the demoted list and leaving the reader
@@ -2224,7 +2451,23 @@ def report(previous, current_entries, threshold_pct,
     # commit making it slower. Note that only a *positively evidenced*
     # mode-structured verdict is excused; MODE_UNDECIDED still fails, so the
     # absence of repeat measurements can never silence the report.
-    return bool(reg_out or reg_unjudged or bisectable_shifts)
+    #
+    # `reg_repl or reg_unrep`, not `reg_out`: the two differ by exactly
+    # `reg_contra`, and a contradicted movement is one where another run of the
+    # *same binary* landed back inside the range. That is positive evidence
+    # that the excursion is not in the code -- the same standard the
+    # mode-structured excuse is held to -- and it is the only category here
+    # withdrawn on that basis. UNREPLICATED still fails; see the gate above.
+    #
+    # `same_binary` empties the run-over-run side entirely: a comparison of a
+    # binary against itself cannot evidence a code regression, so failing the
+    # build on one gates merges on the host's mood. Sustained shifts are
+    # deliberately *not* excused by it -- `level_shifts` measures against a
+    # baseline drawn from before the last LEVEL_SHIFT_SKIP runs, which are
+    # other commits, so that comparison is not self-referential and keeps its
+    # force even when the immediately preceding run happens to be a repeat.
+    run_over_run = [] if same_binary else (reg_repl + reg_unrep + reg_unjudged)
+    return bool(run_over_run or bisectable_shifts)
 
 
 def cmd_list(history_path):
@@ -2346,8 +2589,15 @@ def main(argv=None):
                   f"different optimisation level, different numbers).")
 
     canary = parse_canary(args.serial)
+    # Read once and used twice -- passed to the report so the replication gate
+    # can find this binary's other runs, and stored in the record below so the
+    # *next* run can find this one. Two `git_commit()` calls could disagree if
+    # HEAD moved mid-run, and a record filed under a different commit than the
+    # one it was judged as would corrupt every later replication verdict.
+    commit = git_commit()
     regressed = report(previous, current_entries, args.threshold,
-                       records=records, host=host, profile=args.profile)
+                       records=records, host=host, profile=args.profile,
+                       commit=commit)
 
     # Reported *after* the comparison, so it qualifies the verdict the reader
     # has just seen rather than being buried above it. The verdict is *taken
@@ -2387,7 +2637,7 @@ def main(argv=None):
             # Sibling key, absent on pre-2026-08-14 records, which
             # record_profile() reads as "debug". See LEGACY_PROFILE.
             "profile": args.profile,
-            "commit": git_commit(),
+            "commit": commit,
             # The target is static and already lives in baselines.toml, so
             # only the measured number goes here.
             "entries": {n: v[0] for n, v in current_entries.items()},

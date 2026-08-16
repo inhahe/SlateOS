@@ -1358,8 +1358,18 @@ def test_band_is_wired_into_report_and_into_the_exit_status(bh):
         regressed = bh.report(previous, current, 25.0, records=history,
                               host="H", profile="release")
     check("a movement outside the range still fails the build", regressed, True)
-    check("...and is called a regression",
-          "REGRESSED" in buf.getvalue(), True)
+    # These records carry no `commit`, so the replication gate cannot find a
+    # second run of this binary and the claim comes back UNREPLICATED rather
+    # than confirmed. Asserted as the *exact* heading: "REGRESSED" alone is a
+    # substring of "REGRESSED, UNREPLICATED", so the loose check this replaces
+    # would have passed whichever verdict the gate produced -- a test that
+    # cannot fail, in a file about checks that cannot fire.
+    out = buf.getvalue()
+    check("...and is called a regression", "  REGRESSED" in out, True)
+    check("...but an unreplicated one, there being no commit to replicate on",
+          "REGRESSED, UNREPLICATED" in out, True)
+    check("...so the confirmed heading is withheld", "  REGRESSED (" in out,
+          False)
 
     # With no history at all the movement is UNCONFIRMED rather than silently
     # confirmed -- and still fails the build, because withholding the word is
@@ -1887,6 +1897,237 @@ def test_mode_structured_shift_does_not_fail_the_build(bh):
     check("an undecided verdict says nothing",
           bh.describe_mode_verdict(
               "b", bh.ModeVerdict(bh.MODE_UNDECIDED, {}, {}, [], [])), [])
+
+
+# --------------------------------------------------------------------------
+# Replication gate. See known-issues.md
+# B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY-EVEN-ON-A-CLEAN-RUN.
+# --------------------------------------------------------------------------
+
+#: `b0` over eight quiet runs. Deliberately tight, so the band is narrow and
+#: any movement the tests introduce is unambiguously outside it -- these tests
+#: are about the replication gate and must not also depend on where a quartile
+#: lands.
+_QUIET = (500, 505, 510, 495, 502, 508, 498, 503)
+
+
+def _repl_history(bh, earlier, earlier_commit, earlier_profile="release",
+                  earlier_host="H"):
+    """History whose *first* record is a repeat, followed by `_QUIET`.
+
+    The repeat is placed before the trailing `SPEED_WINDOW` deliberately: the
+    band must be computed from the eight quiet runs alone, while the
+    replication evidence is still found. That separation is the point --
+    replication is drawn from the whole comparable history, not just the band's
+    window, and a test where the repeat sits inside the window could not tell
+    the two apart because the repeat would move the fence as well.
+    """
+    stable = {f"b{i}": 1000 for i in range(1, 20)}
+    first = {"host": earlier_host, "profile": earlier_profile,
+             "commit": earlier_commit, "entries": dict(stable, b0=earlier)}
+    rest = [{"host": "H", "profile": "release", "commit": f"h{i}",
+             "entries": dict(stable, b0=value)}
+            for i, value in enumerate(_QUIET)]
+    return [first] + rest
+
+
+def _repl_report(bh, history, current_b0, commit):
+    """Run `report()` over `history` with `b0` at `current_b0`. -> (out, failed)."""
+    import io
+    import contextlib
+
+    previous = history[-1]
+    current = {name: (value, 10000, "OK", None, None)
+               for name, value in previous["entries"].items()}
+    current["b0"] = (current_b0, 10000, "OK", None, None)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        failed = bh.report(previous, current, 25.0, records=history, host="H",
+                           profile="release", commit=commit)
+    return buf.getvalue(), failed
+
+
+def test_replication_withdraws_what_the_same_binary_contradicts(bh):
+    """A second run of the same commit that lands in-range withdraws the claim.
+
+    This is the measured failure: two `--bench` runs of commit `602fc62e0`
+    minutes apart, nothing rebuilt, produced three *confirmed* regressions
+    between them. The band was not wrong about the numbers -- `page_alloc_free`
+    really does sit at 293-453 ns and really did measure 680 -- so no band
+    setting could have declined them. What declines them is that the same
+    binary also produced 363 ns.
+
+    The scenario here is the one where this fires without the whole comparison
+    being an A/A pair: commit `xxx` was measured, then `h7`, then `xxx` was
+    measured again -- an ordinary bisect.
+    """
+    history = _repl_history(bh, 500, "xxx")
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("a contradicted movement does not fail the build", failed, False)
+    check("...and is shown, under a heading that says why",
+          "NOT REPLICATED" in out, True)
+    check("...and is not called a regression", "  REGRESSED" in out, False)
+    check("...and the contradicting measurement is quoted",
+          "500ns, inside" in out, True)
+    # The A/A noise floor, which only repeat measurements can supply, and which
+    # is what decides whether any *smaller* movement in b0 is judgeable at all.
+    check("...and the same-commit spread is stated as a noise floor",
+          "same-commit runs: [500, 3000]" in out, True)
+    check("...as a percentage", "500% spread with no code change" in out, True)
+
+
+def test_replication_promotes_what_every_run_of_the_commit_shows(bh):
+    """The gate must still let a real regression through, or it is a mute check.
+
+    A gate that only ever withdraws is indistinguishable from deleting the
+    check. This is the other half: same construction, but the earlier run of
+    the same commit is *also* slow, so the movement is a property of the binary
+    and the word REGRESSED is earned.
+    """
+    history = _repl_history(bh, 2900, "xxx")
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("a replicated movement fails the build", failed, True)
+    check("...and gets the confirmed heading", "  REGRESSED (" in out, True)
+    check("...which says what was replicated",
+          "every recorded run of this commit shows it" in out, True)
+    check("...and is not withdrawn", "NOT REPLICATED" in out, False)
+
+
+def test_one_run_of_a_commit_is_unreplicated_and_still_fails(bh):
+    """Measured once is not absolved -- it is unmeasured, and must still fail.
+
+    This is the asymmetry the gate turns on, and the temptation to get it wrong
+    is real: excusing every single-run movement would make the check silent in
+    the ordinary case, since one run per commit is the norm. Then
+    `--fail-on-regression` could never fire, which is the same failure as a
+    check that cannot fire at all. Only a *positively evidenced* contradiction
+    withdraws a claim -- exactly the standard `MODE_UNDECIDED` is held to.
+    """
+    history = _repl_history(bh, 500, "some-other-commit")
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("an unreplicated movement still fails the build", failed, True)
+    check("...and says it has been measured only once",
+          "measured only once" in out, True)
+    check("...and is not given the confirmed heading",
+          "  REGRESSED (" in out, False)
+    check("...and tells the reader how to settle it",
+          "WITHOUT" in out and "rebuilding to confirm" in out, True)
+
+
+def test_replication_evidence_must_be_the_same_binary_on_the_same_terms(bh):
+    """Three ways a repeat can look like evidence without being any.
+
+    Each of these would silently *manufacture* replication -- the failure
+    direction that matters, because it ends with a real regression waved
+    through as "contradicted".
+    """
+    # 1. `unknown` is what git_commit() returns when it could not read HEAD.
+    #    Two runs that both failed to read HEAD are not two runs of one binary.
+    history = _repl_history(bh, 500, "unknown")
+    out, failed = _repl_report(bh, history, 3000, "unknown")
+    check("an unknown commit is not an identity", failed, True)
+    check("...so the movement is unreplicated, not contradicted",
+          "NOT REPLICATED" in out, False)
+
+    # 2. A different build profile. Its numbers are not comparable at all --
+    #    the same reason `comparable_records` exists.
+    history = _repl_history(bh, 500, "xxx", earlier_profile="debug")
+    _out, failed = _repl_report(bh, history, 3000, "xxx")
+    check("another profile's run is not evidence here", failed, True)
+
+    # 3. A different host.
+    history = _repl_history(bh, 500, "xxx", earlier_host="OTHER")
+    _out, failed = _repl_report(bh, history, 3000, "xxx")
+    check("another host's run is not evidence here", failed, True)
+
+    # And the unit-level statement of the same rule, so a refactor that moves
+    # the filtering out of `values_for_commit` is caught here too.
+    history = _repl_history(bh, 500, "xxx")
+    check("values_for_commit finds the repeat",
+          bh.values_for_commit(history, "H", "release", "b0", "xxx"), [500])
+    check("...and refuses to match the unknown sentinel",
+          bh.values_for_commit(history, "H", "release", "b0",
+                               bh.UNKNOWN_COMMIT), [])
+
+
+def test_an_aa_comparison_is_named_and_cannot_fail_the_build(bh):
+    """Baseline and current sharing a commit makes the whole diff an A/A test.
+
+    Not a statistical claim but an arithmetic one: the two runs share a commit,
+    so the difference between them has no code term in it. Worth stating
+    separately from the per-benchmark gate because it also covers the movements
+    the per-benchmark gate declines to judge -- the ones with too little
+    history for a band, which would otherwise still print as `REGRESSED,
+    UNCONFIRMED` and still fail the build on a binary compared to itself.
+    """
+    history = _repl_history(bh, 500, "xxx")
+    history[-1]["commit"] = "xxx"          # baseline IS the current commit
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("an A/A comparison cannot fail the build", failed, False)
+    check("...and says so before any list", "A/A COMPARISON" in out, True)
+    check("...naming the shared commit", "SAME commit (xxx)" in out, True)
+    check("...and pointing at the measurement",
+          "5 of 83 benchmarks" in out, True)
+
+    # A different baseline commit must NOT trip it, or the banner would excuse
+    # every run and the check would be gone.
+    history = _repl_history(bh, 2900, "xxx")
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+    check("an ordinary comparison is not called A/A",
+          "A/A COMPARISON" in out, False)
+    check("...and still fails the build", failed, True)
+
+
+def test_replication_declines_the_measured_false_positives(bh):
+    """Positive control: the documented A/A pair, replayed from the real file.
+
+    `bench/history.jsonl`'s last two records share commit `602fc62e0` and are
+    the pair written up in known-issues.md. Replaying run B against run A, the
+    harness reported `page_alloc_free` +85% and `vfs_stat_breakdown_full` +36%
+    as *confirmed* regressions on code that had not changed, and graded the run
+    itself `RUN CLEAN` while doing it.
+
+    Synthetic tests can only show the gate does what it was written to do. This
+    one shows it does it to the actual numbers that fooled a reader.
+    """
+    import json
+    if not os.path.exists(HISTORY):
+        check("history.jsonl exists for the A/A control", False, True)
+        return
+    records = [json.loads(line) for line in
+               open(HISTORY, encoding="utf-8").read().splitlines()
+               if line.strip()]
+    if len(records) < 2 or records[-1].get("commit") != records[-2].get("commit"):
+        print("SKIP  A/A control (the last two records no longer share a commit)")
+        return
+
+    run_b = records[-1]
+    host, profile = run_b["host"], bh.record_profile(run_b)
+    prior = records[:-1]
+    previous = bh.previous_for_host(prior, host, profile)
+    current = {name: (value, 10 ** 9, "OK", None, None)
+               for name, value in run_b["entries"].items()}
+
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        failed = bh.report(previous, current, 25.0, records=prior, host=host,
+                           profile=profile, commit=run_b["commit"])
+    out = buf.getvalue()
+
+    check("the measured A/A pair no longer fails the build", failed, False)
+    check("...and no benchmark is called a confirmed regression",
+          "  REGRESSED (" in out, False)
+    for name in ("page_alloc_free", "vfs_stat_breakdown_full"):
+        if name not in run_b["entries"]:
+            continue
+        check(f"...{name} is withdrawn by name",
+              f"-> {name}: another run of this same binary" in out, True)
 
 
 def main():

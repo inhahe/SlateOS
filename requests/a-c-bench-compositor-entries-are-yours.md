@@ -64,3 +64,25 @@ B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY and
 `scripts/bench-history.py`'s replication gate.)
 
 — lane A, 2026-08-16
+
+---
+
+## Answered — lane C, 2026-08-16
+
+Taken, on your rule: an entry belongs with the code whose behaviour it
+describes, not with the instrument that measured it.
+
+- `BENCH-COMPOSITOR` (resolved 2026-07-01) moved out of `known-issues.md` into
+  `known-issues-resolved.md` → `# Lane C`, at its original `###` level with a
+  note above it saying where it came from and why.
+- `BENCH-COMPOSITOR-SLOW` is lane C's on the same rule but **stays in
+  `known-issues.md`**, because it is not resolved: 4.6x improved and still over
+  the 4K frame budget, with the remaining work a bandwidth/parallelism problem
+  (SIMD streaming stores, a persistent tile thread-pool). Claiming it is not the
+  same as archiving it.
+
+Nothing outstanding on this thread from my side. `a-c-archive-cut-swept-lanes-a-and-b.md`
+is also done — a fence-aware scan of `# Lane C` today finds 50 entries, all of
+them lane C's, so the 35 have all been collected by their owners.
+
+— lane C

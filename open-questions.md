@@ -472,6 +472,50 @@ the `profile` history field, which is common to all three options.
 
 ---
 
+## Q47 — [A] The `D:` drive filled to 0 bytes free and destroyed a source file. Should the three lanes share one build-output directory? — Status: OPEN
+
+**In short:** The drive the project lives on ran completely out of space today.
+An edit that was half-written when the space ran out left one kernel source
+file **empty** — 18 KB of code replaced by nothing. It was recovered from git in
+under a minute because it happened to be already committed, but five other files
+being edited at the same moment were *not* committed and would have been gone
+for good. The space is going to compiler output: three parallel agents each keep
+their own copy of every compiled artefact, and deleting just one agent's copy
+freed **13 GB**. The question is whether the three should share one output
+directory (much less disk, but they would have to take turns compiling) or keep
+their own (fast, independent, and this happens again).
+
+**Terms:** a *build-output directory* (`target/`) is where the compiler puts
+everything it produces — object files, libraries, the kernel image. It is
+entirely regenerable: deleting it costs a rebuild, never source. Rust's build
+tool locks that directory, so two builds sharing one **queue** rather than run
+at once.
+
+| Option | *What changes:* | Cost |
+|---|---|---|
+| **A — Share one directory** (`CARGO_TARGET_DIR` set to a single path for all three lanes) | Roughly a quarter of the disk footprint; a lane that starts a build while another is compiling **waits** instead of proceeding | Lanes serialise on the build lock. Wall-clock per lane goes up whenever two build at once |
+| **B — Keep separate directories, add pruning** | Nothing changes day to day, except a scheduled/opportunistic `cargo clean` on lanes that have been idle | Keeps parallel builds, but the pruning has to be remembered, and "idle" is a guess |
+| **C — Keep separate, and add a free-space floor to the tooling** | `boot-test.sh` and the test runner refuse to start below (say) 20 GB free and say why | Does not free anything; converts a corrupting failure into an honest refusal |
+| **D — Move the build output off `D:` entirely** | Compiler output goes to another volume; `D:` holds only source and the operator's data | Needs a volume with tens of GB free — operator knows whether one exists; also slower if that volume is slower |
+
+**Claude's recommendation: C now (it is Lane A's to do unilaterally and is
+strictly protective), plus A if you are willing to trade build parallelism.**
+A's serialisation is arguably a *bonus* rather than a cost here: concurrent lane
+builds are already the single largest source of the benchmark contamination
+documented throughout `known-issues.md`, so forcing the lanes to take turns
+would make the performance numbers more trustworthy, not less. But that is a
+real change to how all three agents work, which is why it is not being made
+unilaterally.
+
+**If never answered:** the disk fills again. Today's damage was one committed
+file and cost a minute; the same event during a large uncommitted change loses
+that change outright. It also degrades quietly first — builds and boot tests
+start failing in confusing ways (a link step dying part-way can leave a stale
+kernel image staged, which `--no-build` will then boot as if it were current)
+before anything says "disk full".
+
+---
+
 Recently resolved (see `design-decisions.md` for the full rationale):
 
 - Q38 Should osh be locale-aware, or UTF-8-only? — resolved 2026-08-07 (§104):

@@ -1352,6 +1352,10 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::TimedOut => errno::ETIMEDOUT,
         KernelError::Deadlock => errno::EDEADLK,
         KernelError::Interrupted => errno::EINTR,
+        // ERANGE, not EINVAL: the call was well-formed and the answer exists,
+        // it just did not fit. EINVAL would tell a caller to stop; ERANGE tells
+        // it to allocate more and retry, which is the correct response.
+        KernelError::BufferTooSmall => errno::ERANGE,
         KernelError::OutOfMemory => errno::ENOMEM,
         KernelError::InvalidAddress => errno::EFAULT,
         KernelError::PageFault => errno::EFAULT,

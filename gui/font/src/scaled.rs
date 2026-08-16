@@ -2058,6 +2058,7 @@ mod tests {
     use crate::sfnt::tests::{
         build_test_font, build_test_font_with_gdef_classes, build_test_font_with_gpos_scripts,
         build_test_font_with_gsub_and_classes, build_test_font_with_layout,
+        build_test_font_with_uvs,
     };
 
     fn font(px: f32) -> ScaledFont {
@@ -2406,6 +2407,122 @@ mod tests {
             ],
             "a class-zero mark the face does not call a mark keeps its width"
         );
+    }
+
+    /// VARIATION SELECTOR-1.
+    const VS: char = '\u{FE00}';
+
+    /// Run the collapse over `pieces` with a face that names every pair as
+    /// glyph 7, or names none at all.
+    fn collapse(pieces: &[Piece], names: bool) -> (Vec<Piece>, Vec<Option<u16>>) {
+        let mut pieces = pieces.to_vec();
+        let mut jamo: Vec<Option<hangul::Jamo>> = Vec::new();
+        let mut uvs: Vec<Option<u16>> = Vec::new();
+        collapse_variation_sequences(&mut pieces, &mut jamo, &mut uvs, |_, _| names.then_some(7));
+        (pieces, uvs)
+    }
+
+    /// A pair the face recognises is one piece from here on, and every pass
+    /// after this one counts pieces: the level list, the run splitter, the
+    /// joining forms. Leaving it as two would give the selector a level, a
+    /// script and a joining form of its own.
+    #[test]
+    fn a_named_pair_becomes_one_piece_carrying_its_glyph() {
+        let (pieces, uvs) = collapse(&[('A', 0), (VS, 1), ('B', 4)], true);
+        assert_eq!(pieces, alloc::vec![('A', 0), ('B', 4)]);
+        assert_eq!(uvs, alloc::vec![Some(7), None]);
+    }
+
+    /// A pair the face does not recognise stays two pieces, which is
+    /// HarfBuzz's fallback and needs nothing further: the selector is a
+    /// default ignorable, so it is erased after shaping and draws nothing.
+    #[test]
+    fn an_unnamed_pair_stays_two_pieces() {
+        let (pieces, uvs) = collapse(&[('A', 0), (VS, 1), ('B', 4)], false);
+        assert_eq!(pieces, alloc::vec![('A', 0), (VS, 1), ('B', 4)]);
+        assert_eq!(uvs, alloc::vec![None, None, None]);
+    }
+
+    /// Only the first selector of a run can attach, and a selector is never a
+    /// base. Both halves matter: a face that named every pair it was shown
+    /// would otherwise fold a whole run of selectors into the letter, and each
+    /// fold would swallow a piece that the erasure pass has to see.
+    #[test]
+    fn a_selector_never_pairs_with_the_selector_after_it() {
+        let (pieces, uvs) = collapse(&[('A', 0), (VS, 1), (VS, 4), ('B', 7)], true);
+        assert_eq!(pieces, alloc::vec![('A', 0), (VS, 4), ('B', 7)]);
+        assert_eq!(uvs, alloc::vec![Some(7), None, None]);
+
+        let (pieces, uvs) = collapse(&[(VS, 0), ('A', 3)], true);
+        assert_eq!(pieces, alloc::vec![(VS, 0), ('A', 3)], "a leading selector");
+        assert_eq!(uvs, alloc::vec![None, None]);
+    }
+
+    /// A trailing selector has nothing after it to pair with, and the
+    /// look-ahead must not read past the end to discover that.
+    #[test]
+    fn a_trailing_selector_is_left_alone() {
+        let (pieces, uvs) = collapse(&[('A', 0), (VS, 1)], true);
+        assert_eq!(pieces, alloc::vec![('A', 0)], "the pair collapsed");
+        assert_eq!(uvs, alloc::vec![Some(7)]);
+    }
+
+    /// Text with no selector in it is left untouched — including `uvs`, which
+    /// stays empty rather than being filled with `None`s. That is the case for
+    /// nearly every string, so every reader indexes `uvs` defensively; a test
+    /// that let it silently become pieces-length would hide a reader that does
+    /// not.
+    #[test]
+    fn text_with_no_selector_does_not_even_allocate() {
+        let (pieces, uvs) = collapse(&[('A', 0), ('B', 1)], true);
+        assert_eq!(pieces, alloc::vec![('A', 0), ('B', 1)]);
+        assert!(uvs.is_empty());
+    }
+
+    /// `jamo` is one entry per piece and is shortened in lockstep. A deletion
+    /// that left it behind would give every Korean glyph after the pair its
+    /// neighbour's syllable feature — `ljmo` where `vjmo` belongs.
+    #[test]
+    fn the_korean_syllable_marks_are_shortened_in_lockstep() {
+        let pieces = alloc::vec![('\u{1100}', 0), (VS, 3), ('\u{1161}', 6)];
+        let mut pieces = pieces;
+        let mut jamo = alloc::vec![
+            Some(hangul::Jamo::Leading),
+            Some(hangul::Jamo::Leading),
+            Some(hangul::Jamo::Vowel),
+        ];
+        let mut uvs: Vec<Option<u16>> = Vec::new();
+        collapse_variation_sequences(&mut pieces, &mut jamo, &mut uvs, |_, _| Some(7));
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(
+            jamo,
+            alloc::vec![Some(hangul::Jamo::Leading), Some(hangul::Jamo::Vowel)]
+        );
+    }
+
+    /// End to end: the face names a glyph its ordinary `cmap` has no entry
+    /// for, and the shaped run is one glyph rather than a letter and an
+    /// invisible selector beside it.
+    #[test]
+    fn a_recognised_pair_shapes_as_the_one_glyph_the_face_named() {
+        let bytes = build_test_font_with_uvs(&[('\u{FE00}' as u32, &[], &[('A' as u32, 2)])]);
+        let f = ScaledFont::from_bytes(bytes, 1000.0).unwrap();
+        let shaped = f.shape("A\u{FE00}");
+        let gids: Vec<u16> = shaped.glyphs().iter().map(|g| g.key.gid()).collect();
+        assert_eq!(gids, alloc::vec![2], "one glyph, and the named one");
+    }
+
+    /// The same string in the same face with the pair unlisted: two glyphs go
+    /// in, and the selector comes out erased rather than drawn, because it is
+    /// a default ignorable. The fixture has no `space` glyph, so erased means
+    /// deleted — which leaves one glyph again, but the base's own.
+    #[test]
+    fn an_unrecognised_pair_leaves_the_base_and_erases_the_selector() {
+        let bytes = build_test_font_with_uvs(&[('\u{FE01}' as u32, &[], &[('A' as u32, 2)])]);
+        let f = ScaledFont::from_bytes(bytes, 1000.0).unwrap();
+        let shaped = f.shape("A\u{FE00}");
+        let gids: Vec<u16> = shaped.glyphs().iter().map(|g| g.key.gid()).collect();
+        assert_eq!(gids, alloc::vec![1], "the base's ordinary glyph");
     }
 
     #[test]

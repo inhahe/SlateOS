@@ -2585,6 +2585,105 @@ pub(crate) mod tests {
         assemble(&tables)
     }
 
+    /// One selector record of a `cmap` format-14 subtable: the selector, the
+    /// default half as `(start, additional)` ranges, and the non-default half
+    /// as `(code point, glyph)` pairs. An empty half is omitted from the file,
+    /// which the format spells as a zero offset.
+    ///
+    /// Both halves must be sorted by code point — the format requires it and
+    /// [`first_at_or_after`] binary-searches on the assumption. A test that
+    /// wants an unsorted one has to build the bytes itself.
+    pub(crate) type Uvs<'a> = (u32, &'a [(u32, u8)], &'a [(u32, u16)]);
+
+    /// The fixture plus a `cmap` format-14 subtable holding `records`.
+    ///
+    /// The fixture's ordinary format-4 subtable stays, and stays *first*: a
+    /// face with variation sequences always has an ordinary table too, since
+    /// format 14 maps pairs and nothing else. The second `cmap` record is
+    /// filed under platform 0 encoding 5, which is what the encoding is for,
+    /// though nothing reads it — [`Face::find_variation_selectors`] looks for
+    /// the format and not for the platform, exactly as HarfBuzz does.
+    pub(crate) fn build_test_font_with_uvs(records: &[Uvs<'_>]) -> Vec<u8> {
+        let mut tables = build_test_tables(TRUE_LSB_3);
+        let sub14 = uvs_subtable(records);
+        for &mut (tag, ref mut data) in &mut tables {
+            if tag != *b"cmap" {
+                continue;
+            }
+            // The fixture's `cmap` is a four-byte header, one eight-byte
+            // record, then the subtable; a second record pushes it along by
+            // eight.
+            let sub4 = data.split_off(12);
+            let mut cmap: Vec<u8> = Vec::new();
+            cmap.extend_from_slice(&0u16.to_be_bytes()); // version
+            cmap.extend_from_slice(&2u16.to_be_bytes()); // numTables
+            cmap.extend_from_slice(&3u16.to_be_bytes()); // platformID (Windows)
+            cmap.extend_from_slice(&1u16.to_be_bytes()); // encodingID (BMP)
+            cmap.extend_from_slice(&20u32.to_be_bytes());
+            cmap.extend_from_slice(&0u16.to_be_bytes()); // platformID (Unicode)
+            cmap.extend_from_slice(&5u16.to_be_bytes()); // encodingID (UVS)
+            let at = u32::try_from(20 + sub4.len()).expect("a test cmap fits in 4 GiB");
+            cmap.extend_from_slice(&at.to_be_bytes());
+            cmap.extend_from_slice(&sub4);
+            cmap.extend_from_slice(&sub14);
+            *data = cmap;
+        }
+        tables.sort_unstable_by_key(|&(tag, _)| tag);
+        assemble(&tables)
+    }
+
+    /// The format-14 subtable itself: a ten-byte header, one eleven-byte
+    /// record per selector, then the halves those records point at, in the
+    /// order the records were written.
+    fn uvs_subtable(records: &[Uvs<'_>]) -> Vec<u8> {
+        fn u24(v: u32) -> [u8; 3] {
+            let [_, a, b, c] = v.to_be_bytes();
+            [a, b, c]
+        }
+        let head = 10 + 11 * records.len();
+        let mut recs: Vec<u8> = Vec::new();
+        let mut halves: Vec<u8> = Vec::new();
+        for &(selector, default, non_default) in records {
+            recs.extend_from_slice(&u24(selector));
+            let mut half = |empty: bool, body: &[u8]| {
+                let at = if empty {
+                    0
+                } else {
+                    u32::try_from(head + halves.len()).expect("a test subtable fits in 4 GiB")
+                };
+                recs.extend_from_slice(&at.to_be_bytes());
+                if !empty {
+                    halves.extend_from_slice(body);
+                }
+            };
+            let mut body: Vec<u8> = Vec::new();
+            let n = u32::try_from(default.len()).expect("a test may not list 4G ranges");
+            body.extend_from_slice(&n.to_be_bytes());
+            for &(start, extra) in default {
+                body.extend_from_slice(&u24(start));
+                body.push(extra);
+            }
+            half(default.is_empty(), &body);
+            let mut body: Vec<u8> = Vec::new();
+            let n = u32::try_from(non_default.len()).expect("a test may not list 4G mappings");
+            body.extend_from_slice(&n.to_be_bytes());
+            for &(cp, gid) in non_default {
+                body.extend_from_slice(&u24(cp));
+                body.extend_from_slice(&gid.to_be_bytes());
+            }
+            half(non_default.is_empty(), &body);
+        }
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(&14u16.to_be_bytes()); // format
+        let len = u32::try_from(head + halves.len()).expect("a test subtable fits in 4 GiB");
+        out.extend_from_slice(&len.to_be_bytes());
+        let n = u32::try_from(records.len()).expect("a test may not list 4G selectors");
+        out.extend_from_slice(&n.to_be_bytes());
+        out.extend_from_slice(&recs);
+        out.extend_from_slice(&halves);
+        out
+    }
+
     /// A `GPOS` or `GSUB` whose ScriptList names `scripts` and which does
     /// nothing. The two tables share a header, so one builder serves both.
     fn empty_layout_table(scripts: &[[u8; 4]]) -> Vec<u8> {
@@ -2646,6 +2745,179 @@ pub(crate) mod tests {
 
     fn face() -> Face {
         Face::parse(build_test_font()).expect("synthetic font must parse")
+    }
+
+    /// VARIATION SELECTOR-1, the one a real face is most likely to carry.
+    const VS1: char = '\u{FE00}';
+    /// VARIATION SELECTOR-2, used here as the selector a face does *not* list.
+    const VS2: char = '\u{FE01}';
+
+    fn uvs_face(records: &[Uvs<'_>]) -> Face {
+        Face::parse(build_test_font_with_uvs(records)).expect("a font with a UVS table must parse")
+    }
+
+    /// The ordinary fixture has no format-14 subtable, so every pair misses —
+    /// and the shaper's skip-the-pass flag says so, which is what keeps the
+    /// lookup off the hot path for the overwhelming majority of faces.
+    #[test]
+    fn a_face_with_no_format_14_subtable_recognises_no_pair() {
+        let f = face();
+        assert!(!f.has_variation_sequences());
+        assert_eq!(f.variation_glyph('A', VS1), None);
+    }
+
+    /// The non-default half is an explicit mapping: this pair draws as *that*
+    /// glyph, whatever the base's ordinary `cmap` entry says. 'A' maps to
+    /// glyph 1 normally; under the selector it is glyph 2.
+    #[test]
+    fn the_non_default_half_names_a_glyph_of_its_own() {
+        let f = uvs_face(&[(VS1 as u32, &[], &[('A' as u32, 2)])]);
+        assert!(f.has_variation_sequences());
+        assert_eq!(f.glyph_index('A'), Some(1), "the ordinary cmap is untouched");
+        assert_eq!(f.variation_glyph('A', VS1), Some(2));
+    }
+
+    /// The default half means "the base's ordinary glyph is already right",
+    /// and answering with that glyph says the same thing as the table while
+    /// still reporting that the pair was *recognised* — which is the whole
+    /// distinction that matters upstream, since a recognised pair is one glyph
+    /// and an unrecognised one is two.
+    #[test]
+    fn the_default_half_answers_with_the_bases_ordinary_glyph() {
+        // One range: U+0041 plus two more code points, so U+0041..=U+0043.
+        let f = uvs_face(&[(VS1 as u32, &[('A' as u32, 2)], &[])]);
+        for (ch, gid) in [('A', 1), ('B', 2), ('C', 3)] {
+            assert_eq!(f.variation_glyph(ch, VS1), Some(gid), "{ch} is in the range");
+        }
+    }
+
+    /// The inclusive range's two edges, from both sides. `additional` counts
+    /// the code points *after* the start, so a zero means a range of one — an
+    /// off-by-one here would either swallow the next character or drop the
+    /// last of the range.
+    #[test]
+    fn a_default_range_ends_where_its_additional_count_says() {
+        let one = uvs_face(&[('\u{FE00}' as u32, &[('B' as u32, 0)], &[])]);
+        assert_eq!(one.variation_glyph('A', VS1), None, "before the range");
+        assert_eq!(one.variation_glyph('B', VS1), Some(2), "the range");
+        assert_eq!(one.variation_glyph('C', VS1), None, "one past it");
+    }
+
+    /// Two ranges, and a base that falls in the gap between them. This is what
+    /// the "first range starting after the base, then step back one" search is
+    /// for: the range that could contain the base is the last one before it,
+    /// and it may still not contain it.
+    #[test]
+    fn a_base_between_two_default_ranges_is_not_recognised() {
+        let f = uvs_face(&[(VS1 as u32, &[('A' as u32, 0), ('C' as u32, 0)], &[])]);
+        assert_eq!(f.variation_glyph('A', VS1), Some(1));
+        assert_eq!(f.variation_glyph('B', VS1), None, "the gap");
+        assert_eq!(f.variation_glyph('C', VS1), Some(3));
+    }
+
+    /// A base below every range there is. The search returns index 0, and
+    /// stepping back from 0 has no answer at all — the arm that a subtraction
+    /// on `usize` would have panicked on.
+    #[test]
+    fn a_base_below_every_default_range_is_not_recognised() {
+        let f = uvs_face(&[(VS1 as u32, &[('B' as u32, 0)], &[])]);
+        assert_eq!(f.variation_glyph('A', VS1), None);
+    }
+
+    /// A selector the face does not list is not a variation sequence, however
+    /// well it knows the base. The record scan is linear over the selectors,
+    /// so the second record has to be reachable too.
+    #[test]
+    fn only_the_selectors_the_face_lists_are_recognised() {
+        let f = uvs_face(&[
+            (VS1 as u32, &[], &[('A' as u32, 2)]),
+            (VS2 as u32, &[], &[('A' as u32, 3)]),
+        ]);
+        assert_eq!(f.variation_glyph('A', VS1), Some(2));
+        assert_eq!(f.variation_glyph('A', VS2), Some(3), "the second record");
+        assert_eq!(f.variation_glyph('A', '\u{FE02}'), None, "no third record");
+    }
+
+    /// A base the listed selector says nothing about. The binary search lands
+    /// on a real record and the equality check has to reject it; without that
+    /// check a near miss would answer with its neighbour's glyph.
+    #[test]
+    fn a_base_the_selector_does_not_map_is_not_recognised() {
+        let f = uvs_face(&[(VS1 as u32, &[], &[('A' as u32, 2), ('C' as u32, 3)])]);
+        assert_eq!(f.variation_glyph('B', VS1), None, "between two mappings");
+        assert_eq!(f.variation_glyph('\u{0100}', VS1), None, "past the last");
+    }
+
+    /// Both halves are optional, and the format spells "absent" as a zero
+    /// offset — which is a perfectly ordinary offset everywhere else in
+    /// `sfnt`, so reading one as a real one would send the search into the
+    /// subtable header.
+    #[test]
+    fn an_absent_half_is_a_zero_offset_and_not_an_offset_of_zero() {
+        let default_only = uvs_face(&[(VS1 as u32, &[('A' as u32, 0)], &[])]);
+        assert_eq!(default_only.variation_glyph('A', VS1), Some(1));
+        assert_eq!(default_only.variation_glyph('B', VS1), None);
+
+        let non_default_only = uvs_face(&[(VS1 as u32, &[], &[('B' as u32, 2)])]);
+        assert_eq!(non_default_only.variation_glyph('A', VS1), None);
+        assert_eq!(non_default_only.variation_glyph('B', VS1), Some(2));
+
+        let neither = uvs_face(&[(VS1 as u32, &[], &[])]);
+        assert!(neither.has_variation_sequences(), "the table is still there");
+        assert_eq!(neither.variation_glyph('A', VS1), None);
+    }
+
+    /// A pair is looked up in the default half first, so a base listed in both
+    /// halves gets its ordinary glyph. Malformed — the format forbids it — but
+    /// a face is not obliged to be well-formed and the order must be defined.
+    #[test]
+    fn the_default_half_wins_when_a_base_is_in_both() {
+        let f = uvs_face(&[(VS1 as u32, &[('A' as u32, 0)], &[('A' as u32, 3)])]);
+        assert_eq!(f.variation_glyph('A', VS1), Some(1));
+    }
+
+    /// A mapping to a glyph the face does not have is refused rather than
+    /// passed on: the fixture has four glyphs, and a `glyf` lookup on 99 would
+    /// run off the end of `loca`. Glyph 0 is refused too — `.notdef` is what a
+    /// miss already means, and a face saying "this pair draws as nothing" is
+    /// indistinguishable from one saying nothing at all.
+    #[test]
+    fn a_mapping_to_a_glyph_the_face_lacks_is_refused() {
+        let f = uvs_face(&[(VS1 as u32, &[], &[('A' as u32, 99), ('B' as u32, 0)])]);
+        assert_eq!(f.variation_glyph('A', VS1), None, "past num_glyphs");
+        assert_eq!(f.variation_glyph('B', VS1), None, ".notdef");
+    }
+
+    /// The binary search both halves share. `count` is returned when every
+    /// record sorts before the base, and the caller must read that as a miss
+    /// rather than as an index — the one arm that is not reachable through
+    /// [`Face::variation_glyph`]'s default half, which steps back instead.
+    #[test]
+    fn the_record_search_finds_the_first_not_before_the_base() {
+        // Four records, stride 4, code points 1, 3, 5, 7.
+        let mut data: Vec<u8> = Vec::new();
+        for cp in [1u32, 3, 5, 7] {
+            data.extend_from_slice(&cp.to_be_bytes()[1..]);
+            data.push(0);
+        }
+        for (base, want) in [(0, 0), (1, 0), (2, 1), (3, 1), (6, 3), (7, 3), (8, 4)] {
+            assert_eq!(
+                first_at_or_after(&data, 0, 4, 4, base),
+                want,
+                "the first record not before {base}"
+            );
+        }
+    }
+
+    /// A truncated table reads as "not before", walking the search to the low
+    /// end, where the caller's own equality check fails it. The alternative —
+    /// reading a short record as "before" — would walk it to `count` and be
+    /// reported as a clean miss, which is the same answer for the wrong
+    /// reason and would hide the truncation from a caller that stepped back.
+    #[test]
+    fn a_truncated_record_array_searches_toward_the_low_end() {
+        assert_eq!(first_at_or_after(&[], 0, 4, 8, 5), 0);
+        assert_eq!(first_at_or_after(&[0, 0, 9], 0, 4, 8, 5), 0, "one short record");
     }
 
     #[test]

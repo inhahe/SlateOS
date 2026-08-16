@@ -293,9 +293,25 @@ fn read_i32_le(data: &[u8], offset: usize) -> Option<i32> {
     Some(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
-/// Parse all records from a utmp file.
+/// Read a utmp file and parse every record in it.
+///
+/// This is only the I/O half; the parsing lives in [`parse_utmp`] so that the
+/// record-decoding rules can be tested against byte buffers directly. Reading
+/// a real path is not a usable way to test them: `who`'s target is a Unix
+/// system, but its tests run on the build host, where a path like `/dev/null`
+/// is not the null device at all — on Windows it resolves against the current
+/// drive, and a stray `D:\dev\null` left behind by a misdirected shell
+/// redirect is an ordinary file whose contents will parse. See the
+/// `test_parse_utmp_*` tests.
 fn read_utmp(path: &str) -> Option<Vec<SessionRecord>> {
-    let data = fs::read(path).ok()?;
+    parse_utmp(&fs::read(path).ok()?)
+}
+
+/// Decode a utmp byte image into records, or `None` if it holds no whole one.
+///
+/// Trailing bytes that do not make up a complete `UTMP_RECORD_SIZE` record are
+/// ignored, matching the way a utmp file torn by a concurrent write is read.
+fn parse_utmp(data: &[u8]) -> Option<Vec<SessionRecord>> {
     if data.len() < UTMP_RECORD_SIZE {
         return None;
     }
@@ -304,13 +320,13 @@ fn read_utmp(path: &str) -> Option<Vec<SessionRecord>> {
     let mut offset = 0;
 
     while offset + UTMP_RECORD_SIZE <= data.len() {
-        let record_type = read_i32_le(&data, offset + UT_TYPE_OFFSET)?;
-        let pid = read_i32_le(&data, offset + UT_PID_OFFSET)?;
-        let tty = extract_string(&data, offset + UT_LINE_OFFSET, UT_LINE_SIZE)?;
-        let id = extract_string(&data, offset + UT_ID_OFFSET, UT_ID_SIZE)?;
-        let user = extract_string(&data, offset + UT_USER_OFFSET, UT_USER_SIZE)?;
-        let host = extract_string(&data, offset + UT_HOST_OFFSET, UT_HOST_SIZE)?;
-        let tv_sec = read_i32_le(&data, offset + UT_TV_SEC_OFFSET)?;
+        let record_type = read_i32_le(data, offset + UT_TYPE_OFFSET)?;
+        let pid = read_i32_le(data, offset + UT_PID_OFFSET)?;
+        let tty = extract_string(data, offset + UT_LINE_OFFSET, UT_LINE_SIZE)?;
+        let id = extract_string(data, offset + UT_ID_OFFSET, UT_ID_SIZE)?;
+        let user = extract_string(data, offset + UT_USER_OFFSET, UT_USER_SIZE)?;
+        let host = extract_string(data, offset + UT_HOST_OFFSET, UT_HOST_SIZE)?;
+        let tv_sec = read_i32_le(data, offset + UT_TV_SEC_OFFSET)?;
 
         // tv_sec is signed but represents a positive epoch timestamp.
         let login_time = if tv_sec >= 0 { tv_sec as u64 } else { 0 };
@@ -1580,11 +1596,37 @@ mod tests {
     }
 
     #[test]
-    fn test_read_utmp_too_small() {
-        // Attempting to parse data smaller than one record should return None.
-        // We cannot create a temp file on the custom target in tests, so we
-        // verify the function handles the nonexistent case.
-        assert!(read_utmp("/dev/null").is_none());
+    fn test_parse_utmp_too_small() {
+        // Anything shorter than one whole record decodes to nothing. Checked
+        // against buffers rather than a file: this test used to read
+        // "/dev/null" and assert the read failed, which is only true on a
+        // Unix host. On Windows that path resolves against the current drive,
+        // and a stray 640-byte `D:\dev\null` (a shell redirect that landed in
+        // a real file) made it decode one garbage record and fail the suite.
+        assert!(parse_utmp(&[]).is_none());
+        assert!(parse_utmp(&[0u8; UTMP_RECORD_SIZE - 1]).is_none());
+    }
+
+    #[test]
+    fn test_parse_utmp_exact_and_partial_records() {
+        // Exactly one record decodes to exactly one record...
+        let one = parse_utmp(&[0u8; UTMP_RECORD_SIZE]).expect("one whole record");
+        assert_eq!(one.len(), 1);
+
+        // ...and a trailing partial record is ignored rather than rounding up
+        // or reading past the end.
+        let one_and_a_bit =
+            parse_utmp(&[0u8; UTMP_RECORD_SIZE + UTMP_RECORD_SIZE / 2]).expect("one whole record");
+        assert_eq!(one_and_a_bit.len(), 1);
+
+        let two = parse_utmp(&[0u8; UTMP_RECORD_SIZE * 2]).expect("two whole records");
+        assert_eq!(two.len(), 2);
+    }
+
+    #[test]
+    fn test_read_utmp_missing_file_is_none() {
+        // The I/O half: an unreadable path yields None rather than panicking.
+        assert!(read_utmp("/nonexistent/dir/utmp").is_none());
     }
 
     // --- Session dir parsing ---

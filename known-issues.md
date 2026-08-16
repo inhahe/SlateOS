@@ -24998,3 +24998,79 @@ go and read §83. The mitigation used here is the one available: §207 and §312
 are now cited *in the syscall's own doc comment* at the point where the check
 happens, so the next reader of the gate meets the history without going looking
 for it.
+
+---
+
+## A-CRYPTO-BENCHMARKS-STEPPED-58-PERCENT-WITH-BYTE-IDENTICAL-CRYPTO-SOURCE (lane A, 2026-08-16)
+
+**Status: OPEN — replicated, cause not yet identified. Not a boot failure; all
+17 boots green.**
+
+**What happened.** Three crypto benchmarks stepped up by a near-uniform ~1.58x
+between the last benchmarked commit (`86a923fe1`) and `9ecef3188`, and stayed
+there across two runs of the *same binary*:
+
+| benchmark | historical range (11 runs) | run 1 | run 2 (`--no-stage`, identical image) |
+|---|---|---|---|
+| `crypto_chacha20_1KiB` | 11749–12178 ns | 19105 | 19187 |
+| `crypto_poly1305_1KiB` | 4976–5166 ns | 8102 | 8257 |
+| `crypto_aead_1KiB` | 18922–19366 ns | 29386 | 29543 |
+
+The historical range is *tight* — chacha20 varied by 3.6% across eleven runs
+spanning many commits — so 19105 is not a tail of the old distribution. The
+ratios are 1.590 / 1.573 / 1.569, and `aead` is chacha20+poly1305, so this
+reads as **one cause appearing three times**, not three findings.
+
+**Why this is not the usual bench flakiness.** The same pair of runs also
+flagged `pick_next` (+150%), `ipc_pipe` (+42%) and `ipc_channel_sync` (+30%),
+and those *did* revert on the second run — 1613→820 ns and 1277→872 ns, back
+inside their own ranges. That is the documented
+`B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY` behaviour and it
+was almost certainly self-inflicted: this agent was running `git fetch`,
+`git merge`, file edits and a `cargo clippy` on the host *while run 1 was
+measuring*, which the canary is documented as unable to see
+(`B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING` — it counts guest cycles, which do
+not advance while the host runs something else). Run 2 was executed with the
+agent deliberately idle. **The crypto trio survived that control and the other
+three did not**, which is what promotes it from noise to a finding.
+
+Note the reporting subtlety that nearly hid this: the suite compares
+*run-over-run*, so once the elevated value became the previous run, the trio
+stopped being flagged. It was found by reading `bench/history.jsonl` directly,
+not from the run verdict, which said `RUN CLEAN`. **A step that persists is
+invisible to a run-over-run comparator after its first appearance.** That is
+arguably a defect in the comparator worth fixing separately — it can only ever
+report edges, never levels.
+
+**What is ruled out.** `kernel/src/crypto.rs` and `kernel/src/bench.rs` are
+**byte-identical** across the range (`git diff 86a923fe1..HEAD --` on both is
+empty). No crypto-related file changed anywhere in the tree. Nothing in the
+build profile changed; the only root `Cargo.toml` edit is lane C adding the
+`byteread` workspace member, which is not in the kernel's dependency graph.
+
+**Leading hypothesis, unconfirmed: code layout under TCG.** The range adds
+~5,400 lines to the kernel image, almost all of it NTFS
+(`kernel/src/fs/ntfs/*`, §210). QEMU's TCG is sensitive to code placement and
+translation-block behaviour in ways real hardware is not, so a hot loop can
+shift substantially without its own source changing. This would make the number
+an emulation artifact rather than a real slowdown — but that is a hypothesis,
+and "probably the emulator" is exactly the reasoning that lets a real
+regression sit unexamined.
+
+**Explicitly considered and rejected:** that the new NTFS self-test perturbs
+machine state before the benchmarks. It does run on every boot, before the
+suite (`kernel/src/main.rs`, `fs::ntfs::self_test()`), but its synthetic volume
+is `TOTAL_CLUSTERS(24) * CLUSTER(4096)` ≈ 98 KiB in a dropped `Vec` — far too
+small to matter, and a memory-pressure effect would move the whole suite rather
+than three benchmarks (whole-suite drift was +0.0%).
+
+**How to settle it.** Build `86a923fe1` in a throwaway worktree and bench it on
+this host. If crypto returns to ~12000 ns, bisect the range; if it does not,
+the step is environmental to this host and the entry can be closed with that
+recorded. Do **not** run anything else on the host during those runs.
+
+**Why it is filed rather than fixed.** The cause is unknown and the honest
+options differ by an order of magnitude in effort. Recording it now matters
+because the run-over-run comparator will never mention it again, so the only
+thing standing between this finding and silent acceptance of a 58% level shift
+is this entry.

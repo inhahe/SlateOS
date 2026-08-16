@@ -8533,6 +8533,10 @@ name = "rancher-cli"
 version = "0.1.0"
 
 [[package]]
+name = "randrange"
+version = "0.1.0"
+
+[[package]]
 name = "ranger-cli"
 version = "0.1.0"
 

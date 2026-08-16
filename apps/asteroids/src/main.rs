@@ -112,45 +112,30 @@ fn normalize_angle(a: f32) -> f32 {
     r
 }
 
-// ── LCG random number generator ────────────────────────────────────
-/// Simple linear congruential generator. Parameters from Numerical Recipes.
-struct Lcg {
-    state: u64,
-}
+// ── Randomness ──────────────────────────────────────────────────────
+//
+// From `randrange`, not a local LCG. The local one's `next_bounded` reduced
+// with `state % bound`, which on a modulus-2^64 generator returns the low bits
+// — and those are a counter, not noise: the low two are a pure function of how
+// many draws have been taken. `random_edge_position` picks the spawn edge with
+// a bound of 4, and a Large asteroid consumes exactly **16** draws (edge, one
+// coordinate, heading, speed, ten vertex radii, spin angle, spin rate). 16 is a
+// multiple of 4, so every edge draw in a wave landed on the same two bits, and
+// **every asteroid in the game entered from the same side of the screen** —
+// which side being the only thing the seed chose. Verified before the fix over
+// seeds 1, 2, 3, 42, 777 and 123456: eight spawns each, one edge each.
+//
+// The float path was already sound: it took the top 24 bits via `>> 40`, which
+// is why the asteroids' shapes and headings looked fine while their entry point
+// did not. See `known-issues.md` and `design-decisions.md` §447.
+use randrange::Rng;
 
-impl Lcg {
-    const fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    /// Returns a value in `0..bound` (exclusive upper bound).
-    fn next_bounded(&mut self, bound: usize) -> usize {
-        let val = self.next_u64();
-        (val % bound as u64) as usize
-    }
-
-    /// Returns a float in [0.0, 1.0).
-    fn next_f32(&mut self) -> f32 {
-        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
-    }
-
-    /// Returns a float in [min, max).
-    fn next_range(&mut self, min: f32, max: f32) -> f32 {
-        min + self.next_f32() * (max - min)
-    }
-
-    /// Returns a random angle in [0, TAU).
-    fn next_angle(&mut self) -> f32 {
-        self.next_f32() * TAU
-    }
+/// Returns a random heading in `[0, TAU)`.
+///
+/// A free function rather than a method: the generator lives in another crate
+/// now, and "a full turn" is this game's unit, not the generator's.
+fn random_angle(rng: &mut Rng) -> f32 {
+    rng.unit_f32() * TAU
 }
 
 // ── Vec2 ────────────────────────────────────────────────────────────
@@ -317,20 +302,20 @@ struct Asteroid {
 }
 
 impl Asteroid {
-    fn new(pos: Vec2, vel: Vec2, size: AsteroidSize, rng: &mut Lcg) -> Self {
+    fn new(pos: Vec2, vel: Vec2, size: AsteroidSize, rng: &mut Rng) -> Self {
         let n = size.vertex_count();
         let base_r = size.radius();
         let mut vertex_radii = Vec::with_capacity(n);
         for _ in 0..n {
             // Vary each vertex radius by +/-30% for jagged look.
-            vertex_radii.push(base_r * rng.next_range(0.7, 1.3));
+            vertex_radii.push(base_r * rng.between_f32(0.7, 1.3));
         }
         Self {
             pos,
             vel,
             size,
-            angle: rng.next_angle(),
-            rotation_speed: rng.next_range(-2.0, 2.0),
+            angle: random_angle(rng),
+            rotation_speed: rng.between_f32(-2.0, 2.0),
             vertex_radii,
         }
     }
@@ -545,7 +530,7 @@ struct AsteroidsApp {
     respawn_timer: f32,
     invulnerable_timer: f32,
     ship_alive: bool,
-    rng: Lcg,
+    rng: Rng,
     frame_counter: u64,
 }
 
@@ -570,7 +555,7 @@ impl AsteroidsApp {
             respawn_timer: 0.0,
             invulnerable_timer: INVULNERABLE_TIME,
             ship_alive: true,
-            rng: Lcg::new(seed),
+            rng: Rng::new(seed),
             frame_counter: 0,
         };
         app.spawn_wave(INITIAL_ASTEROIDS);
@@ -589,8 +574,8 @@ impl AsteroidsApp {
     /// Spawn a single asteroid of the given size at a random edge position.
     fn spawn_asteroid_at_edge(&mut self, size: AsteroidSize) {
         let pos = self.random_edge_position(size.radius());
-        let angle = self.rng.next_angle();
-        let speed = size.speed() * self.rng.next_range(0.5, 1.5);
+        let angle = random_angle(&mut self.rng);
+        let speed = size.speed() * self.rng.between_f32(0.5, 1.5);
         let vel = Vec2::new(cos_f32(angle) * speed, sin_f32(angle) * speed);
         self.asteroids
             .push(Asteroid::new(pos, vel, size, &mut self.rng));
@@ -599,13 +584,24 @@ impl AsteroidsApp {
     /// Pick a random position along the field edges, ensuring it is far
     /// enough from the ship.
     fn random_edge_position(&mut self, radius: f32) -> Vec2 {
+        // The loop is unbounded but cannot spin: each edge spans a full field
+        // dimension, and the wrapped distance along it reaches half of that —
+        // 400 across, 300 down — both comfortably past SAFE_SPAWN_DISTANCE
+        // (150). So an acceptable point exists on *every* edge whatever the
+        // ship is doing, and the retry only rejects the near ones.
         loop {
-            let side = self.rng.next_bounded(4);
+            let side = self.rng.below(4);
             let pos = match side {
-                0 => Vec2::new(self.rng.next_range(0.0, FIELD_WIDTH), radius),
-                1 => Vec2::new(self.rng.next_range(0.0, FIELD_WIDTH), FIELD_HEIGHT - radius),
-                2 => Vec2::new(radius, self.rng.next_range(0.0, FIELD_HEIGHT)),
-                _ => Vec2::new(FIELD_WIDTH - radius, self.rng.next_range(0.0, FIELD_HEIGHT)),
+                0 => Vec2::new(self.rng.between_f32(0.0, FIELD_WIDTH), radius),
+                1 => Vec2::new(
+                    self.rng.between_f32(0.0, FIELD_WIDTH),
+                    FIELD_HEIGHT - radius,
+                ),
+                2 => Vec2::new(radius, self.rng.between_f32(0.0, FIELD_HEIGHT)),
+                _ => Vec2::new(
+                    FIELD_WIDTH - radius,
+                    self.rng.between_f32(0.0, FIELD_HEIGHT),
+                ),
             };
             if pos.wrapped_distance(self.ship.pos, FIELD_WIDTH, FIELD_HEIGHT) > SAFE_SPAWN_DISTANCE
             {
@@ -619,7 +615,7 @@ impl AsteroidsApp {
         for i in 0..2 {
             let offset_angle = if i == 0 { PI / 4.0 } else { -PI / 4.0 };
             let base_angle = parent_vel.y.atan2(parent_vel.x) + offset_angle;
-            let speed = child_size.speed() * self.rng.next_range(0.6, 1.4);
+            let speed = child_size.speed() * self.rng.between_f32(0.6, 1.4);
             let vel = Vec2::new(cos_f32(base_angle) * speed, sin_f32(base_angle) * speed);
             let nudge = Vec2::new(
                 cos_f32(base_angle) * child_size.radius(),
@@ -635,9 +631,9 @@ impl AsteroidsApp {
 
     fn spawn_explosion(&mut self, pos: Vec2, count: usize, color: Color) {
         for _ in 0..count {
-            let angle = self.rng.next_angle();
-            let speed = self.rng.next_range(30.0, 150.0);
-            let lifetime = self.rng.next_range(0.3, 0.8);
+            let angle = random_angle(&mut self.rng);
+            let speed = self.rng.between_f32(30.0, 150.0);
+            let lifetime = self.rng.between_f32(0.3, 0.8);
             self.particles.push(Particle {
                 pos,
                 vel: Vec2::new(cos_f32(angle) * speed, sin_f32(angle) * speed),
@@ -650,9 +646,9 @@ impl AsteroidsApp {
 
     fn spawn_thrust_particle(&mut self) {
         let exhaust = self.ship.exhaust_point();
-        let angle = self.ship.angle + PI + self.rng.next_range(-0.3, 0.3);
-        let speed = self.rng.next_range(50.0, 120.0);
-        let lifetime = self.rng.next_range(0.1, 0.3);
+        let angle = self.ship.angle + PI + self.rng.between_f32(-0.3, 0.3);
+        let speed = self.rng.between_f32(50.0, 120.0);
+        let lifetime = self.rng.between_f32(0.1, 0.3);
         self.particles.push(Particle {
             pos: exhaust,
             vel: Vec2::new(cos_f32(angle) * speed, sin_f32(angle) * speed),
@@ -1081,12 +1077,12 @@ impl AsteroidsApp {
 
     fn render_stars(&self, cmds: &mut Vec<RenderCommand>, fx: f32, fy: f32) {
         // Draw a static starfield using deterministic positions from a fixed seed.
-        let mut star_rng = Lcg::new(999);
+        let mut star_rng = Rng::new(999);
         let star_color = Color::rgba(100, 100, 140, 60);
         let star_bright = Color::rgba(150, 150, 200, 100);
         for i in 0..40 {
-            let sx = star_rng.next_range(4.0, FIELD_WIDTH - 4.0);
-            let sy = star_rng.next_range(4.0, FIELD_HEIGHT - 4.0);
+            let sx = star_rng.between_f32(4.0, FIELD_WIDTH - 4.0);
+            let sy = star_rng.between_f32(4.0, FIELD_HEIGHT - 4.0);
             let size = if i % 5 == 0 { 2.0 } else { 1.5 };
             let color = if i % 5 == 0 { star_bright } else { star_color };
             cmds.push(RenderCommand::FillRect {
@@ -1661,53 +1657,71 @@ mod tests {
         assert!((d - 20.0).abs() < 0.01);
     }
 
-    // ── LCG ─────────────────────────────────────────────────────────
+    // ── Randomness ──────────────────────────────────────────────────
+    //
+    // Bounded, deterministic, in-range: those are properties of the generator,
+    // and the generator is `randrange`'s, which tests all of them. The two
+    // tests left here are about this game.
 
+    /// A full turn, and nothing outside one.
+    ///
+    /// `random_angle` is the one piece of randomness this crate still owns, so
+    /// it keeps its own test.
     #[test]
-    fn test_lcg_deterministic() {
-        let mut a = Lcg::new(42);
-        let mut b = Lcg::new(42);
-        for _ in 0..10 {
-            assert_eq!(a.next_u64(), b.next_u64());
+    fn random_angle_stays_within_one_turn() {
+        let mut rng = Rng::new(42);
+        for _ in 0..1000 {
+            let a = random_angle(&mut rng);
+            assert!((0.0..TAU).contains(&a), "angle {a} is outside [0, TAU)");
         }
     }
 
+    /// Asteroids must not all enter from the same side of the screen.
+    ///
+    /// They used to. `random_edge_position` chose the edge with a bound of 4,
+    /// reduced by `state % 4`, which on a modulus-2^64 LCG is a pure function
+    /// of how many draws have been taken — the low two bits are a counter.
+    /// Spawning one Large asteroid consumes exactly **16** draws (edge, one
+    /// coordinate, heading, speed, ten vertex radii, spin angle, spin rate),
+    /// and 16 is a multiple of 4, so every edge draw in a wave landed on the
+    /// same two bits. Simulated over seeds 1, 2, 3, 42, 777 and 123456 before
+    /// the fix: eight spawns each, and every one of the eight from one edge.
+    /// The seed chose *which* edge and nothing else.
+    ///
+    /// The test infers the edge from the position rather than reading the
+    /// draw, because the edge is what a player sees.
+    ///
+    /// It counts edges **within one seed**, which matters: pooling the edges
+    /// across seeds passes against the broken generator, since the seed did
+    /// choose the edge and twenty seeds cover all four. The defect is that one
+    /// *game* only ever saw one edge, so one game is the unit to measure. With
+    /// a working generator, eight spawns landing on a single edge has
+    /// probability 4 × (1/4)^8 ≈ 1/16000, so requiring at least two edges from
+    /// every one of twenty seeds is safe.
     #[test]
-    fn test_lcg_bounded() {
-        let mut rng = Lcg::new(42);
-        for _ in 0..100 {
-            let val = rng.next_bounded(10);
-            assert!(val < 10);
-        }
-    }
-
-    #[test]
-    fn test_lcg_f32_range() {
-        let mut rng = Lcg::new(42);
-        for _ in 0..100 {
-            let val = rng.next_f32();
-            assert!(val >= 0.0);
-            assert!(val < 1.0);
-        }
-    }
-
-    #[test]
-    fn test_lcg_next_range() {
-        let mut rng = Lcg::new(42);
-        for _ in 0..100 {
-            let val = rng.next_range(10.0, 20.0);
-            assert!(val >= 10.0);
-            assert!(val < 20.0);
-        }
-    }
-
-    #[test]
-    fn test_lcg_next_angle() {
-        let mut rng = Lcg::new(42);
-        for _ in 0..100 {
-            let a = rng.next_angle();
-            assert!(a >= 0.0);
-            assert!(a < TAU);
+    fn asteroids_do_not_all_enter_from_one_edge() {
+        for seed in 1..=20_u64 {
+            let mut app = AsteroidsApp::with_seed(seed);
+            app.asteroids.clear();
+            app.spawn_wave(8);
+            let mut edges = std::collections::BTreeSet::new();
+            for a in &app.asteroids {
+                let r = a.radius();
+                let edge = if (a.pos.y - r).abs() < 1.0 {
+                    "top"
+                } else if (a.pos.y - (FIELD_HEIGHT - r)).abs() < 1.0 {
+                    "bottom"
+                } else if (a.pos.x - r).abs() < 1.0 {
+                    "left"
+                } else {
+                    "right"
+                };
+                edges.insert(edge);
+            }
+            assert!(
+                edges.len() > 1,
+                "seed {seed}: all eight asteroids entered from {edges:?}"
+            );
         }
     }
 
@@ -1872,7 +1886,7 @@ mod tests {
 
     #[test]
     fn test_asteroid_creation() {
-        let mut rng = Lcg::new(42);
+        let mut rng = Rng::new(42);
         let a = Asteroid::new(
             Vec2::new(100.0, 100.0),
             Vec2::new(50.0, 0.0),
@@ -1885,7 +1899,7 @@ mod tests {
 
     #[test]
     fn test_asteroid_moves() {
-        let mut rng = Lcg::new(42);
+        let mut rng = Rng::new(42);
         let mut a = Asteroid::new(
             Vec2::new(100.0, 100.0),
             Vec2::new(50.0, 0.0),
@@ -1899,7 +1913,7 @@ mod tests {
 
     #[test]
     fn test_asteroid_wraps() {
-        let mut rng = Lcg::new(42);
+        let mut rng = Rng::new(42);
         let mut a = Asteroid::new(
             Vec2::new(FIELD_WIDTH - 1.0, 100.0),
             Vec2::new(500.0, 0.0),
@@ -1912,7 +1926,7 @@ mod tests {
 
     #[test]
     fn test_asteroid_rotates() {
-        let mut rng = Lcg::new(42);
+        let mut rng = Rng::new(42);
         let mut a = Asteroid::new(
             Vec2::new(100.0, 100.0),
             Vec2::ZERO,
@@ -1929,7 +1943,7 @@ mod tests {
 
     #[test]
     fn test_asteroid_vertices_count() {
-        let mut rng = Lcg::new(42);
+        let mut rng = Rng::new(42);
         let a = Asteroid::new(
             Vec2::new(100.0, 100.0),
             Vec2::ZERO,

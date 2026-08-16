@@ -113,7 +113,52 @@ CORPUS = [
     "\\u0939\\u093f\\u0928\\u094d\\u0926\\u0940",
     # Scriptless text, which selects the font's default features.
     "123 456",
+    # --- language ---
+    #
+    # A language selects a LangSysRecord in place of the script's default
+    # language system, and that record *replaces* the default's feature list
+    # rather than adding to it -- so naming a language can take a feature away
+    # as readily as turn one on. Most entries below are a string already in the
+    # corpus, or paired with a language-less twin, so that a difference between
+    # the two halves is the language and nothing else.
+    #
+    # Turkish: `TRK ` suppresses `fi`, which a Turkish reader sees as a
+    # misspelling of the dotless/dotted pair rather than as a ligature.
+    ("tr", "office fluffy waffle"),
+    ("tr", "fi fl ffi ffl"),
+    # Serbian and Macedonian Cyrillic: `SRB `/`MKD ` swap six italic letters
+    # for their locally-correct shapes. 41 host faces register `SRB `.
+    ("sr", "\\u0431\\u0433\\u0434\\u043f\\u0442"),
+    ("mk", "\\u0431\\u0433\\u0434\\u043f\\u0442"),
+    "\\u0431\\u0433\\u0434\\u043f\\u0442",
+    # Romanian and Moldovan: `ROM `/`MOL ` put a comma below s and t where the
+    # default draws a cedilla. The two most common LangSysRecords on this host
+    # (140 and 76 faces), and `ro-MD` is the one tag here whose *region* subtag
+    # changes the answer.
+    ("ro", "\\u0219\\u021b \\u015f\\u0163"),
+    ("ro-MD", "\\u0219\\u021b \\u015f\\u0163"),
+    "\\u0219\\u021b \\u015f\\u0163",
+    # Catalan: `CAT ` keeps the middle dot of l-l apart from the `ll` ligature.
+    ("ca", "col\\u00b7legi"),
+    "col\\u00b7legi",
+    # Urdu, which selects a different set of Arabic forms from Arabic itself.
+    ("ur", "\\u0627\\u0644\\u0639\\u0631\\u0628\\u064a\\u0629"),
+    # A language essentially no face registers. It must shape exactly like no
+    # language at all: selection falls back to the script's own default, never
+    # to another script's and never to another language's.
+    ("chr", "office fluffy waffle"),
 ]
+
+
+def lang_of(entry):
+    """The BCP 47 tag an entry names, or `""` for text that names none."""
+    return entry[0] if isinstance(entry, tuple) else ""
+
+
+def string_of(entry):
+    """The (still escaped) string an entry shapes."""
+    return entry[1] if isinstance(entry, tuple) else entry
+
 
 # Corpus entries the two halves cannot be asked the same question about.
 #
@@ -182,8 +227,8 @@ def ours(corpus, fonts):
         "w", suffix=".txt", delete=False, encoding="utf-8", newline="\n"
     ) as f:
         f.write(f"{len(corpus)}\n")
-        for line in corpus:
-            f.write(line + "\n")
+        for entry in corpus:
+            f.write(f"{lang_of(entry)}\t{string_of(entry)}\n")
         for path in fonts:
             f.write(path + "\n")
         input_path = f.name
@@ -241,9 +286,15 @@ def positions(field):
     return [tuple(int(n) for n in p.split(";")) for p in field.split(",") if p]
 
 
-def theirs(path, strings):
+def theirs(path, questions):
     """`[([gid, ...], [(adv, dx, dy), ...], rtl), ...]`, or `None` if it will
     not open.
+
+    `questions` is `[(bcp47 or "", text), ...]`. A named language is set on the
+    buffer, which is how HarfBuzz reaches a LangSysRecord; it maps the tag with
+    `hb_ot_tags_from_language`, the same function `lang.rs` is generated from,
+    so the two halves select the same language system or the comparison is
+    meaningless.
 
     `rtl` is the direction HarfBuzz guessed, and it decides which of our two
     orders its answer is comparable to. HarfBuzz does no bidi of its own: it
@@ -265,14 +316,19 @@ def theirs(path, strings):
         return None
 
     out = []
-    for text in strings:
+    for tag, string in questions:
         buf = hb.Buffer()
-        buf.add_str(text)
+        buf.add_str(string)
         # The same thing this crate does not do: guess one script for the
         # whole string. For a single-script string that is the same answer an
         # itemizer gives; for a mixed one it is not, which is why `MIXED`
         # holds those two entries out of the verdict.
         buf.guess_segment_properties()
+        # After the guess, which sets a language of its own from the locale.
+        # An empty tag has to mean *no* language rather than "whatever this
+        # machine is set to", or the sweep would compare our "no language"
+        # against HarfBuzz's "en", and pass or fail by where it was run.
+        buf.language = tag
         rtl = str(buf.direction).lower().endswith("rtl")
         try:
             hb.shape(font, buf)
@@ -366,8 +422,8 @@ def main():
     if not fonts:
         sys.exit(f"no fonts under {args.fonts}")
 
-    strings = [unescape(line) for line in CORPUS]
-    print(f"{len(fonts)} faces x {len(strings)} strings")
+    questions = [(lang_of(entry), unescape(string_of(entry))) for entry in CORPUS]
+    print(f"{len(fonts)} faces x {len(questions)} strings")
     mine = ours(CORPUS, fonts)
 
     agree = 0
@@ -379,7 +435,7 @@ def main():
     placed_examples = {}
     skipped = 0
     for path in fonts:
-        hb_out = theirs(path, strings)
+        hb_out = theirs(path, questions)
         if hb_out is None:
             skipped += 1
             continue

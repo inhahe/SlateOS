@@ -65,6 +65,7 @@ use crate::gpos::{Adjust, Positioning, Run};
 use crate::gsub::{SubGlyph, Substitutions};
 use crate::indic_shape::{self, Script};
 use crate::kern::Kerning;
+use crate::lang::Lang;
 use crate::mark::MarkPositioning;
 use crate::otl;
 use crate::script::ScriptTags;
@@ -1207,25 +1208,37 @@ impl Face {
     /// which is the right answer for a run of digits and punctuation and the
     /// only one available for a caller holding bare glyph ids.
     ///
+    /// `lang` chooses among the rules that script offers: a face may spell
+    /// Turkish, Serbian or Romanian differently from the rest of the writing
+    /// system, and this is how it is asked to. `None` — and any language the
+    /// chosen script does not register — takes that script's default rules,
+    /// which is what a caller who does not know the language should pass; a
+    /// *wrong* language is worse than none. See [`lang`](crate::lang).
+    ///
     /// An Indic run is not substituted but *shaped*: the same lookups run, but
     /// in thirteen stages with a reordering between two of them, because the
     /// order Indic text is stored in is not the order it is drawn in. That path
     /// runs even in a face with no `GSUB`, since moving a left matra in front
     /// of its consonant is this crate's job rather than the font's.
-    pub fn substitute(&self, script: Option<ScriptTags>, glyphs: &mut Vec<SubGlyph>) {
+    pub fn substitute(
+        &self,
+        script: Option<ScriptTags>,
+        lang: Option<Lang>,
+        glyphs: &mut Vec<SubGlyph>,
+    ) {
         let subs = self.substitutions.as_ref();
         let chosen = self.gsub_chosen_script(script);
         match Script::shaping(script)
             .filter(|_| !crate::fallback::shaped_as_default(script, chosen))
         {
             Some(indic) => {
-                indic_shape::shape(&self.data, subs, script, chosen, indic, glyphs, |ch| {
+                indic_shape::shape(&self.data, subs, script, lang, chosen, indic, glyphs, |ch| {
                     self.glyph_index(ch)
                 });
             }
             None => {
                 if let Some(subs) = subs {
-                    subs.apply(&self.data, script, glyphs);
+                    subs.apply(&self.data, script, lang, glyphs);
                 }
             }
         }
@@ -1338,8 +1351,8 @@ impl Face {
         self.kerning.as_ref().is_some_and(Kerning::has_legacy)
     }
 
-    /// Whether a run of `script` reaches a `kern` feature in this face's
-    /// `GPOS`.
+    /// Whether a run of `script` in `lang` reaches a `kern` feature in this
+    /// face's `GPOS`.
     ///
     /// A face files its `GPOS` features under particular scripts, so this is a
     /// question about the run and not about the face: Leelawadee registers only
@@ -1349,10 +1362,10 @@ impl Face {
     /// switched on by `!has_gpos_kern`, and `has_gpos_kern` is looked up in the
     /// shaping plan's *selected* script.
     #[must_use]
-    pub(crate) fn gpos_kerns(&self, script: Option<ScriptTags>) -> bool {
+    pub(crate) fn gpos_kerns(&self, script: Option<ScriptTags>, lang: Option<Lang>) -> bool {
         self.positioning
             .as_ref()
-            .is_some_and(|gpos| gpos.kerns(script))
+            .is_some_and(|gpos| gpos.kerns(script, lang))
     }
 
     /// The legacy `kern` table's adjustment to `left`'s advance when `right`

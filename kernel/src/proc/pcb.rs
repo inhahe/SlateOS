@@ -6723,6 +6723,25 @@ pub fn cap_count(pid: ProcessId) -> Option<usize> {
     table.get(&pid).map(|p| p.cap_table.count())
 }
 
+/// Snapshot every valid capability a process holds, in handle order.
+///
+/// A snapshot rather than a view, and the copy is deliberate: the caller
+/// (`SYS_CAP_QUERY`) has to write this out to user memory, and doing that
+/// while holding `PROCESS_TABLE` risks a page fault whose handler needs the
+/// same lock.  Taking the entries here means the lock is already released by
+/// the time the copy happens.
+///
+/// The consequence is that this is a point-in-time answer: a concurrent grant
+/// or revoke on another thread is neither reliably included nor reliably
+/// excluded.  That is inherent to enumerating mutable state and is not a
+/// reason to hold the lock across the copy — the kernel re-checks authority on
+/// every privileged operation regardless of what this returned, so a stale
+/// list can mislead a caller about itself but can never grant anything.
+pub fn cap_entries(pid: ProcessId) -> Option<Vec<crate::cap::table::CapEntry>> {
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid).map(|p| p.cap_table.valid_entries())
+}
+
 /// Get the credentials for a process.
 pub fn get_credentials(pid: ProcessId) -> Option<ProcessCredentials> {
     let table = PROCESS_TABLE.lock();

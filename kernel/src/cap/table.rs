@@ -260,6 +260,30 @@ impl CapTable {
         self.entries.values().filter(|e| e.valid).count()
     }
 
+    /// Every valid entry, in handle order.
+    ///
+    /// The counterpart to [`count`](Self::count), and the two must agree:
+    /// `valid_entries().len() == count()` is the invariant `SYS_CAP_QUERY`
+    /// relies on when a caller probes for a size and then asks for the data.
+    /// Both filter on `valid`, so a revoked entry is absent from both.
+    ///
+    /// Handle values are deliberately **not** returned. What the caller of an
+    /// enumeration wants to know is what authority exists, not which slot
+    /// holds it; a handle is a token that can be *used*, so putting one in an
+    /// informational list invites exactly that. `entries` is a `BTreeMap`
+    /// keyed by handle, so the iteration order is nonetheless deterministic
+    /// (ascending handle, i.e. grant order) rather than an artefact of the
+    /// hash of the moment.
+    ///
+    /// Returns owned clones rather than references: a borrow into the map
+    /// would tie its lifetime to the `PROCESS_TABLE` lock, and the whole point
+    /// of the enumeration path is that the lock is *dropped* before user
+    /// memory is touched (a fault there re-enters the same lock).
+    #[must_use]
+    pub fn valid_entries(&self) -> Vec<CapEntry> {
+        self.entries.values().filter(|e| e.valid).cloned().collect()
+    }
+
     /// Check if the table contains a valid capability for the specified
     /// resource with sufficient rights.
     ///
@@ -352,6 +376,7 @@ pub fn self_test() -> KernelResult<()> {
     test_revoke_by_resource()?;
     test_delegation_cannot_escalate()?;
     test_has_capability_type()?;
+    test_valid_entries()?;
 
     Ok(())
 }
@@ -589,5 +614,118 @@ fn test_has_capability_type() -> KernelResult<()> {
     }
 
     serial_println!("[cap]   has_capability_type: OK");
+    Ok(())
+}
+
+/// Test 8: `valid_entries` agrees with `count`, and hides what it should hide.
+///
+/// This is the invariant `SYS_CAP_QUERY` rests on: a caller probes with a null
+/// buffer (answered from `count`), allocates that many slots, then asks for the
+/// data (answered from `valid_entries`).  If the two ever disagreed, the second
+/// call would either overflow the caller's buffer or silently under-report
+/// authority the process genuinely holds — and under-reporting is the direction
+/// nobody notices, because the missing capability just looks like a permission
+/// the process was never given.
+fn test_valid_entries() -> KernelResult<()> {
+    let mut table = CapTable::new();
+
+    // Empty table: both accessors must agree that there is nothing.
+    if table.count() != 0 || !table.valid_entries().is_empty() {
+        serial_println!("[cap]   FAIL: empty table should have no valid entries");
+        return Err(KernelError::InternalError);
+    }
+
+    // Grant three capabilities of distinct types, in a known order.
+    let h_chan = table.insert(ResourceType::Channel, 10, Rights::READ_WRITE)?;
+    let h_pipe = table.insert(ResourceType::Pipe, 20, Rights::READ)?;
+    // Bound but never used by handle: this one is revoked *by resource* below,
+    // which is a third path to invalidity that the enumeration must also honour.
+    let _h_file = table.insert(ResourceType::File, 30, Rights::READ | Rights::WRITE)?;
+
+    let entries = table.valid_entries();
+    if entries.len() != table.count() || entries.len() != 3 {
+        serial_println!("[cap]   FAIL: valid_entries/count disagree after 3 inserts");
+        return Err(KernelError::InternalError);
+    }
+
+    // Order is ascending handle, i.e. grant order — not an artefact of hashing.
+    // A caller that renders the list wants it stable across calls.
+    //
+    // Compared as a whole slice rather than element by element: `a[0]`, `a[1]`
+    // in kernel code is a panic waiting for the day the length check above is
+    // edited apart from the reads below.  A self-test that panics takes the
+    // kernel down instead of printing FAIL, which is a strictly worse way to
+    // learn the same thing.
+    let ids: Vec<u64> = entries.iter().map(|e| e.resource_id).collect();
+    if ids.as_slice() != [10, 20, 30] {
+        serial_println!("[cap]   FAIL: valid_entries not in grant order: {:?}", ids);
+        return Err(KernelError::InternalError);
+    }
+
+    // Contents survive the copy: type and rights are what was granted, and — the
+    // half that matters — rights are not *widened* by the copy.
+    let chan_ok = entries.iter().any(|e| {
+        e.resource_type == ResourceType::Channel
+            && e.resource_id == 10
+            && e.rights.contains(Rights::WRITE)
+    });
+    let pipe_ok = entries.iter().any(|e| {
+        e.resource_type == ResourceType::Pipe
+            && e.resource_id == 20
+            && !e.rights.contains(Rights::WRITE)
+    });
+    if !chan_ok || !pipe_ok {
+        serial_println!("[cap]   FAIL: valid_entries lost type or rights");
+        return Err(KernelError::InternalError);
+    }
+
+    // Revoking the middle one must remove it from *both* accessors, and must
+    // not disturb the relative order of the survivors.
+    if !table.revoke(h_pipe) {
+        serial_println!("[cap]   FAIL: revoke of a live handle returned false");
+        return Err(KernelError::InternalError);
+    }
+    let entries = table.valid_entries();
+    if entries.len() != table.count() || entries.len() != 2 {
+        serial_println!("[cap]   FAIL: valid_entries/count disagree after revoke");
+        return Err(KernelError::InternalError);
+    }
+    if entries.iter().any(|e| e.resource_type == ResourceType::Pipe) {
+        serial_println!("[cap]   FAIL: revoked entry still enumerated");
+        return Err(KernelError::InternalError);
+    }
+    let ids: Vec<u64> = entries.iter().map(|e| e.resource_id).collect();
+    if ids.as_slice() != [10, 30] {
+        serial_println!("[cap]   FAIL: revoke disturbed enumeration order: {:?}", ids);
+        return Err(KernelError::InternalError);
+    }
+
+    // `remove` frees the slot outright; the two accessors must still agree.
+    if table.remove(h_chan).is_none() {
+        serial_println!("[cap]   FAIL: remove of a live handle returned None");
+        return Err(KernelError::InternalError);
+    }
+    let entries = table.valid_entries();
+    if entries.len() != table.count() || entries.len() != 1 {
+        serial_println!("[cap]   FAIL: valid_entries/count disagree after remove");
+        return Err(KernelError::InternalError);
+    }
+    let ids: Vec<u64> = entries.iter().map(|e| e.resource_id).collect();
+    if ids.as_slice() != [30] {
+        serial_println!("[cap]   FAIL: wrong survivor after remove: {:?}", ids);
+        return Err(KernelError::InternalError);
+    }
+
+    // `revoke_by_resource` is the third way an entry can stop being valid;
+    // it must be invisible to the enumeration too.
+    if table.revoke_by_resource(ResourceType::File, 30) != 1 {
+        serial_println!("[cap]   FAIL: revoke_by_resource should revoke exactly 1");
+        return Err(KernelError::InternalError);
+    }
+    if !table.valid_entries().is_empty() || table.count() != 0 {
+        serial_println!("[cap]   FAIL: valid_entries/count disagree after revoke_by_resource");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[cap]   valid_entries: OK");
     Ok(())
 }

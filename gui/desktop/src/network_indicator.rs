@@ -5,7 +5,7 @@
 //! flyout listing available WiFi networks.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -509,6 +509,7 @@ impl NetworkIndicator {
             color: icon_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -546,6 +547,7 @@ impl NetworkIndicator {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 20.0;
 
@@ -562,6 +564,7 @@ impl NetworkIndicator {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 20.0;
 
@@ -593,6 +596,7 @@ impl NetworkIndicator {
             color: airplane_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner * 0.45),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // WiFi toggle
@@ -618,6 +622,7 @@ impl NetworkIndicator {
             color: wifi_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner * 0.45),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 36.0;
 
@@ -661,6 +666,7 @@ impl NetworkIndicator {
                         FontWeightHint::Regular
                     },
                     max_width: Some(inner * 0.6),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Signal + security
@@ -675,6 +681,7 @@ impl NetworkIndicator {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(inner - 16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Signal bars color indicator

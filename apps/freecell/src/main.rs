@@ -21,7 +21,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -962,6 +962,7 @@ impl GameState {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Move counter.
@@ -973,6 +974,7 @@ impl GameState {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Foundation total.
@@ -984,6 +986,7 @@ impl GameState {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Help text.
@@ -995,6 +998,7 @@ impl GameState {
             font_size: INFO_FONT_SIZE - 2.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Top row labels.
@@ -1006,6 +1010,7 @@ impl GameState {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: Self::top_row_x(4),
@@ -1015,6 +1020,7 @@ impl GameState {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Separator line between top row and tableau.
@@ -1095,6 +1101,7 @@ impl GameState {
                     font_size: INFO_FONT_SIZE - 2.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             None => {
@@ -1109,6 +1116,7 @@ impl GameState {
                     font_size: CARD_SUIT_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1217,6 +1225,7 @@ impl GameState {
             font_size: CARD_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Top-left suit.
@@ -1228,6 +1237,7 @@ impl GameState {
             font_size: CARD_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Center suit (larger).
@@ -1239,6 +1249,7 @@ impl GameState {
             font_size: CARD_SUIT_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Bottom-right rank.
@@ -1250,6 +1261,7 @@ impl GameState {
             font_size: CARD_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Bottom-right suit.
@@ -1261,6 +1273,7 @@ impl GameState {
             font_size: CARD_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1284,6 +1297,7 @@ impl GameState {
             font_size: OVERLAY_FONT_SIZE + 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1294,6 +1308,7 @@ impl GameState {
             font_size: STATUS_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1304,6 +1319,7 @@ impl GameState {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

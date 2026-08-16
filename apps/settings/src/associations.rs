@@ -7,7 +7,7 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -981,6 +981,7 @@ impl AssociationsPageState {
             font_size: 20.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x,
@@ -990,6 +991,7 @@ impl AssociationsPageState {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y + 56.0
     }
@@ -1025,6 +1027,7 @@ impl AssociationsPageState {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Search text or placeholder
@@ -1046,6 +1049,7 @@ impl AssociationsPageState {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bar_width - 48.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         y + SEARCH_BAR_HEIGHT
@@ -1087,6 +1091,7 @@ impl AssociationsPageState {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             tab_x += tab_width + 8.0;
@@ -1151,6 +1156,7 @@ impl AssociationsPageState {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Description text (below extension)
@@ -1162,6 +1168,7 @@ impl AssociationsPageState {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Default app name (right side)
@@ -1182,6 +1189,7 @@ impl AssociationsPageState {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(180.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             y += ROW_HEIGHT;
@@ -1235,6 +1243,7 @@ impl AssociationsPageState {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         py += 24.0;
 
@@ -1289,6 +1298,7 @@ impl AssociationsPageState {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - 100.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // "(uninstalled)" marker
@@ -1303,6 +1313,7 @@ impl AssociationsPageState {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -1329,6 +1340,7 @@ impl AssociationsPageState {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // "Reset to default" button
@@ -1349,6 +1361,7 @@ impl AssociationsPageState {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         y + EXPAND_PANEL_HEIGHT

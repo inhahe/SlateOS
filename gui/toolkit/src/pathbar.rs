@@ -10,7 +10,7 @@
 
 use crate::color::Color;
 use crate::event::{EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
-use crate::render::{FontWeightHint, RenderCommand};
+use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 
 // ---------------------------------------------------------------------------
@@ -735,6 +735,7 @@ impl PathBar {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             x += ew + SEGMENT_PADDING_H * 2.0 + SEGMENT_GAP;
 
@@ -747,6 +748,7 @@ impl PathBar {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             x += SEPARATOR_WIDTH;
         }
@@ -778,6 +780,7 @@ impl PathBar {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Store rect for hit testing.
@@ -795,6 +798,7 @@ impl PathBar {
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 x += SEPARATOR_WIDTH;
             }
@@ -849,6 +853,7 @@ impl PathBar {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - BAR_PADDING * 2.0 - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Cursor.
@@ -931,6 +936,7 @@ impl PathBar {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Item name.
@@ -942,6 +948,7 @@ impl PathBar {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dropdown_w - DROPDOWN_PADDING * 2.0 - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

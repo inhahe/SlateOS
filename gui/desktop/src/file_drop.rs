@@ -11,7 +11,7 @@
 //! - Auto-scroll when dragging near window edges
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -422,6 +422,7 @@ pub fn render_drag_overlay(session: &DragSession) -> Vec<RenderCommand> {
         color: MOCHA_TEXT,
         font_weight: FontWeightHint::Regular,
         max_width: Some(desc_room),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Effect badge.
@@ -443,6 +444,7 @@ pub fn render_drag_overlay(session: &DragSession) -> Vec<RenderCommand> {
         color: MOCHA_BASE,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Item count badge (if multiple).
@@ -463,6 +465,7 @@ pub fn render_drag_overlay(session: &DragSession) -> Vec<RenderCommand> {
             color: MOCHA_BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -506,6 +509,7 @@ pub fn render_drop_target_highlight(target: &DropTarget, effect: DropEffect) -> 
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 

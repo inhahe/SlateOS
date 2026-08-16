@@ -7,7 +7,7 @@
 
 use crate::color::Color;
 use crate::event::{Key, KeyEvent};
-use crate::render::{FontWeightHint, RenderCommand};
+use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 
 // ─── Catppuccin Mocha palette ───────────────────────────────────────────────
@@ -439,6 +439,7 @@ impl ContextMenu {
                             font_size: FONT_SIZE,
                             font_weight: FontWeightHint::Bold,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     }
 
@@ -451,6 +452,7 @@ impl ContextMenu {
                         font_size: FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
 
                     // Shortcut text (right-aligned).
@@ -465,6 +467,7 @@ impl ContextMenu {
                             font_size: FONT_SIZE,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     }
 
@@ -495,6 +498,7 @@ impl ContextMenu {
                         font_size: FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
 
                     // Submenu arrow indicator.
@@ -506,6 +510,7 @@ impl ContextMenu {
                         font_size: FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
 
                     current_y += ITEM_HEIGHT;
@@ -828,6 +833,7 @@ impl Tooltip {
                 font_size: TOOLTIP_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.max_width),
+                overflow: TextOverflow::Ellipsis,
             });
             text_y += TOOLTIP_LINE_HEIGHT;
         }

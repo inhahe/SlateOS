@@ -1743,7 +1743,7 @@ pub struct Signature {
 
 // ─── Application ─────────────────────────────────────────────────────
 
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -2192,6 +2192,7 @@ impl EmailApp {
             color: colors::BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Unread badge
@@ -2212,6 +2213,7 @@ impl EmailApp {
                 color: colors::BASE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -2241,6 +2243,7 @@ impl EmailApp {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(276.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Toolbar
@@ -2285,6 +2288,7 @@ impl EmailApp {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             bx += bw + 8.0;
         }
@@ -2314,6 +2318,7 @@ impl EmailApp {
                 color: acct.color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(sidebar_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: 12.0,
@@ -2323,6 +2328,7 @@ impl EmailApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sidebar_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2371,6 +2377,7 @@ impl EmailApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(sidebar_w - 60.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             if mb.unread_messages > 0 {
@@ -2382,6 +2389,7 @@ impl EmailApp {
                     color: colors::BLUE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -2435,6 +2443,7 @@ impl EmailApp {
             color: colors::SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -2454,6 +2463,7 @@ impl EmailApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         }
@@ -2499,6 +2509,7 @@ impl EmailApp {
                     color: colors::YELLOW,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -2526,6 +2537,7 @@ impl EmailApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(max_w * 0.6),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Date
@@ -2537,6 +2549,7 @@ impl EmailApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(70.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Subject
@@ -2556,6 +2569,7 @@ impl EmailApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(max_w),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Preview
@@ -2567,6 +2581,7 @@ impl EmailApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Attachment indicator
@@ -2579,6 +2594,7 @@ impl EmailApp {
                     color: colors::SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -2592,6 +2608,7 @@ impl EmailApp {
                     color: colors::RED,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -2618,6 +2635,7 @@ impl EmailApp {
                     color: colors::PEACH,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 lx += lw + 4.0;
             }
@@ -2651,6 +2669,7 @@ impl EmailApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         };
@@ -2668,6 +2687,7 @@ impl EmailApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         py += 28.0;
 
@@ -2680,6 +2700,7 @@ impl EmailApp {
             color: colors::SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         py += 18.0;
 
@@ -2698,6 +2719,7 @@ impl EmailApp {
             color: colors::SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         py += 18.0;
 
@@ -2717,6 +2739,7 @@ impl EmailApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
+                overflow: TextOverflow::Ellipsis,
             });
             py += 18.0;
         }
@@ -2730,6 +2753,7 @@ impl EmailApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         py += 24.0;
 
@@ -2753,6 +2777,7 @@ impl EmailApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

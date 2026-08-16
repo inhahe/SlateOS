@@ -8,6 +8,40 @@
 use crate::color::Color;
 use crate::style::{Border, CornerRadii, Shadow};
 
+/// What a renderer does with text that does not fit its `max_width`.
+///
+/// There is no default, and that is the point. `max_width` on its own poses a
+/// question — *and if it doesn't fit?* — that used to be answered by silence:
+/// the compositor stopped before the first glyph that would cross the limit and
+/// drew no mark. A label reading `Gateway 192.168.1.1 res` is then
+/// indistinguishable from a complete one, which is how a truncated path, a
+/// clipped host name or a spoofed peer name gets read as the whole value.
+/// Making this a required field means the question cannot be left unanswered by
+/// accident — see `design-decisions.md` §427.
+///
+/// The renderer, not the caller, places the mark: it is the party that knows
+/// exactly where the glyphs ran out, and it is about to walk them anyway. A
+/// caller who elides first pays for a second measurement of the same string by
+/// a second implementation, and the two can disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextOverflow {
+    /// Stop at the limit and draw nothing to say so.
+    ///
+    /// Correct when the cut is not information the reader needs: a decorative
+    /// rule, a progress bar's caption that is duplicated elsewhere, or text
+    /// whose containing box the reader can plainly see the text is filling.
+    /// Also the only sensible value when `max_width` is `None`, where the
+    /// choice is vacuous.
+    Clip,
+
+    /// End the visible text with `…`, cutting one glyph earlier to make room.
+    ///
+    /// The right answer for anything variable-length — a file name, an SSID, an
+    /// error string, anything from the wire or from another process — because
+    /// the reader's alternative is to mistake a fragment for the whole.
+    Ellipsis,
+}
+
 /// A render command — one drawing primitive.
 #[derive(Clone, Debug)]
 pub enum RenderCommand {
@@ -41,6 +75,10 @@ pub enum RenderCommand {
         font_size: f32,
         font_weight: FontWeightHint,
         max_width: Option<f32>,
+        /// What to do with the part that does not fit `max_width`. Vacuous —
+        /// and so [`TextOverflow::Clip`] by convention — when `max_width` is
+        /// `None`, since nothing can fail to fit an unbounded width.
+        overflow: TextOverflow,
     },
 
     /// Draw an image/bitmap.
@@ -279,6 +317,8 @@ impl RenderTree {
             font_size,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            // Vacuous: with no bound, nothing can fail to fit.
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -339,6 +379,13 @@ impl RenderTree {
             font_size,
             font_weight,
             max_width: Some(width),
+            // Belt and braces, and deliberately not redundant. The string is
+            // already elided above, so in the ordinary case the renderer finds
+            // nothing to cut and this never fires. It fires exactly when the
+            // measuring face and the drawing face disagree — and in that case
+            // the old behaviour was to clip the difference away silently, which
+            // is the failure this field exists to end.
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -478,5 +525,61 @@ mod tests {
         let mut tree = RenderTree::new();
         tree.text_in(0.0, 0.0, 0.0, "anything at all", Color::rgb(0, 0, 0), 11.0);
         assert_eq!(drawn(&tree).0, "");
+    }
+
+    // ---- overflow policy (design-decisions.md §427) ------------------------
+
+    fn overflow_of(tree: &RenderTree) -> TextOverflow {
+        match tree.commands.first().expect("one command") {
+            RenderCommand::Text { overflow, .. } => *overflow,
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    /// `text` sets no bound, so nothing can fail to fit and the policy is
+    /// vacuous. `Clip` is the honest spelling of "this question does not
+    /// arise"; `Ellipsis` here would suggest a cut that cannot happen.
+    #[test]
+    fn unbounded_text_declares_the_vacuous_policy() {
+        let mut tree = RenderTree::new();
+        tree.text(0.0, 0.0, "unbounded", Color::rgb(0, 0, 0), 11.0);
+        assert_eq!(overflow_of(&tree), TextOverflow::Clip);
+    }
+
+    /// `text_in` already elides against its *measuring* face, so the field
+    /// looks redundant. It is not: it fires exactly when the compositor's
+    /// drawing face disagrees with the measurement, and before §427 that
+    /// disagreement was resolved by silently cutting the difference away.
+    #[test]
+    fn fitted_text_asks_for_the_mark_even_though_it_already_elided() {
+        let mut tree = RenderTree::new();
+        tree.text_in(0.0, 0.0, 60.0, &"W".repeat(300), Color::rgb(0, 0, 0), 11.0);
+        assert_eq!(overflow_of(&tree), TextOverflow::Ellipsis);
+    }
+
+    /// The policy is a property of the call site, not of the particular string:
+    /// a bounded site that happens to be given something short this frame is
+    /// still a bounded site next frame.
+    #[test]
+    fn a_bounded_site_asks_for_the_mark_even_when_the_text_fits() {
+        let mut tree = RenderTree::new();
+        tree.text_in(0.0, 0.0, 400.0, "init", Color::rgb(0, 0, 0), 11.0);
+        assert_eq!(drawn(&tree).0, "init");
+        assert_eq!(overflow_of(&tree), TextOverflow::Ellipsis);
+    }
+
+    #[test]
+    fn the_weight_taking_variant_asks_for_the_mark_too() {
+        let mut tree = RenderTree::new();
+        tree.text_in_weighted(
+            0.0,
+            0.0,
+            120.0,
+            "The quick brown fox",
+            Color::rgb(0, 0, 0),
+            13.0,
+            FontWeightHint::Bold,
+        );
+        assert_eq!(overflow_of(&tree), TextOverflow::Ellipsis);
     }
 }

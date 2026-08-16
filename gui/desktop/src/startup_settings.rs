@@ -4,7 +4,7 @@
 //! startup delay, impact assessment, and per-app enable/disable control.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -528,6 +528,7 @@ impl StartupSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 48.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Stats
@@ -544,6 +545,7 @@ impl StartupSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 48.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Tabs
@@ -573,6 +575,7 @@ impl StartupSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tw - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tx += tw + 8.0;
         }
@@ -624,6 +627,7 @@ impl StartupSettingsUI {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 40.0;
 
@@ -636,6 +640,7 @@ impl StartupSettingsUI {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 22.0;
 
@@ -661,6 +666,7 @@ impl StartupSettingsUI {
                 color: RED,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 36.0;
         }
@@ -676,6 +682,7 @@ impl StartupSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -721,6 +728,7 @@ impl StartupSettingsUI {
                 color: if entry.enabled { TEXT } else { OVERLAY0 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width * 0.5),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Publisher and type
@@ -732,6 +740,7 @@ impl StartupSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.5),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Delay
@@ -744,6 +753,7 @@ impl StartupSettingsUI {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(200.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -766,6 +776,7 @@ impl StartupSettingsUI {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(64.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Failure indicator
@@ -786,6 +797,7 @@ impl StartupSettingsUI {
                     color: CRUST,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(64.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -805,6 +817,7 @@ impl StartupSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -826,6 +839,7 @@ impl StartupSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
@@ -841,6 +855,7 @@ impl StartupSettingsUI {
                 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 58.0;
         }
@@ -855,6 +870,7 @@ impl StartupSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 28.0;
 
@@ -891,6 +907,7 @@ impl StartupSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -932,6 +949,7 @@ impl StartupSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 80.0),
+            overflow: TextOverflow::Ellipsis,
         });
         let sw_x = x + width - 44.0;
         cmds.push(RenderCommand::FillRect {
@@ -970,6 +988,7 @@ impl StartupSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + width * 0.55,
@@ -979,6 +998,7 @@ impl StartupSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.45),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

@@ -18,7 +18,7 @@ use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -3206,6 +3206,7 @@ impl SpreadsheetApp {
             color: fg,
             font_weight,
             max_width: Some(w),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -3239,6 +3240,7 @@ impl SpreadsheetApp {
             color: COLOR_BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(54.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // "fx" label
@@ -3250,6 +3252,7 @@ impl SpreadsheetApp {
             color: COLOR_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Formula/value text area
@@ -3281,6 +3284,7 @@ impl SpreadsheetApp {
             color: COLOR_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.window_width - 112.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Bottom separator
@@ -3371,6 +3375,7 @@ impl SpreadsheetApp {
                 color: text_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Vertical separator
@@ -3481,6 +3486,7 @@ impl SpreadsheetApp {
                 color: text_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(ROW_HEADER_WIDTH - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Row header separator
@@ -3655,6 +3661,7 @@ impl SpreadsheetApp {
                         color: text_color,
                         font_weight,
                         max_width: Some(col_w - 8.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
 
@@ -3848,6 +3855,7 @@ impl SpreadsheetApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(SHEET_TAB_WIDTH - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             tx += SHEET_TAB_WIDTH + 2.0;
@@ -3870,6 +3878,7 @@ impl SpreadsheetApp {
             color: COLOR_SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -3906,6 +3915,7 @@ impl SpreadsheetApp {
                 color: COLOR_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(390.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -3926,6 +3936,7 @@ impl SpreadsheetApp {
             color: COLOR_GREEN,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Selection range display
@@ -3938,6 +3949,7 @@ impl SpreadsheetApp {
             color: COLOR_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -4058,6 +4070,7 @@ impl SpreadsheetApp {
             color: COLOR_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Search field label
@@ -4069,6 +4082,7 @@ impl SpreadsheetApp {
             color: COLOR_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Search field
@@ -4089,6 +4103,7 @@ impl SpreadsheetApp {
             color: COLOR_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(192.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Replace field label
@@ -4100,6 +4115,7 @@ impl SpreadsheetApp {
             color: COLOR_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Replace field
@@ -4120,6 +4136,7 @@ impl SpreadsheetApp {
             color: COLOR_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(192.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Result count
@@ -4132,6 +4149,7 @@ impl SpreadsheetApp {
             color: COLOR_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Buttons
@@ -4156,6 +4174,7 @@ impl SpreadsheetApp {
                 color: COLOR_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bw - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             bx += bw + 8.0;
         }

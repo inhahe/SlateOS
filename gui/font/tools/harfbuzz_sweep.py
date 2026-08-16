@@ -109,11 +109,172 @@ CORPUS = [
     # a vowel under it must be lifted clear of it, and Thai faces write that
     # lift as a contextual rule too.
     "\\u0e17\\u0e35\\u0e48\\u0e19\\u0e35\\u0e48",
+    # --- Thai and Lao SARA AM, which is what the Thai shaper is *for* ---
+    #
+    # SARA AM (U+0E33) is one character that draws as two marks: a nikhahit
+    # ring above the consonant and a sara aa stroke after it. A shaper splits
+    # it, and -- the part that needs an oracle -- moves the ring in front of
+    # any tone mark already sitting above, because the ring belongs closest to
+    # the letter and the tone rides on top of it. Stored order is consonant,
+    # tone, sara am; drawn order is consonant, nikhahit, tone, sara aa.
+    #
+    # Plain, with no tone: the split happens but nothing moves, so a shaper
+    # that only splits agrees here and disagrees on the entry below it.
+    "\\u0e01\\u0e33",
+    # KO KAI, MAI EK, SARA AM -- the reordering case.
+    "\\u0e01\\u0e48\\u0e33",
+    # The same pair in Lao, which shares the shaper and the rule: LO LING,
+    # MAI EK, SARA AM.
+    "\\u0ea5\\u0eb3",
+    "\\u0ea5\\u0ec8\\u0eb3",
+    # A whole Thai word with a pre-base vowel. Thai stores pre-base vowels
+    # before their consonant already, so nothing reorders and this is the
+    # control: a difference here is not the shaper.
+    "\\u0e40\\u0e01\\u0e34\\u0e14",
     # Devanagari, the reason script tags have two spellings.
     "\\u0939\\u093f\\u0928\\u094d\\u0926\\u0940",
+    # --- Khmer, which the Khmer shaper is for ---
+    #
+    # Khmer stacks a consonant under another by writing COENG (U+17D2) between
+    # them, and the shaper has two moves: a left vowel goes to the front of its
+    # syllable, and a COENG+RO pair goes to the front *ahead of it*. Neither is
+    # in the stored order, so a face's own rules cannot do either.
+    #
+    # `khmae` -- "Khmer". KHA, COENG, MO, AE, RO: one subscript and one left
+    # vowel, which is the ordinary case and the one that breaks most visibly.
+    "\\u1781\\u17d2\\u1798\\u17c2\\u179a",
+    # The whole word, `phiesaa khmae` -- "the Khmer language". A systematic
+    # breakage shows here as more than an edge case.
+    "\\u1797\\u17b6\\u179f\\u17b6\\u1781\\u17d2\\u1798\\u17c2\\u179a",
+    # NGO, COENG, RO, COENG, KO and NGO, COENG, KO, COENG, RO -- HarfBuzz's own
+    # pair, from the comment in `reorder_consonant_syllable`. The two differ
+    # only in which subscript is RO, and telling them apart is the entire point
+    # of the `cfar` feature: the first moves COENG+RO to the front and marks
+    # what follows, the second leaves it where it is.
+    "\\u1784\\u17d2\\u179a\\u17d2\\u1782",
+    "\\u1784\\u17d2\\u1782\\u17d2\\u179a",
+    # NYO with a below vowel, NYO with a subscript NYO, and both at once --
+    # HarfBuzz's three-sequence Uniscribe test (issue #974), which is what
+    # settled that the basic features are applied together rather than one
+    # stage each. NYO loses its tail when something is subscripted under it.
+    "\\u1789\\u17bc",
+    "\\u1789\\u17d2\\u1789",
+    "\\u1789\\u17d2\\u1789\\u17bc",
+    # The five split vowels, which Unicode gives no decomposition and the
+    # shaper's own `decompose` hook has to split: each is drawn as a left part
+    # plus a second part, so a shaper that leaves them whole asks the face for
+    # one glyph where it wants two.
+    "\\u1780\\u17be\\u0020\\u1780\\u17bf\\u0020\\u1780\\u17c0",
+    "\\u1780\\u17c4\\u0020\\u1780\\u17c5",
+    # ROBAT (U+17CC) over a consonant -- its own category in the grammar, and
+    # the only mark allowed before the first COENG.
+    "\\u1780\\u17cc",
+    # A bare COENG with nothing to subscript: a broken cluster, which gets a
+    # dotted circle to hang from.
+    "\\u17d2\\u1780",
+    # Khmer digits and a lek attak, which reach no syllable rule at all and are
+    # the control: a difference here is not the shaper.
+    "\\u17e1\\u17e2\\u17e3",
     # Scriptless text, which selects the font's default features.
     "123 456",
+    # --- default ignorables, which shape and are then erased ---
+    #
+    # A joiner, a soft hyphen, a bidi control and a variation selector are
+    # instructions to the shaper, not letters. They have to reach it -- a
+    # joiner is what makes some faces' ligature fire -- and must not reach the
+    # screen, so a shaper hides them at the end: the face's space glyph if it
+    # has one, deletion if it does not.
+    #
+    # The soft hyphen is the one that makes this a correctness question rather
+    # than a tidiness one. Faces routinely map U+00AD to a *visible hyphen*
+    # glyph, so a word carrying a discretionary break renders with a hyphen in
+    # the middle of it. Both halves are here: the word alone as the control,
+    # and the word with the breaks in it.
+    "supercalifragilistic",
+    "super\\u00adcali\\u00adfragi\\u00adlistic",
+    # ZWJ and ZWNJ between two letters that would otherwise ligate. The joiner
+    # changes what the face does *and* leaves nothing behind, which is two
+    # claims one string checks at once.
+    "f\\u200di",
+    "f\\u200ci",
+    # A variation selector, which selects a glyph and is never itself drawn.
+    "a\\ufe0fb",
+    # The word joiner and the zero-width space, which are different characters
+    # hidden the same way.
+    "a\\u2060b",
+    "a\\u200bb",
+    # A combining grapheme joiner, which is ignorable *and* a combining mark.
+    # The two properties are not exclusive, and the mark path must not keep it.
+    "a\\u034fb",
+    # --- language ---
+    #
+    # A language selects a LangSysRecord in place of the script's default
+    # language system, and that record *replaces* the default's feature list
+    # rather than adding to it -- so naming a language can take a feature away
+    # as readily as turn one on. Most entries below are a string already in the
+    # corpus, or paired with a language-less twin, so that a difference between
+    # the two halves is the language and nothing else.
+    #
+    # Turkish: `TRK ` suppresses `fi`, which a Turkish reader sees as a
+    # misspelling of the dotless/dotted pair rather than as a ligature.
+    ("tr", "office fluffy waffle"),
+    ("tr", "fi fl ffi ffl"),
+    # Serbian and Macedonian Cyrillic: `SRB `/`MKD ` swap six italic letters
+    # for their locally-correct shapes. 41 host faces register `SRB `.
+    ("sr", "\\u0431\\u0433\\u0434\\u043f\\u0442"),
+    ("mk", "\\u0431\\u0433\\u0434\\u043f\\u0442"),
+    "\\u0431\\u0433\\u0434\\u043f\\u0442",
+    # Romanian and Moldovan: `ROM `/`MOL ` put a comma below s and t where the
+    # default draws a cedilla. The two most common LangSysRecords on this host
+    # (140 and 76 faces), and `ro-MD` is the one tag here whose *region* subtag
+    # changes the answer.
+    ("ro", "\\u0219\\u021b \\u015f\\u0163"),
+    ("ro-MD", "\\u0219\\u021b \\u015f\\u0163"),
+    "\\u0219\\u021b \\u015f\\u0163",
+    # Catalan: `CAT ` keeps the middle dot of l-l apart from the `ll` ligature.
+    ("ca", "col\\u00b7legi"),
+    "col\\u00b7legi",
+    # Urdu, which selects a different set of Arabic forms from Arabic itself.
+    ("ur", "\\u0627\\u0644\\u0639\\u0631\\u0628\\u064a\\u0629"),
+    # A language essentially no face registers. It must shape exactly like no
+    # language at all: selection falls back to the script's own default, never
+    # to another script's and never to another language's.
+    ("chr", "office fluffy waffle"),
 ]
+
+
+def read_corpus(path):
+    """A corpus from a file of `[language<TAB>]string` lines.
+
+    Blank lines and `#` comments are skipped; the escapes are the built-in
+    corpus's, expanded later by `unescape` on both halves. A targeted corpus is
+    how a synthetic face is swept — the built-in one is 40 strings about the
+    host's fonts, and running it against two generated faces would report
+    thirty-eight agreements that mean nothing.
+    """
+    out = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if "\t" in line:
+                lang, text = line.split("\t", 1)
+                out.append((lang, text) if lang else text)
+            else:
+                out.append(line)
+    return out
+
+
+def lang_of(entry):
+    """The BCP 47 tag an entry names, or `""` for text that names none."""
+    return entry[0] if isinstance(entry, tuple) else ""
+
+
+def string_of(entry):
+    """The (still escaped) string an entry shapes."""
+    return entry[1] if isinstance(entry, tuple) else entry
+
 
 # Corpus entries the two halves cannot be asked the same question about.
 #
@@ -182,8 +343,8 @@ def ours(corpus, fonts):
         "w", suffix=".txt", delete=False, encoding="utf-8", newline="\n"
     ) as f:
         f.write(f"{len(corpus)}\n")
-        for line in corpus:
-            f.write(line + "\n")
+        for entry in corpus:
+            f.write(f"{lang_of(entry)}\t{string_of(entry)}\n")
         for path in fonts:
             f.write(path + "\n")
         input_path = f.name
@@ -241,9 +402,15 @@ def positions(field):
     return [tuple(int(n) for n in p.split(";")) for p in field.split(",") if p]
 
 
-def theirs(path, strings):
+def theirs(path, questions):
     """`[([gid, ...], [(adv, dx, dy), ...], rtl), ...]`, or `None` if it will
     not open.
+
+    `questions` is `[(bcp47 or "", text), ...]`. A named language is set on the
+    buffer, which is how HarfBuzz reaches a LangSysRecord; it maps the tag with
+    `hb_ot_tags_from_language`, the same function `lang.rs` is generated from,
+    so the two halves select the same language system or the comparison is
+    meaningless.
 
     `rtl` is the direction HarfBuzz guessed, and it decides which of our two
     orders its answer is comparable to. HarfBuzz does no bidi of its own: it
@@ -265,14 +432,19 @@ def theirs(path, strings):
         return None
 
     out = []
-    for text in strings:
+    for tag, string in questions:
         buf = hb.Buffer()
-        buf.add_str(text)
+        buf.add_str(string)
         # The same thing this crate does not do: guess one script for the
         # whole string. For a single-script string that is the same answer an
         # itemizer gives; for a mixed one it is not, which is why `MIXED`
         # holds those two entries out of the verdict.
         buf.guess_segment_properties()
+        # After the guess, which sets a language of its own from the locale.
+        # An empty tag has to mean *no* language rather than "whatever this
+        # machine is set to", or the sweep would compare our "no language"
+        # against HarfBuzz's "en", and pass or fail by where it was run.
+        buf.language = tag
         rtl = str(buf.direction).lower().endswith("rtl")
         try:
             hb.shape(font, buf)
@@ -356,7 +528,19 @@ def main():
     ap.add_argument(
         "--limit", type=int, default=0, help="stop after this many faces (0 = all)"
     )
+    ap.add_argument(
+        "--corpus",
+        default=None,
+        help="file of `[language<TAB>]string` lines to sweep instead of the "
+        "built-in corpus, with the same backslash-u escapes",
+    )
     args = ap.parse_args()
+
+    corpus = CORPUS
+    if args.corpus:
+        corpus = read_corpus(args.corpus)
+        if not corpus:
+            sys.exit(f"{args.corpus} has no strings in it")
 
     if not os.path.isdir(args.fonts):
         sys.exit(f"{args.fonts} is not a directory")
@@ -366,9 +550,9 @@ def main():
     if not fonts:
         sys.exit(f"no fonts under {args.fonts}")
 
-    strings = [unescape(line) for line in CORPUS]
-    print(f"{len(fonts)} faces x {len(strings)} strings")
-    mine = ours(CORPUS, fonts)
+    questions = [(lang_of(entry), unescape(string_of(entry))) for entry in corpus]
+    print(f"{len(fonts)} faces x {len(questions)} strings")
+    mine = ours(corpus, fonts)
 
     agree = 0
     order_only = Counter()
@@ -379,7 +563,7 @@ def main():
     placed_examples = {}
     skipped = 0
     for path in fonts:
-        hb_out = theirs(path, strings)
+        hb_out = theirs(path, questions)
         if hb_out is None:
             skipped += 1
             continue
@@ -392,14 +576,14 @@ def main():
             # the buffer was right-to-left, logical when it did not.
             logical, visual = got
             ours_here, ours_pos = visual if rtl else logical
-            if CORPUS[i] in MIXED:
+            if corpus[i] in MIXED:
                 # Not a verdict on the shaper — see `MIXED`. Counted as
                 # agreement only when the itemizer happened not to matter for
                 # this face, which is the interesting half of the answer.
                 if ours_here == expected and same_positions(ours_pos, expected_pos):
                     agree += 1
                 else:
-                    mixed[CORPUS[i]] += 1
+                    mixed[corpus[i]] += 1
             elif ours_here == expected:
                 if same_positions(ours_pos, expected_pos):
                     agree += 1
@@ -409,9 +593,9 @@ def main():
                     # and mark attachment live here and nowhere else in this
                     # sweep: a mark stacked on the wrong base picks the same
                     # glyph id as one stacked on the right base.
-                    placed[CORPUS[i]] += 1
+                    placed[corpus[i]] += 1
                     placed_examples.setdefault(
-                        CORPUS[i],
+                        corpus[i],
                         (os.path.basename(path), ours_pos, expected_pos),
                     )
             elif sorted(ours_here) == sorted(expected):
@@ -422,11 +606,11 @@ def main():
                 # backwards, where we reorder each run on its own. The
                 # *shaping* agreed exactly, so it is worth separating from a
                 # real disagreement rather than burying in the total.
-                order_only[CORPUS[i]] += 1
+                order_only[corpus[i]] += 1
             else:
-                differ[CORPUS[i]] += 1
+                differ[corpus[i]] += 1
                 examples.setdefault(
-                    CORPUS[i], (os.path.basename(path), ours_here, expected)
+                    corpus[i], (os.path.basename(path), ours_here, expected)
                 )
 
     print(f"agree    {agree}  (same glyphs, same positions)")

@@ -26,7 +26,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha ────────────────────────────────────────────────
@@ -381,6 +381,7 @@ impl MandelbrotApp {
                 color: COL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Bottom help bar
@@ -400,6 +401,7 @@ impl MandelbrotApp {
                 color: COL_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -443,6 +445,7 @@ impl MandelbrotApp {
             color: COL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let helps = [
@@ -472,6 +475,7 @@ impl MandelbrotApp {
                 color: COL_BLUE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: bx + 140.0,
@@ -481,6 +485,7 @@ impl MandelbrotApp {
                 color: COL_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 18.0;
         }

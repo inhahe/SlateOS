@@ -38,7 +38,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -3152,6 +3152,7 @@ impl DbViewerApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Toolbar buttons
@@ -3177,6 +3178,7 @@ impl DbViewerApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(btn_w),
+                overflow: TextOverflow::Ellipsis,
             });
             bx += btn_w + 8.0;
         }
@@ -3225,6 +3227,7 @@ impl DbViewerApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tw - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Close button
@@ -3236,6 +3239,7 @@ impl DbViewerApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(12.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             tx += tw + 2.0;
@@ -3258,6 +3262,7 @@ impl DbViewerApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(12.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -3304,6 +3309,7 @@ impl DbViewerApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
         ny += 22.0;
 
@@ -3382,6 +3388,7 @@ impl DbViewerApp {
                 font_size,
                 font_weight,
                 max_width: Some(16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Label
@@ -3393,6 +3400,7 @@ impl DbViewerApp {
                 font_size,
                 font_weight,
                 max_width: Some(width - 36.0 - indent),
+                overflow: TextOverflow::Ellipsis,
             });
 
             ny += 22.0;
@@ -3419,6 +3427,7 @@ impl DbViewerApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             ny += 18.0;
 
@@ -3446,6 +3455,7 @@ impl DbViewerApp {
                         font_size: 10.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width - 40.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     // Remove button
                     cmds.push(RenderCommand::Text {
@@ -3456,6 +3466,7 @@ impl DbViewerApp {
                         font_size: 10.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(10.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     let _ = fi; // suppress unused
                     ny += 20.0;
@@ -3498,6 +3509,7 @@ impl DbViewerApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         };
@@ -3557,6 +3569,7 @@ impl DbViewerApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(col_width - CELL_PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Column separator
@@ -3619,6 +3632,7 @@ impl DbViewerApp {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(col_width - CELL_PADDING * 2.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -3669,6 +3683,7 @@ impl DbViewerApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Prev / Next buttons
@@ -3691,6 +3706,7 @@ impl DbViewerApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(48.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -3755,6 +3771,7 @@ impl DbViewerApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tw - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tx += tw + 2.0;
         }
@@ -3820,6 +3837,7 @@ impl DbViewerApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             // Render tokens with syntax coloring
@@ -3862,6 +3880,7 @@ impl DbViewerApp {
                         font_size: 12.0,
                         font_weight: weight,
                         max_width: Some(text_w + 4.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
                 tx_pos += text_w;
@@ -3878,6 +3897,7 @@ impl DbViewerApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut hy = history_y + 16.0;
@@ -3912,6 +3932,7 @@ impl DbViewerApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
             hy += 18.0;
         }
@@ -3935,6 +3956,7 @@ impl DbViewerApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 32.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             Some(result) => {
@@ -3981,6 +4003,7 @@ impl DbViewerApp {
                         font_size: RESULT_MSG_FONT_SIZE,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(msg_width),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
 
@@ -4012,6 +4035,7 @@ impl DbViewerApp {
                             font_size: 10.0,
                             font_weight: FontWeightHint::Bold,
                             max_width: Some(col_w - 12.0),
+                            overflow: TextOverflow::Ellipsis,
                         });
                     }
 
@@ -4037,6 +4061,7 @@ impl DbViewerApp {
                                 font_size: 10.0,
                                 font_weight: FontWeightHint::Regular,
                                 max_width: Some(col_w - 12.0),
+                                overflow: TextOverflow::Ellipsis,
                             });
                         }
                         ry += 16.0;
@@ -4070,6 +4095,7 @@ impl DbViewerApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         };
@@ -4087,6 +4113,7 @@ impl DbViewerApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Column headers
@@ -4113,6 +4140,7 @@ impl DbViewerApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(col_widths.get(hi).copied().unwrap_or(100.0)),
+                overflow: TextOverflow::Ellipsis,
             });
             hx += col_widths.get(hi).copied().unwrap_or(100.0);
         }
@@ -4137,6 +4165,7 @@ impl DbViewerApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(180.0),
+                overflow: TextOverflow::Ellipsis,
             });
             rx += 180.0;
 
@@ -4148,6 +4177,7 @@ impl DbViewerApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             rx += 100.0;
 
@@ -4160,6 +4190,7 @@ impl DbViewerApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(200.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -4184,6 +4215,7 @@ impl DbViewerApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 16.0;
 
@@ -4199,6 +4231,7 @@ impl DbViewerApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 32.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 16.0;
             }
@@ -4226,6 +4259,7 @@ impl DbViewerApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let table_count = tab.db.tables.len();
@@ -4238,6 +4272,7 @@ impl DbViewerApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -4298,6 +4333,7 @@ impl DbViewerApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(box_width - 12.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Columns
@@ -4316,6 +4352,7 @@ impl DbViewerApp {
                     font_size: 9.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(box_width - 12.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 14.0;
             }
@@ -4357,6 +4394,7 @@ impl DbViewerApp {
                     font_size: 8.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(120.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -4384,6 +4422,7 @@ impl DbViewerApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Table info
@@ -4404,6 +4443,7 @@ impl DbViewerApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -4416,6 +4456,7 @@ impl DbViewerApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(140.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

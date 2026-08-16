@@ -65,7 +65,7 @@
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -855,6 +855,7 @@ impl SecurityDialog {
             color: theme::TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dw - SHIELD_SIZE - PADDING * 3.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // --- Subtitle: "AppName wants to access ResourceType" ---
@@ -871,6 +872,7 @@ impl SecurityDialog {
             color: theme::SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - SHIELD_SIZE - PADDING * 3.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // --- Body section ---
@@ -896,6 +898,7 @@ impl SecurityDialog {
             color: theme::CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(badge_width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Risk description
@@ -907,6 +910,7 @@ impl SecurityDialog {
             color: theme::SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - PADDING * 2.0 - badge_width - 10.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // --- Detail rows ---
@@ -978,6 +982,7 @@ impl SecurityDialog {
             color: details_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // --- Expanded details panel ---
@@ -1016,6 +1021,7 @@ impl SecurityDialog {
                 color: theme::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_w - dp * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             ty += 16.0;
 
@@ -1035,6 +1041,7 @@ impl SecurityDialog {
                 color: time_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_w - dp * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             ty += 16.0;
 
@@ -1047,6 +1054,7 @@ impl SecurityDialog {
                 color: theme::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_w - dp * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             ty += 16.0;
 
@@ -1059,6 +1067,7 @@ impl SecurityDialog {
                 color: theme::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_w - dp * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1148,6 +1157,7 @@ impl SecurityDialog {
                 color: theme::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1207,6 +1217,7 @@ impl SecurityDialog {
             color: theme::CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SHIELD_SIZE),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1229,6 +1240,7 @@ impl SecurityDialog {
             color: theme::SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(label_width),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + label_width,
@@ -1238,6 +1250,7 @@ impl SecurityDialog {
             color: theme::TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - label_width),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1271,6 +1284,7 @@ impl SecurityDialog {
             color: fg,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1324,6 +1338,7 @@ impl SecurityDialog {
                 color: theme::CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(box_size),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1336,6 +1351,7 @@ impl SecurityDialog {
             color: theme::SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

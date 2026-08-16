@@ -19,7 +19,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -298,6 +298,7 @@ impl FloodIt {
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Color buttons
@@ -326,6 +327,7 @@ impl FloodIt {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             // Highlight current color
             if is_current {
@@ -356,6 +358,7 @@ impl FloodIt {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Grid
@@ -399,6 +402,7 @@ impl FloodIt {
                     font_size: 18.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             GameState::Lost => {
@@ -410,6 +414,7 @@ impl FloodIt {
                     font_size: 18.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             GameState::Playing => {}
@@ -423,6 +428,7 @@ impl FloodIt {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -446,6 +452,7 @@ impl FloodIt {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             let lines = [
                 ("1-6", "Choose color"),
@@ -464,6 +471,7 @@ impl FloodIt {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cmds.push(RenderCommand::Text {
                     x: help_x + 60.0,
@@ -473,6 +481,7 @@ impl FloodIt {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         } else {
@@ -484,6 +493,7 @@ impl FloodIt {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 

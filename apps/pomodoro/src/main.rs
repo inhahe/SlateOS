@@ -15,7 +15,7 @@
 //! - Minimal distraction UI with large timer display
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────────────
@@ -715,6 +715,7 @@ impl PomodoroApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -732,6 +733,7 @@ impl PomodoroApp {
             color: self.phase.color(),
             font_weight: FontWeightHint::Bold,
             max_width: Some(160.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Round indicator
@@ -746,6 +748,7 @@ impl PomodoroApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Progress ring (simulated as arc using filled rects)
@@ -805,6 +808,7 @@ impl PomodoroApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // State indicator
@@ -825,6 +829,7 @@ impl PomodoroApp {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Controls help
@@ -837,6 +842,7 @@ impl PomodoroApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(280.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Task label
@@ -849,6 +855,7 @@ impl PomodoroApp {
                 color: LAVENDER,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -878,6 +885,7 @@ impl PomodoroApp {
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(280.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -893,6 +901,7 @@ impl PomodoroApp {
             color: if today_count >= goal { GREEN } else { SUBTEXT1 },
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Streak
@@ -904,6 +913,7 @@ impl PomodoroApp {
             color: if self.streak_days > 0 { PEACH } else { OVERLAY0 },
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Ambient sound
@@ -915,6 +925,7 @@ impl PomodoroApp {
             color: TEAL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(160.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Total pomodoros
@@ -931,6 +942,7 @@ impl PomodoroApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(160.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -943,6 +955,7 @@ impl PomodoroApp {
             color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut sy = y + 40.0;
@@ -990,6 +1003,7 @@ impl PomodoroApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(card_w - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: cx + 10.0,
@@ -999,6 +1013,7 @@ impl PomodoroApp {
                 color: *color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(card_w - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1013,6 +1028,7 @@ impl PomodoroApp {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
         sy += 22.0;
 
@@ -1025,6 +1041,7 @@ impl PomodoroApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             // Table header
@@ -1036,6 +1053,7 @@ impl PomodoroApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(self.width - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
             sy += 16.0;
 
@@ -1056,6 +1074,7 @@ impl PomodoroApp {
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(self.width - 40.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 sy += 14.0;
             }
@@ -1071,6 +1090,7 @@ impl PomodoroApp {
             color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let start_y = y + 40.0;
@@ -1086,6 +1106,7 @@ impl PomodoroApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -1099,6 +1120,7 @@ impl PomodoroApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let entries_rev: Vec<&LogEntry> = self.log_entries.iter().rev().collect();
@@ -1136,6 +1158,7 @@ impl PomodoroApp {
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1149,6 +1172,7 @@ impl PomodoroApp {
             color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1159,6 +1183,7 @@ impl PomodoroApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let items: Vec<(&str, String)> = vec![
@@ -1236,6 +1261,7 @@ impl PomodoroApp {
                 color: if is_selected { TEXT_COLOR } else { SUBTEXT1 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1254,6 +1280,7 @@ impl PomodoroApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(180.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1277,6 +1304,7 @@ impl PomodoroApp {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width * 0.6),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Timer mini display on right
@@ -1289,6 +1317,7 @@ impl PomodoroApp {
             color: self.phase.color(),
             font_weight: FontWeightHint::Bold,
             max_width: Some(110.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1329,6 +1358,7 @@ impl PomodoroApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(nw - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1339,6 +1369,7 @@ impl PomodoroApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(nw - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

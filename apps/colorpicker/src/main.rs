@@ -9,7 +9,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -899,6 +899,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE_LARGE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Eyedropper button
@@ -924,6 +925,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         *y += 28.0;
@@ -983,6 +985,7 @@ impl ColorPickerApp {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - info_x - PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
             info_y += 18.0;
         }
@@ -1005,6 +1008,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         *y += SWATCH_SIZE + PADDING;
@@ -1056,6 +1060,7 @@ impl ColorPickerApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_width),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1091,6 +1096,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - 2.0 * PADDING - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         *y += 30.0 + PADDING;
@@ -1118,6 +1124,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let track_x = x + 36.0;
@@ -1173,6 +1180,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1185,6 +1193,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         *y += 18.0;
 
@@ -1237,6 +1246,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         *y += 18.0;
 
@@ -1260,6 +1270,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         *y += 18.0;
 
@@ -1307,6 +1318,7 @@ impl ColorPickerApp {
                 font_size: FONT_SIZE_SMALL - 1.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1322,6 +1334,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         *y += 18.0;
 
@@ -1356,6 +1369,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Background swatch
@@ -1375,6 +1389,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Ratio text
@@ -1387,6 +1402,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // WCAG level
@@ -1404,6 +1420,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Sample text on background
@@ -1424,6 +1441,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(148.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         *y += CONTRAST_PANEL_HEIGHT + PADDING;
@@ -1438,6 +1456,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         *y += 18.0;
 
@@ -1497,6 +1516,7 @@ impl ColorPickerApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         *y += 18.0;
 
@@ -1534,6 +1554,7 @@ impl ColorPickerApp {
                 font_size: FONT_SIZE_SMALL - 1.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(PALETTE_CELL),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

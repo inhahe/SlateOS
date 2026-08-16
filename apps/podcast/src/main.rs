@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1914,6 +1914,7 @@ impl PodcastApp {
             font_size: 18.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - indent * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         item_y += 36.0;
 
@@ -1974,6 +1975,7 @@ impl PodcastApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - indent * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         item_y += 24.0;
 
@@ -2017,6 +2019,7 @@ impl PodcastApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - indent * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         item_y += 24.0;
 
@@ -2071,6 +2074,7 @@ impl PodcastApp {
                 FontWeightHint::Regular
             },
             max_width: Some(item_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2115,6 +2119,7 @@ impl PodcastApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Episodes.
@@ -2166,6 +2171,7 @@ impl PodcastApp {
             font_size: 18.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2223,6 +2229,7 @@ impl PodcastApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(label_width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             pill_x += label_width + 8.0;
@@ -2274,6 +2281,7 @@ impl PodcastApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 160.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Podcast name and date.
@@ -2285,6 +2293,7 @@ impl PodcastApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 160.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Duration and download indicator.
@@ -2297,6 +2306,7 @@ impl PodcastApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Download icon indicator.
@@ -2309,6 +2319,7 @@ impl PodcastApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2345,6 +2356,7 @@ impl PodcastApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Bottom separator.
@@ -2403,6 +2415,7 @@ impl PodcastApp {
             font_size: 20.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(text_w),
+            overflow: TextOverflow::Ellipsis,
         });
         detail_y += 32.0;
 
@@ -2415,6 +2428,7 @@ impl PodcastApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(text_w),
+            overflow: TextOverflow::Ellipsis,
         });
         detail_y += 24.0;
 
@@ -2432,6 +2446,7 @@ impl PodcastApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(text_w),
+            overflow: TextOverflow::Ellipsis,
         });
         detail_y += 24.0;
 
@@ -2460,6 +2475,7 @@ impl PodcastApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
         let dl_badge_x = pad + status_w + 8.0;
         cmds.push(RenderCommand::FillRect {
@@ -2478,6 +2494,7 @@ impl PodcastApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
         detail_y += 36.0;
 
@@ -2501,6 +2518,7 @@ impl PodcastApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(text_w),
+            overflow: TextOverflow::Ellipsis,
         });
         detail_y += 22.0;
 
@@ -2535,6 +2553,7 @@ impl PodcastApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(text_w),
+                overflow: TextOverflow::Ellipsis,
             });
             detail_y += 22.0;
 
@@ -2569,6 +2588,7 @@ impl PodcastApp {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(50.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: pad + 68.0,
@@ -2578,6 +2598,7 @@ impl PodcastApp {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(text_w - 80.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 detail_y += 26.0;
             }
@@ -2603,6 +2624,7 @@ impl PodcastApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -2619,6 +2641,7 @@ impl PodcastApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut row_y = HEADER_HEIGHT + 36.0;
@@ -2650,6 +2673,7 @@ impl PodcastApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Episode title.
@@ -2661,6 +2685,7 @@ impl PodcastApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 180.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Podcast title.
@@ -2672,6 +2697,7 @@ impl PodcastApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 180.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Duration.
@@ -2683,6 +2709,7 @@ impl PodcastApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             row_y += row_h + 4.0;
@@ -2737,6 +2764,7 @@ impl PodcastApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bar_w),
+            overflow: TextOverflow::Ellipsis,
         });
         info_y += 28.0;
 
@@ -2750,6 +2778,7 @@ impl PodcastApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bar_w),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             cmds.push(RenderCommand::Text {
@@ -2760,6 +2789,7 @@ impl PodcastApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(bar_w),
+                overflow: TextOverflow::Ellipsis,
             });
             info_y += 24.0;
 
@@ -2776,6 +2806,7 @@ impl PodcastApp {
                     font_size: 13.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(bar_w - 100.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Progress bar.
@@ -2806,6 +2837,7 @@ impl PodcastApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(60.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 info_y += 40.0;
@@ -2833,6 +2865,7 @@ impl PodcastApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(bar_w),
+            overflow: TextOverflow::Ellipsis,
         });
         info_y += 24.0;
 
@@ -2853,6 +2886,7 @@ impl PodcastApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(bar_w - 100.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: bar_x + bar_w - 90.0,
@@ -2862,6 +2896,7 @@ impl PodcastApp {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(80.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 info_y += 24.0;
             }
@@ -2887,6 +2922,7 @@ impl PodcastApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -2908,6 +2944,7 @@ impl PodcastApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 160.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -2922,6 +2959,7 @@ impl PodcastApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 160.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Completion indicator.
@@ -2934,6 +2972,7 @@ impl PodcastApp {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(80.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -2946,6 +2985,7 @@ impl PodcastApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Separator.
@@ -3042,6 +3082,7 @@ impl PodcastApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w - 48.0),
+            overflow: TextOverflow::Ellipsis,
         });
         card_y += 28.0;
 
@@ -3063,6 +3104,7 @@ impl PodcastApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 200.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: pad + content_w - 200.0,
@@ -3072,6 +3114,7 @@ impl PodcastApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             card_y += 24.0;
         }
@@ -3119,6 +3162,7 @@ impl PodcastApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Value.
@@ -3130,6 +3174,7 @@ impl PodcastApp {
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -3182,6 +3227,7 @@ impl PodcastApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(text_w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Results.
@@ -3195,6 +3241,7 @@ impl PodcastApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(text_w),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             cmds.push(RenderCommand::Text {
@@ -3205,6 +3252,7 @@ impl PodcastApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(text_w),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let mut ep_y = results_y + 24.0;
@@ -3295,6 +3343,7 @@ impl PodcastApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(350.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -3305,6 +3354,7 @@ impl PodcastApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(350.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Playback controls.
@@ -3328,6 +3378,7 @@ impl PodcastApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(28.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Play/Pause button.
@@ -3353,6 +3404,7 @@ impl PodcastApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Skip forward button.
@@ -3373,6 +3425,7 @@ impl PodcastApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Time display.
@@ -3389,6 +3442,7 @@ impl PodcastApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(150.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Speed indicator.
@@ -3408,6 +3462,7 @@ impl PodcastApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(38.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

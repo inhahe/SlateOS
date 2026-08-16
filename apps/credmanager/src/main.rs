@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 
 use guitk::color::Color;
 use guitk::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -2347,7 +2347,14 @@ fn draw_stroke_rect(
     });
 }
 
-/// Render text at a position.
+/// Render text at a position, marking the cut if `max_width` truncates it.
+///
+/// The overflow policy is derived rather than taken as a ninth argument: every
+/// caller in this file draws a credential's own text — a service name, a user
+/// name, a URL — where a bound exists precisely because the value is
+/// variable-length and might not fit, and a fragment of a URL read as a whole
+/// URL is the failure this app can least afford. A caller wanting a silent cut
+/// should build the command directly and say so.
 // 8 args mirror the underlying Text render command; same shape on purpose.
 #[allow(clippy::too_many_arguments)]
 fn draw_text(
@@ -2368,6 +2375,11 @@ fn draw_text(
         font_size: size,
         font_weight: weight,
         max_width,
+        overflow: if max_width.is_some() {
+            TextOverflow::Ellipsis
+        } else {
+            TextOverflow::Clip
+        },
     });
 }
 

@@ -6,7 +6,7 @@
 //! through.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -442,6 +442,7 @@ impl FocusAssistManager {
             color: BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         commands
@@ -462,6 +463,7 @@ impl FocusAssistManager {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 32.0;
 
@@ -479,6 +481,7 @@ impl FocusAssistManager {
             },
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 24.0;
 
@@ -491,6 +494,7 @@ impl FocusAssistManager {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 20.0;
         }
@@ -522,6 +526,7 @@ impl FocusAssistManager {
                 color: if selected { BLUE } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             commands.push(RenderCommand::Text {
                 x: x + padding + 36.0,
@@ -531,6 +536,7 @@ impl FocusAssistManager {
                 color: if selected { TEXT } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             commands.push(RenderCommand::Text {
                 x: x + padding + 36.0,
@@ -540,6 +546,7 @@ impl FocusAssistManager {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - padding * 2.0 - 48.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 46.0;
         }
@@ -554,6 +561,7 @@ impl FocusAssistManager {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 24.0;
 
@@ -566,6 +574,7 @@ impl FocusAssistManager {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         } else {
             for rule in &self.auto_rules {
@@ -585,6 +594,7 @@ impl FocusAssistManager {
                     color: TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 commands.push(RenderCommand::Text {
                     x: x + width - padding - 80.0,
@@ -594,6 +604,7 @@ impl FocusAssistManager {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Light,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cy += 32.0;
             }

@@ -22,7 +22,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -1348,6 +1348,7 @@ fn render_title_bar(tree: &mut RenderTree, app: &VpnManager) {
         color: TEXT_COLOR,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Connection count indicator
@@ -1367,6 +1368,7 @@ fn render_title_bar(tree: &mut RenderTree, app: &VpnManager) {
         color: indicator_color,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Global kill switch indicator
@@ -1387,6 +1389,7 @@ fn render_title_bar(tree: &mut RenderTree, app: &VpnManager) {
             color: MANTLE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1440,6 +1443,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &VpnManager) {
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Separator
@@ -1480,6 +1484,7 @@ fn render_toolbar_button(tree: &mut RenderTree, label: &str, x: f32, y: f32, col
         color,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width - 16.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -1522,6 +1527,7 @@ fn render_sidebar(tree: &mut RenderTree, app: &VpnManager, content_y: f32, conte
         color: search_color,
         font_weight: FontWeightHint::Regular,
         max_width: Some(SIDEBAR_WIDTH - 32.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Profile list
@@ -1604,6 +1610,7 @@ fn render_sidebar_item(
         color: name_color,
         font_weight: FontWeightHint::Bold,
         max_width: Some(SIDEBAR_WIDTH - 50.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Server and protocol
@@ -1615,6 +1622,7 @@ fn render_sidebar_item(
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(SIDEBAR_WIDTH - 50.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Status text
@@ -1629,6 +1637,7 @@ fn render_sidebar_item(
         color: status_color,
         font_weight: FontWeightHint::Light,
         max_width: Some(SIDEBAR_WIDTH - 50.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Kill switch badge
@@ -1649,6 +1658,7 @@ fn render_sidebar_item(
             color: RED,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }
@@ -1752,6 +1762,7 @@ fn render_tab_bar(tree: &mut RenderTree, app: &VpnManager, px: f32, py: f32, pw:
                 FontWeightHint::Regular
             },
             max_width: Some(tab_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -1765,6 +1776,7 @@ fn render_no_selection(tree: &mut RenderTree, px: f32, py: f32, pw: f32, ph: f32
         color: OVERLAY0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 
@@ -1912,6 +1924,7 @@ fn render_tab_overview(
                 color: GREEN,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
                 x: summary_x,
@@ -1921,6 +1934,7 @@ fn render_tab_overview(
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
                 x: summary_x,
@@ -1930,6 +1944,7 @@ fn render_tab_overview(
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
                 x: summary_x,
@@ -1939,6 +1954,7 @@ fn render_tab_overview(
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 }
@@ -1980,6 +1996,7 @@ fn render_tab_connection(
             color: status_color,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += FIELD_HEIGHT;
 
@@ -2042,6 +2059,7 @@ fn render_tab_connection(
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2082,6 +2100,7 @@ fn render_tab_split_tunnel(
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(pw - SECTION_PADDING * 2.0),
+        overflow: TextOverflow::Ellipsis,
     });
     y += 16.0;
     tree.push(RenderCommand::Text {
@@ -2092,6 +2111,7 @@ fn render_tab_split_tunnel(
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(pw - SECTION_PADDING * 2.0),
+        overflow: TextOverflow::Ellipsis,
     });
     y += 24.0;
 
@@ -2107,6 +2127,7 @@ fn render_tab_split_tunnel(
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += FIELD_HEIGHT;
     } else {
@@ -2129,6 +2150,7 @@ fn render_tab_split_tunnel(
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(pw - SECTION_PADDING * 2.0 - 80.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Remove button
@@ -2140,6 +2162,7 @@ fn render_tab_split_tunnel(
                 color: RED,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             y += FIELD_HEIGHT + 2.0;
@@ -2225,6 +2248,7 @@ fn render_tab_protocol(
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(pw - SECTION_PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y += FIELD_HEIGHT;
         }
@@ -2256,6 +2280,7 @@ fn render_tab_log(
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         return;
     }
@@ -2277,6 +2302,7 @@ fn render_tab_log(
         color: TEXT_COLOR,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     tree.push(RenderCommand::Text {
         x: px + SECTION_PADDING + 80.0,
@@ -2286,6 +2312,7 @@ fn render_tab_log(
         color: TEXT_COLOR,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     tree.push(RenderCommand::Text {
         x: px + SECTION_PADDING + 130.0,
@@ -2295,6 +2322,7 @@ fn render_tab_log(
         color: TEXT_COLOR,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     tree.push(RenderCommand::Text {
         x: px + SECTION_PADDING + 250.0,
@@ -2304,6 +2332,7 @@ fn render_tab_log(
         color: TEXT_COLOR,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     y += LOG_ENTRY_HEIGHT + 2.0;
 
@@ -2346,6 +2375,7 @@ fn render_tab_log(
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         tree.push(RenderCommand::Text {
@@ -2356,6 +2386,7 @@ fn render_tab_log(
             color: entry.level.color(),
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         tree.push(RenderCommand::Text {
@@ -2366,6 +2397,7 @@ fn render_tab_log(
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: Some(110.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         tree.push(RenderCommand::Text {
@@ -2376,6 +2408,7 @@ fn render_tab_log(
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(pw - SECTION_PADDING * 2.0 - 260.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         y += LOG_ENTRY_HEIGHT;
@@ -2495,6 +2528,7 @@ fn render_tab_stats(
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Bar
@@ -2516,6 +2550,7 @@ fn render_tab_stats(
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         y += bar_h + 4.0;
@@ -2572,6 +2607,7 @@ fn render_add_dialog(tree: &mut RenderTree, app: &VpnManager) {
         color: TEXT_COLOR,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Form fields
@@ -2639,6 +2675,7 @@ fn render_status_bar(tree: &mut RenderTree, app: &VpnManager) {
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Active connections
@@ -2651,6 +2688,7 @@ fn render_status_bar(tree: &mut RenderTree, app: &VpnManager) {
         color: if active > 0 { GREEN } else { OVERLAY0 },
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Total transfer
@@ -2664,6 +2702,7 @@ fn render_status_bar(tree: &mut RenderTree, app: &VpnManager) {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2677,6 +2716,7 @@ fn render_status_bar(tree: &mut RenderTree, app: &VpnManager) {
             color: RED,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }
@@ -2694,6 +2734,7 @@ fn render_section_title(tree: &mut RenderTree, title: &str, x: f32, y: f32) -> f
         color: LAVENDER,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     // Underline
     tree.push(RenderCommand::Line {
@@ -2724,6 +2765,7 @@ fn render_field_row(
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(FIELD_LABEL_WIDTH),
+            overflow: TextOverflow::Ellipsis,
         });
     }
     tree.push(RenderCommand::Text {
@@ -2734,6 +2776,7 @@ fn render_field_row(
         color: TEXT_COLOR,
         font_weight: FontWeightHint::Regular,
         max_width: Some(400.0),
+        overflow: TextOverflow::Ellipsis,
     });
     y + FIELD_HEIGHT
 }
@@ -2747,6 +2790,7 @@ fn render_toggle_row(tree: &mut RenderTree, label: &str, enabled: bool, x: f32, 
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(FIELD_LABEL_WIDTH),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Toggle track
@@ -2809,6 +2853,7 @@ fn render_action_button(tree: &mut RenderTree, label: &str, x: f32, y: f32, colo
         color,
         font_weight: FontWeightHint::Bold,
         max_width: Some(BUTTON_WIDTH - 24.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -2828,6 +2873,7 @@ fn render_dialog_field(
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(100.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Input box
@@ -2860,6 +2906,7 @@ fn render_dialog_field(
         color: if value.is_empty() { OVERLAY0 } else { TEXT_COLOR },
         font_weight: FontWeightHint::Regular,
         max_width: Some(fw - 120.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     y + FIELD_HEIGHT + 6.0

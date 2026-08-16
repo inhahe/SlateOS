@@ -26,7 +26,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -900,6 +900,7 @@ impl CrosswordApp {
             color: COL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Puzzle list
@@ -929,6 +930,7 @@ impl CrosswordApp {
                 color: text_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -939,6 +941,7 @@ impl CrosswordApp {
                 color: COL_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -951,6 +954,7 @@ impl CrosswordApp {
             color: COL_OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -983,6 +987,7 @@ impl CrosswordApp {
             color: COL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Timer
@@ -994,6 +999,7 @@ impl CrosswordApp {
             color: COL_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Progress
@@ -1006,6 +1012,7 @@ impl CrosswordApp {
             color: COL_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Current clue display
@@ -1022,6 +1029,7 @@ impl CrosswordApp {
                 color: COL_YELLOW,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1081,6 +1089,7 @@ impl CrosswordApp {
                                 color: if is_cursor { COL_CRUST } else { COL_OVERLAY0 },
                                 font_weight: FontWeightHint::Regular,
                                 max_width: None,
+                                overflow: TextOverflow::Clip,
                             });
                         }
 
@@ -1104,6 +1113,7 @@ impl CrosswordApp {
                                 color: letter_color,
                                 font_weight: FontWeightHint::Bold,
                                 max_width: None,
+                                overflow: TextOverflow::Clip,
                             });
                         }
                     }
@@ -1141,6 +1151,7 @@ impl CrosswordApp {
             color: COL_OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Help overlay
@@ -1170,6 +1181,7 @@ impl CrosswordApp {
             color: COL_LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let mut cy = y + 22.0;
@@ -1208,6 +1220,7 @@ impl CrosswordApp {
                 color,
                 font_weight: weight,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 18.0;
         }
@@ -1246,6 +1259,7 @@ impl CrosswordApp {
             color: COL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let helps = [
@@ -1272,6 +1286,7 @@ impl CrosswordApp {
                 color: COL_BLUE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: bx + 150.0,
@@ -1281,6 +1296,7 @@ impl CrosswordApp {
                 color: COL_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 20.0;
         }
@@ -1307,6 +1323,7 @@ impl CrosswordApp {
             color: COL_GREEN,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1317,6 +1334,7 @@ impl CrosswordApp {
             color: COL_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1327,6 +1345,7 @@ impl CrosswordApp {
             color: COL_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let revealed = self
@@ -1343,6 +1362,7 @@ impl CrosswordApp {
                 color: COL_PEACH,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1354,6 +1374,7 @@ impl CrosswordApp {
             color: COL_OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

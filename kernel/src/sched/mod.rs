@@ -2221,6 +2221,82 @@ static LIVENESS_CTX_STALL_COUNT: AtomicU64 = AtomicU64::new(0);
 /// wall-clock boot deadline, which catches every hang mode by construction.
 static LIVENESS_LAST_OUTPUT: AtomicU64 = AtomicU64::new(0);
 
+/// Kernel-side forward-progress total observed at the previous liveness check.
+///
+/// **Why serial silence was not enough.** [`LIVENESS_LAST_OUTPUT`] above names
+/// the exact hole in its own premise: a starting ring-3 process "spends nearly
+/// all its wall time inside the kernel on its own behalf (ELF load,
+/// demand-paging storm, filesystem I/O)". Nothing narrates during that stretch,
+/// so `silent` is true; the ticks land in kernel mode with an empty run queue,
+/// so `USEFUL_WORK_TICKS` is frozen; and the total-hang branch therefore fired
+/// on a perfectly healthy boot (observed 2026-08-15, `useful_work=82`, reported
+/// by lane C in `requests/c-a-liveness-system-hang-false-positive.md`: the boot
+/// went on to reach `BOOT_OK` ~600 s later).
+///
+/// This counter closes that hole with the work such a stretch *does* leave a
+/// trace of: page faults resolved and block-I/O operations completed. Loading a
+/// 3.5 MB ELF off ext4 moves both by thousands while printing nothing.
+///
+/// **Only the total-hang branch consults it, deliberately.** That branch claims
+/// "no task-level forward progress, all CPUs idle-ticking"; a resolved page
+/// fault or a completed disk read is a direct *contradiction* of that claim, so
+/// gating on it removes a false statement rather than merely tuning a
+/// threshold. The busy-livelock branch below claims something else entirely — "a
+/// task is monopolizing a CPU" — which is perfectly consistent with a fault
+/// storm, so the same gate there would blind a correct detector rather than fix
+/// an incorrect one.
+static LIVENESS_LAST_KWORK: AtomicU64 = AtomicU64::new(0);
+
+/// Sum the kernel-side forward-progress counters backing [`LIVENESS_LAST_KWORK`].
+///
+/// Both sources are plain relaxed atomic loads with no lock, which matters: this
+/// runs from the timer tick, and a watchdog that took the `SCHED` lock could
+/// deadlock against precisely the hang it exists to report.
+fn kernel_progress_count() -> u64 {
+    let f = crate::mm::fault::fault_stats();
+    let io = crate::blkdev::io_stats();
+    f.kernel_resolved
+        .wrapping_add(f.user_resolved)
+        .wrapping_add(io.total_reads)
+        .wrapping_add(io.total_writes)
+}
+
+/// Maximum number of `SYSTEM HANG` reports emitted per armed window.
+///
+/// The report used to be made one-shot by *disarming* the watchdog, which also
+/// killed the wall-clock backstop for the rest of boot (see [`liveness_check`]).
+/// Bounding the report count instead keeps the backstop alive while still
+/// capping the log: each report dumps the whole task table, and an unbounded
+/// series of them across a 600 s window would bury the first — the one that
+/// actually shows what broke — under thousands of later lines.
+///
+/// Three rather than one because the second and third dumps carry real
+/// information the first cannot: whether the task states are *changing*, which
+/// is what separates a frozen system from a slow one.
+const LIVENESS_MAX_HANG_REPORTS: u64 = 3;
+
+/// Number of `SYSTEM HANG` reports already emitted in this armed window.
+static LIVENESS_HANG_REPORTS: AtomicU64 = AtomicU64::new(0);
+
+/// Set while a self-test is deliberately driving a detector into firing.
+///
+/// The reports are prefixed `(self-test)` while this is set, so
+/// `scripts/boot-test.sh` can fail the boot on a *real* `[liveness] SYSTEM HANG`
+/// without also failing on the drill that proves the detector works. Without the
+/// distinction the harness assertion would fire on every healthy boot, and an
+/// assertion that always fires gets deleted — which would leave the contract
+/// unchecked again, exactly as it was when this bug went unnoticed.
+static LIVENESS_SELFTEST_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// `"(self-test) "` while a drill is running, `""` otherwise.
+fn liveness_report_prefix() -> &'static str {
+    if LIVENESS_SELFTEST_ACTIVE.load(Ordering::Relaxed) {
+        "(self-test) "
+    } else {
+        ""
+    }
+}
+
 /// Consecutive stalled check-intervals before declaring a hung system.
 ///
 /// At WATCHDOG_CHECK_INTERVAL (5s) per interval, 3 intervals = 15 seconds
@@ -2386,6 +2462,7 @@ pub fn liveness_arm() {
     LIVENESS_STALL_COUNT.store(0, Ordering::Relaxed);
     LIVENESS_LAST_CTX.store(total_ctx_switches(), Ordering::Relaxed);
     LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
+    LIVENESS_HANG_REPORTS.store(0, Ordering::Relaxed);
     let arm_ns = crate::timekeeping::clock_monotonic();
     LIVENESS_ARM_NS.store(arm_ns, Ordering::Relaxed);
 
@@ -2411,8 +2488,14 @@ pub fn liveness_arm() {
     );
 
     // Baseline the output counter *after* the line above, so arming's own
-    // report does not make the first interval look chatty.
+    // report does not make the first interval look chatty.  The kernel-progress
+    // baseline is taken here too, and for the same reason: emitting that line
+    // can itself resolve a page fault (first touch of a formatting buffer, a
+    // cold console page), which would otherwise show up as "progress" and make
+    // the first interval after arming unconditionally exempt from the
+    // total-hang check.
     LIVENESS_LAST_OUTPUT.store(crate::serial::output_count(), Ordering::Relaxed);
+    LIVENESS_LAST_KWORK.store(kernel_progress_count(), Ordering::Relaxed);
 
     LIVENESS_DEADLINE_FIRED.store(false, Ordering::Relaxed);
     LIVENESS_BREADCRUMB_BUCKET.store(0, Ordering::Relaxed);
@@ -2573,6 +2656,14 @@ fn liveness_check() {
     let out_prev = LIVENESS_LAST_OUTPUT.swap(out_now, Ordering::Relaxed);
     let silent = out_now == out_prev;
 
+    // Kernel-side progress (page faults resolved, block I/O completed).
+    // Snapshotted unconditionally, like the counters above, so the comparison is
+    // always against the immediately preceding interval no matter which branch
+    // the previous one took. Consulted only by the total-hang branch — see
+    // LIVENESS_LAST_KWORK for why the livelock branch must NOT use it.
+    let kwork_now = kernel_progress_count();
+    let kwork_prev = LIVENESS_LAST_KWORK.swap(kwork_now, Ordering::Relaxed);
+
     if !silent {
         // The kernel is still narrating — boot is advancing no matter what the
         // tick/context-switch counters say. Clear both stall counters so a hang
@@ -2588,6 +2679,18 @@ fn liveness_check() {
         // so keep the busy-livelock counter quiet to avoid double-reporting.
         LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
 
+        // ...unless the kernel is demonstrably working on some task's behalf.
+        // Resolving page faults or completing disk I/O is incompatible with
+        // "all CPUs idle-ticking", so the signature is simply not present and
+        // the counter must reset rather than accumulate toward a false report.
+        // This is the fix for the 2026-08-15 false positive: a large ring-3
+        // spawn is silent on serial and invisible to USEFUL_WORK_TICKS, but it
+        // is a demand-paging and block-I/O storm. See LIVENESS_LAST_KWORK.
+        if kwork_now != kwork_prev {
+            LIVENESS_STALL_COUNT.store(0, Ordering::Relaxed);
+            return;
+        }
+
         let count = LIVENESS_STALL_COUNT
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
@@ -2595,15 +2698,38 @@ fn liveness_check() {
             return;
         }
 
-        // Confirmed hang: dump every task's state, then disarm so the report
-        // appears exactly once (further intervals would just repeat it).
-        LIVENESS_ARMED.store(false, Ordering::Release);
+        // Confirmed hang.  Reset the counter so the next report needs another
+        // full LIVENESS_ALERT_COUNT of continuous stall, and bound the total so
+        // repeated task-table dumps cannot bury the first one.
+        LIVENESS_STALL_COUNT.store(0, Ordering::Relaxed);
+        let reports = LIVENESS_HANG_REPORTS
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        if reports > LIVENESS_MAX_HANG_REPORTS {
+            return;
+        }
+
+        // Deliberately does NOT disarm.  Disarming here also disabled
+        // `liveness_boot_deadline_check` — the wall-clock backstop that is the
+        // only detector able to catch *any* hang mode by construction — for the
+        // remainder of boot, so a single false positive at ~140 s left the next
+        // ~600 s completely unwatched (lane C, 2026-08-15).  The busy-livelock
+        // path below already documented this invariant and already obeyed it;
+        // this branch was the outlier.  A watchdog that switches itself off on
+        // its own say-so is a check that cannot fire.
         let stall_secs = count.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100);
         serial_println!(
-            "[liveness] SYSTEM HANG: no task-level forward progress and no serial \
-             output for {}+ seconds (useful_work={}, all CPUs idle-ticking). \
-             Dumping task table:",
-            stall_secs, current,
+            "[liveness] {}SYSTEM HANG: no task-level forward progress, no serial \
+             output, and no kernel-side progress for {}+ seconds \
+             (useful_work={}, kernel_progress={}, ctx_switches={}, report {}/{}, \
+             watchdog stays ARMED). Dumping task table:",
+            liveness_report_prefix(),
+            stall_secs,
+            current,
+            kwork_now,
+            ctx_now,
+            reports,
+            LIVENESS_MAX_HANG_REPORTS,
         );
         dump_all_tasks_serial();
         return;
@@ -2644,11 +2770,14 @@ fn liveness_check() {
     LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
     let stall_secs = count.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100);
     serial_println!(
-        "[liveness] SUSPECTED LIVELOCK: useful-work ticks advancing but zero \
+        "[liveness] {}SUSPECTED LIVELOCK: useful-work ticks advancing but zero \
          context switches and no serial output for {}+ seconds (useful_work={}, \
          ctx_switches={}) — a task is likely monopolizing a CPU without \
          yielding. Dumping task table:",
-        stall_secs, current, ctx_now,
+        liveness_report_prefix(),
+        stall_secs,
+        current,
+        ctx_now,
     );
     dump_all_tasks_serial();
 }
@@ -4534,8 +4663,23 @@ pub fn task_exists(task_id: TaskId) -> bool {
 /// callers wanting Linux's 15-visible-byte `TASK_COMM_LEN - 1` rule must
 /// apply it before calling.  The field is fully cleared first so no stale
 /// tail bytes survive a shorter replacement.
+///
+/// **Task 0 (the BSP idle task) is not renameable** and returns `false`.  Its
+/// name is a kernel-owned label that diagnostics rely on, not a thread's
+/// `comm`.  `prctl(PR_SET_NAME)` routes to `current_task_id()`, which is 0 in
+/// kernel context, and its call site assumed such a call would find no task and
+/// silently do nothing — but task 0 *does* exist, so a ring-3 `PR_SET_NAME`
+/// self-test permanently relabelled the idle task.  The cost was paid in the one
+/// place it hurts most: the liveness watchdog's hang dump showed
+/// `tid=0 state=Running prio=31 name="prctl-batch269"`, reading as though a
+/// userspace test were the task running at the moment of the hang (lane C,
+/// 2026-08-15).  Rejecting it here rather than in the `prctl` handler covers
+/// every caller, present and future.
 #[must_use]
 pub fn set_task_name(task_id: TaskId, name: &[u8]) -> bool {
+    if task_id == 0 {
+        return false;
+    }
     let mut state = SCHED.lock();
     let Some(task) = state.tasks.get_mut(&task_id) else {
         return false;
@@ -6190,6 +6334,11 @@ fn test_liveness_watchdog() -> KernelResult<()> {
         "[sched]   (self-test) intentionally driving the busy-livelock guard; the \
          'SUSPECTED LIVELOCK' line below is expected and not a real event:"
     );
+    // Mark the reports below as drills so `scripts/boot-test.sh` can fail a boot
+    // on a real one without failing on these.  Prose above the line is not
+    // enough for a grep, and a harness assertion that fires on every healthy
+    // boot is one that gets deleted.
+    LIVENESS_SELFTEST_ACTIVE.store(true, Ordering::Relaxed);
     let livelock_ok = crate::cpu::without_interrupts(|| {
         liveness_arm(); // armed; baselines LAST_WORK and LAST_CTX to "now"
         LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
@@ -6227,6 +6376,104 @@ fn test_liveness_watchdog() -> KernelResult<()> {
     });
     liveness_disarm();
     if !livelock_ok {
+        LIVENESS_SELFTEST_ACTIVE.store(false, Ordering::Relaxed);
+        return Err(KernelError::InternalError);
+    }
+
+    // Total-hang branch.  This drill did not exist before 2026-08-15, which is
+    // why the branch was allowed to keep a policy its sibling had already
+    // rejected in writing: it disarmed the whole watchdog on its own report,
+    // taking the wall-clock backstop down with it, and one false positive
+    // therefore left ~600 s of boot unwatched (lane C,
+    // `requests/c-a-liveness-system-hang-false-positive.md`).  Two properties
+    // are asserted here, and neither was covered by anything before:
+    //   1. kernel-side progress (page faults / block I/O) suppresses the
+    //      report — the false positive itself, and
+    //   2. when it does fire it stays ARMED — the collateral damage.
+    serial_println!(
+        "[sched]   (self-test) intentionally driving the total-hang detector; the \
+         '(self-test) SYSTEM HANG' line below is expected and not a real event:"
+    );
+    let totalhang_ok = crate::cpu::without_interrupts(|| {
+        // (1) Kernel-side progress must veto the report even when useful-work
+        // is frozen and serial is silent — the exact shape of a large ring-3
+        // spawn.  Rewinding the baseline is how the livelock drill above fakes
+        // its own progress signal; same technique, same reason (the real
+        // counters cannot be driven backwards from here).
+        liveness_arm();
+        for _ in 0..LIVENESS_ALERT_COUNT.saturating_add(1) {
+            // Pretend a page fault or disk read landed since the last check.
+            LIVENESS_LAST_KWORK.store(
+                kernel_progress_count().wrapping_sub(1),
+                Ordering::Relaxed,
+            );
+            liveness_check(); // useful-work frozen, silent, but kernel busy
+        }
+        if LIVENESS_STALL_COUNT.load(Ordering::Relaxed) != 0 {
+            serial_println!(
+                "[sched]   FAIL: total-hang guard accrued a stall interval while \
+                 kernel-side progress was advancing"
+            );
+            return false;
+        }
+        if LIVENESS_HANG_REPORTS.load(Ordering::Relaxed) != 0 {
+            serial_println!(
+                "[sched]   FAIL: total-hang guard reported a hang while kernel-side \
+                 progress was advancing"
+            );
+            return false;
+        }
+
+        // (2) With every signal frozen the report must fire — and must leave the
+        // watchdog armed so the wall-clock backstop survives it.
+        //
+        // This half is also what stops (1) passing vacuously.  On its own, (1)
+        // would be satisfied by an interval that was merely *not silent*, since
+        // that path returns early with the same zeroed counters and never
+        // consults the kernel-progress gate at all.  (2) runs under identical
+        // conditions and asserts a report *did* fire, which is only reachable
+        // when the interval is silent — so a silent environment is proven, and
+        // the only remaining difference between the two halves is the
+        // kernel-progress baseline that (1) rewinds.
+        liveness_arm();
+        for _ in 0..LIVENESS_ALERT_COUNT {
+            // Pin the baseline to "now" each interval so the gate deterministically
+            // sees no progress.  Without this the drill would depend on no page
+            // fault or disk read happening to land in the window — ambient events
+            // it does not control — and would veto its own report at random.  The
+            // two halves now differ by exactly one integer: (1) rewinds the
+            // baseline by 1, this one does not.
+            LIVENESS_LAST_KWORK.store(kernel_progress_count(), Ordering::Relaxed);
+            liveness_check();
+        }
+        if LIVENESS_HANG_REPORTS.load(Ordering::Relaxed) != 1 {
+            serial_println!(
+                "[sched]   FAIL: total-hang guard did not report after {} stalled \
+                 intervals",
+                LIVENESS_ALERT_COUNT,
+            );
+            return false;
+        }
+        if !LIVENESS_ARMED.load(Ordering::Relaxed) {
+            serial_println!(
+                "[sched]   FAIL: total-hang guard disarmed the watchdog — this \
+                 also disables the wall-clock boot-deadline backstop"
+            );
+            return false;
+        }
+        // ...and it must re-baseline rather than re-fire every interval.
+        if LIVENESS_STALL_COUNT.load(Ordering::Relaxed) != 0 {
+            serial_println!(
+                "[sched]   FAIL: total-hang guard did not reset its counter after \
+                 reporting"
+            );
+            return false;
+        }
+        true
+    });
+    liveness_disarm();
+    LIVENESS_SELFTEST_ACTIVE.store(false, Ordering::Relaxed);
+    if !totalhang_ok {
         return Err(KernelError::InternalError);
     }
 

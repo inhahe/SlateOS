@@ -473,10 +473,9 @@ fn first_strong(classes: &[Class]) -> Option<Level> {
     let mut i = 0;
     while let Some(&kind) = classes.get(i) {
         if kind.is_isolate_initiator() {
-            i = match matching_pdi(classes, i) {
-                Some(at) => at.saturating_add(1),
-                None => return None,
-            };
+            // An unterminated isolate swallows the rest of the paragraph, so
+            // there is no strong character left to find: `?` returns `None`.
+            i = matching_pdi(classes, i)?.saturating_add(1);
             continue;
         }
         match kind {

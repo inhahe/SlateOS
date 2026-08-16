@@ -16,7 +16,7 @@ use crate::color::Color;
 use crate::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use crate::render::{FontWeightHint, RenderCommand, RenderTree};
+use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
 
 // --- Catppuccin Mocha palette ---
@@ -634,6 +634,7 @@ impl AlertDialog {
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(layout.width - CONTENT_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Content area.
@@ -664,6 +665,7 @@ impl AlertDialog {
                 font_size: FONT_SIZE_TITLE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             text_x = icon_x + ICON_SIZE + ICON_PADDING;
@@ -696,6 +698,7 @@ impl AlertDialog {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(text_max_width),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -767,6 +770,7 @@ impl AlertDialog {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1230,6 +1234,7 @@ impl InputDialog {
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - CONTENT_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Message, one command per wrapped line.
@@ -1243,6 +1248,7 @@ impl InputDialog {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - CONTENT_PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         content_y += message_height + 12.0;
@@ -1297,6 +1303,7 @@ impl InputDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(input_width - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         content_y += INPUT_HEIGHT;
@@ -1312,6 +1319,7 @@ impl InputDialog {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(input_width),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1348,6 +1356,7 @@ impl InputDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Cancel button.
@@ -1380,6 +1389,7 @@ impl InputDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }
@@ -1621,6 +1631,7 @@ impl ProgressDialog {
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - CONTENT_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Status text.
@@ -1633,6 +1644,7 @@ impl ProgressDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - CONTENT_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         content_y += FONT_SIZE + 12.0;
 
@@ -1694,6 +1706,7 @@ impl ProgressDialog {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1709,6 +1722,7 @@ impl ProgressDialog {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bar_width),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1732,6 +1746,7 @@ impl ProgressDialog {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -2050,6 +2065,7 @@ impl NonModalDialog {
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - CONTENT_PADDING * 2.0 - CLOSE_BUTTON_SIZE - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Close button (X).
@@ -2080,6 +2096,7 @@ impl NonModalDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Content area with clipping.

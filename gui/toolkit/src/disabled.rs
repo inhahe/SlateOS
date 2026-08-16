@@ -22,7 +22,7 @@
 #![allow(dead_code)]
 
 use crate::color::Color;
-use crate::render::{FontWeightHint, RenderCommand};
+use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 use crate::widget::WidgetId;
 
@@ -231,6 +231,7 @@ fn apply_opacity(cmd: &RenderCommand, opacity: f32) -> RenderCommand {
             font_size,
             font_weight,
             max_width,
+            overflow,
         } => RenderCommand::Text {
             x: *x,
             y: *y,
@@ -239,6 +240,9 @@ fn apply_opacity(cmd: &RenderCommand, opacity: f32) -> RenderCommand {
             font_size: *font_size,
             font_weight: *font_weight,
             max_width: *max_width,
+            // Greying a control out changes what it says about itself, not what
+            // it says. A label that was marked as truncated stays marked.
+            overflow: *overflow,
         },
         RenderCommand::Line {
             x1,
@@ -350,6 +354,7 @@ pub fn render_reason_tooltip(reason: &str, x: f32, y: f32, above: bool) -> Vec<R
             font_size: TOOLTIP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(text_width),
+            overflow: TextOverflow::Ellipsis,
         },
     ]
 }
@@ -1300,6 +1305,7 @@ mod tests {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             },
         ];
 

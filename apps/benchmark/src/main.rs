@@ -24,7 +24,7 @@ use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::fold;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -1498,6 +1498,7 @@ impl BenchmarkApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         // Hardware summary on title bar right side.
         let hw_summary = format!(
@@ -1512,6 +1513,7 @@ impl BenchmarkApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(380.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1564,6 +1566,7 @@ impl BenchmarkApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_width - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1642,6 +1645,7 @@ impl BenchmarkApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             y += 20.0;
 
@@ -1653,6 +1657,7 @@ impl BenchmarkApp {
                 color: score_color(result.overall_score),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Comparison delta.
@@ -1667,6 +1672,7 @@ impl BenchmarkApp {
                     color: delta_color,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             y += 40.0;
@@ -1706,6 +1712,7 @@ impl BenchmarkApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Score.
@@ -1717,6 +1724,7 @@ impl BenchmarkApp {
                     color: *color,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Bar chart showing score relative to 10000.
@@ -1761,6 +1769,7 @@ impl BenchmarkApp {
                         color: delta_color(pct),
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(70.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -1776,6 +1785,7 @@ impl BenchmarkApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             y += 24.0;
 
@@ -1798,6 +1808,7 @@ impl BenchmarkApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(150.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 tree.push(RenderCommand::Text {
                     x: x + 170.0,
@@ -1807,6 +1818,7 @@ impl BenchmarkApp {
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(self.width - 200.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         } else {
@@ -1819,6 +1831,7 @@ impl BenchmarkApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
                 x: self.width / 2.0 - 140.0,
@@ -1828,6 +1841,7 @@ impl BenchmarkApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1867,6 +1881,7 @@ impl BenchmarkApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(bar_width - 100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Elapsed time.
@@ -1878,6 +1893,7 @@ impl BenchmarkApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1899,6 +1915,7 @@ impl BenchmarkApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += 30.0;
 
@@ -1912,6 +1929,7 @@ impl BenchmarkApp {
                 color: score_color(cat.composite_score),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             y += 30.0;
 
@@ -1932,6 +1950,7 @@ impl BenchmarkApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tree.push(RenderCommand::Text {
                 x: x + 250.0,
@@ -1941,6 +1960,7 @@ impl BenchmarkApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
                 x: x + 420.0,
@@ -1950,6 +1970,7 @@ impl BenchmarkApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             y += ROW_HEIGHT + 2.0;
 
@@ -1984,6 +2005,7 @@ impl BenchmarkApp {
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(230.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Score value.
@@ -1996,6 +2018,7 @@ impl BenchmarkApp {
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(160.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Bar chart.
@@ -2041,6 +2064,7 @@ impl BenchmarkApp {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         } else {
@@ -2052,6 +2076,7 @@ impl BenchmarkApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -2068,6 +2093,7 @@ impl BenchmarkApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += 30.0;
 
@@ -2080,6 +2106,7 @@ impl BenchmarkApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         }
@@ -2094,6 +2121,7 @@ impl BenchmarkApp {
                 color: GREEN,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         if let Some(avg) = self.history.average_overall() {
@@ -2105,6 +2133,7 @@ impl BenchmarkApp {
                 color: BLUE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         if let Some(worst) = self.history.worst_overall() {
@@ -2116,6 +2145,7 @@ impl BenchmarkApp {
                 color: RED,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         y += 24.0;
@@ -2142,6 +2172,7 @@ impl BenchmarkApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         y += ROW_HEIGHT + 2.0;
@@ -2196,6 +2227,7 @@ impl BenchmarkApp {
                     color: col_color,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -2223,6 +2255,7 @@ impl BenchmarkApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         let chart_y = y + 20.0;
 
@@ -2327,6 +2360,7 @@ impl BenchmarkApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - 200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Run count.
@@ -2338,6 +2372,7 @@ impl BenchmarkApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2384,6 +2419,7 @@ impl BenchmarkApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Export button.
@@ -2418,6 +2454,7 @@ impl BenchmarkApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Clear history button (only on History tab).
@@ -2453,6 +2490,7 @@ impl BenchmarkApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }

@@ -26,7 +26,7 @@ use guitk::event::{
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstraint};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 use guitk::text;
@@ -1671,6 +1671,7 @@ impl DiskImagerApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Refresh drives button
@@ -1692,6 +1693,7 @@ impl DiskImagerApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1741,6 +1743,7 @@ impl DiskImagerApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Active tab indicator
@@ -1779,6 +1782,7 @@ impl DiskImagerApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Drive entries
@@ -1839,6 +1843,7 @@ impl DiskImagerApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             rt.push(RenderCommand::Text {
@@ -1849,6 +1854,7 @@ impl DiskImagerApp {
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 60.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Drive details
@@ -1860,6 +1866,7 @@ impl DiskImagerApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 60.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             rt.push(RenderCommand::Text {
@@ -1870,6 +1877,7 @@ impl DiskImagerApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 60.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Lock / system indicators
@@ -1882,6 +1890,7 @@ impl DiskImagerApp {
                     font_size: SMALL_FONT_SIZE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             if is_locked {
@@ -1893,6 +1902,7 @@ impl DiskImagerApp {
                     font_size: SMALL_FONT_SIZE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1922,6 +1932,7 @@ impl DiskImagerApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 24.0;
 
@@ -1946,6 +1957,7 @@ impl DiskImagerApp {
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 72.0;
         }
@@ -1959,6 +1971,7 @@ impl DiskImagerApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 24.0;
 
@@ -1982,6 +1995,7 @@ impl DiskImagerApp {
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 52.0;
         }
@@ -1996,6 +2010,7 @@ impl DiskImagerApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 24.0;
 
@@ -2015,6 +2030,7 @@ impl DiskImagerApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         rt.push(RenderCommand::Text {
@@ -2025,6 +2041,7 @@ impl DiskImagerApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PANEL_PADDING * 2.0 - 30.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 30.0;
 
@@ -2037,6 +2054,7 @@ impl DiskImagerApp {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 28.0;
 
@@ -2071,6 +2089,7 @@ impl DiskImagerApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Recent images section
@@ -2085,6 +2104,7 @@ impl DiskImagerApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 22.0;
 
@@ -2111,6 +2131,7 @@ impl DiskImagerApp {
                     font_size: SMALL_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(room),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 18.0;
             }
@@ -2129,6 +2150,7 @@ impl DiskImagerApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 28.0;
 
@@ -2140,6 +2162,7 @@ impl DiskImagerApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 28.0;
 
@@ -2152,6 +2175,7 @@ impl DiskImagerApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 24.0;
 
@@ -2175,6 +2199,7 @@ impl DiskImagerApp {
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 52.0;
         }
@@ -2189,6 +2214,7 @@ impl DiskImagerApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 24.0;
 
@@ -2208,6 +2234,7 @@ impl DiskImagerApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         rt.push(RenderCommand::Text {
@@ -2218,6 +2245,7 @@ impl DiskImagerApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 30.0;
 
@@ -2230,6 +2258,7 @@ impl DiskImagerApp {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 28.0;
 
@@ -2246,6 +2275,7 @@ impl DiskImagerApp {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 30.0;
 
@@ -2277,6 +2307,7 @@ impl DiskImagerApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2292,6 +2323,7 @@ impl DiskImagerApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 28.0;
 
@@ -2311,6 +2343,7 @@ impl DiskImagerApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 22.0;
 
@@ -2331,6 +2364,7 @@ impl DiskImagerApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 20.0;
 
@@ -2370,6 +2404,7 @@ impl DiskImagerApp {
                         font_size: SMALL_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -2388,6 +2423,7 @@ impl DiskImagerApp {
                     font_size: SMALL_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Name
@@ -2399,6 +2435,7 @@ impl DiskImagerApp {
                     font_size: SMALL_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - PANEL_PADDING * 2.0 - indent - 120.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Size (for files)
@@ -2418,6 +2455,7 @@ impl DiskImagerApp {
                         font_size: SMALL_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
             }
@@ -2440,6 +2478,7 @@ impl DiskImagerApp {
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2456,6 +2495,7 @@ impl DiskImagerApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 28.0;
 
@@ -2480,6 +2520,7 @@ impl DiskImagerApp {
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 52.0;
         }
@@ -2493,6 +2534,7 @@ impl DiskImagerApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 24.0;
 
@@ -2534,6 +2576,7 @@ impl DiskImagerApp {
                 font_size: UI_FONT_SIZE,
                 font_weight: alg_weight,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         cy += BUTTON_HEIGHT + 16.0;
@@ -2547,6 +2590,7 @@ impl DiskImagerApp {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 18.0;
 
@@ -2586,6 +2630,7 @@ impl DiskImagerApp {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(input_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 40.0;
 
@@ -2617,6 +2662,7 @@ impl DiskImagerApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += BUTTON_HEIGHT + 16.0;
 
@@ -2630,6 +2676,7 @@ impl DiskImagerApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 22.0;
 
@@ -2649,6 +2696,7 @@ impl DiskImagerApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(input_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 40.0;
 
@@ -2671,6 +2719,7 @@ impl DiskImagerApp {
                         font_size: UI_FONT_SIZE,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(input_w - 24.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
                 VerificationResult::Mismatch { expected, computed } => {
@@ -2690,6 +2739,7 @@ impl DiskImagerApp {
                         font_size: UI_FONT_SIZE,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(input_w - 24.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     // A hash is read from its front, so these elide from the
                     // end — unlike a path, where the tail is the useful part.
@@ -2711,6 +2761,7 @@ impl DiskImagerApp {
                         font_size: SMALL_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(hash_room),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     rt.push(RenderCommand::Text {
                         x: px + 12.0,
@@ -2720,6 +2771,7 @@ impl DiskImagerApp {
                         font_size: SMALL_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(hash_room),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
                 _ => {}
@@ -2760,6 +2812,7 @@ impl DiskImagerApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         ty += 18.0;
 
@@ -2777,6 +2830,7 @@ impl DiskImagerApp {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         ty += 16.0;
 
@@ -2790,6 +2844,7 @@ impl DiskImagerApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             ty += 16.0;
         }
@@ -2804,6 +2859,7 @@ impl DiskImagerApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2826,6 +2882,7 @@ impl DiskImagerApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -2866,6 +2923,7 @@ impl DiskImagerApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         rt.push(RenderCommand::Text {
@@ -2881,6 +2939,7 @@ impl DiskImagerApp {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         rt.push(RenderCommand::Text {
@@ -2899,6 +2958,7 @@ impl DiskImagerApp {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Warning badge for system drives
@@ -2925,6 +2985,7 @@ impl DiskImagerApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -2977,6 +3038,7 @@ impl DiskImagerApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             ty += 16.0;
         }
@@ -3003,6 +3065,7 @@ impl DiskImagerApp {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.window_width * 0.6),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Right side: operation status
@@ -3021,6 +3084,7 @@ impl DiskImagerApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         } else {
             // Drive count
@@ -3038,6 +3102,7 @@ impl DiskImagerApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -3112,6 +3177,7 @@ impl DiskImagerApp {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Progress details below bar
@@ -3123,6 +3189,7 @@ impl DiskImagerApp {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bar_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Cancel hint
@@ -3134,6 +3201,7 @@ impl DiskImagerApp {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -3224,6 +3292,7 @@ impl DiskImagerApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_w - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Message, then the warning beneath whatever the message actually
@@ -3254,6 +3323,7 @@ impl DiskImagerApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Confirm (destructive) button
@@ -3274,6 +3344,7 @@ impl DiskImagerApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

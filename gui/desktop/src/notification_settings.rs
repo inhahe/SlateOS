@@ -5,7 +5,7 @@
 //! sound settings, and notification history retention.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -732,6 +732,7 @@ impl NotificationSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 48.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Tab bar
@@ -768,6 +769,7 @@ impl NotificationSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -861,6 +863,7 @@ impl NotificationSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 28.0;
 
@@ -915,6 +918,7 @@ impl NotificationSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 28.0;
 
@@ -940,6 +944,7 @@ impl NotificationSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 28.0;
 
@@ -1007,6 +1012,7 @@ impl NotificationSettingsUI {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 40.0;
 
@@ -1020,6 +1026,7 @@ impl NotificationSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -1051,6 +1058,7 @@ impl NotificationSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width * 0.5),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Enabled/disabled badge
@@ -1072,6 +1080,7 @@ impl NotificationSettingsUI {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Stats line
@@ -1087,6 +1096,7 @@ impl NotificationSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 80.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Detail panel if expanded
@@ -1163,6 +1173,7 @@ impl NotificationSettingsUI {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 28.0;
 
@@ -1184,6 +1195,7 @@ impl NotificationSettingsUI {
                 color: BLUE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(180.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 30.0;
         }
@@ -1246,6 +1258,7 @@ impl NotificationSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.4),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Title
@@ -1257,6 +1270,7 @@ impl NotificationSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 48.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Body preview
@@ -1277,6 +1291,7 @@ impl NotificationSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - BODY_INSET),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cy += 58.0;
@@ -1297,6 +1312,7 @@ impl NotificationSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1320,6 +1336,7 @@ impl NotificationSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Toggle switch
@@ -1360,6 +1377,7 @@ impl NotificationSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + width * 0.55,
@@ -1369,6 +1387,7 @@ impl NotificationSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.45),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -1925,6 +1944,7 @@ mod tests {
                 font_size,
                 font_weight,
                 max_width: Some(mw),
+                overflow: TextOverflow::Ellipsis,
                 ..
             } = cmd
                 && (*font_size - 11.0).abs() < 0.01

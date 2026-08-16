@@ -19,7 +19,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ──
@@ -413,6 +413,7 @@ impl SlidingPuzzle {
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Move counter
@@ -425,6 +426,7 @@ impl SlidingPuzzle {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Size selector
@@ -437,6 +439,7 @@ impl SlidingPuzzle {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Grid
@@ -509,6 +512,7 @@ impl SlidingPuzzle {
                             font_size,
                             font_weight: FontWeightHint::Bold,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     }
                 }
@@ -526,6 +530,7 @@ impl SlidingPuzzle {
                 font_size: 20.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: grid_x,
@@ -535,6 +540,7 @@ impl SlidingPuzzle {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -559,6 +565,7 @@ impl SlidingPuzzle {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let labels = ["3x3 (8)", "4x4 (15)", "5x5 (24)"];
@@ -576,6 +583,7 @@ impl SlidingPuzzle {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -607,6 +615,7 @@ impl SlidingPuzzle {
                 font_size: 16.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             for (i, (key, desc)) in help_lines.iter().enumerate() {
@@ -619,6 +628,7 @@ impl SlidingPuzzle {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cmds.push(RenderCommand::Text {
                     x: panel_x + 70.0,
@@ -628,6 +638,7 @@ impl SlidingPuzzle {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         } else {
@@ -640,6 +651,7 @@ impl SlidingPuzzle {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 

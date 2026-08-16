@@ -75,6 +75,7 @@ mod bench;
 mod blkdev;
 mod ahci;
 mod boot;
+mod bytestr;
 mod cap;
 mod cet;
 mod cgroup;
@@ -634,6 +635,13 @@ extern "C" fn kernel_main() -> ! {
     // Must be after serial (for output) and before subsystem benchmarks.
     // PIT channel 2 is always available on x86_64 hardware.
     bench::calibrate_tsc();
+    // Rescale the syscall-latency histogram thresholds into TSC cycles now
+    // that the frequency is known.  Must follow `calibrate_tsc` and should be
+    // as early as possible: syscalls dispatched before this point cannot be
+    // bucketed and are counted separately as unmeasurable rather than being
+    // silently reported as "<1us".
+    sclatency::calibrate();
+    sclatency::self_test();
     cputime::init();
     timekeeping::init();
 
@@ -4537,6 +4545,14 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::path::self_test() {
         serial_println!("WARNING: Path self-test failed: {:?}", e);
     }
+    // The byte-string splitters that the kshell parser is being converted
+    // onto. Each one is claimed to behave exactly like its `str` counterpart,
+    // and a ~1500-site mechanical conversion is only safe while that holds —
+    // a helper that differed in one edge case would plant a bug at whichever
+    // site hit it, with nothing in the diff to show for it.
+    if let Err(e) = bytestr::self_test() {
+        serial_println!("WARNING: bytestr self-test failed: {:?}", e);
+    }
     // The octal escaper that lets those byte paths be written into the
     // line-oriented text formats (/proc/mounts, the trash index). A bug here
     // corrupts a file rather than failing loudly, so it is checked on boot.
@@ -4959,6 +4975,16 @@ extern "C" fn kernel_main() -> ! {
     // sandboxing.  O(1) check per syscall, fork-inheritable, tighten-only.
     scfilter::init();
     scfilter::self_test();
+
+    // Now that filtering is live, re-check that dispatch still reaches its
+    // handlers.  The syscall dispatch self-test ran ~4200 lines above this
+    // point, with the filter subsystem off — a configuration the system never
+    // actually runs in — so it cannot see a dispatch↔filter interaction bug.
+    // One shipped this way: a stale `scfilter::MAX_SYSCALL_NR` denied every
+    // syscall in 1000..1100 to every process from this line onward.
+    if let Err(e) = syscall::dispatch::verify_dispatch_under_filtering() {
+        panic!("Syscall dispatch broken under live filtering: {e:?}");
+    }
 
     // Step 22e⅞++++q: Self-test runner infrastructure test.
     // Verifies the centralized test runner can enumerate suites.
@@ -5453,6 +5479,39 @@ extern "C" fn kernel_main() -> ! {
     // once the system is otherwise fully initialised. The periodic tick fires in
     // ISR context and hands off to the (already-live) workqueue worker.
     container::start_health_monitor();
+
+    // Re-verify lockdep's O(1) class index now that the table is populated.
+    //
+    // The same check runs inside `lockdep::self_test()`, but that executes in
+    // early boot with ~3 classes registered, while by this point there are ~43.
+    // A probe-sequence bug in the hash index needs a populated table to show
+    // itself, and its symptom is silence — a missed lookup registers a second
+    // class for the same lock, splits that lock's dependency edges across two
+    // graph nodes, and stops cycles ever being found through it.
+    //
+    // Deliberately placed BEFORE the BOOT_OK marker. It was first written after
+    // it, which meant `boot-test.sh` (which kills QEMU at BOOT_OK unless
+    // `--bench` is given) never saw the line — a check that in practice ran only
+    // on the longer benchmark boots, i.e. only when someone was already looking.
+    // That is the exact failure mode this check exists to prevent, so it must
+    // sit inside the window the boot test observes.
+    lockdep::verify_class_index("populated");
+
+    // The syscall filter's pid index, same reasoning one subsystem over — but
+    // note honestly what this call does and does not prove.  By BOOT_OK the
+    // filter table is normally *empty*, so the lookup paths are barely
+    // exercised here; the real index test is inside `scfilter::self_test`,
+    // which verifies with filters installed and with two pids deliberately
+    // forced into the same hash bucket.
+    //
+    // What this placement does prove is that the self-tests drained what they
+    // installed: `ACTIVE_FILTERS` must agree with a linear count of active
+    // slots.  If a test leaked a filter, that counter stays non-zero and every
+    // syscall for the rest of the boot takes a table lock it does not need —
+    // precisely the failure the namespace self-tests had, where a leaked
+    // `NS_FEATURES_ACTIVE` silently cost every VFS operation three spinlocks
+    // for the whole run and went unnoticed until a benchmark contradicted it.
+    scfilter::verify_index("boot");
 
     // Boot success marker — the boot test script greps for this.
     // Printed synchronously so it appears within seconds of power-on,

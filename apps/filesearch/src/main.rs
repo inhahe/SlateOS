@@ -996,7 +996,7 @@ impl fmt::Display for SortColumn {
 
 // ─── Application ─────────────────────────────────────────────────────
 
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 
@@ -1264,6 +1264,7 @@ impl FileSearchApp {
             color: colors::BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Search input
@@ -1295,6 +1296,7 @@ impl FileSearchApp {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(search_w - 120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Search mode indicator
@@ -1314,6 +1316,7 @@ impl FileSearchApp {
             color: colors::MAUVE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let content_y = header_h;
@@ -1362,6 +1365,7 @@ impl FileSearchApp {
             color: colors::SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -1379,6 +1383,7 @@ impl FileSearchApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         fy += 20.0;
 
@@ -1422,6 +1427,7 @@ impl FileSearchApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             fy += 24.0;
         }
@@ -1436,6 +1442,7 @@ impl FileSearchApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         fy += 20.0;
 
@@ -1472,6 +1479,7 @@ impl FileSearchApp {
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             fy += 24.0;
         }
@@ -1486,6 +1494,7 @@ impl FileSearchApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         fy += 20.0;
 
@@ -1510,6 +1519,7 @@ impl FileSearchApp {
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             fy += 22.0;
         }
@@ -1546,6 +1556,7 @@ impl FileSearchApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         }
@@ -1673,6 +1684,7 @@ impl FileSearchApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         };
@@ -1695,6 +1707,7 @@ impl FileSearchApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         py += 24.0;
 
@@ -1733,6 +1746,7 @@ impl FileSearchApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: px + 80.0,
@@ -1742,6 +1756,7 @@ impl FileSearchApp {
                 color: colors::SUBTEXT1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w - 80.0),
+                overflow: TextOverflow::Ellipsis,
             });
             py += 18.0;
         }
@@ -1756,6 +1771,7 @@ impl FileSearchApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         py += 20.0;
 
@@ -1777,6 +1793,7 @@ impl FileSearchApp {
                 color: colors::TEAL,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             py += 28.0;
         }
@@ -2572,6 +2589,7 @@ mod tests {
                 font_size,
                 font_weight,
                 max_width: Some(_),
+                overflow: TextOverflow::Ellipsis,
                 ..
             } = cmd
             else {
@@ -2602,6 +2620,7 @@ mod tests {
                     text,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_),
+                    overflow: TextOverflow::Ellipsis,
                     ..
                 } if (x - left).abs() < 0.01 => Some(text.clone()),
                 _ => None,

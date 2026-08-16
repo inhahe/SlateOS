@@ -107,9 +107,6 @@
 //! * **`dlig`, `hlig`, `swsh`** and the other opt-in features, which are off
 //!   by default by design and have no way to be turned on yet — there is no
 //!   per-run feature list to turn them on *with*.
-//! * **Language selection.** Only each script's DefaultLangSys is read, so a
-//!   `locl` override registered under `SRB ` or `TRK ` is not reached. See
-//!   [`otl`](crate::otl) and `TD-FONT-IGNORES-LANGSYS-OVERRIDES`.
 //! * **The reordering features** — `rphf`, `half`, `pref`, `abvs` and the rest
 //!   of the Indic and Universal Shaping Engine sets. Unlike the Arabic four,
 //!   these need the cluster *rearranged* before the features are chosen, which
@@ -123,12 +120,12 @@ use alloc::vec::Vec;
 use crate::context::{MAX_NESTING, Matched, Nested, chain_match, context_match, read_records};
 use crate::indic::Char;
 use crate::joining::Form;
-use crate::otl::{
-    ByScript, Lookup, MAX_SUBTABLES, coverage_index, lookup_at, lookup_list,
-};
+use crate::lang::Lang;
+use crate::norm::Ignorable;
+use crate::otl::{ByScript, Lookup, MAX_SUBTABLES, coverage_index, lookup_at, lookup_list};
 use crate::script::ScriptTags;
 use crate::sfnt::{Span, u16_at};
-use crate::skip::{CLASS_BASE, CLASS_MARK, Definitions, Skipper};
+use crate::skip::{CLASS_BASE, CLASS_MARK, Definitions, Joiners, Skipper};
 use crate::would::would_apply;
 
 /// The features read, in the order whose positions become the mask bits.
@@ -143,7 +140,10 @@ use crate::would::would_apply;
 /// it against both tables, so nothing stops a face filing a substitution under
 /// `mark` or a `PairPos` under `calt`. The two lists are the same set,
 /// deliberately.
-const FEATURES: &[&[u8; 4]] = &[
+/// Visible to the crate so that `the_survey_matches_the_shapers_feature_list`
+/// in [`otl`](crate::otl) can pin it against the tool that measures faces
+/// against it.
+pub(crate) const FEATURES: &[&[u8; 4]] = &[
     // Unconditional: every glyph is eligible for all of these.
     b"ccmp", b"locl", b"liga", b"rlig", b"clig", b"calt", b"rclt", b"abvm", b"blwm", b"curs",
     b"dist", b"kern", b"mark", b"mkmk",
@@ -167,6 +167,13 @@ const FEATURES: &[&[u8; 4]] = &[
     // which slot the jamo occupies. Appended rather than inserted, so that no
     // bit constant above moves.
     b"ljmo", b"vjmo", b"tjmo",
+    // Khmer: `cfar` is the one feature the Khmer shaper asks for that the
+    // Indic run above does not already list — everything else it uses
+    // (`pref`, `blwf`, `abvf`, `pstf`, `pres`, `abvs`, `blws`, `psts`) is a
+    // tag it shares with Indic. Appended for the same reason the Hangul three
+    // were: `LJMO`, `VJMO` and `TJMO` are written as literal shifts, so
+    // inserting this beside its Indic relatives would move them.
+    b"cfar",
 ];
 
 /// The feature mask every glyph carries: bits for the fourteen unconditional
@@ -206,6 +213,62 @@ const TJMO: u64 = 1 << 36;
 /// occupies is a bit no lookup carries — so the extra ones select nothing and
 /// the constant needs no maintenance when the list grows.
 pub(crate) const ALL_FEATURES: u64 = u64::MAX;
+
+/// The single stage a caller with no staging plan runs.
+const ONE_STAGE: [u64; 1] = [ALL_FEATURES];
+
+/// A shaper's instructions to [`Substitutions::apply_stages`]: which features
+/// run when, and the two things that are decided per feature rather than per
+/// lookup.
+///
+/// Everything here is a *set of feature bits*, intersected with each lookup's
+/// own mask. That is the granularity the questions really have: one lookup can
+/// be reached by two features that answer them differently, and HarfBuzz
+/// resolves each clash in a particular direction when it merges the two map
+/// entries that name the lookup. Those directions are reproduced at the point
+/// of use, and noted on each field below.
+pub(crate) struct Staging<'s> {
+    /// The passes, in order. A lookup runs in a stage when some feature that
+    /// reached it is in that stage's set, and it sees only the glyphs eligible
+    /// for the features in the intersection.
+    pub(crate) stages: &'s [u64],
+    /// The features that may not match across a syllable boundary.
+    ///
+    /// A lookup some feature in this set reaches is offered each maximal run of
+    /// glyphs sharing a [`SubGlyph::syllable`] separately, so no rule inside it
+    /// can see beyond one. Indic features are all declared that way — a
+    /// ligature spanning two syllables is never what the font meant, whatever
+    /// its coverage says — but the general ones the Indic shaper runs alongside
+    /// them in its last stage are not.
+    ///
+    /// Clash resolved *towards* confinement, as HarfBuzz's `per_syllable |=`.
+    pub(crate) per_syllable: u64,
+    /// The features that read ZWJ and ZWNJ themselves.
+    ///
+    /// For an ordinary feature the joiners are the font's business: a lookup
+    /// steps over a ZWJ on its way to the next glyph, which is what makes
+    /// `f ZWJ i` still reach the `fi` ligature. For the Indic-family basic
+    /// features they are the *shaper's* business — a joiner there selects
+    /// between a conjunct and a half-form — and stepping over one would apply
+    /// the rule the joiner was typed to suppress.
+    ///
+    /// Clash resolved *towards* manual, as HarfBuzz's `auto_zwj &=`. See
+    /// [`Joiners`].
+    pub(crate) manual_joiners: u64,
+}
+
+impl Staging<'static> {
+    /// One pass, every feature, nothing declared: what a script with no shaper
+    /// of its own runs.
+    #[must_use]
+    pub(crate) fn all() -> Self {
+        Self {
+            stages: &ONE_STAGE,
+            per_syllable: 0,
+            manual_joiners: 0,
+        }
+    }
+}
 
 /// The mask bit of the feature tagged `tag`, or `0` for a tag this crate never
 /// asks a face for.
@@ -410,6 +473,34 @@ pub struct SubGlyph {
     /// Left at its default — not Indic, never reordered — for every run no
     /// Indic shaper touches, which is nearly all of them.
     pub(crate) indic: Char,
+    /// Which never-drawn character this glyph is still standing for, if any —
+    /// a joiner, a soft hyphen, a bidi control, a variation selector.
+    ///
+    /// Read twice, for two different questions. [`Skipper`] asks which *kind*
+    /// it is, to decide whether a lookup may step over the glyph on its way
+    /// past; [`ScaledFont::shape`] asks only whether it is one at all, to erase
+    /// it at the end. See [`Ignorable`] for why the two questions have
+    /// different answers.
+    ///
+    /// **This is the one field substitution clears rather than carries.**
+    /// Every other property here is about the character the glyph started as,
+    /// and stays true of it however the glyph is rewritten; this one stops
+    /// being true the moment a lookup rewrites it. A face that maps ZWJ to a
+    /// visible glyph through a lookup has *asked* for that glyph and gets it —
+    /// the glyph is no longer the control character, it is whatever the font
+    /// said. HarfBuzz spells the same rule as
+    /// `is_default_ignorable() && !is_substituted()`, tracking substitution
+    /// with its own bit; keeping one field and clearing it comes to the same
+    /// thing, and puts the rule where the rewriting happens.
+    ///
+    /// Note the consequence for the paths that do *not* rewrite: reordering
+    /// moves this along with the glyph, and a ligature keeps its first
+    /// component's — which, since a ligature is a substitution, is cleared
+    /// anyway.
+    ///
+    /// A glyph still carrying one at the very end of [`ScaledFont::shape`] is
+    /// replaced by the face's space glyph, or dropped.
+    pub(crate) ignorable: Ignorable,
 }
 
 /// Where a glyph sits inside a ligature: HarfBuzz's `lig_props`, unpacked.
@@ -614,6 +705,7 @@ impl SubGlyph {
             indic: Char::DEFAULT,
             syllable: 0,
             word: false,
+            ignorable: Ignorable::No,
         }
     }
 
@@ -633,6 +725,7 @@ impl SubGlyph {
             indic: Char::DEFAULT,
             syllable: 0,
             word: false,
+            ignorable: Ignorable::No,
         }
     }
 
@@ -672,6 +765,7 @@ impl SubGlyph {
             indic: Char::DEFAULT,
             syllable: 0,
             word: false,
+            ignorable: Ignorable::No,
         }
     }
 
@@ -694,6 +788,7 @@ impl SubGlyph {
             indic: Char::DEFAULT,
             syllable: 0,
             word: false,
+            ignorable: Ignorable::No,
         }
     }
 }
@@ -736,8 +831,8 @@ impl Substitutions {
         })
     }
 
-    /// Apply every lookup this face offers a run of `script` to `glyphs`, in
-    /// order, rewriting it in place.
+    /// Apply every lookup this face offers a run of `script` in `lang` to
+    /// `glyphs`, in order, rewriting it in place.
     ///
     /// `glyphs` is one substitution run and the lookups may join anything in
     /// it, so a caller that does not want a ligature to form across some
@@ -746,16 +841,21 @@ impl Substitutions {
     /// such a boundary, and the reason `script` is a parameter rather than a
     /// property of the face: applying Arabic's `liga` to a Latin word is how a
     /// face that supports both silently corrupts one of them.
+    ///
+    /// `lang` picks the language system inside that script — `None`, and any
+    /// language the script does not register, take its default one. See
+    /// [`lang`](crate::lang).
     pub(crate) fn apply(
         &self,
         data: &[u8],
         script: Option<ScriptTags>,
+        lang: Option<Lang>,
         glyphs: &mut Vec<SubGlyph>,
     ) {
-        self.apply_stages(data, script, &[ALL_FEATURES], 0, glyphs, |_, _| {});
+        self.apply_stages(data, script, lang, &Staging::all(), glyphs, |_, _| {});
     }
 
-    /// Apply the lookups in several passes, one per entry of `stages`.
+    /// Apply the lookups in several passes, one per entry of `staging.stages`.
     ///
     /// A stage is a set of feature bits; a lookup runs in a stage when some
     /// feature that reached it is in that stage's set, and it sees only the
@@ -775,25 +875,13 @@ impl Substitutions {
     /// reordering that has to happen at a particular point in the sequence
     /// rather than before or after all of it.
     ///
-    /// `per_syllable` is the set of features that may not match across a
-    /// syllable boundary: a lookup some feature in it reaches is offered each
-    /// maximal run of glyphs sharing a [`SubGlyph::syllable`] separately, so no
-    /// rule inside it can see beyond one. Indic features are all declared that
-    /// way — a ligature spanning two syllables is never what the font meant,
-    /// whatever its coverage says — but the general ones the Indic shaper runs
-    /// alongside them in its last stage are not.
-    ///
-    /// A *set* and not a flag because that is the granularity the confinement
-    /// really has: one lookup can be reached by both a per-syllable feature and
-    /// an unconstrained one, and HarfBuzz resolves the clash by confining it —
-    /// its `per_syllable |= ` when it merges two entries for one lookup, which
-    /// is what the intersection below reproduces.
+    /// See [`Staging`] for what the rest of it means.
     pub(crate) fn apply_stages(
         &self,
         data: &[u8],
         script: Option<ScriptTags>,
-        stages: &[u64],
-        per_syllable: u64,
+        lang: Option<Lang>,
+        staging: &Staging<'_>,
         glyphs: &mut Vec<SubGlyph>,
         mut between: impl FnMut(usize, &mut Vec<SubGlyph>),
     ) {
@@ -803,20 +891,21 @@ impl Substitutions {
             scratch: Vec::new(),
             defs: self.defs,
             mask: ALWAYS,
+            manual_joiners: staging.manual_joiners,
             serial: 0,
         };
         // Hoisted out of both loops for the same reason `Ctx::scratch` is: a
         // per-syllable stage would otherwise allocate once per syllable per
         // lookup, and Devanagari text is nothing but syllables.
         let mut piece: Vec<SubGlyph> = Vec::new();
-        for (i, &stage) in stages.iter().enumerate() {
-            for (lookup, mask) in self.lookups.for_script(script) {
+        for (i, &stage) in staging.stages.iter().enumerate() {
+            for (lookup, mask) in self.lookups.for_script(script, lang) {
                 let mask = mask & stage;
                 if mask == 0 {
                     continue;
                 }
                 ctx.mask = mask;
-                if mask & per_syllable != 0 {
+                if mask & staging.per_syllable != 0 {
                     apply_per_syllable(data, lookup, glyphs, &mut ctx, &mut piece);
                 } else {
                     apply_lookup(data, lookup, glyphs, &mut ctx);
@@ -826,8 +915,8 @@ impl Substitutions {
         }
     }
 
-    /// The bit that selects `tag`'s lookups on a run of `script`, or `0` if
-    /// this face reaches none.
+    /// The bit that selects `tag`'s lookups on a run of `script` in `lang`, or
+    /// `0` if this face reaches none.
     ///
     /// HarfBuzz's `get_1_mask`, and the difference from
     /// [`feature_bit`] is the whole point of having it: `feature_bit` says
@@ -835,17 +924,27 @@ impl Substitutions {
     /// anything to select. The Indic shaper reads it as a yes-or-no — "does
     /// this font form a reph at all?" — and then, when the answer is yes, as
     /// the bit to set on the glyphs that should get one.
-    pub(crate) fn feature_mask(&self, script: Option<ScriptTags>, tag: &[u8; 4]) -> u64 {
+    pub(crate) fn feature_mask(
+        &self,
+        script: Option<ScriptTags>,
+        lang: Option<Lang>,
+        tag: &[u8; 4],
+    ) -> u64 {
         let bit = feature_bit(tag);
-        if bit != 0 && self.lookups.for_script(script).any(|(_, m)| m & bit != 0) {
+        if bit != 0
+            && self
+                .lookups
+                .for_script(script, lang)
+                .any(|(_, m)| m & bit != 0)
+        {
             bit
         } else {
             0
         }
     }
 
-    /// Would the feature tagged `tag`, on a run of `script`, substitute
-    /// exactly the glyph sequence `glyphs`?
+    /// Would the feature tagged `tag`, on a run of `script` in `lang`,
+    /// substitute exactly the glyph sequence `glyphs`?
     ///
     /// This is a question, not an instruction: nothing is rewritten, and
     /// `glyphs` need not be — and for its callers never is — part of any run.
@@ -863,6 +962,7 @@ impl Substitutions {
         &self,
         data: &[u8],
         script: Option<ScriptTags>,
+        lang: Option<Lang>,
         tag: &[u8; 4],
         glyphs: &[u16],
         zero_context: bool,
@@ -872,7 +972,7 @@ impl Substitutions {
             return false;
         }
         self.lookups
-            .for_script(script)
+            .for_script(script, lang)
             .filter(|&(_, mask)| mask & bit != 0)
             .any(|(lookup, _)| would_apply(data, lookup, glyphs, zero_context))
     }
@@ -947,6 +1047,14 @@ struct Ctx {
     /// by contrast, is the nested lookup's own — which is why a skipper is
     /// built per invocation rather than passed down.
     mask: u64,
+    /// The features that read the joiners themselves rather than leaving them
+    /// to the font — the plan's `manual_joiners`, unchanged for the whole run.
+    ///
+    /// Intersected with [`mask`](Self::mask) to decide whether the lookup being
+    /// applied may step over a ZWJ. Held here rather than passed down because
+    /// it is a property of the *plan*, and a nested lookup inherits the mask
+    /// that reached the rule that invoked it.
+    manual_joiners: u64,
     /// How many ligature ids have been handed out so far in this run, for
     /// [`next_lig_id`](Ctx::next_lig_id).
     serial: u8,
@@ -1001,7 +1109,17 @@ fn apply_lookup(data: &[u8], lookup: &Lookup, glyphs: &mut Vec<SubGlyph>, ctx: &
 /// The view of the run that `lookup` is entitled to, under the features
 /// currently being applied.
 fn skipper<'a>(lookup: &Lookup, data: &'a [u8], ctx: &Ctx) -> Skipper<'a> {
-    Skipper::new(data, ctx.defs, lookup.flag, lookup.filter, ctx.mask)
+    Skipper::new(
+        data,
+        ctx.defs,
+        lookup.flag,
+        lookup.filter,
+        ctx.mask,
+        // Manual if *any* of the features that reached the lookup is manual,
+        // which is how HarfBuzz resolves it when it merges two map entries
+        // that name the same lookup: `auto_zwnj &= …`, `auto_zwj &= …`.
+        Joiners::substitution(ctx.mask & ctx.manual_joiners != 0),
+    )
 }
 
 /// Apply one lookup at exactly one position, if it matches there.
@@ -1044,7 +1162,12 @@ fn apply_at(
 ///
 /// The position is independent of every other — nothing here can look at a
 /// neighbour — so the run's length and clusters come out unchanged.
-fn apply_single(data: &[u8], subtables: &[usize], glyphs: &mut [SubGlyph], i: usize) -> Option<usize> {
+fn apply_single(
+    data: &[u8],
+    subtables: &[usize],
+    glyphs: &mut [SubGlyph],
+    i: usize,
+) -> Option<usize> {
     let glyph = glyphs.get_mut(i)?;
     // First subtable that covers the glyph wins, and the result is not offered
     // to the rest: within one lookup a glyph is substituted once.
@@ -1052,6 +1175,10 @@ fn apply_single(data: &[u8], subtables: &[usize], glyphs: &mut [SubGlyph], i: us
         .iter()
         .find_map(|&sub| single_at(data, sub, glyph.gid))?;
     glyph.gid = gid;
+    // The font asked for this glyph, so it is no longer standing for the
+    // control character it was looked up from and must not be hidden at the
+    // end of shaping. See `SubGlyph::ignorable`.
+    glyph.ignorable = Ignorable::No;
     Some(1)
 }
 
@@ -1139,6 +1266,10 @@ fn apply_multiple(
             } else {
                 glyph.lig
             },
+            // Cleared, not inherited, and note that this is the one field of
+            // `glyph` the `..glyph` spread must not carry: every piece is a
+            // glyph the font asked for. See `SubGlyph::ignorable`.
+            ignorable: Ignorable::No,
             ..glyph
         }),
     );
@@ -1177,6 +1308,8 @@ fn apply_alternate(
         .iter()
         .find_map(|&sub| alternate_at(data, sub, glyph.gid))?;
     glyph.gid = gid;
+    // As in `apply_single`: substituted is no longer ignorable.
+    glyph.ignorable = Ignorable::No;
     Some(1)
 }
 
@@ -1243,9 +1376,7 @@ fn sequence_at(data: &[u8], sub: usize, glyph: u16, out: &mut Vec<u16>) -> Optio
         return None;
     }
     for i in 0..glyph_count {
-        let at = sequence
-            .checked_add(2)?
-            .checked_add(i.checked_mul(2)?)?;
+        let at = sequence.checked_add(2)?.checked_add(i.checked_mul(2)?)?;
         out.push(u16_at(data, at)?);
     }
     Some(())
@@ -1283,6 +1414,14 @@ fn apply_ligature(
         // The cluster stays as it was: it is the first component's, and the
         // components that follow are being swallowed, not moved.
         first.gid = gid;
+        // ...but `ignorable` does not, for the same reason as in
+        // `apply_single`: a ligature is a glyph the font asked for. It matters
+        // here even though a joiner is rarely a ligature's *first* component,
+        // because it is routinely one of the rest — a joiner between two
+        // letters is exactly what makes some faces' ligature fire — and those
+        // components are removed below, which disposes of them just as
+        // thoroughly.
+        first.ignorable = Ignorable::No;
     }
     // Removed from the back so that the earlier indices stay valid. Component
     // zero is the glyph just rewritten and stays.
@@ -1330,12 +1469,13 @@ fn stamp_components(
     ctx: &mut Ctx,
 ) {
     let defs = ctx.defs;
-    let class_of = |glyphs: &[SubGlyph], pos: usize| {
-        glyphs.get(pos).map_or(0, |g| defs.class(data, g.gid))
-    };
+    let class_of =
+        |glyphs: &[SubGlyph], pos: usize| glyphs.get(pos).map_or(0, |g| defs.class(data, g.gid));
     let Some(&first) = at.first() else { return };
-    let rest_all_marks =
-        (1..count).all(|k| at.get(k).is_some_and(|&p| class_of(glyphs, p) == CLASS_MARK));
+    let rest_all_marks = (1..count).all(|k| {
+        at.get(k)
+            .is_some_and(|&p| class_of(glyphs, p) == CLASS_MARK)
+    });
     let first_class = class_of(glyphs, first);
     let mark_ligature = rest_all_marks && first_class == CLASS_MARK;
     let ligature = !(rest_all_marks && matches!(first_class, CLASS_BASE | CLASS_MARK));
@@ -1397,9 +1537,7 @@ fn renumber(glyphs: &mut [SubGlyph], at: usize, id: u8, so_far: u8, last: u8) {
         0 => last,
         n => n,
     };
-    let comp = so_far
-        .saturating_sub(last)
-        .saturating_add(this.min(last));
+    let comp = so_far.saturating_sub(last).saturating_add(this.min(last));
     glyph.lig = glyph.lig.mark(id, comp);
 }
 
@@ -1484,11 +1622,15 @@ fn ligature_matches(
             lig.checked_add(4)?
                 .checked_add(k.checked_sub(1)?.checked_mul(2)?)?,
         )?;
-        pos = skip.next(glyphs, pos)?;
+        // Not `next` plus a comparison: a never-drawn character between two
+        // components is stepped over rather than failing the match — `f ZWJ i`
+        // is a request for the `fi` ligature — while a rule that names the
+        // joiner itself still matches it. Only a walk that carries the
+        // criterion can tell those apart. See [`Skipper::next_matching`].
+        pos = skip.next_matching(glyphs, pos, |p| {
+            glyphs.get(p).is_some_and(|g| g.gid == want)
+        })?;
         let component = glyphs.get(pos)?;
-        if component.gid != want {
-            return None;
-        }
         if !ligation_allowed(glyphs, i, head, component.lig, skip, &mut ligbase) {
             return None;
         }
@@ -1539,7 +1681,9 @@ fn ligation_allowed(
 fn base_is_hidden(glyphs: &[SubGlyph], from: usize, id: u8, skip: Skipper<'_>) -> bool {
     let mut j = from;
     while let Some(k) = j.checked_sub(1) {
-        let Some(glyph) = glyphs.get(k) else { return false };
+        let Some(glyph) = glyphs.get(k) else {
+            return false;
+        };
         if glyph.lig.id != id {
             return false;
         }
@@ -1903,8 +2047,9 @@ mod tests {
         let mut data = gsub.to_vec();
         let at = data.len();
         data.extend_from_slice(gdef);
-        let subs = Substitutions::parse(&data, Some(span(0, gsub.len())), Some(span(at, gdef.len())))
-            .expect("a flagged lookup must still parse");
+        let subs =
+            Substitutions::parse(&data, Some(span(0, gsub.len())), Some(span(at, gdef.len())))
+                .expect("a flagged lookup must still parse");
         (data, subs)
     }
 
@@ -2034,11 +2179,8 @@ mod tests {
         sets: &[Vec<u8>],
     ) -> Vec<u8> {
         let coverage = coverage1(glyphs);
-        let (blocks, offs) = sets_after(
-            12 + sets.len() * 2,
-            &[&coverage, back, input, ahead],
-            sets,
-        );
+        let (blocks, offs) =
+            sets_after(12 + sets.len() * 2, &[&coverage, back, input, ahead], sets);
         let mut out = Vec::new();
         out.extend_from_slice(&be16(2));
         for b in &blocks {
@@ -2101,7 +2243,10 @@ mod tests {
         let mut out = Vec::new();
         out.extend_from_slice(&be16(3));
         let mut next = offs.iter();
-        for (n, part) in [back.len(), input.len(), ahead.len()].into_iter().enumerate() {
+        for (n, part) in [back.len(), input.len(), ahead.len()]
+            .into_iter()
+            .enumerate()
+        {
             let _ = n;
             out.extend_from_slice(&be16(u16::try_from(part).unwrap()));
             for _ in 0..part {
@@ -2123,7 +2268,7 @@ mod tests {
             .enumerate()
             .map(|(i, &gid)| SubGlyph::new(gid, i))
             .collect();
-        subs.apply(data, None, &mut glyphs);
+        subs.apply(data, None, None, &mut glyphs);
         glyphs.iter().map(|g| g.gid).collect()
     }
 
@@ -2134,7 +2279,7 @@ mod tests {
             .enumerate()
             .map(|(i, &gid)| SubGlyph::new(gid, i))
             .collect();
-        subs.apply(data, None, &mut glyphs);
+        subs.apply(data, None, None, &mut glyphs);
         glyphs.iter().map(|g| g.cluster).collect()
     }
 
@@ -2147,7 +2292,8 @@ mod tests {
         ]);
         let sub = ligature_subst(&[10], &[set_f]);
         let data = gsub_table(b"liga", LOOKUP_LIGATURE, &sub);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).expect("liga must parse");
+        let subs =
+            Substitutions::parse(&data, Some(span(0, data.len())), None).expect("liga must parse");
         (data, subs)
     }
 
@@ -2219,8 +2365,12 @@ mod tests {
         subs.apply_stages(
             data,
             None,
-            &[ALL_FEATURES],
-            ALL_FEATURES,
+            None,
+            &Staging {
+                stages: &[ALL_FEATURES],
+                per_syllable: ALL_FEATURES,
+                manual_joiners: 0,
+            },
             &mut glyphs,
             |_, _| {},
         );
@@ -2281,7 +2431,18 @@ mod tests {
             .enumerate()
             .map(|(i, &gid)| SubGlyph::new(gid, i))
             .collect();
-        subs.apply_stages(&data, None, &[0], 0, &mut glyphs, |_, _| {});
+        subs.apply_stages(
+            &data,
+            None,
+            None,
+            &Staging {
+                stages: &[0],
+                per_syllable: 0,
+                manual_joiners: 0,
+            },
+            &mut glyphs,
+            |_, _| {},
+        );
         assert_eq!(glyphs.iter().map(|g| g.gid).collect::<Vec<_>>(), [10, 11]);
     }
 
@@ -2300,8 +2461,12 @@ mod tests {
         subs.apply_stages(
             &data,
             None,
-            &[0, ALL_FEATURES],
-            0,
+            None,
+            &Staging {
+                stages: &[0, ALL_FEATURES],
+                per_syllable: 0,
+                manual_joiners: 0,
+            },
             &mut glyphs,
             |i, glyphs| seen.push((i, glyphs.len())),
         );
@@ -2311,7 +2476,7 @@ mod tests {
     /// Would `tag` substitute `gids`, under the strict rule that a chaining
     /// rule with any context does not answer?
     fn would(data: &[u8], subs: &Substitutions, tag: &[u8; 4], gids: &[u16]) -> bool {
-        subs.would_substitute(data, None, tag, gids, true)
+        subs.would_substitute(data, None, None, tag, gids, true)
     }
 
     #[test]
@@ -2389,13 +2554,13 @@ mod tests {
         let sub = chain_context3(&[&[9]], &[&[10], &[11]], &[], &[(0, 0)]);
         let data = gsub_table(b"liga", LOOKUP_CHAIN_CONTEXT, &sub);
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
-        assert!(!subs.would_substitute(&data, None, b"liga", &[10, 11], true));
+        assert!(!subs.would_substitute(&data, None, None, b"liga", &[10, 11], true));
         // With the strict rule off — which is what the old Indic
         // specification and Malayalam need — the context is ignored rather
         // than failed, and the input alone decides.
-        assert!(subs.would_substitute(&data, None, b"liga", &[10, 11], false));
+        assert!(subs.would_substitute(&data, None, None, b"liga", &[10, 11], false));
         // Ignored, not matched: the input still has to be right.
-        assert!(!subs.would_substitute(&data, None, b"liga", &[10, 12], false));
+        assert!(!subs.would_substitute(&data, None, None, b"liga", &[10, 12], false));
     }
 
     #[test]
@@ -2403,9 +2568,9 @@ mod tests {
         let sub = chain_context3(&[], &[&[10], &[11]], &[], &[(0, 0)]);
         let data = gsub_table(b"liga", LOOKUP_CHAIN_CONTEXT, &sub);
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
-        assert!(subs.would_substitute(&data, None, b"liga", &[10, 11], true));
-        assert!(subs.would_substitute(&data, None, b"liga", &[10, 11], false));
-        assert!(!subs.would_substitute(&data, None, b"liga", &[10, 11, 12], true));
+        assert!(subs.would_substitute(&data, None, None, b"liga", &[10, 11], true));
+        assert!(subs.would_substitute(&data, None, None, b"liga", &[10, 11], false));
+        assert!(!subs.would_substitute(&data, None, None, b"liga", &[10, 11, 12], true));
     }
 
     #[test]
@@ -2437,8 +2602,8 @@ mod tests {
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         let latn = ScriptTags::exactly(*b"latn");
         let arab = ScriptTags::exactly(*b"arab");
-        assert!(subs.would_substitute(&data, Some(latn), b"liga", &[10, 11], true));
-        assert!(!subs.would_substitute(&data, Some(arab), b"liga", &[10, 11], true));
+        assert!(subs.would_substitute(&data, Some(latn), None, b"liga", &[10, 11], true));
+        assert!(!subs.would_substitute(&data, Some(arab), None, b"liga", &[10, 11], true));
     }
 
     const IGNORE_MARKS: u16 = 0x0008;
@@ -2458,7 +2623,7 @@ mod tests {
             .enumerate()
             .map(|(i, &gid)| SubGlyph::new(gid, i))
             .collect();
-        subs.apply(data, None, &mut glyphs);
+        subs.apply(data, None, None, &mut glyphs);
         glyphs
             .iter()
             .map(|g| (g.gid, g.lig.id, g.lig.comp()))
@@ -2473,7 +2638,7 @@ mod tests {
             .enumerate()
             .map(|(i, &gid)| SubGlyph::new(gid, i))
             .collect();
-        subs.apply(data, None, &mut glyphs);
+        subs.apply(data, None, None, &mut glyphs);
         glyphs.iter().map(|g| g.lig.components()).collect()
     }
 
@@ -2722,17 +2887,13 @@ mod tests {
 
     /// Run every lookup over `gids`, each glyph eligible for the cursive form
     /// beside it, and report what comes out.
-    fn subst_cursive(
-        data: &[u8],
-        subs: &Substitutions,
-        run: &[(u16, Option<Form>)],
-    ) -> Vec<u16> {
+    fn subst_cursive(data: &[u8], subs: &Substitutions, run: &[(u16, Option<Form>)]) -> Vec<u16> {
         let mut glyphs: Vec<SubGlyph> = run
             .iter()
             .enumerate()
             .map(|(i, &(gid, form))| SubGlyph::cursive(gid, i, form))
             .collect();
-        subs.apply(data, None, &mut glyphs);
+        subs.apply(data, None, None, &mut glyphs);
         glyphs.iter().map(|g| g.gid).collect()
     }
 
@@ -2803,7 +2964,10 @@ mod tests {
         // clearing it in `SubGlyph::jamo` meaningful: a bit that was not in
         // `ALWAYS` would already be clear and the removal a no-op.
         assert_eq!(ALWAYS & CALT, CALT);
-        assert!(FEATURES.len() < u64::BITS as usize, "a feature past the 64th gets no bit");
+        assert!(
+            FEATURES.len() < u64::BITS as usize,
+            "a feature past the 64th gets no bit"
+        );
         // `ALWAYS` is a prefix of the list: every feature before the first
         // positional one and none after it. Being a *prefix* is the property
         // that lets it be a literal — an unconditional feature added after a
@@ -2832,7 +2996,12 @@ mod tests {
         for tag in FEATURES {
             let bit = feature_bit(tag);
             assert_ne!(bit, 0, "{:?}", core::str::from_utf8(*tag));
-            assert_eq!(seen & bit, 0, "{:?} repeats a bit", core::str::from_utf8(*tag));
+            assert_eq!(
+                seen & bit,
+                0,
+                "{:?} repeats a bit",
+                core::str::from_utf8(*tag)
+            );
             seen |= bit;
         }
     }
@@ -2848,31 +3017,258 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_feature_only_a_language_system_reaches_is_not_applied() {
-        // The other half of the same question. A `locl` registered under
-        // `TRK ` is Turkish, not the default, and reaching it would hand a
-        // reader who never asked for Turkish its dotless `i`. The gap this
-        // pins down is deliberate and tracked as
-        // `TD-FONT-IGNORES-LANGSYS-OVERRIDES`: only DefaultLangSys is read,
-        // so a face whose *only* route to a feature is a language system
-        // contributes nothing at all.
-        let mut scripts = Vec::new();
-        scripts.extend_from_slice(&be16(1)); // scriptCount
-        scripts.extend_from_slice(b"latn");
-        scripts.extend_from_slice(&be16(8)); // the Script table follows
-        scripts.extend_from_slice(&be16(0)); // no DefaultLangSys
-        scripts.extend_from_slice(&be16(1)); // langSysCount
-        scripts.extend_from_slice(b"TRK ");
-        scripts.extend_from_slice(&be16(10)); // LangSys, from the Script
-        scripts.extend_from_slice(&be16(0)); // lookupOrder, always zero
-        scripts.extend_from_slice(&be16(0xFFFF)); // no required feature
-        scripts.extend_from_slice(&be16(1)); // featureIndexCount
-        scripts.extend_from_slice(&be16(0)); // feature 0
+    /// One language system, as a font writes it: the index of the feature it
+    /// *requires* — `NO_REQUIRED` for none — and the features its index list
+    /// names.
+    type Sys<'a> = (u16, &'a [u16]);
 
+    /// `requiredFeatureIndex`'s "there is no required feature" value.
+    const NO_REQUIRED: u16 = 0xFFFF;
+
+    /// One script: its tag, its DefaultLangSys if it has one, and the language
+    /// systems it names beside the default.
+    type Script<'a> = (&'a [u8; 4], Option<Sys<'a>>, &'a [(&'a [u8; 4], Sys<'a>)]);
+
+    /// A ScriptList spelling out each script's DefaultLangSys *and* the named
+    /// language systems beside it.
+    ///
+    /// [`fixture::script_list`](crate::fixture::script_list) can express
+    /// neither a script without a default nor a script with a named language,
+    /// and those two shapes are what the tests below are about. Every offset
+    /// inside is relative to the ScriptList's own start, as the format
+    /// requires.
+    fn languages(scripts: &[Script<'_>]) -> Vec<u8> {
+        fn body((required, features): Sys<'_>) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&be16(0)); // lookupOrder, always zero
+            out.extend_from_slice(&be16(required));
+            out.extend_from_slice(&be16(u16::try_from(features.len()).unwrap()));
+            for f in features {
+                out.extend_from_slice(&be16(*f));
+            }
+            out
+        }
+        let mut records = Vec::new();
+        let mut tables = Vec::new();
+        // The Script tables follow the ScriptRecords.
+        let mut at = 2 + scripts.len() * 6;
+        for (tag, default, langs) in scripts {
+            records.extend_from_slice(*tag);
+            records.extend_from_slice(&be16(u16::try_from(at).unwrap()));
+
+            // One Script table: a header of the default's offset, the count
+            // and the LangSysRecords, then every LangSys the script owns —
+            // the default first, when it has one.
+            let header = 4 + langs.len() * 6;
+            let mut bodies = Vec::new();
+            let mut lang_records = Vec::new();
+            let mut off = header;
+            let default_off = match default {
+                Some(sys) => {
+                    let block = body(*sys);
+                    off += block.len();
+                    bodies.extend_from_slice(&block);
+                    u16::try_from(header).unwrap()
+                }
+                // Zero, not an offset: a script may have no default at all,
+                // and that is not the same as one naming no features.
+                None => 0,
+            };
+            for (lang, sys) in *langs {
+                lang_records.extend_from_slice(*lang);
+                lang_records.extend_from_slice(&be16(u16::try_from(off).unwrap()));
+                let block = body(*sys);
+                off += block.len();
+                bodies.extend_from_slice(&block);
+            }
+            tables.extend_from_slice(&be16(default_off));
+            tables.extend_from_slice(&be16(u16::try_from(langs.len()).unwrap()));
+            tables.extend_from_slice(&lang_records);
+            tables.extend_from_slice(&bodies);
+            at += off;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(u16::try_from(scripts.len()).unwrap()));
+        out.extend_from_slice(&records);
+        out.extend_from_slice(&tables);
+        out
+    }
+
+    /// Shape glyph 10 alone under `script` and `lang`, and report what it
+    /// became.
+    fn one(data: &[u8], subs: &Substitutions, script: Option<ScriptTags>, lang: &str) -> u16 {
+        let lang =
+            (!lang.is_empty()).then(|| Lang::new(lang).expect("the tests name real languages"));
+        let mut glyphs = vec![SubGlyph::new(10, 0)];
+        subs.apply(data, script, lang, &mut glyphs);
+        glyphs.first().map_or(0, |g| g.gid)
+    }
+
+    /// A `locl` registered under `TRK ` and nowhere else — the Turkish dotless
+    /// `i`, and the commonest per-language rule there is: 140 of the 996
+    /// language overrides on the development host are this shape.
+    ///
+    /// Reaching it from a run that never asked for Turkish would hand its
+    /// reader a spelling they did not ask for; *not* reaching it from a run
+    /// that did ask is what `TD-FONT-IGNORES-LANGSYS-OVERRIDES` was.
+    #[test]
+    fn a_feature_only_a_language_system_reaches_applies_only_to_that_language() {
+        let scripts = languages(&[(b"latn", None, &[(b"TRK ", (NO_REQUIRED, &[0]))])]);
         let sub = single_delta(&[10], 5);
         let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
-        assert!(Substitutions::parse(&data, Some(span(0, data.len())), None).is_none());
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+
+        assert_eq!(one(&data, &subs, LATIN, "tr"), 15);
+        assert_eq!(one(&data, &subs, LATIN, "tr-TR"), 15);
+        // This script has no default language system at all, so every other
+        // run reaches nothing — including one that names no language, which is
+        // what a caller who does not know says.
+        for lang in ["", "en", "de", "az"] {
+            assert_eq!(one(&data, &subs, LATIN, lang), 10, "{lang:?}");
+        }
+    }
+
+    /// A LangSysRecord *replaces* its script's feature list rather than adding
+    /// to it, which is why a language can take a feature away as well as add
+    /// one.
+    #[test]
+    fn a_language_system_replaces_its_scripts_features_rather_than_adding_to_them() {
+        let scripts = languages(&[(
+            b"latn",
+            Some((NO_REQUIRED, &[0])),
+            &[(b"TRK ", (NO_REQUIRED, &[]))],
+        )]);
+        let sub = single_delta(&[10], 5);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+
+        assert_eq!(one(&data, &subs, LATIN, ""), 15);
+        assert_eq!(one(&data, &subs, LATIN, "en"), 15);
+        assert_eq!(one(&data, &subs, LATIN, "tr"), 10);
+    }
+
+    /// A language system names one feature *outside* its index list, and it is
+    /// as binding as the ones inside: `requiredFeatureIndex` is how a font says
+    /// "this one is not optional".
+    #[test]
+    fn a_required_feature_is_applied_like_any_other() {
+        // Neither language lists a feature; the Turkish one requires it.
+        let scripts = languages(&[(b"latn", Some((NO_REQUIRED, &[])), &[(b"TRK ", (0, &[]))])]);
+        let sub = single_delta(&[10], 5);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(one(&data, &subs, LATIN, "tr"), 15);
+        assert_eq!(one(&data, &subs, LATIN, ""), 10);
+
+        // And the same field on a DefaultLangSys, which every run reads.
+        let scripts = languages(&[(b"latn", Some((0, &[])), &[])]);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(one(&data, &subs, LATIN, ""), 15);
+    }
+
+    /// Only the *script* falls back. A run whose script is registered but whose
+    /// language is not takes that script's default rules — not the same
+    /// language's rules under some other script.
+    ///
+    /// HarfBuzz's order, in `hb_ot_layout_table_select_script` followed by
+    /// `hb_ot_layout_script_select_language`: the script is chosen first and
+    /// the language is looked up only inside it.
+    #[test]
+    fn language_selection_does_not_fall_back_to_another_script() {
+        // `DFLT` has the Turkish rule; `latn` is registered and says nothing.
+        let scripts = languages(&[
+            (
+                b"DFLT",
+                Some((NO_REQUIRED, &[])),
+                &[(b"TRK ", (NO_REQUIRED, &[0]))],
+            ),
+            (b"latn", Some((NO_REQUIRED, &[])), &[]),
+        ]);
+        let sub = single_delta(&[10], 5);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+
+        // A Latin run stops the chain at `latn`, and `latn` has no Turkish.
+        assert_eq!(one(&data, &subs, LATIN, "tr"), 10);
+        // A run with no script of its own starts at `DFLT`, where it is.
+        assert_eq!(one(&data, &subs, None, "tr"), 15);
+        assert_eq!(one(&data, &subs, None, ""), 10);
+    }
+
+    /// A BCP 47 tag names *several* OpenType tags, tried in order, and a face
+    /// that registers only a later one still answers.
+    ///
+    /// This is the bug the HarfBuzz sweep caught: `ro-MD` is `MOL ` and then
+    /// `ROM `, and 66 of the development host's 556 faces file Romanian's
+    /// comma-below `locl` under `ROM ` and register no `MOL ` at all. Stopping
+    /// at the first candidate lost the feature on every one of them.
+    #[test]
+    fn a_language_reaches_a_face_that_registers_only_its_second_candidate() {
+        let scripts = languages(&[(
+            b"latn",
+            Some((NO_REQUIRED, &[])),
+            &[(b"ROM ", (NO_REQUIRED, &[0]))],
+        )]);
+        let sub = single_delta(&[10], 5);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+
+        assert_eq!(one(&data, &subs, LATIN, "ro"), 15);
+        assert_eq!(one(&data, &subs, LATIN, "ro-MD"), 15);
+        assert_eq!(one(&data, &subs, LATIN, ""), 10);
+    }
+
+    /// When a face registers more than one of a language's candidates, the
+    /// *first* answers — even when what it selects is exactly the script's
+    /// default.
+    ///
+    /// That last clause is the whole test. A named language whose features
+    /// match its script's default is stored nowhere, because the default entry
+    /// already holds the answer; if "which candidate wins" were decided by
+    /// which one is stored, a `MOL ` that says nothing would silently hand
+    /// Moldavian over to `ROM `'s overrides. The face registered `MOL ` and
+    /// said it has no rules of its own, and that is an answer.
+    #[test]
+    fn the_first_candidate_a_face_registers_wins_even_when_it_selects_nothing() {
+        let scripts = languages(&[(
+            b"latn",
+            Some((NO_REQUIRED, &[])),
+            &[
+                (b"MOL ", (NO_REQUIRED, &[])),
+                (b"ROM ", (NO_REQUIRED, &[0])),
+            ],
+        )]);
+        let sub = single_delta(&[10], 5);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+
+        // Romanian is `ROM ` alone, and reaches the rule.
+        assert_eq!(one(&data, &subs, LATIN, "ro"), 15);
+        // Moldavian stops at `MOL `, which this face registers and leaves bare.
+        assert_eq!(one(&data, &subs, LATIN, "ro-MD"), 10);
+        assert_eq!(one(&data, &subs, LATIN, ""), 10);
+    }
+
+    /// And the other way round, so the test above cannot pass by ignoring the
+    /// language list altogether.
+    #[test]
+    fn the_first_candidate_a_face_registers_wins_when_it_selects_something() {
+        let scripts = languages(&[(
+            b"latn",
+            Some((NO_REQUIRED, &[])),
+            &[
+                (b"MOL ", (NO_REQUIRED, &[0])),
+                (b"ROM ", (NO_REQUIRED, &[])),
+            ],
+        )]);
+        let sub = single_delta(&[10], 5);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+
+        assert_eq!(one(&data, &subs, LATIN, "ro-MD"), 15);
+        assert_eq!(one(&data, &subs, LATIN, "ro"), 10);
+        assert_eq!(one(&data, &subs, LATIN, ""), 10);
     }
 
     #[test]
@@ -3018,11 +3414,11 @@ mod tests {
     fn a_run_gets_only_its_own_scripts_features() {
         let (data, subs) = two_script_font();
         let mut latin_run = vec![SubGlyph::new(10, 0)];
-        subs.apply(&data, LATIN, &mut latin_run);
+        subs.apply(&data, LATIN, None, &mut latin_run);
         assert_eq!(latin_run.first().map(|g| g.gid), Some(60));
 
         let mut arabic_run = vec![SubGlyph::new(10, 0)];
-        subs.apply(&data, ARABIC, &mut arabic_run);
+        subs.apply(&data, ARABIC, None, &mut arabic_run);
         assert_eq!(arabic_run.first().map(|g| g.gid), Some(50));
     }
 
@@ -3046,25 +3442,26 @@ mod tests {
         // empty-handed.
         let (data, subs) = two_script_font();
         let mut glyphs = vec![SubGlyph::new(10, 0)];
-        subs.apply(&data, hebrew, &mut glyphs);
+        subs.apply(&data, hebrew, None, &mut glyphs);
         assert_eq!(glyphs.first().map(|g| g.gid), Some(60));
         // A run with no script of its own asks for `DFLT` first, which this
         // face does not register either, and lands in the same place.
         let mut none = vec![SubGlyph::new(10, 0)];
-        subs.apply(&data, None, &mut none);
+        subs.apply(&data, None, None, &mut none);
         assert_eq!(none.first().map(|g| g.gid), Some(60));
 
         // A face with no `latn` and no default really does say nothing.
-        let data = gsub_scripts(&[(b"arab", b"liga")], LOOKUP_SINGLE, &[&single_list(
-            &[10],
-            &[50],
-        )]);
+        let data = gsub_scripts(
+            &[(b"arab", b"liga")],
+            LOOKUP_SINGLE,
+            &[&single_list(&[10], &[50])],
+        );
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         let mut glyphs = vec![SubGlyph::new(10, 0)];
-        subs.apply(&data, hebrew, &mut glyphs);
+        subs.apply(&data, hebrew, None, &mut glyphs);
         assert_eq!(glyphs.first().map(|g| g.gid), Some(10));
         let mut none = vec![SubGlyph::new(10, 0)];
-        subs.apply(&data, None, &mut none);
+        subs.apply(&data, None, None, &mut none);
         assert_eq!(none.first().map(|g| g.gid), Some(10));
     }
 
@@ -3076,7 +3473,7 @@ mod tests {
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         for script in [LATIN, ARABIC, None] {
             let mut glyphs = vec![SubGlyph::new(10, 0)];
-            subs.apply(&data, script, &mut glyphs);
+            subs.apply(&data, script, None, &mut glyphs);
             assert_eq!(
                 glyphs.first().map(|g| g.gid),
                 Some(42),
@@ -3115,7 +3512,9 @@ mod tests {
         let lookups_at = lookup_list + 2 + 2 * 2;
         out.extend_from_slice(&be16(2));
         for i in 0..2 {
-            out.extend_from_slice(&be16(u16::try_from(lookups_at + i * 8 - lookup_list).unwrap()));
+            out.extend_from_slice(&be16(
+                u16::try_from(lookups_at + i * 8 - lookup_list).unwrap(),
+            ));
         }
         let mut sub_at = lookups_at + 2 * 8;
         for (i, sub) in subtables.iter().enumerate() {
@@ -3130,11 +3529,8 @@ mod tests {
         }
 
         let subs = Substitutions::parse(&out, Some(span(0, out.len())), None).unwrap();
-        let mut glyphs = vec![
-            SubGlyph::new(10, 0),
-            SubGlyph::new(11, 1),
-        ];
-        subs.apply(&out, LATIN, &mut glyphs);
+        let mut glyphs = vec![SubGlyph::new(10, 0), SubGlyph::new(11, 1)];
+        subs.apply(&out, LATIN, None, &mut glyphs);
         assert_eq!(
             glyphs.iter().map(|g| g.gid).collect::<Vec<_>>(),
             [10, 60],
@@ -3214,11 +3610,7 @@ mod tests {
     fn a_substitution_is_not_offered_to_the_lookup_that_made_it() {
         // A font whose output is also its input must not loop or cascade
         // inside one lookup: 10 becomes 11 once, not 12.
-        let data = gsub_lookups(&[(
-            b"ccmp",
-            LOOKUP_SINGLE,
-            single_list(&[10, 11], &[11, 12]),
-        )]);
+        let data = gsub_lookups(&[(b"ccmp", LOOKUP_SINGLE, single_list(&[10, 11], &[11, 12]))]);
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]), [11]);
     }
@@ -3291,7 +3683,11 @@ mod tests {
 
     #[test]
     fn every_glyph_of_a_run_is_decomposed_not_just_the_first() {
-        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10, 12], &[&[30, 31], &[40, 41]]));
+        let data = gsub_table(
+            b"ccmp",
+            LOOKUP_MULTIPLE,
+            &multiple(&[10, 12], &[&[30, 31], &[40, 41]]),
+        );
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10, 11, 12]), [30, 31, 11, 40, 41]);
         assert_eq!(clusters(&data, &subs, &[10, 11, 12]), [0, 0, 1, 2, 2]);
@@ -3354,7 +3750,7 @@ mod tests {
             lig: Lig::at(3, 2, 0),
             ..SubGlyph::new(10, 0)
         }];
-        subs.apply(&data, None, &mut glyphs);
+        subs.apply(&data, None, None, &mut glyphs);
         assert_eq!(glyphs.len(), 2);
         for g in &glyphs {
             assert_eq!(g.lig.id, 3);
@@ -3374,7 +3770,7 @@ mod tests {
             lig: Lig::at(3, 2, 0),
             ..SubGlyph::new(10, 0)
         }];
-        subs.apply(&data, None, &mut glyphs);
+        subs.apply(&data, None, None, &mut glyphs);
         assert_eq!(glyphs.len(), 1);
         assert!(!glyphs[0].lig.multiplied());
         assert!(glyphs[0].lig.ligated_and_didnt_multiply());
@@ -3458,7 +3854,11 @@ mod tests {
 
     #[test]
     fn a_truncated_multiple_substitution_is_survivable() {
-        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10, 12], &[&[30, 31], &[40]]));
+        let data = gsub_table(
+            b"ccmp",
+            LOOKUP_MULTIPLE,
+            &multiple(&[10, 12], &[&[30, 31], &[40]]),
+        );
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         for cut in 0..data.len() {
             let short = &data[..cut];
@@ -3473,7 +3873,11 @@ mod tests {
     /// it can reach a run is by being invoked — which is the arrangement real
     /// fonts use and the thing that makes these tests test the invocation
     /// rather than the helper.
-    fn context_font(kind: u16, sub: Vec<u8>, helpers: &[(u16, Vec<u8>)]) -> (Vec<u8>, Substitutions) {
+    fn context_font(
+        kind: u16,
+        sub: Vec<u8>,
+        helpers: &[(u16, Vec<u8>)],
+    ) -> (Vec<u8>, Substitutions) {
         let mut lookups: Vec<(&[u8; 4], u16, Vec<u8>)> = alloc::vec![(b"calt", kind, sub)];
         // Three off-by-default tags, so a helper is never reachable on its own.
         for (tag, (kind, sub)) in [b"dlig", b"hlig", b"swsh"].iter().zip(helpers) {
@@ -3526,14 +3930,14 @@ mod tests {
     fn a_rule_set_tries_its_rules_in_the_fonts_order() {
         // Longest first, as with ligatures: the font decides, and the first
         // rule that matches wins rather than the most specific one.
-        let set = rule_set_of(&[
-            rule(&[11, 12], &[(0, 1)]),
-            rule(&[11], &[(0, 2)]),
-        ]);
+        let set = rule_set_of(&[rule(&[11, 12], &[(0, 1)]), rule(&[11], &[(0, 2)])]);
         let (data, subs) = context_font(
             LOOKUP_CONTEXT,
             context1(&[10], &[set]),
-            &[helper_10_to_30(), (LOOKUP_SINGLE, single_list(&[10], &[40]))],
+            &[
+                helper_10_to_30(),
+                (LOOKUP_SINGLE, single_list(&[10], &[40])),
+            ],
         );
         assert_eq!(subst(&data, &subs, &[10, 11, 12]), [30, 11, 12]);
         assert_eq!(subst(&data, &subs, &[10, 11, 13]), [40, 11, 13]);
@@ -3572,10 +3976,7 @@ mod tests {
         // subtable's own header and read its format as a rule count.
         let classes = class_def(10, &[1, 1]);
         // Both glyphs are class 1, and a format-2 rule names classes.
-        let sets = alloc::vec![
-            rule_set_of(&[]),
-            rule_set_of(&[rule(&[1], &[(0, 1)])]),
-        ];
+        let sets = alloc::vec![rule_set_of(&[]), rule_set_of(&[rule(&[1], &[(0, 1)])]),];
         let mut sub = context2(&[10, 11], &classes, &sets);
         // The class-1 rule set is the second offset, at byte 10 of the header.
         assert_eq!(subst_with(&sub, &[10, 11]), [30, 11]);
@@ -3586,11 +3987,7 @@ mod tests {
     /// Build a context font around `sub` with the usual 10 -> 30 helper and
     /// run it, for the tests that only care about whether the context fired.
     fn subst_with(sub: &[u8], gids: &[u16]) -> Vec<u16> {
-        let (data, subs) = context_font(
-            LOOKUP_CONTEXT,
-            sub.to_vec(),
-            &[helper_10_to_30()],
-        );
+        let (data, subs) = context_font(LOOKUP_CONTEXT, sub.to_vec(), &[helper_10_to_30()]);
         subst(&data, &subs, gids)
     }
 
@@ -3783,18 +4180,43 @@ mod tests {
     #[test]
     fn a_truncated_contextual_substitution_is_survivable() {
         let subtables = alloc::vec![
-            (LOOKUP_CONTEXT, context1(&[10], &[rule_set_of(&[rule(&[11], &[(0, 1)])])])),
-            (LOOKUP_CONTEXT, context2(&[10, 11], &class_def(10, &[1, 1]), &[
-                rule_set_of(&[]),
-                rule_set_of(&[rule(&[1], &[(0, 1)])]),
-            ])),
+            (
+                LOOKUP_CONTEXT,
+                context1(&[10], &[rule_set_of(&[rule(&[11], &[(0, 1)])])])
+            ),
+            (
+                LOOKUP_CONTEXT,
+                context2(
+                    &[10, 11],
+                    &class_def(10, &[1, 1]),
+                    &[rule_set_of(&[]), rule_set_of(&[rule(&[1], &[(0, 1)])]),]
+                )
+            ),
             (LOOKUP_CONTEXT, context3(&[&[10], &[11]], &[(0, 1)])),
-            (LOOKUP_CHAIN_CONTEXT, context1(&[10], &[rule_set_of(&[chained(&[5], &[], &[20], &[(0, 1)])])])),
-            (LOOKUP_CHAIN_CONTEXT, chain_context2(&[10], &class_def(5, &[1]), &class_def(10, &[1]), &class_def(20, &[1]), &[
-                rule_set_of(&[]),
-                rule_set_of(&[chained(&[1], &[], &[1], &[(0, 1)])]),
-            ])),
-            (LOOKUP_CHAIN_CONTEXT, chain_context3(&[&[5]], &[&[10]], &[&[20]], &[(0, 1)])),
+            (
+                LOOKUP_CHAIN_CONTEXT,
+                context1(
+                    &[10],
+                    &[rule_set_of(&[chained(&[5], &[], &[20], &[(0, 1)])])]
+                )
+            ),
+            (
+                LOOKUP_CHAIN_CONTEXT,
+                chain_context2(
+                    &[10],
+                    &class_def(5, &[1]),
+                    &class_def(10, &[1]),
+                    &class_def(20, &[1]),
+                    &[
+                        rule_set_of(&[]),
+                        rule_set_of(&[chained(&[1], &[], &[1], &[(0, 1)])]),
+                    ]
+                )
+            ),
+            (
+                LOOKUP_CHAIN_CONTEXT,
+                chain_context3(&[&[5]], &[&[10]], &[&[20]], &[(0, 1)])
+            ),
         ];
         for (kind, sub) in subtables {
             let (data, subs) = context_font(kind, sub, &[helper_10_to_30()]);

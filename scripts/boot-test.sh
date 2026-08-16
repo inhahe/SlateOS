@@ -4,6 +4,19 @@
 # Exit codes:
 #   0 — success marker detected AND no self-test failures
 #   1 — Timeout, PANIC, or a non-fatal self-test failure detected
+#   2 — Wedge: the serial log stopped growing for --stall-secs with the marker
+#       still absent (opt-in; distinct from 1 because a wedge is a hang to be
+#       debugged with the captured RIP, not a test that reported a failure)
+#   3 — The kernel booted cleanly but the run did not produce the artefact it
+#       was asked for: --bench was given and the benchmark recorder failed, so
+#       nothing was written to bench/history.jsonl.  Distinct from 1 because the
+#       fault is in our tooling, not in the kernel.
+#
+# 2 and 3 are listed here because they were not: exit 2 has existed since the
+# stall detector landed and this header still claimed the script only ever
+# returned 0 or 1, so any caller branching on the documented set treated a wedge
+# as an ordinary failure.  A status a caller cannot know about is a status the
+# caller cannot handle.
 #
 # Usage:
 #   ./scripts/boot-test.sh              # full build + test (waits for BOOT_OK)
@@ -12,6 +25,18 @@
 #                                       # use this for soaks so a concurrent
 #                                       # `cargo build` cannot swap the kernel
 #                                       # mid-run
+#   ./scripts/boot-test.sh --profile=debug|release
+#                                       # force the build profile, independently
+#                                       # of --bench.  Without it, --bench means
+#                                       # release and everything else means
+#                                       # debug.  `--bench --profile=debug` is
+#                                       # the only way to run the benchmark
+#                                       # suite on a debug build, which is what
+#                                       # exercises the debug branch of the
+#                                       # per-profile budgets in bench.rs.
+#                                       # An unrecognised value is an error, not
+#                                       # a fallback: a typo must not silently
+#                                       # measure the other profile.
 #   ./scripts/boot-test.sh --bench      # wait for BENCH_OK and print benchmark
 #                                       # numbers (the micro-benchmarks run in a
 #                                       # deferred background task AFTER BOOT_OK,
@@ -21,6 +46,51 @@
 #                                       # timeout to 1200s, since the suite
 #                                       # runs well past BOOT_OK; an explicit
 #                                       # --timeout= still wins.
+#
+#                                       # DO NOT RUN ANYTHING ELSE ON THIS
+#                                       # MACHINE WHILE --bench IS IN ITS QEMU
+#                                       # WINDOW.  TCG is pure emulation and
+#                                       # entirely CPU-bound, so competing work
+#                                       # scales the measurements.  Demonstrated,
+#                                       # not assumed: the 2026-08-14T22:22 run
+#                                       # measured a 47% spread in the reference
+#                                       # access cost while a grep, an Edit and
+#                                       # two Python scripts ran alongside it;
+#                                       # the next run, on an idle machine, read
+#                                       # 0% (5.16 vs 5.17 cycles) at every one
+#                                       # of the same 8 sample positions.  The
+#                                       # build phase is safe; the QEMU window is
+#                                       # not.  Several "regressions" written up
+#                                       # on 2026-08-14 were self-inflicted this
+#                                       # way.  The canary reports it as
+#                                       # CONTAMINATED -- believe it.  See
+#                                       # known-issues.md P19.
+#
+#                                       # READ THAT ONE WAY ONLY.  When the
+#                                       # canary FIRES it is right; when it does
+#                                       # not fire it has certified nothing.  It
+#                                       # counts *guest* cycles, which do not
+#                                       # advance while the host is running
+#                                       # something else, so it is structurally
+#                                       # blind to the host stealing the CPU --
+#                                       # the dominant contamination mode here.
+#                                       # It read 0% spread, its cleanest
+#                                       # possible verdict, on a run that took
+#                                       # 2.3x as long as its own twin.  Read
+#                                       # the "RUN CONTAMINATED/UNPROVEN/CLEAN"
+#                                       # line from bench-history.py instead;
+#                                       # see known-issues.md
+#                                       # B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING.
+#   ./scripts/boot-test.sh --bench --host-load=idle
+#                                       # assert that nothing else was running
+#                                       # on this machine during the QEMU window
+#                                       # (idle|loaded|unknown; default
+#                                       # unknown).  It is an assertion by you,
+#                                       # not a measurement, and it is recorded
+#                                       # as such.  --host-load=loaded marks a
+#                                       # deliberately-poisoned control run, and
+#                                       # such runs are then excluded from every
+#                                       # baseline and band the comparator uses.
 #   ./scripts/boot-test.sh --hard-lockup-watchdog
 #                                       # attach a QEMU i6300esb PCI watchdog set
 #                                       # to inject an NMI on timeout. OFF by
@@ -66,6 +136,184 @@ check_selftest_failures() {
     return 0
 }
 
+# Fail a boot whose liveness watchdog reported a hang, or admitted a false one.
+#
+# WHY THIS EXISTS: on 2026-08-15 a green boot (exit 0, BOOT_OK reached) contained
+# both a "[liveness] SYSTEM HANG" report at ~140s AND the watchdog's own
+# "that report was a FALSE POSITIVE" admission 600s later.  The harness said
+# nothing, because it only ever grepped for BOOT_OK.  BUG-LIVENESS-DEADLINE-
+# FALSE-FIRE's Verification section had *required* a boot log free of these
+# lines since 2026-07-27, but the requirement lived only in prose -- so a run
+# that violated both halves of it still exited 0.  A contract nothing checks is
+# a contract that is not enforced.
+#
+# The patterns are anchored to line start and matched against the kernel's exact
+# strings.  The "(self-test) " infix is what keeps this from firing on the
+# deliberate drills in test_liveness_watchdog, which prove the detectors still
+# work by driving them into firing on purpose:
+#   real:  "[liveness] SYSTEM HANG: ..."
+#   drill: "[liveness] (self-test) SYSTEM HANG: ..."
+# Matching on the real shape alone means the drills stay silent here without the
+# harness needing to know how many of them there are.
+#
+# Returns 0 if clean, 1 if any liveness failure marker is present.
+check_liveness_failures() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    # shellcheck disable=SC2016
+    local pat='^\[liveness\] (SYSTEM HANG|SUSPECTED LIVELOCK)|^\[liveness\].*BOOT DEADLINE EXCEEDED|^\[liveness\].*FALSE POSITIVE'
+    if grep -aEq "$pat" "$file" 2>/dev/null; then
+        echo "LIVENESS WATCHDOG failure detected in serial log:"
+        grep -aEn "$pat" "$file" || true
+        echo "  (a '(self-test)' infix marks a deliberate drill and is NOT matched above;"
+        echo "   these are real reports, or the watchdog's own false-positive admission)"
+        return 1
+    fi
+    return 0
+}
+
+# Fail a boot whose benchmark suite measured something it then never judged.
+#
+# WHY THIS EXISTS: bench.rs prints one line per suite stating how many of its
+# measurement windows reached the scorecard.  Every window must land in exactly
+# one of three places — scored (graded against a target), tracked (recorded,
+# ungraded), or *declared* a diagnostic (deliberately print-only).  A window in
+# none of those is measured every boot and recorded never: it burns boot time,
+# prints a number nobody compares, and cannot regress visibly.  Seven such
+# benchmarks accumulated before the instrument existed (see known-issues.md,
+# "benchmarks measured every boot and recorded never"), and the reason they went
+# unnoticed for so long is precisely that nothing failed when they appeared.
+#
+# The design point that matters here is the ABSENT case.  Under --bench the
+# coverage line MUST be present, and its absence is a failure, not a pass.
+# run_all() prints it before main.rs prints BENCH_OK on both the deferred and
+# the inline-fallback path, so "BENCH_OK but no coverage line" means the
+# instrument itself stopped running — which is the exact condition it exists to
+# catch, and treating it as "nothing to complain about" would reproduce the
+# original bug one level up.  Outside --bench the suite may legitimately not run
+# at all, so an absent line is simply not evidence either way.
+#
+# Two failure shapes are matched:
+#   "... , N unjudged (print-only: ..."  with N > 0  -> a real coverage gap
+#   "[bench]   NOTE: ... carried a seq that names no measurement window"
+#       -> a BenchResult was hand-built without note_measurement, so the counts
+#          above it are unreliable and a clean "0 unjudged" cannot be believed
+#
+# ANY occurrence fails, not just the last: run_all() resets its state and may be
+# run more than once, and each printing is a complete verdict for its own run.
+#
+# Returns 0 if clean, 1 on a coverage gap / unreliable count / missing line.
+check_bench_coverage() {
+    local file="$1"
+    local require="${2:-0}"
+    [ -f "$file" ] || return 0
+
+    # shellcheck disable=SC2016
+    local line_pat='^\[bench\] === Scorecard coverage: '
+    if ! grep -aEq "$line_pat" "$file" 2>/dev/null; then
+        if [ "$require" = "1" ]; then
+            echo "BENCH COVERAGE LINE MISSING from serial log:"
+            echo "  --bench reached its marker but bench.rs never printed"
+            echo "  '[bench] === Scorecard coverage: ...'.  That line is printed"
+            echo "  unconditionally by print_scorecard(), before BENCH_OK, so its"
+            echo "  absence means the coverage instrument did not run.  A check that"
+            echo "  cannot fire is indistinguishable from a check that passes."
+            return 1
+        fi
+        return 0
+    fi
+
+    local rc=0
+
+    # Non-zero unjudged.  Anchored on the literal " unjudged (print-only:" suffix
+    # so it cannot match the "N are declared diagnostics" field next to it.
+    # shellcheck disable=SC2016
+    local gap_pat='^\[bench\] === Scorecard coverage: .*, [1-9][0-9]* unjudged \(print-only:'
+    if grep -aEq "$gap_pat" "$file" 2>/dev/null; then
+        echo "BENCH COVERAGE GAP detected in serial log:"
+        grep -aEn "$gap_pat" "$file" || true
+        echo "  The named windows below were measured but never recorded:"
+        grep -aEn '^\[bench\]   unjudged print-only: ' "$file" || true
+        echo "  Each must be given a destination: score() if it has a target,"
+        echo "  track() if it is comparable but untargeted, or run_diagnostic()"
+        echo "  if it is deliberately print-only.  Untargeted is not uncomparable."
+        rc=1
+    fi
+
+    # Unreliable counts.  Reported even when unjudged reads 0 — especially then,
+    # since an orphan seq marks some *other* window covered, which is the
+    # direction that hides work rather than inventing it.
+    # shellcheck disable=SC2016
+    local orphan_pat='^\[bench\]   NOTE: .*carried a seq that names no'
+    if grep -aEq "$orphan_pat" "$file" 2>/dev/null; then
+        echo "BENCH COVERAGE COUNTS ARE UNRELIABLE (orphan seq) in serial log:"
+        grep -aEn "$orphan_pat" "$file" || true
+        echo "  A BenchResult was constructed without calling note_measurement(),"
+        echo "  so its seq indexes a window belonging to some other measurement."
+        rc=1
+    fi
+
+    return "$rc"
+}
+
+# Detect a kernel that has already died, so the wait loop can stop waiting.
+#
+# WHY THIS EXISTS: the poll loop used to test only for the success marker, and
+# the "PANIC\|FATAL" check sat AFTER the loop — i.e. it only ran once the full
+# TIMEOUT had burned.  A capability self-test failure that hit serial at ~100s
+# therefore cost 1004s of wall clock before the harness said a word (observed,
+# 2026-08-15, while break-testing test_valid_entries).  Nothing about the
+# verdict changes here: a dead kernel never reaches the marker, so an early
+# check can only ever reach the SAME verdict SOONER.
+#
+# The patterns are anchored to line start, and to the exact strings the kernel
+# itself emits:
+#   kernel/src/main.rs panic handler -> "!!! KERNEL PANIC !!!"
+#                                    -> "!!! DOUBLE PANIC (panic inside ...)"
+#   every fatal path in main.rs/idt.rs -> serial_println!("FATAL: ...")
+# Anchoring matters because this check runs against a LIVE, still-booting log:
+# an unanchored "PANIC\|FATAL" would match a userspace fixture echoing the word,
+# or a diagnostic that merely mentions it, and would abort a healthy boot.  The
+# post-loop check keeps its wider unanchored net — by then the boot has already
+# failed to reach the marker, so a loose match there costs nothing.
+#
+# Returns 0 if the log shows a dead kernel, 1 otherwise.
+kernel_is_dead() {
+    local file="$1"
+    [ -f "$file" ] || return 1
+    grep -aEq '^(FATAL:|!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)' "$file" 2>/dev/null
+}
+
+# Print the death evidence from a serial log.  Shared by the in-loop early exit
+# and the post-loop check so both report the same way.
+#
+# WHY THE CONTEXT WINDOW: the FATAL line names the *subsystem*, not the test.
+# Break-testing CapEntryInfo printed only
+#     FATAL: Capability system self-test failed: internal kernel error (-1)
+# while the line that actually said what broke -- "[cap]   FAIL: CapEntryInfo is
+# 32 bytes / align 8, ABI says 24 / 8" -- sat one line above and was not shown.
+# Every self-test in the kernel has that shape: a specific FAIL: diagnostic
+# immediately followed by a generic FATAL: wrapper.  Reporting the wrapper alone
+# means the harness output can only ever tell you to go read the log yourself,
+# which is the difference between a diagnosis and a notification.
+report_kernel_death() {
+    local file="$1"
+    echo "KERNEL PANIC detected!"
+    local first
+    first="$(grep -anE '^(FATAL:|!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)' "$file" 2>/dev/null | head -1 | cut -d: -f1)"
+    if [ -n "$first" ]; then
+        local from=$((first - 12))
+        [ "$from" -lt 1 ] && from=1
+        echo "--- serial log lines ${from}-$((first + 20)) (context around the death) ---"
+        sed -n "${from},$((first + 20))p" "$file" | sed 's/^/  /'
+        echo "--- end context ---"
+    fi
+    # Still list every death-ish line in the whole log: a second panic further
+    # down (or an EXCEPTION before the first FATAL) is worth seeing.
+    echo "All PANIC/FATAL/EXCEPTION lines:"
+    grep -an "PANIC\|FATAL\|EXCEPTION" "$file" | head -40 || true
+}
+
 # Surface Path-Z rungs that DID NOT RUN because rootfs.ext4 lacked a binary
 # they drive.
 #
@@ -99,12 +347,35 @@ report_pathz_skips() {
 # "Performance-Critical Subsystems" table.  A change under any of these is a
 # change that CLAUDE.md requires benchmarking, so it is the trigger for
 # nagging about a stale benchmark record.
+# Each entry is annotated with the benchmarks it actually guards.  Keep that
+# mapping accurate: this list is only useful if it covers everything the suite
+# measures, and the failure mode when it does not is SILENT -- an unwatched
+# path reports "no perf-critical changes", which is exactly the false negative
+# this whole mechanism exists to prevent.
+#
+# The first version of this list was derived from CLAUDE.md's perf-critical
+# table read as *directories*, and it missed more than half the suite: 30+ of
+# the 63 benchmarks measured code in idt.rs, fs/, net/ and crypto.rs, none of
+# which were listed.  Cross-check against `python scripts/bench-history.py
+# --list` / the recorded entry names when adding a benchmark.
 BENCH_CRITICAL_PATHS=(
-    "kernel/src/mm"
-    "kernel/src/sched"
-    "kernel/src/ipc"
-    "kernel/src/syscall"
-    "kernel/src/smp.rs"
+    "kernel/src/mm"           # page_alloc_free, heap_alloc_free_64
+    "kernel/src/sched"        # context_switch, pick_next, sched_pick_next
+    "kernel/src/ipc"          # ipc_*, futex_wake_empty, shm_*, cp_*,
+                              #   io_ring_nop, service_connect
+    "kernel/src/syscall"      # syscall_dispatch
+    "kernel/src/smp.rs"       # cross-CPU paths behind the above
+    "kernel/src/idt.rs"       # isr_latency, page_fault -- CLAUDE.md lists both
+                              #   "interrupt dispatch" and "page fault
+                              #   handling"; the handlers live here, not in mm/
+    "kernel/src/fs"           # vfs_read_256, vfs_write_256, vfs_readdir,
+                              #   vfs_stat_{root,3comp,deep},
+                              #   vfs_throughput_16k_{read,write}
+    "kernel/src/net"          # net_*, tcp_checksum_*, dns_build_query,
+                              #   firewall_check, and http_*/dashboard_api_*
+                              #   (net/http.rs, net/dashboard.rs)
+    "kernel/src/crypto.rs"    # crypto_* (sha256/sha512/hmac/chacha20/poly1305/
+                              #   aead/ed25519/x25519)
 )
 
 # Say — out loud — that this boot produced NO benchmark numbers.
@@ -192,6 +463,10 @@ to_win_path() {
     fi
 }
 
+# Default (debug) artefact path.  Reassigned unconditionally after arg parsing
+# from the resolved BENCH_PROFILE (--profile=, else --bench's default) — see the
+# CARGO_PROFILE_ARGS block below for why.  This initial value therefore only
+# matters if that block is ever bypassed; it is kept in sync deliberately.
 KERNEL_BIN="$PROJECT_ROOT/target/x86_64-unknown-none/debug/kernel"
 ESP_DIR="$PROJECT_ROOT/build/esp"
 SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
@@ -217,6 +492,15 @@ PIDFILE_WIN="$(to_win_path "$PIDFILE")"
 # image name only if the pidfile is missing (should not happen).  Idempotent.
 kill_qemu() {
     local cyg_pid="${1:-}"
+    # Stamp the end of the QEMU window at the FIRST teardown, not the last.
+    # kill_qemu is idempotent and is called again from the EXIT trap, so an
+    # unconditional stamp here would measure the harness's own post-run log
+    # processing as if it were guest time.  Every exit path funnels through
+    # this function, which is why the stamp lives here rather than being
+    # repeated at each of them (one of which would eventually be missed).
+    if [ -z "${QEMU_END_EPOCH:-}" ] && [ -n "${QEMU_START_EPOCH:-}" ]; then
+        QEMU_END_EPOCH=$(date +%s)
+    fi
     # Best-effort Cygwin-side signal first (harmless if it does nothing).
     [ -n "$cyg_pid" ] && kill "$cyg_pid" 2>/dev/null || true
     # Authoritative kill via the OS PID qemu recorded in its pidfile.
@@ -287,6 +571,40 @@ HARD_LOCKUP_WATCHDOG=0
 # BOOT_OK (the fast path); --bench switches it to BENCH_OK so we wait for the
 # deferred micro-benchmark task to finish and can scrape its numbers.
 WAIT_MARKER="BOOT_OK"
+# Explicit build-profile override, empty unless --profile=... is given.  See the
+# profile-selection block below for why this exists separately from --bench.
+PROFILE_REQ=""
+# What the caller asserts the host was doing during the QEMU window.  Default
+# "unknown" deliberately: "nobody said" must never be silently upgraded to "the
+# host was quiet", which is the error that let a run taking 2.3x as long as its
+# own twin be written up as the cleanest run the instruments could describe.
+# See known-issues.md B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING.
+HOST_LOAD="unknown"
+# Refuse to start a build below this many GiB free on the build volume
+# (0 disables).  Q47 option C in open-questions.md, which is Lane A's to take
+# unilaterally because it is purely protective: it frees nothing and changes no
+# build, it only converts a corrupting failure into an honest refusal.
+#
+# WHY, concretely: on 2026-08-15 `D:` reached *zero* bytes free.  An edit that
+# was half-written when the space ran out left a kernel source file **empty** —
+# 18 KB of code replaced by nothing.  That one was already committed and came
+# back from git in under a minute; five other files being edited at that moment
+# were not committed and would have been lost outright.
+#
+# A disk-full build does not fail cleanly, which is the real argument for a
+# floor rather than a post-hoc check.  A link step that dies part-way can leave
+# a stale kernel image staged in the ESP, and a later --no-build run then boots
+# that image *as if it were current* — so the harness reports on code that was
+# never compiled.  Failing before the build starts is the only point at which
+# that is cheap.
+#
+# 20 GiB is the figure proposed in Q47 and is a floor, not an estimate of what a
+# build needs: measured the same day, the four worktrees held 138 GB of build
+# output between them (59.1 / 40.4 / 35.0 / 3.5), so 20 GiB is well under one
+# full rebuild of all four.  It is meant to leave enough room that the *editor*
+# and git keep working while a build is refused — recovering costs a
+# `cargo clean`, and losing an uncommitted file costs the work.
+MIN_FREE_GB="${BOOT_TEST_MIN_FREE_GB:-20}"
 
 # Parse args
 for arg in "$@"; do
@@ -300,17 +618,145 @@ for arg in "$@"; do
         # note on B-KNULLJUMP-SIGNAL).
         --no-stage) NO_BUILD=1; NO_STAGE=1 ;;
         --bench) BENCH=1; WAIT_MARKER="BENCH_OK" ;;
+        # --profile decouples "which build to measure" from "how long to wait".
+        # Those are independent questions that --bench used to answer jointly,
+        # which left one combination unreachable: a DEBUG build waited on to
+        # BENCH_OK.  That gap was not academic -- bench.rs carries per-profile
+        # budgets whose debug branch could not be exercised at all, so a
+        # mis-sized debug constant would go unnoticed until it fired on someone
+        # else's ordinary boot.  Rejecting an unknown value rather than falling
+        # back to a default: a typo'd --profile=relese must not silently measure
+        # the other profile and label the record with it.
+        --profile=*)
+            PROFILE_REQ="${arg#*=}"
+            case "$PROFILE_REQ" in
+                debug|release) ;;
+                *) echo "ERROR: --profile must be 'debug' or 'release', got '$PROFILE_REQ'" >&2
+                   exit 1 ;;
+            esac
+            ;;
         --timeout=*) TIMEOUT="${arg#*=}"; TIMEOUT_EXPLICIT=1 ;;
         --stall-secs=*) STALL_SECS="${arg#*=}" ;;
         --hard-lockup-watchdog) HARD_LOCKUP_WATCHDOG=1 ;;
+        --host-load=*) HOST_LOAD="${arg#*=}" ;;
+        --min-free-gb=*) MIN_FREE_GB="${arg#*=}" ;;
     esac
 done
+
+# Free-space floor (Q47 option C).  See MIN_FREE_GB above for why.
+#
+# Reports one of three outcomes and never conflates them, because "the check
+# could not run" reads exactly like "the check passed" if you let it:
+#   ok      — measured, and above the floor
+#   refuse  — measured, and below it (exit 1 before anything is built)
+#   unknown — df did not produce a number; warn loudly and continue
+#
+# Continuing on `unknown` is deliberate: this guard is protective, not
+# load-bearing, and a df that cannot parse must not be able to block every boot
+# test on every machine.  But it says so, rather than printing nothing and
+# letting a silent skip pass for a clean bill of health.
+check_free_space() {
+    local phase="$1"
+    [ "$MIN_FREE_GB" = "0" ] && return 0
+
+    # -P forces POSIX single-line output: without it a long filesystem name
+    # wraps onto its own line and $4 is then the wrong column.
+    local avail_kib
+    avail_kib="$(df -Pk "$PROJECT_ROOT" 2>/dev/null | awk 'NR==2 {print $4}')"
+
+    case "$avail_kib" in
+        ''|*[!0-9]*)
+            echo "WARNING: could not measure free space on $PROJECT_ROOT " \
+                 "(df gave '${avail_kib:-no output}'); the ${MIN_FREE_GB} GiB " \
+                 "floor is NOT being enforced for this run." >&2
+            return 0
+            ;;
+    esac
+
+    local avail_gb=$((avail_kib / 1024 / 1024))
+    if [ "$avail_gb" -lt "$MIN_FREE_GB" ]; then
+        echo "" >&2
+        echo "ERROR: only ${avail_gb} GiB free on the build volume; the floor is ${MIN_FREE_GB} GiB (${phase})." >&2
+        echo "" >&2
+        echo "Refusing to continue rather than risk a disk-full build.  On 2026-08-15 this" >&2
+        echo "volume hit zero bytes free and a half-written edit truncated a kernel source" >&2
+        echo "file to zero bytes; a part-way link can also leave a stale kernel staged in the" >&2
+        echo "ESP, which a later --no-build run boots as if it were current." >&2
+        echo "" >&2
+        echo "To free space, prune build output from a worktree nobody is building in:" >&2
+        echo "    cargo clean --manifest-path '<other-worktree>/Cargo.toml'" >&2
+        echo "The integration checkout (…/os) is usually the largest and the safest --" >&2
+        echo "target/ is entirely regenerable, so this costs a rebuild and never source." >&2
+        echo "" >&2
+        echo "To override for one run:  --min-free-gb=N   (or BOOT_TEST_MIN_FREE_GB=N, 0 disables)" >&2
+        exit 1
+    fi
+    echo "Free space OK: ${avail_gb} GiB on the build volume (floor ${MIN_FREE_GB} GiB, ${phase})."
+}
+
+# Validated here rather than passed through, so a typo ("--host-load=quiet")
+# fails the run outright instead of being silently recorded as an unknown value
+# by bench-history.py.  A mislabelled control is worse than an unlabelled one.
+case "$HOST_LOAD" in
+    idle|loaded|unknown) ;;
+    *)
+        echo "ERROR: --host-load must be idle, loaded or unknown (got '$HOST_LOAD')" >&2
+        exit 1
+        ;;
+esac
 
 # --bench waits for a marker that is emitted long after BOOT_OK, so it needs a
 # correspondingly longer budget.  Applied only if the caller did not pick a
 # timeout themselves — an explicit --timeout= always wins, in either direction.
 if [ "$BENCH" = "1" ] && [ "$TIMEOUT_EXPLICIT" = "0" ]; then
     TIMEOUT="$BENCH_TIMEOUT"
+fi
+
+# --bench DEFAULTS to --release; every other run defaults to debug.  Either can
+# be overridden with --profile=<debug|release>.
+#
+# WHY: a benchmark that does not measure the shipped build is not a benchmark.
+# Until 2026-08-14 this script ran a bare `cargo build` for every mode, so all
+# 63 benchmarks were measured at `opt-level = 0` (there is no
+# `[profile.dev.package.kernel]` override) and then scored against
+# `baselines.toml` targets taken from *optimised* Linux/Fuchsia/L4/jemalloc
+# implementations — a comparison with no meaning.  Meanwhile
+# `[profile.release.package.kernel]` had been sitting in Cargo.toml the whole
+# time with `opt-level = 3, codegen-units = 1, strip = "none"`, tuned for
+# exactly this and never used.  See known-issues.md
+# B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL.
+#
+# It also cuts the largest *noise* source in the suite.  Under TCG a hot loop
+# that straddles a 4 KiB guest page costs ~1.7x, deterministically per build,
+# and that penalty is invisible to both the canary and the mean/min check
+# because it does not vary within a run.  Straddle probability scales with the
+# loop's byte length: ~500 bytes at opt-level 0 versus a few dozen optimised.
+# See B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x.
+#
+# The default boot test deliberately stays on debug — faster rebuilds and
+# readable panics matter most when a boot *fails*, and --bench already roughly
+# doubles the cycle.  Whether that split is right is Q46 in open-questions.md;
+# if it is resolved toward "release everywhere", collapse these two branches.
+#
+# --profile=<debug|release> overrides the choice below.  --bench selects the
+# *default* profile; it no longer dictates it.  The combination that override
+# unlocks -- `--bench --profile=debug`, i.e. wait for BENCH_OK on a debug build
+# -- is the only way to exercise the debug branch of the per-profile budgets in
+# bench.rs, which are otherwise dead code no test can reach.
+if [ -n "$PROFILE_REQ" ]; then
+    BENCH_PROFILE="$PROFILE_REQ"
+elif [ "$BENCH" = "1" ]; then
+    BENCH_PROFILE="release"
+else
+    BENCH_PROFILE="debug"
+fi
+
+if [ "$BENCH_PROFILE" = "release" ]; then
+    CARGO_PROFILE_ARGS=("--release")
+    KERNEL_BIN="$PROJECT_ROOT/target/x86_64-unknown-none/release/kernel"
+else
+    CARGO_PROFILE_ARGS=()
+    KERNEL_BIN="$PROJECT_ROOT/target/x86_64-unknown-none/debug/kernel"
 fi
 
 # Optional hard-lockup NMI watchdog device (see --hard-lockup-watchdog above and
@@ -510,23 +956,115 @@ resolve_kernel_symbol() {
 # run to bench/history.jsonl and diffs against the previous one.  This used to
 # say "compare against prior runs" without anything storing them, which made
 # the advice unfollowable.
+
+# Non-zero if the benchmark recorder failed on this run.  Read by finish_pass,
+# which is the only place allowed to print the PASSED banner.
+BENCH_RECORDER_STATUS=0
+
 print_bench_results() {
     local file="$1"
     [ -f "$file" ] || return 0
     echo "=== Benchmark results ==="
-    # The machine-readable SCORE lines are for bench-history.py, not the reader.
-    grep -E '^\[bench\]' "$file" | grep -v '^\[bench\] SCORE ' \
+    # The machine-readable SCORE and CANARY lines are for bench-history.py,
+    # not the reader; the kernel prints a prose verdict for each alongside
+    # them, and that is what stays here. Note this only filters the *display*
+    # -- bench-history.py re-reads the raw file, so nothing is lost.
+    grep -E '^\[bench\]' "$file" \
+        | grep -v -E '^\[bench\] (SCORE|CANARY) ' \
         || echo "(no [bench] lines found)"
 
-    # Record and diff.  Never fatal: a missing python or a write failure must
-    # not turn a healthy boot into a failed one.
+    # Record and diff.
+    #
+    # --profile stamps the record with the build profile it was measured on.
+    # Numbers from different profiles are not comparable — opt-level 0 vs 3 on
+    # this code is a multiple, not a percentage — so the comparator must never
+    # diff across the boundary.  The 5 records written before 2026-08-14 carry
+    # no profile field and are read as "debug".
+    #
+    # The exit status is CAPTURED, not discarded.  It used to end in `|| true`
+    # on the reasoning that "a missing python or a write failure must not turn a
+    # healthy boot into a failed one" — which is true, and which those two cases
+    # already satisfy without it: python's absence is handled by the `command
+    # -v` branch below, and a write failure is reported by the tool without a
+    # non-zero exit.  What `|| true` actually suppressed was the third case
+    # nobody had in mind: the recorder *crashing*.  A refactor left a `NameError`
+    # on the recording path, and for four commits every `--bench` boot printed a
+    # traceback, wrote no history record, and was immediately overprinted with
+    # "=== Boot test PASSED ===" — the run silently produced no data at all.
+    #
+    # Note this invocation passes no --fail-on-regression, so the tool has no
+    # legitimate non-zero exit here: any non-zero status is a fault in the tool
+    # itself.  See the docstring on bench-history.py's print_canary_summary.
+    #
+    # --wall-seconds and --host-load feed the run-level verdict, which is the
+    # worst of the canary, dispersion and wall-clock axes rather than the canary
+    # alone.  The wall figure is omitted entirely (not passed as 0) when the
+    # QEMU window was never timed, because bench-history.py's whole discipline
+    # is that an absent measurement is unknown, not clean.
+    local bench_args=(--serial "$file" --profile "$BENCH_PROFILE"
+                      --host-load "$HOST_LOAD")
+    if [ -n "${QEMU_START_EPOCH:-}" ]; then
+        local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))
+        # Spelt as a full `if` rather than `[ ... ] && ...`: under `set -e` a
+        # bare AND-list whose test fails takes the script's exit status with it,
+        # so a clock that stepped backwards mid-run would abort the harness
+        # instead of merely declining to record a nonsense duration.
+        if [ "$wall" -ge 0 ]; then
+            bench_args+=(--wall-seconds "$wall")
+        fi
+    fi
+
+    local rc=0
     if command -v python &>/dev/null; then
-        python "$SCRIPT_DIR/bench-history.py" --serial "$file" || true
+        python "$SCRIPT_DIR/bench-history.py" "${bench_args[@]}" || rc=$?
     elif command -v python3 &>/dev/null; then
-        python3 "$SCRIPT_DIR/bench-history.py" --serial "$file" || true
+        python3 "$SCRIPT_DIR/bench-history.py" "${bench_args[@]}" || rc=$?
     else
         echo "(python not found; skipping benchmark history diff)"
+        return 0
     fi
+
+    if [ "$rc" -ne 0 ]; then
+        echo "=== BENCHMARK RECORDER FAILED (exit $rc) ==="
+        echo "    The kernel's numbers are in $file, but they were NOT recorded"
+        echo "    to bench/history.jsonl, so this run cannot be compared against"
+        echo "    later ones.  This is a bug in scripts/bench-history.py, not in"
+        echo "    the kernel: the boot itself is unaffected."
+        BENCH_RECORDER_STATUS=$rc
+    fi
+}
+
+# The single place that decides a boot passed, and the only place that prints
+# the PASSED banner.
+#
+# It is a function because there are two ways to reach a successful boot -- the
+# poll loop notices the marker, or the post-loop check finds it after QEMU has
+# already exited -- and both used to carry their own verbatim copy of this
+# sequence.  Two copies of "what counts as a pass" is one copy too many: any
+# condition added to one silently does not apply to the other, and the failure
+# mode is a boot that reports PASSED down whichever path the copy was not
+# applied to.
+#
+# Exit codes: 0 pass; 3 the kernel booted but the run did not produce the
+# artefact it was asked for.  3 is deliberately distinct from 1 (kernel/self-test
+# failure) and 2 (hang/wedge) -- conflating "the kernel is broken" with "our
+# tooling is broken" sends the reader to the wrong tree.
+finish_pass() {
+    local file="$1"
+    if [ "$BENCH" -eq 1 ]; then
+        print_bench_results "$file"
+    else
+        report_bench_absence "$file"
+    fi
+    report_pathz_skips "$file"
+
+    if [ "$BENCH_RECORDER_STATUS" -ne 0 ]; then
+        echo "=== Boot test INCOMPLETE ($WAIT_MARKER reached, but --bench recorded nothing) ==="
+        exit 3
+    fi
+
+    echo "=== Boot test PASSED ==="
+    exit 0
 }
 
 # Find QEMU
@@ -566,14 +1104,15 @@ fi
 
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then
+    check_free_space "before building"
     echo "=== Building kernel ==="
     CARGO="${CARGO:-cargo}"
     # Try full path on Windows if cargo not in PATH
     if ! command -v "$CARGO" &>/dev/null; then
         CARGO="/c/Users/${USER:-${USERNAME:-$(whoami)}}/.cargo/bin/cargo.exe"
     fi
-    (cd "$PROJECT_ROOT" && "$CARGO" build)
-    echo "Build OK."
+    (cd "$PROJECT_ROOT" && "$CARGO" build ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"})
+    echo "Build OK ($BENCH_PROFILE profile)."
 fi
 
 if [ "$NO_STAGE" -eq 0 ] && [ ! -f "$KERNEL_BIN" ]; then
@@ -582,6 +1121,14 @@ if [ "$NO_STAGE" -eq 0 ] && [ ! -f "$KERNEL_BIN" ]; then
 fi
 
 # Step 2: Stage boot files
+#
+# Checked a second time, and not redundantly: staging copies a ~200 MiB kernel
+# image into build/esp, and the failure this whole floor exists to prevent is a
+# *partial* write leaving a stale-or-truncated image that a later --no-build run
+# boots as if it were current.  The pre-build check cannot cover this, because
+# the build itself is what consumes the margin.  This also covers --no-build and
+# --no-stage callers, which skip the first check entirely.
+check_free_space "before staging"
 echo "=== Staging boot files ==="
 mkdir -p "$ESP_DIR/EFI/BOOT" "$ESP_DIR/boot"
 cp "$PROJECT_ROOT/limine/BOOTX64.EFI" "$ESP_DIR/EFI/BOOT/BOOTX64.EFI"
@@ -815,6 +1362,23 @@ rm -f "$SERIAL_FILE"
 
 OVMF_WIN="$(to_win_path "$OVMF")"
 rm -f "$PIDFILE"
+# Wall clock across the QEMU window only — not the build, which runs at full
+# parallelism and says nothing about host interference.
+#
+# This is the most sensitive contamination signal the harness has, and until
+# 2026-08-15 it was computed (as ELAPSED, for the progress message) and thrown
+# away.  TCG is pure emulation, CPU-bound and single-threaded, so for a fixed
+# amount of guest work the wall time is guest-work divided by the share of a
+# core the emulator actually got: a run descheduled half the time simply takes
+# twice as long, and there is nowhere for that time to hide because it is
+# measured on the host's clock, outside the guest.  That is exactly the frame
+# the in-guest canary cannot reach.  Two boots of one binary minutes apart read
+# 160s and 365s while the canary called the 365s run its cleanest ever.
+#
+# A separate epoch stamp rather than reusing ELAPSED: ELAPSED counts `sleep 1`
+# iterations plus the loop body's own work, so it drifts upward on exactly the
+# busy hosts whose measurement matters most.
+QEMU_START_EPOCH=$(date +%s)
 "$QEMU" \
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN" \
     -drive "format=raw,file=fat:rw:$ESP_DIR_WIN" \
@@ -865,14 +1429,29 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
         fi
-        if [ "$BENCH" -eq 1 ]; then
-            print_bench_results "$SERIAL_FILE"
-        else
-            report_bench_absence "$SERIAL_FILE"
+        if ! check_liveness_failures "$SERIAL_FILE"; then
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but the liveness watchdog reported) ==="
+            exit 1
         fi
-        report_pathz_skips "$SERIAL_FILE"
-        echo "=== Boot test PASSED ==="
-        exit 0
+        if ! check_bench_coverage "$SERIAL_FILE" "$BENCH"; then
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but the benchmark suite left windows unjudged) ==="
+            exit 1
+        fi
+        finish_pass "$SERIAL_FILE"
+    fi
+
+    # Early death detection.  Checked AFTER the marker so a log that somehow
+    # holds both still reports PASS, matching the post-loop elif ordering.
+    # The 2s settle lets the panic handler's trailing lines (the Display of
+    # PanicInfo, the location) land before we take the emulator away, so the
+    # printed evidence is the whole panic and not just its first line.
+    if kernel_is_dead "$SERIAL_FILE"; then
+        sleep 2
+        echo "=== Kernel died after ${ELAPSED}s (not waiting out the ${TIMEOUT}s timeout) ==="
+        report_kernel_death "$SERIAL_FILE"
+        kill_qemu "$QEMU_PID"
+        echo "=== Boot test FAILED ==="
+        exit 1
     fi
 
     # Serial-stall wedge detection (opt-in).  A wedged kernel stops writing to
@@ -921,17 +1500,20 @@ if [ -f "$SERIAL_FILE" ]; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
         fi
-        if [ "$BENCH" -eq 1 ]; then
-            print_bench_results "$SERIAL_FILE"
-        else
-            report_bench_absence "$SERIAL_FILE"
+        if ! check_liveness_failures "$SERIAL_FILE"; then
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but the liveness watchdog reported) ==="
+            exit 1
         fi
-        report_pathz_skips "$SERIAL_FILE"
-        echo "=== Boot test PASSED ==="
-        exit 0
+        if ! check_bench_coverage "$SERIAL_FILE" "$BENCH"; then
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but the benchmark suite left windows unjudged) ==="
+            exit 1
+        fi
+        finish_pass "$SERIAL_FILE"
     elif grep -q "PANIC\|FATAL" "$SERIAL_FILE"; then
-        echo "KERNEL PANIC detected!"
-        grep "PANIC\|FATAL\|EXCEPTION" "$SERIAL_FILE" || true
+        # Wider (unanchored) net than the in-loop kernel_is_dead check: by this
+        # point the boot has already failed to reach the marker, so a loose
+        # match cannot turn a healthy boot into a failure.
+        report_kernel_death "$SERIAL_FILE"
         echo "=== Boot test FAILED ==="
         exit 1
     fi

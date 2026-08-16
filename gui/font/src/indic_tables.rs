@@ -15,7 +15,7 @@ use crate::indic::{Category, Position};
 /// A character in no range is [`Category::Other`] at
 /// [`Position::End`], which is the answer for everything outside the
 /// Indic blocks and for most characters inside them.
-pub(crate) static INDIC_RANGES: [(u32, u32, Category, Position); 252] = [
+pub(crate) static INDIC_RANGES: [(u32, u32, Category, Position); 275] = [
     (0x002D, 0x002D, Category::Placeholder, Position::BaseC),
     (0x0030, 0x0039, Category::Placeholder, Position::BaseC),
     (0x00A0, 0x00A0, Category::Placeholder, Position::BaseC),
@@ -244,6 +244,29 @@ pub(crate) static INDIC_RANGES: [(u32, u32, Category, Position); 252] = [
     (0x0D62, 0x0D63, Category::Matra, Position::AfterPost),
     (0x0D66, 0x0D6F, Category::Placeholder, Position::BaseC),
     (0x0D7A, 0x0D7F, Category::Consonant, Position::BaseC),
+    (0x1780, 0x1799, Category::Consonant, Position::BaseC),
+    (0x179A, 0x179A, Category::Ra, Position::BaseC),
+    (0x179B, 0x17A2, Category::Consonant, Position::BaseC),
+    (0x17A3, 0x17B3, Category::Vowel, Position::BaseC),
+    (0x17B6, 0x17B6, Category::VowelPost, Position::PostC),
+    (0x17B7, 0x17BA, Category::VowelAbove, Position::AboveC),
+    (0x17BB, 0x17BD, Category::VowelBelow, Position::BelowC),
+    (0x17BE, 0x17BE, Category::VowelAbove, Position::AboveC),
+    (0x17BF, 0x17C0, Category::VowelPost, Position::PostC),
+    (0x17C1, 0x17C3, Category::VowelPre, Position::PreC),
+    (0x17C4, 0x17C5, Category::VowelPost, Position::PostC),
+    (0x17C6, 0x17C6, Category::XGroup, Position::End),
+    (0x17C7, 0x17C8, Category::YGroup, Position::End),
+    (0x17C9, 0x17CA, Category::Robatic, Position::End),
+    (0x17CB, 0x17CB, Category::XGroup, Position::End),
+    (0x17CC, 0x17CC, Category::Robatic, Position::End),
+    (0x17CD, 0x17D1, Category::XGroup, Position::End),
+    (0x17D2, 0x17D2, Category::Halant, Position::End),
+    (0x17D3, 0x17D3, Category::YGroup, Position::End),
+    (0x17D9, 0x17D9, Category::Placeholder, Position::BaseC),
+    (0x17DC, 0x17DC, Category::Symbol, Position::Smvd),
+    (0x17DD, 0x17DD, Category::YGroup, Position::End),
+    (0x17E0, 0x17E9, Category::Placeholder, Position::BaseC),
     (0x1CD0, 0x1CD2, Category::Cantillation, Position::Smvd),
     (0x1CD4, 0x1CE8, Category::Cantillation, Position::Smvd),
     (0x1CE9, 0x1CEC, Category::Symbol, Position::Smvd),

@@ -51,10 +51,9 @@
 
 use alloc::vec::Vec;
 
-use crate::context::{
-    MAX_NESTING, Matched, chain_match, context_match, read_records,
-};
+use crate::context::{MAX_NESTING, Matched, chain_match, context_match, read_records};
 use crate::gsub::SubGlyph;
+use crate::lang::Lang;
 use crate::mark::{attachment, lig_attachment};
 use crate::otl::{
     ByScript, Lookup, MAX_SUBTABLES, binary_search, coverage_index, glyph_class, lookup_at,
@@ -62,7 +61,7 @@ use crate::otl::{
 };
 use crate::script::ScriptTags;
 use crate::sfnt::{Span, i16_at, u16_at};
-use crate::skip::{CLASS_MARK, Definitions, IGNORE_FLAGS, IGNORE_MARKS, Skipper};
+use crate::skip::{CLASS_MARK, Definitions, IGNORE_FLAGS, IGNORE_MARKS, Joiners, Skipper};
 
 /// Single adjustment: move one glyph and change its advance.
 const SINGLE_POS: u16 = 1;
@@ -123,7 +122,10 @@ const KINDS: [u16; 8] = [
 /// positional features must reach only the glyphs the shaper marked eligible,
 /// a positioning feature is gated by its own glyph coverage — a face's `abvm`
 /// simply does not cover glyphs that have nothing above them.
-const FEATURES: [&[u8; 4]; 14] = [
+///
+/// Visible to the crate so that `the_two_tables_ask_for_the_same_features` in
+/// [`otl`](crate::otl) can pin the "one feature map" claim above.
+pub(crate) const FEATURES: [&[u8; 4]; 14] = [
     b"abvm", b"blwm", b"calt", b"ccmp", b"clig", b"curs", b"dist", b"kern", b"liga", b"locl",
     b"mark", b"mkmk", b"rclt", b"rlig",
 ];
@@ -266,6 +268,10 @@ pub(crate) struct Run<'a> {
     pub(crate) rtl: bool,
     /// The run's script, which selects the lookups.
     pub(crate) script: Option<ScriptTags>,
+    /// The run's language, which selects among the lookups that script offers.
+    /// `None` — and any language the script does not register — takes the
+    /// script's default language system. See [`lang`](crate::lang).
+    pub(crate) lang: Option<Lang>,
 }
 
 /// A face's `GPOS`, resolved once per script.
@@ -294,7 +300,7 @@ impl Positioning {
         })
     }
 
-    /// Whether a run of `script` reaches a `kern` feature here.
+    /// Whether a run of `script` in `lang` reaches a `kern` feature here.
     ///
     /// A face files its `GPOS` features under particular scripts, so this is a
     /// question about the run and not about the face: Leelawadee registers only
@@ -307,9 +313,9 @@ impl Positioning {
     /// The script fallback chain is [`ByScript::for_script`]'s, so a face that
     /// registers `DFLT` answers for every run, as it should.
     #[must_use]
-    pub(crate) fn kerns(&self, script: Option<ScriptTags>) -> bool {
+    pub(crate) fn kerns(&self, script: Option<ScriptTags>, lang: Option<Lang>) -> bool {
         self.lookups
-            .for_script(script)
+            .for_script(script, lang)
             .any(|(_, mask)| mask & KERN_MASK != 0)
     }
 
@@ -318,7 +324,7 @@ impl Positioning {
         let mut out: Vec<Adjust> = (0..run.glyphs.len())
             .map(|i| Adjust::plain(run.advances.get(i).copied().unwrap_or(0)))
             .collect();
-        for (lookup, _) in self.lookups.for_script(run.script) {
+        for (lookup, _) in self.lookups.for_script(run.script, run.lang) {
             self.run_lookup(data, lookup, run, &mut out);
         }
         // Marks lose their width here, between the lookups and the chains, for
@@ -344,7 +350,14 @@ impl Positioning {
     /// a pair that consumed its second glyph resumes past it, everything else
     /// resumes at the next glyph.
     fn run_lookup(&self, data: &[u8], lookup: &Lookup, run: &Run<'_>, out: &mut [Adjust]) {
-        let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u64::MAX);
+        let skip = Skipper::new(
+            data,
+            self.defs,
+            lookup.flag,
+            lookup.filter,
+            u64::MAX,
+            Joiners::POSITIONING,
+        );
         let mut i = 0usize;
         while i < run.glyphs.len() {
             let next = if skip.considers(run.glyphs, i) {
@@ -402,11 +415,25 @@ impl Positioning {
         match lookup.kind {
             SINGLE_POS => single(data, sub, run.glyphs, i, out),
             PAIR_POS => {
-                let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u64::MAX);
+                let skip = Skipper::new(
+                    data,
+                    self.defs,
+                    lookup.flag,
+                    lookup.filter,
+                    u64::MAX,
+                    Joiners::POSITIONING,
+                );
                 pair(data, sub, skip, run.glyphs, i, out)
             }
             CURSIVE_POS => {
-                let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u64::MAX);
+                let skip = Skipper::new(
+                    data,
+                    self.defs,
+                    lookup.flag,
+                    lookup.filter,
+                    u64::MAX,
+                    Joiners::POSITIONING,
+                );
                 cursive(data, sub, skip, lookup.flag, run, i, out)
             }
             MARK_BASE_POS => {
@@ -414,13 +441,27 @@ impl Positioning {
                 // lookup's own flag: a mark-to-base lookup that did not ignore
                 // marks would attach the second accent of a stack to the first
                 // and call it a base.
-                let skip = Skipper::new(data, self.defs, IGNORE_MARKS, 0, u64::MAX);
+                let skip = Skipper::new(
+                    data,
+                    self.defs,
+                    IGNORE_MARKS,
+                    0,
+                    u64::MAX,
+                    Joiners::POSITIONING,
+                );
                 let j = skip.prev(run.glyphs, i)?;
                 attach(data, sub, run.glyphs, i, j, out)
             }
             MARK_LIG_POS => {
                 // Same search as mark-to-base, for the same reason.
-                let skip = Skipper::new(data, self.defs, IGNORE_MARKS, 0, u64::MAX);
+                let skip = Skipper::new(
+                    data,
+                    self.defs,
+                    IGNORE_MARKS,
+                    0,
+                    u64::MAX,
+                    Joiners::POSITIONING,
+                );
                 let j = skip.prev(run.glyphs, i)?;
                 attach_to_lig(data, sub, run.glyphs, i, j, out)
             }
@@ -435,6 +476,7 @@ impl Positioning {
                     lookup.flag & !IGNORE_FLAGS,
                     lookup.filter,
                     u64::MAX,
+                    Joiners::POSITIONING,
                 );
                 let j = skip.prev(run.glyphs, i)?;
                 let below = run.glyphs.get(j)?.gid;
@@ -444,7 +486,14 @@ impl Positioning {
                 attach(data, sub, run.glyphs, i, j, out)
             }
             CONTEXT_POS => {
-                let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u64::MAX);
+                let skip = Skipper::new(
+                    data,
+                    self.defs,
+                    lookup.flag,
+                    lookup.filter,
+                    u64::MAX,
+                    Joiners::POSITIONING,
+                );
                 // A local rather than a field, so that a nested contextual
                 // lookup does not reuse the buffer its caller is matching in.
                 let mut rules = Vec::new();
@@ -452,7 +501,14 @@ impl Positioning {
                 Some(self.nested(data, run, i, &hit, out, depth))
             }
             CHAIN_CONTEXT_POS => {
-                let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u64::MAX);
+                let skip = Skipper::new(
+                    data,
+                    self.defs,
+                    lookup.flag,
+                    lookup.filter,
+                    u64::MAX,
+                    Joiners::POSITIONING,
+                );
                 let mut rules = Vec::new();
                 let hit = chain_match(data, sub, run.glyphs, i, skip, &mut rules)?;
                 Some(self.nested(data, run, i, &hit, out, depth))
@@ -1074,7 +1130,7 @@ mod tests {
         let run = glyphs(&[1, 2, 1]);
         let mut out = alloc::vec![Adjust::plain(500); 3];
         let defs = Definitions::default();
-        let skip = Skipper::new(&data, defs, 0, 0, u64::MAX);
+        let skip = Skipper::new(&data, defs, 0, 0, u64::MAX, Joiners::POSITIONING);
         // No second record, so the second glyph may still open the next pair.
         assert_eq!(pair(&data, 0, skip, &run, 0, &mut out), Some(1));
         assert_eq!(out[0].x_advance, 440);
@@ -1087,7 +1143,14 @@ mod tests {
         let data = pair_pos1(1, 2, -60, Some(-10));
         let run = glyphs(&[1, 2]);
         let mut out = alloc::vec![Adjust::plain(500); 2];
-        let skip = Skipper::new(&data, Definitions::default(), 0, 0, u64::MAX);
+        let skip = Skipper::new(
+            &data,
+            Definitions::default(),
+            0,
+            0,
+            u64::MAX,
+            Joiners::POSITIONING,
+        );
         assert_eq!(pair(&data, 0, skip, &run, 0, &mut out), Some(2));
         assert_eq!(out[0].x_advance, 440);
         assert_eq!(out[1].x_advance, 490);
@@ -1432,13 +1495,13 @@ mod tests {
         let data = gpos_table_with_empty_script(b"latn", &[(SINGLE_POS, sub)]);
         let pos = Positioning::parse(&data, span(0, data.len()), None).expect("GPOS parses");
         // A script the table does not register reaches `DFLT`, as ever.
-        assert!(pos.kerns(Some(ScriptTags::exactly(*b"thai"))));
-        assert!(pos.kerns(None));
+        assert!(pos.kerns(Some(ScriptTags::exactly(*b"thai")), None));
+        assert!(pos.kerns(None, None));
         // `latn` is registered, so the chain stops there — and finds nothing.
-        assert!(!pos.kerns(Some(ScriptTags::exactly(*b"latn"))));
+        assert!(!pos.kerns(Some(ScriptTags::exactly(*b"latn")), None));
         assert_eq!(
             pos.lookups
-                .for_script(Some(ScriptTags::exactly(*b"latn")))
+                .for_script(Some(ScriptTags::exactly(*b"latn")), None)
                 .count(),
             0
         );
@@ -1518,9 +1581,9 @@ mod tests {
         let asks = |script: &[u8; 4], feature: &[u8; 4]| {
             let data = gpos_table_for(script, feature, &[(SINGLE_POS, sub())]);
             let pos = Positioning::parse(&data, span(0, data.len()), None).expect("GPOS parses");
-            let latin = pos.kerns(Some(ScriptTags::exactly(*b"latn")));
-            let thai = pos.kerns(Some(ScriptTags::exactly(*b"thai")));
-            let none = pos.kerns(None);
+            let latin = pos.kerns(Some(ScriptTags::exactly(*b"latn")), None);
+            let thai = pos.kerns(Some(ScriptTags::exactly(*b"thai")), None);
+            let none = pos.kerns(None, None);
             (latin, thai, none)
         };
         // Filed under `thai` alone: only a Thai run reaches it. A run with no
@@ -1547,6 +1610,7 @@ mod tests {
                 marks: &marks,
                 rtl: false,
                 script: None,
+                lang: None,
             },
         )
         .iter()

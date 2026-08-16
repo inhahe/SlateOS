@@ -17,7 +17,7 @@
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ---------------------------------------------------------------------------
@@ -570,6 +570,7 @@ impl Game2048App {
             font_size: 48.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Score display
@@ -595,6 +596,7 @@ impl Game2048App {
             font_size: 16.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Controls hint
@@ -606,6 +608,7 @@ impl Game2048App {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Board background
@@ -650,6 +653,7 @@ impl Game2048App {
                         font_size: fs,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(CELL_SIZE),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -712,6 +716,7 @@ impl Game2048App {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: x + 10.0,
@@ -721,6 +726,7 @@ impl Game2048App {
             font_size: 22.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -751,6 +757,7 @@ impl Game2048App {
             font_size: 42.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -761,6 +768,7 @@ impl Game2048App {
             font_size: 16.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(board_w - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -797,6 +805,7 @@ impl Game2048App {
                 font_size: 15.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(400.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

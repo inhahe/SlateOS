@@ -16,7 +16,7 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1063,6 +1063,7 @@ impl WeatherApp {
                 color: bg_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(self.width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1091,6 +1092,7 @@ impl WeatherApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Active location
@@ -1102,6 +1104,7 @@ impl WeatherApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Nav tabs
@@ -1147,6 +1150,7 @@ impl WeatherApp {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1219,6 +1223,7 @@ impl WeatherApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Large temperature
@@ -1230,6 +1235,7 @@ impl WeatherApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Feels like
@@ -1244,6 +1250,7 @@ impl WeatherApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Condition text
@@ -1255,6 +1262,7 @@ impl WeatherApp {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Weather icon (ASCII art rendered as text lines)
@@ -1269,6 +1277,7 @@ impl WeatherApp {
                 color: icon_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1289,6 +1298,7 @@ impl WeatherApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: dx,
@@ -1298,6 +1308,7 @@ impl WeatherApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1378,6 +1389,7 @@ impl WeatherApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Clip the scrollable area
@@ -1417,6 +1429,7 @@ impl WeatherApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(item_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Temperature
@@ -1428,6 +1441,7 @@ impl WeatherApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(item_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Condition mini icon (first line of ASCII art)
@@ -1441,6 +1455,7 @@ impl WeatherApp {
                     color: hf.condition.icon_color(),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(item_w - 8.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1454,6 +1469,7 @@ impl WeatherApp {
                     color: BLUE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(item_w - 16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1491,6 +1507,7 @@ impl WeatherApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         if self.hourly.is_empty() {
@@ -1524,6 +1541,7 @@ impl WeatherApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(40.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Grid line
@@ -1577,6 +1595,7 @@ impl WeatherApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1609,6 +1628,7 @@ impl WeatherApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Column positions
@@ -1638,6 +1658,7 @@ impl WeatherApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1675,6 +1696,7 @@ impl WeatherApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1685,6 +1707,7 @@ impl WeatherApp {
                 color: SUBTEXT1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(130.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1695,6 +1718,7 @@ impl WeatherApp {
                 color: PEACH,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1705,6 +1729,7 @@ impl WeatherApp {
                 color: BLUE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1715,6 +1740,7 @@ impl WeatherApp {
                 color: if day.precip_pct > 50 { BLUE } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1729,6 +1755,7 @@ impl WeatherApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1760,6 +1787,7 @@ impl WeatherApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // AQI number
@@ -1771,6 +1799,7 @@ impl WeatherApp {
             color: aq.color(),
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Category label
@@ -1782,6 +1811,7 @@ impl WeatherApp {
             color: aq.color(),
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Color-coded bar
@@ -1830,6 +1860,7 @@ impl WeatherApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 30.0;
 
@@ -1854,6 +1885,7 @@ impl WeatherApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         cy += 20.0;
@@ -1877,6 +1909,7 @@ impl WeatherApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: col_temp,
@@ -1886,6 +1919,7 @@ impl WeatherApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: col_cond,
@@ -1895,6 +1929,7 @@ impl WeatherApp {
                 color: SUBTEXT1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(170.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: col_precip,
@@ -1904,6 +1939,7 @@ impl WeatherApp {
                 color: if hf.precip_pct > 30 { BLUE } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 24.0;
         }
@@ -1922,6 +1958,7 @@ impl WeatherApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 36.0;
 
@@ -1945,6 +1982,7 @@ impl WeatherApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1955,6 +1993,7 @@ impl WeatherApp {
                 color: SUBTEXT1,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1969,6 +2008,7 @@ impl WeatherApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1984,6 +2024,7 @@ impl WeatherApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - padding * 2.0 - 220.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Render condition icon lines
@@ -1998,6 +2039,7 @@ impl WeatherApp {
                     color: icon_color,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -2018,6 +2060,7 @@ impl WeatherApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 36.0;
 
@@ -2030,6 +2073,7 @@ impl WeatherApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         }
@@ -2092,6 +2136,7 @@ impl WeatherApp {
                 color: severity_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(self.width - padding * 2.0 - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Description, one command per wrapped line.
@@ -2104,6 +2149,7 @@ impl WeatherApp {
                     color: SUBTEXT1,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(text_width),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -2124,6 +2170,7 @@ impl WeatherApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 36.0;
 
@@ -2171,6 +2218,7 @@ impl WeatherApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(self.width - padding * 2.0 - 100.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Default badge
@@ -2191,6 +2239,7 @@ impl WeatherApp {
                     color: BLUE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -2211,6 +2260,7 @@ impl WeatherApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 36.0;
 
@@ -2263,6 +2313,7 @@ impl WeatherApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -2273,6 +2324,7 @@ impl WeatherApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cy += row_h + 8.0;

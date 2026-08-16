@@ -40,6 +40,19 @@ pub enum KernelError {
     /// `FUTEX_WAKE`).  Maps to `EINTR`; restartable syscalls translate this to
     /// an `ERESTART*` sentinel at the syscall layer instead.
     Interrupted = -8,
+    /// A caller-supplied output buffer is too small to hold the whole answer.
+    ///
+    /// Distinct from `InvalidArgument` on purpose: the request was well-formed
+    /// and the kernel *could* have answered it, so the caller's correct
+    /// response is to allocate more and retry, not to give up.  A handler
+    /// returning this must write **nothing**, which is the whole point of the
+    /// variant: a short answer must never be mistaken for a complete one.  For
+    /// an enumeration (`SYS_CAP_QUERY`) a silent prefix would read as "this
+    /// process holds less authority than it does" — the same class of bug as
+    /// over-reporting, in the direction that is harder to notice.
+    ///
+    /// Maps to `ERANGE`.
+    BufferTooSmall = -9,
 
     // --- Memory (100 - 199) ---
     /// No physical memory available to satisfy the allocation.
@@ -159,6 +172,7 @@ impl KernelError {
             Self::TimedOut => "operation timed out",
             Self::Deadlock => "operation would deadlock",
             Self::Interrupted => "interrupted by signal",
+            Self::BufferTooSmall => "output buffer too small for the whole answer",
             Self::OutOfMemory => "out of memory",
             Self::InvalidAddress => "invalid address",
             Self::PageFault => "unresolvable page fault",

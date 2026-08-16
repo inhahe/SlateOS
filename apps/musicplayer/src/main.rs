@@ -18,7 +18,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -1017,6 +1017,7 @@ fn render_tab_bar(state: &PlayerState, tree: &mut RenderTree) {
                 FontWeightHint::Regular
             },
             max_width: Some(tab_width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         if active {
@@ -1044,6 +1045,7 @@ fn render_tab_bar(state: &PlayerState, tree: &mut RenderTree) {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(240.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -1077,6 +1079,7 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
             font_size: 48.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Track title
@@ -1089,6 +1092,7 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
             font_size: 22.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Artist
@@ -1100,6 +1104,7 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
             font_size: 16.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(400.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Album
@@ -1111,6 +1116,7 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(400.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Waveform visualization
@@ -1153,6 +1159,7 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
             font_size: 20.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x: center_x - 140.0,
@@ -1162,6 +1169,7 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }
@@ -1186,6 +1194,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree, content_height: f3
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     tree.push(RenderCommand::Text {
         x: col_artist_x,
@@ -1195,6 +1204,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree, content_height: f3
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     tree.push(RenderCommand::Text {
         x: col_album_x,
@@ -1204,6 +1214,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree, content_height: f3
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     tree.push(RenderCommand::Text {
         x: col_duration_x,
@@ -1213,6 +1224,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree, content_height: f3
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Track list
@@ -1257,6 +1269,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree, content_height: f3
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1268,6 +1281,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree, content_height: f3
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_artist_x - col_title_x - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         tree.push(RenderCommand::Text {
@@ -1278,6 +1292,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree, content_height: f3
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_album_x - col_artist_x - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         tree.push(RenderCommand::Text {
@@ -1288,6 +1303,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree, content_height: f3
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_duration_x - col_album_x - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         tree.push(RenderCommand::Text {
@@ -1298,6 +1314,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree, content_height: f3
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1316,6 +1333,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree, content_height: f3
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 
@@ -1331,6 +1349,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Total duration
@@ -1343,6 +1362,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Playlist tracks
@@ -1383,6 +1403,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Playing indicator
@@ -1396,6 +1417,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1408,6 +1430,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(state.width * 0.4),
+            overflow: TextOverflow::Ellipsis,
         });
 
         tree.push(RenderCommand::Text {
@@ -1418,6 +1441,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(state.width * 0.25),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Duration
@@ -1429,6 +1453,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Format badge
@@ -1448,6 +1473,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1461,6 +1487,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
             font_size: 16.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }
@@ -1530,6 +1557,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     tree.push(RenderCommand::Text {
         x: progress_x + progress_width - 40.0,
@@ -1539,6 +1567,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Playback buttons row
@@ -1575,6 +1604,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         font_size: 16.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Next button
@@ -1652,6 +1682,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         font_size: 14.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Volume bar background
@@ -1687,6 +1718,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Current track info (left side of controls)
@@ -1713,6 +1745,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         tree.push(RenderCommand::Text {
@@ -1723,6 +1756,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -1753,6 +1787,7 @@ fn render_button(
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(size - 4.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 

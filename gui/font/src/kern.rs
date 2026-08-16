@@ -66,7 +66,7 @@ use alloc::vec::Vec;
 use crate::gpos::pair_values;
 use crate::otl::{MAX_SUBTABLES, binary_search, feature_lookups};
 use crate::sfnt::{Span, i16_at, u16_at};
-use crate::skip::{Definitions, Skipper};
+use crate::skip::{Definitions, Joiners, Skipper};
 
 /// `GPOS` lookup type for pair positioning.
 const LOOKUP_PAIR_POS: u16 = 2;
@@ -132,7 +132,9 @@ impl Kerning {
         legacy: Option<Span>,
         gdef: Option<Span>,
     ) -> Option<Self> {
-        let gpos = gpos.and_then(|span| parse_gpos(data, span)).unwrap_or_default();
+        let gpos = gpos
+            .and_then(|span| parse_gpos(data, span))
+            .unwrap_or_default();
         let legacy = legacy
             .and_then(|span| parse_legacy(data, span))
             .unwrap_or_default();
@@ -188,7 +190,14 @@ impl Kerning {
     pub(crate) fn pair(&self, data: &[u8], left: u16, right: u16, between: &[u16]) -> i16 {
         for group in &self.gpos {
             if !between.is_empty() {
-                let skip = Skipper::new(data, self.defs, group.flag, group.filter, u64::MAX);
+                let skip = Skipper::new(
+                    data,
+                    self.defs,
+                    group.flag,
+                    group.filter,
+                    u64::MAX,
+                    Joiners::POSITIONING,
+                );
                 if !between.iter().all(|&g| skip.skips(g)) {
                     continue;
                 }
@@ -337,7 +346,10 @@ fn legacy_pair(data: &[u8], sub: usize, left: u16, right: u16) -> Option<i16> {
         let r = u16_at(data, at.checked_add(2)?)?;
         Some((l, r).cmp(&key))
     })?;
-    i16_at(data, first.checked_add(found.checked_mul(6)?)?.checked_add(4)?)
+    i16_at(
+        data,
+        first.checked_add(found.checked_mul(6)?)?.checked_add(4)?,
+    )
 }
 
 #[cfg(test)]
@@ -597,7 +609,8 @@ mod tests {
     #[test]
     fn an_extension_lookup_is_followed_to_the_subtable_it_wraps() {
         let data = gpos_table_extension(-65);
-        let k = Kerning::parse(&data, Some(span(0, data.len())), None, None).expect("extension parses");
+        let k =
+            Kerning::parse(&data, Some(span(0, data.len())), None, None).expect("extension parses");
         assert_eq!(k.pair(&data, 1, 2, &[]), -65);
     }
 
@@ -778,7 +791,8 @@ mod tests {
         // `kern` predates lookups and has no flags to honour, so there is no
         // basis for reading across anything.
         let data = legacy_table(0x0001, &[(1, 2, -10)]);
-        let k = Kerning::parse(&data, None, Some(span(0, data.len())), None).expect("legacy parses");
+        let k =
+            Kerning::parse(&data, None, Some(span(0, data.len())), None).expect("legacy parses");
         assert_eq!(k.pair(&data, 1, 2, &[]), -10);
         assert_eq!(k.pair(&data, 1, 2, &[90]), 0);
     }

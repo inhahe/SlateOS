@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -1458,6 +1458,7 @@ impl CameraApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1497,6 +1498,7 @@ impl CameraApp {
             font_size: 18.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tx += 80.0;
 
@@ -1523,6 +1525,7 @@ impl CameraApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(150.0),
+            overflow: TextOverflow::Ellipsis,
         });
         tx += 160.0;
 
@@ -1552,6 +1555,7 @@ impl CameraApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tx += 60.0;
 
@@ -1577,6 +1581,7 @@ impl CameraApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tx += 76.0;
 
@@ -1655,6 +1660,7 @@ impl CameraApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tx += 52.0;
         }
@@ -1676,6 +1682,7 @@ impl CameraApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tx += 38.0;
 
@@ -1688,6 +1695,7 @@ impl CameraApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Right-aligned: filter indicator
@@ -1710,6 +1718,7 @@ impl CameraApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(84.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1884,6 +1893,7 @@ impl CameraApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -1904,6 +1914,7 @@ impl CameraApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         } else {
             // No frame — show "No Signal" message
@@ -1915,6 +1926,7 @@ impl CameraApp {
                 font_size: 18.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1999,6 +2011,7 @@ impl CameraApp {
             font_size: 56.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Progress ring (simulated as a border)
@@ -2042,6 +2055,7 @@ impl CameraApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Duration
@@ -2053,6 +2067,7 @@ impl CameraApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // File size estimate
@@ -2064,6 +2079,7 @@ impl CameraApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2118,6 +2134,7 @@ impl CameraApp {
                 font_size: 11.0,
                 font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
                 max_width: Some(tab_w - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2161,6 +2178,7 @@ impl CameraApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += row_h;
 
@@ -2186,6 +2204,7 @@ impl CameraApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: px + pw - 40.0,
@@ -2195,6 +2214,7 @@ impl CameraApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += row_h;
 
@@ -2208,6 +2228,7 @@ impl CameraApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: px + pw - 50.0,
@@ -2217,6 +2238,7 @@ impl CameraApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += row_h + 8.0;
 
@@ -2229,6 +2251,7 @@ impl CameraApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += row_h;
 
@@ -2241,6 +2264,7 @@ impl CameraApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: px + pw - 40.0,
@@ -2250,6 +2274,7 @@ impl CameraApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += row_h;
 
@@ -2268,6 +2293,7 @@ impl CameraApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             // Toggle indicator
             let indicator_color = if *active { GREEN } else { SURFACE1 };
@@ -2307,6 +2333,7 @@ impl CameraApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += row_h;
 
@@ -2319,6 +2346,7 @@ impl CameraApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: px + pw - 30.0,
@@ -2328,6 +2356,7 @@ impl CameraApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += row_h;
 
@@ -2340,6 +2369,7 @@ impl CameraApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: px + pw - 50.0,
@@ -2349,6 +2379,7 @@ impl CameraApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2374,6 +2405,7 @@ impl CameraApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Value text
@@ -2385,6 +2417,7 @@ impl CameraApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Slider track
@@ -2445,6 +2478,7 @@ impl CameraApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += row_h;
 
@@ -2479,6 +2513,7 @@ impl CameraApp {
                 font_size: 11.0,
                 font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
                 max_width: Some(pw - 18.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y += row_h;
         }
@@ -2495,6 +2530,7 @@ impl CameraApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             y += row_h;
 
@@ -2507,6 +2543,7 @@ impl CameraApp {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(pw),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 y += row_h - 4.0;
             }
@@ -2531,6 +2568,7 @@ impl CameraApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += row_h;
 
@@ -2565,6 +2603,7 @@ impl CameraApp {
                 font_size: 11.0,
                 font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
                 max_width: Some(col_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2580,6 +2619,7 @@ impl CameraApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += 20.0;
 
@@ -2612,6 +2652,7 @@ impl CameraApp {
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(preview_size),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2639,6 +2680,7 @@ impl CameraApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += row_h;
 
@@ -2650,6 +2692,7 @@ impl CameraApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(pw),
+            overflow: TextOverflow::Ellipsis,
         });
         y += row_h + 8.0;
 
@@ -2663,6 +2706,7 @@ impl CameraApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         } else {
             let visible_count = 12usize;
@@ -2704,6 +2748,7 @@ impl CameraApp {
                             font_size: 14.0,
                             font_weight: FontWeightHint::Bold,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     }
 
@@ -2716,6 +2761,7 @@ impl CameraApp {
                         font_size: 11.0,
                         font_weight: if selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
                         max_width: Some(pw - 38.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
 
                     // Size + resolution info
@@ -2727,6 +2773,7 @@ impl CameraApp {
                         font_size: 10.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(pw - 38.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
 
                     y += 36.0;
@@ -2777,6 +2824,7 @@ impl CameraApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sw - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             let max_visible = ((sw - 24.0) / (thumb_size + thumb_margin)) as usize;
@@ -2828,6 +2876,7 @@ impl CameraApp {
                     font_size: 14.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Favorite indicator
@@ -2911,6 +2960,7 @@ impl CameraApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2964,6 +3014,7 @@ impl CameraApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         x += 90.0;
 
@@ -2977,6 +3028,7 @@ impl CameraApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             x += 160.0;
         }
@@ -2990,6 +3042,7 @@ impl CameraApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         x += 80.0;
 
@@ -3003,6 +3056,7 @@ impl CameraApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             x += 80.0;
         }
@@ -3017,6 +3071,7 @@ impl CameraApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             x += 120.0;
         }
@@ -3032,6 +3087,7 @@ impl CameraApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(190.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 

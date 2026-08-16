@@ -31,7 +31,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -733,6 +733,7 @@ impl NonogramApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Puzzle list
@@ -762,6 +763,7 @@ impl NonogramApp {
                 font_size: SELECT_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: PADDING + 160.0,
@@ -771,6 +773,7 @@ impl NonogramApp {
                 font_size: STATUS_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Mini thumbnail
@@ -803,6 +806,7 @@ impl NonogramApp {
             font_size: STATUS_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds
@@ -876,6 +880,7 @@ impl NonogramApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Timer
@@ -888,6 +893,7 @@ impl NonogramApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         if self.screen == Screen::Won {
@@ -899,6 +905,7 @@ impl NonogramApp {
                 font_size: STATUS_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -935,6 +942,7 @@ impl NonogramApp {
                     font_size: CLUE_FONT_SIZE,
                     font_weight: weight,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -972,6 +980,7 @@ impl NonogramApp {
                     font_size: CLUE_FONT_SIZE,
                     font_weight: weight,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1115,6 +1124,7 @@ impl NonogramApp {
             font_size: STATUS_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Progress indicator
@@ -1133,6 +1143,7 @@ impl NonogramApp {
             font_size: STATUS_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

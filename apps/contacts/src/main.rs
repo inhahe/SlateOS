@@ -19,7 +19,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -1887,6 +1887,7 @@ impl ContactsApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(180.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Contact count
@@ -1899,6 +1900,7 @@ impl ContactsApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Add contact button (+)
@@ -1919,6 +1921,7 @@ impl ContactsApp {
             color: BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Search icon / bar
@@ -1949,6 +1952,7 @@ impl ContactsApp {
             color: search_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(SIDEBAR_WIDTH - 60.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Search icon (magnifying glass placeholder)
@@ -1960,6 +1964,7 @@ impl ContactsApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Filter/sort indicators
@@ -1972,6 +1977,7 @@ impl ContactsApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(SIDEBAR_WIDTH - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Contact list
@@ -2013,6 +2019,7 @@ impl ContactsApp {
                         color: BLUE,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
                 cy += LETTER_DIVIDER_HEIGHT;
@@ -2062,6 +2069,7 @@ impl ContactsApp {
                     color: if contact.favorite { BASE } else { TEXT_COLOR },
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Name
@@ -2073,6 +2081,7 @@ impl ContactsApp {
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(SIDEBAR_WIDTH - 80.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Subtitle (company or phone)
@@ -2094,6 +2103,7 @@ impl ContactsApp {
                         color: SUBTEXT0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(SIDEBAR_WIDTH - 80.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
 
@@ -2107,6 +2117,7 @@ impl ContactsApp {
                         color: YELLOW,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
             }
@@ -2161,6 +2172,7 @@ impl ContactsApp {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -2229,6 +2241,7 @@ impl ContactsApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -2239,6 +2252,7 @@ impl ContactsApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_width - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: center_x - 20.0,
@@ -2248,6 +2262,7 @@ impl ContactsApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_width - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2283,6 +2298,7 @@ impl ContactsApp {
             color: BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cy += AVATAR_SIZE + 12.0;
@@ -2296,6 +2312,7 @@ impl ContactsApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(panel_width - pad * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 28.0;
 
@@ -2316,6 +2333,7 @@ impl ContactsApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - pad * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 20.0;
         }
@@ -2330,6 +2348,7 @@ impl ContactsApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - pad * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 18.0;
         }
@@ -2344,6 +2363,7 @@ impl ContactsApp {
                 color: LAVENDER,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(panel_width - pad * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 18.0;
         }
@@ -2374,6 +2394,7 @@ impl ContactsApp {
                 color: BASE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         cy += btn_h + 16.0;
@@ -2399,6 +2420,7 @@ impl ContactsApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 16.0;
             for phone in &contact.phones {
@@ -2415,6 +2437,7 @@ impl ContactsApp {
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(panel_width - pad * 2.0 - 8.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 20.0;
             }
@@ -2431,6 +2454,7 @@ impl ContactsApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 16.0;
             for email in &contact.emails {
@@ -2443,6 +2467,7 @@ impl ContactsApp {
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(panel_width - pad * 2.0 - 8.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 20.0;
             }
@@ -2459,6 +2484,7 @@ impl ContactsApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 16.0;
             for addr in &contact.addresses {
@@ -2470,6 +2496,7 @@ impl ContactsApp {
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(panel_width - pad * 2.0 - 8.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 20.0;
             }
@@ -2486,6 +2513,7 @@ impl ContactsApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 16.0;
             for social in &contact.social_accounts {
@@ -2497,6 +2525,7 @@ impl ContactsApp {
                     color: LAVENDER,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(panel_width - pad * 2.0 - 8.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 20.0;
             }
@@ -2513,6 +2542,7 @@ impl ContactsApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 16.0;
             cmds.push(RenderCommand::Text {
@@ -2523,6 +2553,7 @@ impl ContactsApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 24.0;
         }
@@ -2537,6 +2568,7 @@ impl ContactsApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 16.0;
             // `RenderCommand::Text` clips at `max_width` instead of wrapping,
@@ -2559,6 +2591,7 @@ impl ContactsApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(notes_width),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += NOTES_LINE_HEIGHT;
             }
@@ -2577,6 +2610,7 @@ impl ContactsApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 16.0;
             let mut chip_x = cx;
@@ -2599,6 +2633,7 @@ impl ContactsApp {
                         color: BASE,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(chip_w - 16.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     chip_x += chip_w + 8.0;
                 }
@@ -2626,6 +2661,7 @@ impl ContactsApp {
             color: BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         // Favorite toggle
         cmds.push(RenderCommand::FillRect {
@@ -2648,6 +2684,7 @@ impl ContactsApp {
             color: if contact.favorite { BASE } else { TEXT_COLOR },
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         // Delete button
         cmds.push(RenderCommand::FillRect {
@@ -2666,6 +2703,7 @@ impl ContactsApp {
             color: BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2696,6 +2734,7 @@ impl ContactsApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(field_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 36.0;
 
@@ -2727,6 +2766,7 @@ impl ContactsApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(field_w),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 14.0;
 
@@ -2759,6 +2799,7 @@ impl ContactsApp {
                 color: text_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(field_w - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += FIELD_HEIGHT + 6.0;
         }
@@ -2772,6 +2813,7 @@ impl ContactsApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 14.0;
         cmds.push(RenderCommand::FillRect {
@@ -2800,6 +2842,7 @@ impl ContactsApp {
             color: notes_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 92.0;
 
@@ -2820,6 +2863,7 @@ impl ContactsApp {
             color: BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::FillRect {
             x: cx + 96.0,
@@ -2837,6 +2881,7 @@ impl ContactsApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2859,6 +2904,7 @@ impl ContactsApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(panel_width - pad * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 32.0;
 
@@ -2873,6 +2919,7 @@ impl ContactsApp {
                 color: GREEN,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - pad * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -2885,6 +2932,7 @@ impl ContactsApp {
             color: PEACH,
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_width - pad * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 24.0;
 
@@ -2915,6 +2963,7 @@ impl ContactsApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(panel_width - pad * 2.0 - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: cx + 12.0,
@@ -2928,6 +2977,7 @@ impl ContactsApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - pad * 2.0 - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Merge button
@@ -2948,6 +2998,7 @@ impl ContactsApp {
                 color: BASE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cy += 72.0;
@@ -2968,6 +3019,7 @@ impl ContactsApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(panel_width - pad * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 32.0;
 
@@ -2982,6 +3034,7 @@ impl ContactsApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - pad * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -3016,6 +3069,7 @@ impl ContactsApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(panel_width - pad * 2.0 - 100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: cx + 36.0,
@@ -3025,6 +3079,7 @@ impl ContactsApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cy += 56.0;

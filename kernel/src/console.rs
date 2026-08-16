@@ -34,9 +34,32 @@
 //!
 //! ## Thread safety
 //!
-//! All mutable state is behind a `spin::Mutex`.  The public API acquires
-//! the lock internally, so callers do not need to worry about
+//! All mutable state is behind a [`crate::sync::Mutex`].  The public API
+//! acquires the lock internally, so callers do not need to worry about
 //! synchronization.
+//!
+//! **Every acquisition uses [`lock_irqsave`](crate::sync::Mutex::lock_irqsave),
+//! never the plain `lock()`, and that is load-bearing.** The console is
+//! reachable from a hard interrupt handler: IRQ 1 → `ioapic::handle_device_irq`
+//! → `keyboard::handle_scancode` → `push_char` → [`putchar`]. With a plain
+//! acquire, a task interrupted anywhere inside a console critical section
+//! would be pre-empted by an ISR that spins on the lock only that task can
+//! release — a permanent, *silent* single-CPU deadlock (silent because a
+//! spin loop with no stall detector reports nothing). Masking interrupts on
+//! the local CPU for the duration of the hold makes that arrival impossible
+//! rather than merely unlikely. See
+//! `known-issues.md → B-CONSOLE-LOCK-IS-TAKEN-FROM-A-HARD-IRQ-WITH-A-PLAIN-LOCK`.
+//!
+//! Corollary, since `cli` masks interrupts but not *faults*: this guarantee
+//! covers interrupt re-entry only. It holds today because no exception
+//! handler prints to the console — the `#[panic_handler]` disables interrupts
+//! and uses `serial_println!` exclusively. Any future fault handler that
+//! writes here must first grow a per-CPU re-entrancy guard in the shape of
+//! `serial::_print`'s `IN_PRINT`.
+//!
+//! Lock order is `COLOR_SCHEME` and `CONSOLE` (never nested in each other),
+//! then `CONSOLE` → `SCROLLBACK` (taken by `scroll_up_locked` while the
+//! caller holds `CONSOLE`). `SCROLLBACK` is a leaf and must stay one.
 
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
@@ -44,7 +67,8 @@
 use alloc::vec::Vec;
 use core::fmt;
 use core::ptr;
-use spin::Mutex;
+
+use crate::sync::Mutex;
 
 use crate::font;
 
@@ -104,12 +128,18 @@ const DEFAULT_PALETTE: [u32; 16] = [
 ];
 
 /// The currently active color scheme.
-static COLOR_SCHEME: Mutex<ColorScheme> = Mutex::new(ColorScheme {
-    name: "default",
-    fg: DEFAULT_FG,
-    bg: DEFAULT_BG,
-    palette: DEFAULT_PALETTE,
-});
+///
+/// Acquired only with `lock_irqsave` — see the module-level "Thread safety"
+/// note. Named so a stall report identifies it.
+static COLOR_SCHEME: Mutex<ColorScheme> = Mutex::named(
+    ColorScheme {
+        name: "default",
+        fg: DEFAULT_FG,
+        bg: DEFAULT_BG,
+        palette: DEFAULT_PALETTE,
+    },
+    b"COLOR_SCHEME",
+);
 
 // ---------------------------------------------------------------------------
 // Built-in color schemes
@@ -263,7 +293,7 @@ pub const BUILTIN_SCHEMES: &[&ColorScheme] = &[
 /// new defaults.
 pub fn set_scheme(scheme: &ColorScheme) {
     {
-        let mut cs = COLOR_SCHEME.lock();
+        let mut cs = COLOR_SCHEME.lock_irqsave();
         *cs = *scheme;
     }
     apply_scheme();
@@ -271,14 +301,14 @@ pub fn set_scheme(scheme: &ColorScheme) {
 
 /// Get a copy of the current color scheme.
 pub fn get_scheme() -> ColorScheme {
-    *COLOR_SCHEME.lock()
+    *COLOR_SCHEME.lock_irqsave()
 }
 
 /// Set just the default foreground and background colors (without
 /// changing the palette).
 pub fn set_default_colors(fg: u32, bg: u32) {
     {
-        let mut cs = COLOR_SCHEME.lock();
+        let mut cs = COLOR_SCHEME.lock_irqsave();
         cs.fg = fg;
         cs.bg = bg;
     }
@@ -287,8 +317,8 @@ pub fn set_default_colors(fg: u32, bg: u32) {
 
 /// Apply the current color scheme to the console.
 fn apply_scheme() {
-    let scheme = *COLOR_SCHEME.lock();
-    let mut con = CONSOLE.lock();
+    let scheme = *COLOR_SCHEME.lock_irqsave();
+    let mut con = CONSOLE.lock_irqsave();
     if !con.initialized {
         return;
     }
@@ -315,7 +345,7 @@ fn apply_scheme() {
             put_pixel(fb, pitch, x, y, bg);
         }
     }
-    let mut con = CONSOLE.lock();
+    let mut con = CONSOLE.lock_irqsave();
     con.cursor_col = 0;
     con.cursor_row = 0;
 }
@@ -475,12 +505,19 @@ impl ScrollbackBuffer {
 
 /// Global scrollback buffer (separate mutex to avoid holding CONSOLE
 /// lock during potentially slow buffer operations).
-static SCROLLBACK: Mutex<ScrollbackBuffer> = Mutex::new(ScrollbackBuffer {
-    lines: Vec::new(),
-    start: 0,
-    count: 0,
-    cols: 0,
-});
+///
+/// A leaf: `scroll_up_locked` takes it *while* holding `CONSOLE`, so nothing
+/// under this lock may ever reach back for `CONSOLE`. Acquired only with
+/// `lock_irqsave` — see the module-level "Thread safety" note.
+static SCROLLBACK: Mutex<ScrollbackBuffer> = Mutex::named(
+    ScrollbackBuffer {
+        lines: Vec::new(),
+        start: 0,
+        count: 0,
+        cols: 0,
+    },
+    b"SCROLLBACK",
+);
 
 /// Current scroll offset (0 = at bottom/live, >0 = viewing older lines).
 static SCROLL_OFFSET: core::sync::atomic::AtomicUsize =
@@ -637,7 +674,7 @@ impl ConsoleInner {
         if self.cols > 0 && self.rows > 0 {
             let total = (self.cols as usize).saturating_mul(self.rows as usize);
             self.screen_buf = alloc::vec![ScrollCell::EMPTY; total];
-            SCROLLBACK.lock().init(self.cols as usize);
+            SCROLLBACK.lock_irqsave().init(self.cols as usize);
         }
     }
 
@@ -676,7 +713,11 @@ impl ConsoleInner {
 }
 
 /// Global console state.
-static CONSOLE: Mutex<ConsoleInner> = Mutex::new(ConsoleInner::new());
+///
+/// Non-leaf (it nests `SCROLLBACK`), and reachable from the IRQ 1 handler,
+/// so it is a `crate::sync::Mutex` acquired only with `lock_irqsave` — see
+/// the module-level "Thread safety" note.
+static CONSOLE: Mutex<ConsoleInner> = Mutex::named(ConsoleInner::new(), b"CONSOLE");
 
 // ---------------------------------------------------------------------------
 // Initialization
@@ -714,7 +755,7 @@ pub unsafe fn init(addr: u64, width: u32, height: u32, pitch: u32, bpp: u16) {
     let cols = width / GLYPH_WIDTH;
     let rows = height / GLYPH_HEIGHT;
 
-    let mut con = CONSOLE.lock();
+    let mut con = CONSOLE.lock_irqsave();
     con.fb_addr = addr;
     con.fb_width = width;
     con.fb_height = height;
@@ -750,7 +791,7 @@ pub unsafe fn init(addr: u64, width: u32, height: u32, pitch: u32, bpp: u16) {
 ///
 /// Returns `None` if the console is not initialized.
 pub fn framebuffer_info() -> Option<(u64, u32, u32, u32)> {
-    let con = CONSOLE.lock();
+    let con = CONSOLE.lock_irqsave();
     if !con.initialized {
         return None;
     }
@@ -763,12 +804,12 @@ pub fn framebuffer_info() -> Option<(u64, u32, u32, u32)> {
 
 /// Number of lines currently in the scrollback buffer.
 pub fn scrollback_count() -> usize {
-    SCROLLBACK.lock().count
+    SCROLLBACK.lock_irqsave().count
 }
 
 /// Get the text of a scrollback line by reverse index (0 = most recent).
 pub fn scrollback_line(rev_idx: usize) -> Option<alloc::string::String> {
-    let sb = SCROLLBACK.lock();
+    let sb = SCROLLBACK.lock_irqsave();
     sb.get_rev(rev_idx).map(|line| {
         line.cells.iter().map(|c| c.ch as char).collect::<alloc::string::String>()
     })
@@ -777,7 +818,7 @@ pub fn scrollback_line(rev_idx: usize) -> Option<alloc::string::String> {
 /// Search the scrollback buffer for a substring.
 /// Returns a list of matching line texts (newest first).
 pub fn scrollback_search(query: &str) -> Vec<alloc::string::String> {
-    let sb = SCROLLBACK.lock();
+    let sb = SCROLLBACK.lock_irqsave();
     let indices = sb.search(query);
     let mut results = Vec::with_capacity(indices.len());
     for idx in &indices {
@@ -792,7 +833,7 @@ pub fn scrollback_search(query: &str) -> Vec<alloc::string::String> {
 
 /// Get the current screen content as text lines (for screen-level search).
 pub fn screen_text() -> Vec<alloc::string::String> {
-    let con = CONSOLE.lock();
+    let con = CONSOLE.lock_irqsave();
     let cols = con.cols as usize;
     let rows = con.rows as usize;
     let mut lines = Vec::with_capacity(rows);
@@ -814,7 +855,7 @@ pub fn screen_text() -> Vec<alloc::string::String> {
 
 /// Fill the entire screen with the background color.
 pub fn clear() {
-    let con = CONSOLE.lock();
+    let con = CONSOLE.lock_irqsave();
     if !con.initialized {
         return;
     }
@@ -835,7 +876,7 @@ pub fn clear() {
     }
 
     // Reset cursor to top-left.
-    let mut con = CONSOLE.lock();
+    let mut con = CONSOLE.lock_irqsave();
     con.cursor_col = 0;
     con.cursor_row = 0;
 }
@@ -848,7 +889,7 @@ pub fn clear() {
 /// single-byte and processed immediately.  ANSI/VT100 escape sequences
 /// are handled via the existing CSI state machine.
 pub fn putchar(c: u8) {
-    let mut con = CONSOLE.lock();
+    let mut con = CONSOLE.lock_irqsave();
     if !con.initialized {
         return;
     }
@@ -2055,7 +2096,7 @@ const COLOR_DIM: u32 = 0x0099_9999;
 ///          `  [✓] Description...`  (Ok)
 ///          `  [!] Description...`  (Warn)
 pub fn boot_step(status: BootStatus, description: &str) {
-    let mut con = CONSOLE.lock();
+    let mut con = CONSOLE.lock_irqsave();
     if !con.initialized {
         return;
     }
@@ -2112,7 +2153,7 @@ pub fn boot_step(status: BootStatus, description: &str) {
 /// Moves the cursor back to the previous line, redraws with the new status,
 /// and advances again.  Use after `boot_step(Running, ...)` to show success.
 pub fn boot_step_update(status: BootStatus, description: &str) {
-    let mut con = CONSOLE.lock();
+    let mut con = CONSOLE.lock_irqsave();
     if !con.initialized {
         return;
     }
@@ -2125,7 +2166,7 @@ pub fn boot_step_update(status: BootStatus, description: &str) {
     boot_step(status, description);
 
     // Advance cursor past the updated line.
-    let mut con = CONSOLE.lock();
+    let mut con = CONSOLE.lock_irqsave();
     con.cursor_col = 0;
     con.cursor_row = con.cursor_row.wrapping_add(1);
     if con.cursor_row >= con.rows {
@@ -2268,7 +2309,7 @@ fn scroll_up_locked(con: &mut ConsoleInner) {
                 }
             }
         }
-        SCROLLBACK.lock().push(sline);
+        SCROLLBACK.lock_irqsave().push(sline);
     }
 
     // Shift the screen text buffer up by one row.
@@ -2378,7 +2419,7 @@ pub struct ConsoleSnapshot {
 /// Returns `None` if the console is not initialized or the screen buffer
 /// has not been allocated yet.
 pub fn snapshot_state() -> Option<ConsoleSnapshot> {
-    let con = CONSOLE.lock();
+    let con = CONSOLE.lock_irqsave();
     if !con.initialized || con.screen_buf.is_empty() {
         return None;
     }
@@ -2412,7 +2453,7 @@ pub fn snapshot_state() -> Option<ConsoleSnapshot> {
 /// Does nothing if the console is not initialized or if the snapshot
 /// dimensions don't match the current console.
 pub fn restore_state(snap: &ConsoleSnapshot) {
-    let mut con = CONSOLE.lock();
+    let mut con = CONSOLE.lock_irqsave();
     if !con.initialized {
         return;
     }
@@ -2482,7 +2523,7 @@ pub fn restore_state(snap: &ConsoleSnapshot) {
 /// Used by the terminal session multiplexer to save the current
 /// session's scrollback when switching away.
 pub(crate) fn take_scrollback() -> ScrollbackBuffer {
-    let mut lock = SCROLLBACK.lock();
+    let mut lock = SCROLLBACK.lock_irqsave();
     let cols = lock.cols;
     core::mem::replace(
         &mut *lock,
@@ -2500,14 +2541,14 @@ pub(crate) fn take_scrollback() -> ScrollbackBuffer {
 /// Used by the terminal session multiplexer to restore a session's
 /// scrollback when switching to it.
 pub(crate) fn put_scrollback(buf: ScrollbackBuffer) {
-    *SCROLLBACK.lock() = buf;
+    *SCROLLBACK.lock_irqsave() = buf;
 }
 
 /// Get the current console dimensions (cols, rows).
 ///
 /// Returns `(0, 0)` if the console is not initialized.
 pub fn dimensions() -> (u32, u32) {
-    let con = CONSOLE.lock();
+    let con = CONSOLE.lock_irqsave();
     (con.cols, con.rows)
 }
 
@@ -2526,7 +2567,7 @@ pub fn self_test() {
 
     // Test 1: Basic initialization state.
     {
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert!(con.initialized, "console not initialized");
         assert!(con.cols > 0 && con.rows > 0, "invalid dimensions");
         crate::serial_println!("[console]   Dimensions: {}x{} OK", con.cols, con.rows);
@@ -2536,7 +2577,7 @@ pub fn self_test() {
     {
         // Move to row 5, col 10 (1-based).
         write_str_no_serial("\x1b[5;10H");
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 4, "CUP row");
         assert_eq!(con.cursor_col, 9, "CUP col");
         crate::serial_println!("[console]   CUP cursor positioning: OK");
@@ -2547,14 +2588,14 @@ pub fn self_test() {
         write_str_no_serial("\x1b[1;1H"); // Home
         write_str_no_serial("\x1b[3B");    // Down 3
         write_str_no_serial("\x1b[5C");    // Right 5
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 3, "CUD");
         assert_eq!(con.cursor_col, 5, "CUF");
         drop(con);
 
         write_str_no_serial("\x1b[2A");    // Up 2
         write_str_no_serial("\x1b[1D");    // Left 1
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 1, "CUU");
         assert_eq!(con.cursor_col, 4, "CUB");
         crate::serial_println!("[console]   Relative cursor movement: OK");
@@ -2564,12 +2605,12 @@ pub fn self_test() {
     {
         write_str_no_serial("\x1b[1;1H"); // Home
         write_str_no_serial("\x1b[15G");   // Column 15
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_col, 14, "CHA");
         drop(con);
 
         write_str_no_serial("\x1b[8d");    // Row 8
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 7, "VPA");
         crate::serial_println!("[console]   CHA/VPA absolute positioning: OK");
     }
@@ -2578,13 +2619,13 @@ pub fn self_test() {
     {
         write_str_no_serial("\x1b[5;10H"); // Row 5, col 10
         write_str_no_serial("\x1b[2E");     // Next line ×2
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 6, "CNL row");
         assert_eq!(con.cursor_col, 0, "CNL col");
         drop(con);
 
         write_str_no_serial("\x1b[1F");     // Previous line ×1
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 5, "CPL row");
         assert_eq!(con.cursor_col, 0, "CPL col");
         crate::serial_println!("[console]   CNL/CPL next/prev line: OK");
@@ -2595,7 +2636,7 @@ pub fn self_test() {
         // Reset, then set bold + underline + reverse.
         write_str_no_serial("\x1b[0m");
         write_str_no_serial("\x1b[1;4;7m");
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert!(con.bold, "bold not set");
         assert!(con.underline, "underline not set");
         assert!(con.reverse, "reverse not set");
@@ -2604,7 +2645,7 @@ pub fn self_test() {
 
         // Reset all.
         write_str_no_serial("\x1b[0m");
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert!(!con.bold, "bold not cleared");
         assert!(!con.underline, "underline not cleared");
         assert!(!con.reverse, "reverse not cleared");
@@ -2615,17 +2656,17 @@ pub fn self_test() {
     {
         write_str_no_serial("\x1b[0m");
         write_str_no_serial("\x1b[31m"); // Red
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert_eq!(con.fg_color, ansi_color(&con, 1), "fg should be red");
         drop(con);
 
         write_str_no_serial("\x1b[94m"); // Bright blue
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert_eq!(con.fg_color, ansi_color(&con, 12), "fg should be bright blue");
         drop(con);
 
         write_str_no_serial("\x1b[39m"); // Default fg
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert_eq!(con.fg_color, con.default_fg, "fg should be default");
         crate::serial_println!("[console]   Foreground color: OK");
     }
@@ -2636,7 +2677,7 @@ pub fn self_test() {
         // 256-color index 196 = bright red from the cube.
         // Index 196 = 16 + 36*5 + 6*0 + 0 → pure red
         write_str_no_serial("\x1b[38;5;196m");
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         let expected = color_256(&con, 196);
         assert_eq!(con.fg_color, expected, "256-color fg");
         drop(con);
@@ -2648,11 +2689,11 @@ pub fn self_test() {
     {
         write_str_no_serial("\x1b[0m");
         let rows = {
-            let con = CONSOLE.lock();
+            let con = CONSOLE.lock_irqsave();
             con.rows
         };
         write_str_no_serial("\x1b[5;20r"); // Scroll region rows 5-20
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert_eq!(con.scroll_top, 4, "scroll_top");
         assert_eq!(con.scroll_bottom, 19, "scroll_bottom");
         // DECSTBM resets cursor to home.
@@ -2662,7 +2703,7 @@ pub fn self_test() {
 
         // Reset scroll region.
         write_str_no_serial("\x1b[r");
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert_eq!(con.scroll_top, 0, "scroll_top reset");
         assert_eq!(con.scroll_bottom, rows.saturating_sub(1), "scroll_bottom reset");
         crate::serial_println!("[console]   Scroll region (DECSTBM): OK");
@@ -2677,7 +2718,7 @@ pub fn self_test() {
         write_str_no_serial("\x1b[1;1H\x1b[31m");   // Move and change color
 
         write_str_no_serial("\x1b8");                 // Restore cursor (DECRC)
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 9, "DECRC row");
         assert_eq!(con.cursor_col, 19, "DECRC col");
         assert_eq!(con.fg_color, ansi_color(&con, 2), "DECRC fg color");
@@ -2690,7 +2731,7 @@ pub fn self_test() {
         write_str_no_serial("\x1b[s");                // Save cursor (SCP)
         write_str_no_serial("\x1b[15;30H");           // Move elsewhere
         write_str_no_serial("\x1b[u");                // Restore (RCP)
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert_eq!(con.cursor_row, 2, "RCP row");
         assert_eq!(con.cursor_col, 6, "RCP col");
         crate::serial_println!("[console]   SCP/RCP cursor save/restore: OK");
@@ -2711,7 +2752,7 @@ pub fn self_test() {
     {
         write_str_no_serial("\x1b[1;4;7;31m"); // Bold+underline+reverse+red
         write_str_no_serial("\x1bc");            // RIS
-        let con = CONSOLE.lock();
+        let con = CONSOLE.lock_irqsave();
         assert!(!con.bold, "RIS bold");
         assert!(!con.underline, "RIS underline");
         assert!(!con.reverse, "RIS reverse");

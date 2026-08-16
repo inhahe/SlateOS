@@ -34,7 +34,7 @@
 #![allow(dead_code)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -882,6 +882,7 @@ impl App {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // File tabs
@@ -913,6 +914,7 @@ impl App {
                     FontWeightHint::Regular
                 },
                 max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
             });
             tab_x += w + 4.0;
         }
@@ -941,6 +943,7 @@ impl App {
                 color: if active { CRUST } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
             });
             mx += w + 4.0;
         }
@@ -959,6 +962,7 @@ impl App {
             color: if self.auto_scroll { GREEN } else { OVERLAY0 },
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -997,6 +1001,7 @@ impl App {
                 color: if active { CRUST } else { OVERLAY0 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
             });
             lx += w + 4.0;
         }
@@ -1030,6 +1035,7 @@ impl App {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(search_w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Search result count
@@ -1047,6 +1053,7 @@ impl App {
                 color: GREEN,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1069,6 +1076,7 @@ impl App {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(134.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1130,6 +1138,7 @@ impl App {
                     color: YELLOW,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(12.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             cx += 14.0;
@@ -1144,6 +1153,7 @@ impl App {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(42.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cx += 46.0;
             }
@@ -1158,6 +1168,7 @@ impl App {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(100.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cx += 104.0;
             }
@@ -1181,6 +1192,7 @@ impl App {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(level_w),
+                overflow: TextOverflow::Ellipsis,
             });
             cx += level_w + 6.0;
 
@@ -1217,6 +1229,7 @@ impl App {
                     color: SKY,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(SOURCE_WIDTH),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cx += drawn_w + 8.0;
             }
@@ -1238,6 +1251,7 @@ impl App {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(msg_width),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1256,6 +1270,7 @@ impl App {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(250.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1274,6 +1289,7 @@ impl App {
                 color: BLUE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let bar_max_w = 400.0;
@@ -1295,6 +1311,7 @@ impl App {
                     color: level.color(),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(60.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Bar
@@ -1316,6 +1333,7 @@ impl App {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(120.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1329,6 +1347,7 @@ impl App {
                 color: TEAL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             for (si, (source, count)) in log.top_sources(10).iter().enumerate() {
@@ -1341,6 +1360,7 @@ impl App {
                     color: TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(200.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: 250.0,
@@ -1350,6 +1370,7 @@ impl App {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(80.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1363,6 +1384,7 @@ impl App {
                 color: PEACH,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let summary_items = [
@@ -1413,6 +1435,7 @@ impl App {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(120.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: stats_x + 140.0,
@@ -1422,6 +1445,7 @@ impl App {
                     color: TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(120.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1468,6 +1492,7 @@ impl App {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(level_w),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Source and time
@@ -1479,6 +1504,7 @@ impl App {
                 color: SUBTEXT1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(400.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1489,6 +1515,7 @@ impl App {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Message body
@@ -1516,6 +1543,7 @@ impl App {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: PADDING + 16.0,
@@ -1525,6 +1553,7 @@ impl App {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_w - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Extra fields
@@ -1538,6 +1567,7 @@ impl App {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(100.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 for (fi, (key, value)) in entry.fields.iter().enumerate() {
@@ -1550,6 +1580,7 @@ impl App {
                         color: TEAL,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(150.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cmds.push(RenderCommand::Text {
                         x: PADDING + 180.0,
@@ -1559,6 +1590,7 @@ impl App {
                         color: TEXT,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(panel_w - 200.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -1573,6 +1605,7 @@ impl App {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::FillRect {
                 x: PADDING + 16.0,
@@ -1596,6 +1629,7 @@ impl App {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_w - 48.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             return;
@@ -1616,6 +1650,7 @@ impl App {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1643,6 +1678,7 @@ impl App {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // File info
@@ -1655,6 +1691,7 @@ impl App {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(400.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Format
@@ -1671,6 +1708,7 @@ impl App {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

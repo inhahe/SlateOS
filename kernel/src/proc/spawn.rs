@@ -15484,6 +15484,89 @@ pub fn self_test_fastpy_slateos_clock() -> KernelResult<()> {
     Ok(())
 }
 
+/// Print the HPET-vs-TSC agreement across the `fastpy-sleep` child's lifetime.
+///
+/// This is a **discriminator**, not a check: it never fails the test, it makes
+/// one of two competing explanations for a short sleep readable off the log.
+///
+/// `sleep_ns` enforces its deadline against `hrtimer::now_ns()`; the elapsed
+/// time everyone then measures comes from `timekeeping::clock_realtime()`. Those
+/// are two different oscillators, and which of them is wrong decides which
+/// subsystem is broken:
+///
+/// * they **agree** → the sleep really did return early, and the fault is in
+///   `sleep_ns`'s deadline arithmetic or timer phase;
+/// * **HPET >> TSC** → the sleep blocked for the time it was asked to and
+///   `clock_realtime` under-reports it, so the fault is the TSC calibration
+///   (`bench::tsc_freq()`) — which would also skew every other
+///   `clock_realtime` consumer and every wall-clock figure in the tree.
+///
+/// The second reading is the one that explains the *intermittency* in
+/// known-issues.md B-FASTPY-SLEEP-SELF-TEST-IS-FLAKY: calibration runs once per
+/// boot on a host whose load varies, so the same correct sleep can read 50 ms on
+/// a quiet boot and 37 ms on a busy one.
+///
+/// `hpet_available` is not decoration. `hrtimer::now_ns()` silently falls back
+/// to the TSC when there is no HPET, and in that configuration both arguments
+/// come from the *same* clock and their agreement means nothing whatsoever. A
+/// comparison that cannot disagree is indistinguishable from one that found
+/// agreement, so that case is reported as unusable rather than as a result.
+fn report_sleep_clock_agreement(hpet_available: bool, tsc_ns: u64, hpet_ns: u64) {
+    if !hpet_available {
+        serial_println!(
+            "[spawn]   sleep clocks: NOT COMPARABLE — no HPET, so hrtimer::now_ns() fell back \
+             to the TSC and both readings come from the same oscillator. TSC delta {} ns; this \
+             run cannot separate an early sleep from a mis-calibrated TSC.",
+            tsc_ns
+        );
+        return;
+    }
+
+    // Fixed-point hundredths: this is the kernel, and a float here would pull
+    // SSE state into a path that has no business touching it.  `checked_div`
+    // rather than a guarded `/` because `clippy::arithmetic_side_effects` is not
+    // flow-sensitive and cannot see the zero check that would otherwise sit
+    // above it.
+    let ratio_centi = hpet_ns.saturating_mul(100).checked_div(tsc_ns).unwrap_or(0);
+
+    serial_println!(
+        "[spawn]   sleep clocks: HPET {} ns vs TSC/clock_realtime {} ns across the child's \
+         lifetime (HPET/TSC = {}.{:02}x)",
+        hpet_ns,
+        tsc_ns,
+        ratio_centi / 100,
+        ratio_centi % 100
+    );
+
+    if tsc_ns == 0 {
+        serial_println!(
+            "[spawn]   -> TSC delta is 0; no ratio is computable and clock_realtime is the \
+             suspect, not sleep_ns."
+        );
+    } else if ratio_centi >= 120 {
+        serial_println!(
+            "[spawn]   -> DISAGREE by >=1.2x: the sleep blocked for the HPET-measured time and \
+             clock_realtime under-reports it. Suspect the TSC calibration (bench::tsc_freq), \
+             which skews every clock_realtime consumer — not sleep_ns."
+        );
+    } else if (95..=105).contains(&ratio_centi) {
+        serial_println!(
+            "[spawn]   -> AGREE within 5%: both oscillators saw the same interval, so an \
+             elapsed time short of the bound is a genuinely early sleep. Suspect sleep_ns's \
+             deadline, not the clocks."
+        );
+    } else {
+        // Neither registered outcome. Saying so is the point: silently folding
+        // this into one of the two verdicts is how a prediction gets confirmed
+        // by data that never tested it.
+        serial_println!(
+            "[spawn]   -> INCONCLUSIVE: the ratio is neither agreement (<=5%) nor the \
+             predicted >=1.2x. Prediction P16 says nothing about this range; it needs reading, \
+             not a verdict."
+        );
+    }
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sleep` utility — the **first fastpy
 /// tool to exercise the scheduler sleep / timer-wakeup path**.
 ///
@@ -15532,7 +15615,24 @@ pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
     // Kernel-side wall-clock reading before spawn (secondary, independent guard
     // #2).  A 0 reading means no usable RTC — the timekeeping path this test
     // depends on is unavailable, so we cannot validate.
+    //
+    // `hpet_before` is sampled alongside it, from the *other* oscillator, and
+    // that pairing is the whole point.  This test compares a sleep **enforced**
+    // against one clock with an elapsed time **measured** against another:
+    // `sleep_ns` derives its deadline from `hrtimer::now_ns()` (HPET), while
+    // both the child and this harness measure with
+    // `timekeeping::clock_realtime()` (TSC, via `clock_monotonic`).  The test
+    // has always assumed the two agree and has never once checked it.
+    //
+    // Sampling only `clock_realtime` on both sides — which is what the first
+    // version of this instrumentation proposed — compares that clock against
+    // itself, so under a mis-calibrated TSC both readings compress by the same
+    // factor and the comparison shows nothing.  It would have been
+    // "instrumented" and still blind.  See known-issues.md
+    // B-FASTPY-SLEEP-SELF-TEST-IS-FLAKY and its CORRECTION, and prediction P16.
+    let hpet_available = crate::hpet::is_available();
     let t_before = crate::timekeeping::clock_realtime();
+    let hpet_before = crate::hrtimer::now_ns();
     if t_before == 0 {
         serial_println!(
             "[spawn]   FAIL: fastpy-sleep (ring 3) — kernel clock_realtime() returned 0 \
@@ -15592,8 +15692,22 @@ pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    // Kernel-side wall-clock reading after the child zombified (guard #2).
+    // Kernel-side wall-clock reading after the child zombified (guard #2), and
+    // its HPET counterpart.
     let t_after = crate::timekeeping::clock_realtime();
+    let hpet_after = crate::hrtimer::now_ns();
+
+    // Reported HERE, before any guard, so it appears on the failure paths too.
+    // Previously `kernel_elapsed` was computed only after guard #1's early
+    // return, which meant that on the exact runs that failed — the only runs
+    // anyone would want to diagnose — the one number capable of explaining the
+    // failure was never printed.
+    let kernel_elapsed = t_after.saturating_sub(t_before);
+    report_sleep_clock_agreement(
+        hpet_available,
+        kernel_elapsed,
+        hpet_after.saturating_sub(hpet_before),
+    );
 
     thread::on_thread_exit(result.task_id);
     pcb::destroy(result.pid);
@@ -15619,8 +15733,8 @@ pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
 
     // Guard #2: real wall-time observed by the *kernel* across the run must also
     // meet the bound — proves the sleep actually blocked in real time, not just
-    // that the tool's arithmetic lined up.
-    let kernel_elapsed = t_after.saturating_sub(t_before);
+    // that the tool's arithmetic lined up.  (`kernel_elapsed` is computed above,
+    // before the guards, so that it is reported on failing runs as well.)
     if kernel_elapsed < MIN_ELAPSED_NS {
         serial_println!(
             "[spawn]   FAIL: fastpy-sleep (ring 3) — tool exited 0 but the kernel observed only \

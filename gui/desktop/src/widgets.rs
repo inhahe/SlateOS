@@ -9,7 +9,7 @@
 //! via a capability-gated registration API.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -713,6 +713,7 @@ impl DesktopWidgetManager {
             ),
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         commands.push(RenderCommand::Text {
             x: x + 24.0,
@@ -727,6 +728,7 @@ impl DesktopWidgetManager {
             ),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Content area.
@@ -764,6 +766,7 @@ impl DesktopWidgetManager {
                     color: Color::rgba(TEXT.r, TEXT.g, TEXT.b, alpha),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 commands.push(RenderCommand::Text {
                     x,
@@ -773,6 +776,7 @@ impl DesktopWidgetManager {
                     color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, alpha),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             WidgetKind::SystemMonitor => {
@@ -786,6 +790,7 @@ impl DesktopWidgetManager {
                     color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, alpha),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 commands.push(RenderCommand::FillRect {
                     x,
@@ -812,6 +817,7 @@ impl DesktopWidgetManager {
                     color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, alpha),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 commands.push(RenderCommand::FillRect {
                     x,
@@ -838,6 +844,7 @@ impl DesktopWidgetManager {
                     color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, alpha),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 commands.push(RenderCommand::FillRect {
                     x,
@@ -887,6 +894,7 @@ impl DesktopWidgetManager {
                     ),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             WidgetKind::BatteryStatus => {
@@ -899,6 +907,7 @@ impl DesktopWidgetManager {
                     color: Color::rgba(GREEN.r, GREEN.g, GREEN.b, alpha),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 commands.push(RenderCommand::Text {
                     x: x + 40.0,
@@ -908,6 +917,7 @@ impl DesktopWidgetManager {
                     color: Color::rgba(TEXT.r, TEXT.g, TEXT.b, alpha),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 commands.push(RenderCommand::Text {
                     x,
@@ -917,6 +927,7 @@ impl DesktopWidgetManager {
                     color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, alpha),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             _ => {
@@ -929,6 +940,7 @@ impl DesktopWidgetManager {
                     color: Color::rgba(SURFACE2.r, SURFACE2.g, SURFACE2.b, alpha),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 commands.push(RenderCommand::Text {
                     x: x + 40.0,
@@ -938,6 +950,7 @@ impl DesktopWidgetManager {
                     color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, alpha),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 44.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -989,6 +1002,7 @@ impl DesktopWidgetManager {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Widget list.
@@ -1005,6 +1019,7 @@ impl DesktopWidgetManager {
                 color: BLUE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             commands.push(RenderCommand::Text {
                 x: px + 40.0,
@@ -1014,6 +1029,7 @@ impl DesktopWidgetManager {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             let sz = kind.default_size();
             commands.push(RenderCommand::Text {
@@ -1024,6 +1040,7 @@ impl DesktopWidgetManager {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Light,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 26.0;
         }

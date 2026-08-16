@@ -16,7 +16,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -1130,6 +1130,7 @@ fn render_toolbar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(btn.width - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -1153,6 +1154,7 @@ fn render_image(
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x: area_x + area_w / 2.0 - 100.0,
@@ -1162,6 +1164,7 @@ fn render_image(
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         return;
     };
@@ -1223,6 +1226,7 @@ fn render_image(
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }
@@ -1249,6 +1253,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
         font_size: 13.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(INFO_PANEL_WIDTH - pad * 2.0),
+        overflow: TextOverflow::Ellipsis,
     });
     text_y += line_height + 8.0;
 
@@ -1304,6 +1309,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x: value_x,
@@ -1313,6 +1319,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(INFO_PANEL_WIDTH - 80.0 - pad * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         text_y += line_height;
     }
@@ -1344,6 +1351,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         text_y += line_height + 4.0;
 
@@ -1366,6 +1374,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 tree.push(RenderCommand::Text {
                     x: value_x,
@@ -1375,6 +1384,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(INFO_PANEL_WIDTH - 80.0 - pad * 2.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 text_y += line_height;
             }
@@ -1400,6 +1410,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     text_y += line_height + 4.0;
 
@@ -1430,6 +1441,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x: value_x,
@@ -1439,6 +1451,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(INFO_PANEL_WIDTH - 80.0 - pad * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         text_y += line_height;
     }
@@ -1522,6 +1535,7 @@ fn render_thumbnail_strip(state: &ViewerState, tree: &mut RenderTree, y: f32) {
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(thumb_size - 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1546,6 +1560,7 @@ fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(state.window_width * 0.4),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Center: dimensions
@@ -1558,6 +1573,7 @@ fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Right side: zoom level + image position
@@ -1571,6 +1587,7 @@ fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Image N of M
@@ -1584,6 +1601,7 @@ fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

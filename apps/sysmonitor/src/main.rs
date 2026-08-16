@@ -36,7 +36,7 @@
 
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1410,6 +1410,7 @@ impl SysMonitorState {
                 font_size: 12.0,
                 font_weight,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tx += tab_w;
         }
@@ -1424,6 +1425,7 @@ impl SysMonitorState {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1444,6 +1446,7 @@ impl SysMonitorState {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w * 0.6),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Alert indicator on the right
@@ -1465,6 +1468,7 @@ impl SysMonitorState {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(280.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1502,6 +1506,7 @@ impl SysMonitorState {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Battery status if available
@@ -1527,6 +1532,7 @@ impl SysMonitorState {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1550,6 +1556,7 @@ impl SysMonitorState {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // CPU mini graph
@@ -1583,6 +1590,7 @@ impl SysMonitorState {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Memory gauge card
@@ -1609,6 +1617,7 @@ impl SysMonitorState {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Memory mini graph
@@ -1641,6 +1650,7 @@ impl SysMonitorState {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cur_y += gauge_h + CARD_GAP;
@@ -1669,6 +1679,7 @@ impl SysMonitorState {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(half_w - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             disk_y += 16.0;
         }
@@ -1694,6 +1705,7 @@ impl SysMonitorState {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(half_w - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             net_y += 16.0;
         }
@@ -1736,6 +1748,7 @@ impl SysMonitorState {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_w - 48.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 alert_y += ALERT_ROW_HEIGHT;
             }
@@ -1749,6 +1762,7 @@ impl SysMonitorState {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_w - 48.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1802,6 +1816,7 @@ impl SysMonitorState {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(filter_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         if self.filter_focused {
             // The caret sits where the glyphs actually end, not where a byte
@@ -1843,6 +1858,7 @@ impl SysMonitorState {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             tree.fill_rect(
@@ -1903,6 +1919,7 @@ impl SysMonitorState {
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     }
                     ProcessColumn::Name => {
@@ -1914,6 +1931,7 @@ impl SysMonitorState {
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(cw - 12.0),
+                            overflow: TextOverflow::Ellipsis,
                         });
                     }
                     ProcessColumn::Status => {
@@ -1925,6 +1943,7 @@ impl SysMonitorState {
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     }
                     ProcessColumn::Cpu => {
@@ -1938,6 +1957,7 @@ impl SysMonitorState {
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     }
                     ProcessColumn::Memory => {
@@ -1949,6 +1969,7 @@ impl SysMonitorState {
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     }
                     ProcessColumn::Threads => {
@@ -1960,6 +1981,7 @@ impl SysMonitorState {
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     }
                     ProcessColumn::Uptime => {
@@ -1971,6 +1993,7 @@ impl SysMonitorState {
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     }
                 }
@@ -2009,6 +2032,7 @@ impl SysMonitorState {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let chart_x = CONTENT_PAD + 12.0;
@@ -2054,6 +2078,7 @@ impl SysMonitorState {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Usage bar background
@@ -2093,6 +2118,7 @@ impl SysMonitorState {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             core_y += 24.0;
@@ -2133,6 +2159,7 @@ impl SysMonitorState {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let chart_x = CONTENT_PAD + 12.0;
@@ -2224,6 +2251,7 @@ impl SysMonitorState {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             legend_x += 160.0;
         }
@@ -2244,6 +2272,7 @@ impl SysMonitorState {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let swap_bar_y = swap_y + 16.0;
@@ -2325,6 +2354,7 @@ impl SysMonitorState {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // I/O rates
@@ -2344,6 +2374,7 @@ impl SysMonitorState {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // I/O graph
@@ -2395,6 +2426,7 @@ impl SysMonitorState {
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::FillRect {
                 x: bar_x + io_graph_w + 8.0,
@@ -2412,6 +2444,7 @@ impl SysMonitorState {
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cur_y += card_h + CARD_GAP;
@@ -2426,6 +2459,7 @@ impl SysMonitorState {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -2463,6 +2497,7 @@ impl SysMonitorState {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Traffic graph
@@ -2514,6 +2549,7 @@ impl SysMonitorState {
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::FillRect {
                 x: CONTENT_PAD + 24.0 + graph_w,
@@ -2531,6 +2567,7 @@ impl SysMonitorState {
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cur_y += card_h + CARD_GAP;
@@ -2545,6 +2582,7 @@ impl SysMonitorState {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -2618,6 +2656,7 @@ impl SysMonitorState {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -2716,6 +2755,7 @@ impl SysMonitorState {
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -3038,6 +3078,7 @@ fn render_bold_text(
         font_size,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 

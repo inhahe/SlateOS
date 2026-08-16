@@ -11,7 +11,7 @@
 //! - **RecentApps** — most-recently-used window list across all desktops.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -557,6 +557,7 @@ fn render_search_bar(cmds: &mut Vec<RenderCommand>, state: &OverviewState, scree
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(bar_w - 24.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -611,6 +612,7 @@ fn render_desktop_labels(
                 FontWeightHint::Regular
             },
             max_width: Some(screen_w - 80.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -667,6 +669,7 @@ fn render_thumbnail_card(
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some((w + dw - 16.0).max(0.0)),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Border.
@@ -706,6 +709,7 @@ fn render_thumbnail_card(
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(12.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -729,6 +733,7 @@ fn render_thumbnail_card(
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(12.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -746,6 +751,7 @@ fn render_thumbnail_card(
         font_size: 10.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some((w + dw).max(0.0)),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Suppress unused-variable warning — label_h is used to document intent.
@@ -775,6 +781,7 @@ fn render_add_desktop_button(cmds: &mut Vec<RenderCommand>, screen_w: f32, scree
         font_size: 18.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(20.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 

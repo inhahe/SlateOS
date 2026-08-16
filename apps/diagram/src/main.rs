@@ -43,7 +43,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 use std::collections::VecDeque;
@@ -1957,6 +1957,7 @@ impl DiagramApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(52.0),
+                overflow: TextOverflow::Ellipsis,
             });
             bx += 68.0;
         }
@@ -1971,6 +1972,7 @@ impl DiagramApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Grid toggle.
@@ -1987,6 +1989,7 @@ impl DiagramApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Snap toggle.
@@ -2003,6 +2006,7 @@ impl DiagramApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Undo/Redo indicators.
@@ -2019,6 +2023,7 @@ impl DiagramApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(150.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2059,6 +2064,7 @@ impl DiagramApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PALETTE_WIDTH - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Shape buttons.
@@ -2105,6 +2111,7 @@ impl DiagramApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(PALETTE_WIDTH - 56.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             by += SHAPE_BTN_H + 4.0;
@@ -2120,6 +2127,7 @@ impl DiagramApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PALETTE_WIDTH - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         by += 20.0;
 
@@ -2155,6 +2163,7 @@ impl DiagramApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(PALETTE_WIDTH - 48.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             by += LAYER_ROW_H + 2.0;
@@ -2170,6 +2179,7 @@ impl DiagramApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PALETTE_WIDTH - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         by += 20.0;
 
@@ -2189,6 +2199,7 @@ impl DiagramApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(PALETTE_WIDTH - 28.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             by += 20.0;
@@ -2628,6 +2639,7 @@ impl DiagramApp {
                 font_size: fs,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w * 0.8),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2732,6 +2744,7 @@ impl DiagramApp {
                 font_size: 11.0 * z,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0 * z),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2818,6 +2831,7 @@ impl DiagramApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PROPERTIES_WIDTH - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut row_y = py + 40.0;
@@ -2913,6 +2927,7 @@ impl DiagramApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(PROPERTIES_WIDTH - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             row_y += 20.0;
 
@@ -2943,6 +2958,7 @@ impl DiagramApp {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(PROPERTIES_WIDTH - 36.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 row_y += 26.0;
             }
@@ -2955,6 +2971,7 @@ impl DiagramApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(PROPERTIES_WIDTH - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2975,6 +2992,7 @@ impl DiagramApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: panel_x + 100.0,
@@ -2984,6 +3002,7 @@ impl DiagramApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(PROPERTIES_WIDTH - 112.0),
+            overflow: TextOverflow::Ellipsis,
         });
         *row_y += 20.0;
     }
@@ -3004,6 +3023,7 @@ impl DiagramApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::FillRect {
             x: x + 88.0,
@@ -3066,6 +3086,7 @@ impl DiagramApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.window_w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Mode indicator.
@@ -3098,6 +3119,7 @@ impl DiagramApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 

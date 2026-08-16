@@ -5,7 +5,7 @@
 //! which the system should not restart.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -441,6 +441,7 @@ impl UpdateSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 28.0;
 
@@ -456,6 +457,7 @@ impl UpdateSettingsUI {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 22.0;
 
@@ -477,6 +479,7 @@ impl UpdateSettingsUI {
             color: status.color(),
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 44.0;
 
@@ -490,6 +493,7 @@ impl UpdateSettingsUI {
                 color: YELLOW,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(inner),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 20.0;
         }
@@ -519,6 +523,7 @@ impl UpdateSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         cy += 38.0;
@@ -543,6 +548,7 @@ impl UpdateSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -560,6 +566,7 @@ impl UpdateSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += 24.0;
 
@@ -588,6 +595,7 @@ impl UpdateSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             let restart_tag = if upd.requires_restart {
                 " (restart required)"
@@ -607,6 +615,7 @@ impl UpdateSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 36.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y += 50.0;
         }
@@ -621,6 +630,7 @@ impl UpdateSettingsUI {
                 color: PEACH,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -636,6 +646,7 @@ impl UpdateSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += 24.0;
 
@@ -658,6 +669,7 @@ impl UpdateSettingsUI {
                 color: if active { BLUE } else { TEXT },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y += 32.0;
         }
@@ -745,6 +757,7 @@ impl UpdateSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -759,6 +772,7 @@ impl UpdateSettingsUI {
                 color: LAVENDER,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
             y += 20.0;
         }
@@ -788,6 +802,7 @@ impl UpdateSettingsUI {
                 color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.7),
+                overflow: TextOverflow::Ellipsis,
             });
             let rollback_tag = if entry.rollback_available {
                 "↩ rollback"
@@ -802,6 +817,7 @@ impl UpdateSettingsUI {
                 color: LAVENDER,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.25),
+                overflow: TextOverflow::Ellipsis,
             });
             if let Some(err) = &entry.error_msg {
                 cmds.push(RenderCommand::Text {
@@ -812,6 +828,7 @@ impl UpdateSettingsUI {
                     color: RED,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 36.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             y += 38.0;
@@ -827,6 +844,7 @@ impl UpdateSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + width * 0.55,
@@ -836,6 +854,7 @@ impl UpdateSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -855,6 +874,7 @@ impl UpdateSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.65),
+            overflow: TextOverflow::Ellipsis,
         });
         let tx = x + width - 48.0;
         let bg = if on { GREEN } else { SURFACE1 };

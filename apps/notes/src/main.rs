@@ -32,7 +32,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1758,6 +1758,7 @@ impl NotesApp {
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(140.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Sort button
@@ -1778,6 +1779,7 @@ impl NotesApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(90.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Favorites toggle
@@ -1806,6 +1808,7 @@ impl NotesApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Search box
@@ -1837,6 +1840,7 @@ impl NotesApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(search_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Template buttons area
@@ -1849,6 +1853,7 @@ impl NotesApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Show a few template buttons
@@ -1874,6 +1879,7 @@ impl NotesApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(btn_w - 12.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tx += btn_w + 4.0;
         }
@@ -1926,6 +1932,7 @@ impl NotesApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Selected note stats
@@ -1947,6 +1954,7 @@ impl NotesApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 270.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1959,6 +1967,7 @@ impl NotesApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(110.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1995,6 +2004,7 @@ impl NotesApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Separator
@@ -2035,6 +2045,7 @@ impl NotesApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(SIDEBAR_WIDTH - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y += 20.0;
 
@@ -2064,6 +2075,7 @@ impl NotesApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(tag_w - TAG_PADDING),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 tag_x += tag_w + 4.0;
             }
@@ -2114,6 +2126,7 @@ impl NotesApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -2132,6 +2145,7 @@ impl NotesApp {
                 FontWeightHint::Regular
             },
             max_width: Some(SIDEBAR_WIDTH - 24.0 - indent),
+            overflow: TextOverflow::Ellipsis,
         });
 
         *y += ITEM_HEIGHT;
@@ -2179,6 +2193,7 @@ impl NotesApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(NOTE_LIST_WIDTH - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Line {
@@ -2233,6 +2248,7 @@ impl NotesApp {
                         font_size: 10.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -2246,6 +2262,7 @@ impl NotesApp {
                         font_size: 12.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -2259,6 +2276,7 @@ impl NotesApp {
                     font_size: 13.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(NOTE_LIST_WIDTH - 50.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Kind badge
@@ -2276,6 +2294,7 @@ impl NotesApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(80.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Preview snippet
@@ -2295,6 +2314,7 @@ impl NotesApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(NOTE_LIST_WIDTH - 92.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Tags row
@@ -2308,6 +2328,7 @@ impl NotesApp {
                         font_size: 9.0,
                         font_weight: FontWeightHint::Light,
                         max_width: Some(NOTE_LIST_WIDTH - 24.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
 
@@ -2366,6 +2387,7 @@ impl NotesApp {
                 font_size: 16.0,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         };
@@ -2388,6 +2410,7 @@ impl NotesApp {
             font_size: 18.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - EDITOR_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Note metadata line
@@ -2418,6 +2441,7 @@ impl NotesApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - EDITOR_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Tags bar
@@ -2442,6 +2466,7 @@ impl NotesApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(tw - 10.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 tx += tw + 4.0;
             }
@@ -2502,6 +2527,7 @@ impl NotesApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - EDITOR_PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             ly += LINE_HEIGHT;
         }
@@ -2550,6 +2576,7 @@ impl NotesApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - EDITOR_PADDING * 2.0 - 30.0),
+                overflow: TextOverflow::Ellipsis,
             });
             iy += LINE_HEIGHT + 4.0;
         }
@@ -2595,6 +2622,7 @@ impl NotesApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(col_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2620,6 +2648,7 @@ impl NotesApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(col_w - 16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             ry += LINE_HEIGHT + 4.0;
@@ -2669,6 +2698,7 @@ impl NotesApp {
                         font_size,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(max_w),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     ly += font_size + 8.0;
                 }
@@ -2692,6 +2722,7 @@ impl NotesApp {
                             font_size: 14.0,
                             font_weight: weight,
                             max_width: Some(max_w),
+                            overflow: TextOverflow::Ellipsis,
                         });
                         ly += LINE_HEIGHT;
                     }
@@ -2707,6 +2738,7 @@ impl NotesApp {
                             font_size: 14.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(max_w - 16.0),
+                            overflow: TextOverflow::Ellipsis,
                         });
                         ly += LINE_HEIGHT;
                     }
@@ -2722,6 +2754,7 @@ impl NotesApp {
                             font_size: 14.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(max_w - 16.0),
+                            overflow: TextOverflow::Ellipsis,
                         });
                         ly += LINE_HEIGHT;
                     }
@@ -2746,6 +2779,7 @@ impl NotesApp {
                             font_size: 10.0,
                             font_weight: FontWeightHint::Light,
                             max_width: Some(max_w - 16.0),
+                            overflow: TextOverflow::Ellipsis,
                         });
                     }
                     let code_y_start = if language.is_empty() {
@@ -2762,6 +2796,7 @@ impl NotesApp {
                             font_size: 13.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(max_w - 24.0),
+                            overflow: TextOverflow::Ellipsis,
                         });
                     }
                     ly += block_h + 8.0;
@@ -2784,6 +2819,7 @@ impl NotesApp {
                         font_size: 14.0,
                         font_weight: FontWeightHint::Light,
                         max_width: Some(max_w - 16.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     ly += LINE_HEIGHT + 8.0;
                 }
@@ -2840,6 +2876,7 @@ impl NotesApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut vy = y + 28.0;
@@ -2855,6 +2892,7 @@ impl NotesApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             // Snippet
             let snippet: String = ver.content.chars().take(20).collect();
@@ -2866,6 +2904,7 @@ impl NotesApp {
                 font_size: 9.0,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             vy += 28.0;
         }

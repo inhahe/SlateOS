@@ -20,7 +20,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -1132,6 +1132,7 @@ impl LockScreen {
             font_size: CLOCK_FONT_SIZE,
             font_weight: FontWeightHint::Light,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Date display.
@@ -1150,6 +1151,7 @@ impl LockScreen {
                 font_size: DATE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1167,6 +1169,7 @@ impl LockScreen {
             font_size: hint_font_size,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1193,6 +1196,7 @@ impl LockScreen {
             font_size: DISPLAY_NAME_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Password field (with shake offset applied).
@@ -1220,6 +1224,7 @@ impl LockScreen {
                 font_size: ERROR_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1240,6 +1245,7 @@ impl LockScreen {
                 font_size: LOCKOUT_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1259,6 +1265,7 @@ impl LockScreen {
                 font_size: HINT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1304,6 +1311,7 @@ impl LockScreen {
             font_size,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1346,6 +1354,7 @@ impl LockScreen {
                 font_size: PASSWORD_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(PASSWORD_FIELD_WIDTH - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             // Masked dots for each character entered.
@@ -1427,6 +1436,7 @@ impl LockScreen {
             font_size: arrow_font_size,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1450,6 +1460,7 @@ impl LockScreen {
             font_size: label_font_size,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         for (i, user) in self.users.iter().enumerate() {
@@ -1502,6 +1513,7 @@ impl LockScreen {
                 font_size: SMALL_AVATAR_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // User display name.
@@ -1520,6 +1532,7 @@ impl LockScreen {
                     FontWeightHint::Regular
                 },
                 max_width: Some(USER_LIST_ITEM_WIDTH - SMALL_AVATAR_DIAMETER - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

@@ -11,7 +11,7 @@
 
 use guitk::color::Color;
 use guitk::event::{EventResult, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 use std::collections::HashMap;
@@ -625,6 +625,7 @@ impl TaskbarState {
                     font_size: 9.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -1113,6 +1114,7 @@ impl TaskbarState {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1187,6 +1189,7 @@ impl TaskbarState {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(menu_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

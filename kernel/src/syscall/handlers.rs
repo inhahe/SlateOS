@@ -5151,14 +5151,49 @@ pub fn sys_process_set_nice(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_CAP_QUERY` — query the calling process's capabilities.
+/// `SYS_CAP_QUERY` — count or enumerate the calling process's capabilities.
 ///
-/// Returns the number of valid capabilities held by the calling process.
+/// `arg0`: pointer to an array of [`CapEntryInfo`], or 0 to only count.
+/// `arg1`: capacity of that array, **in entries** (not bytes).
 ///
-/// This is a simple count query.  A future extension will support
-/// filling a user-space buffer with detailed capability entries.
+/// Returns the number of valid capabilities the caller holds.
+///
+/// # Two modes, and why the split is at a null/zero buffer
+///
+/// - **Probe** (`arg0 == 0` or `arg1 == 0`): writes nothing, returns the
+///   count.  This is byte-for-byte the old behaviour, which matters because
+///   `userspace/strace` calls it that way, and it is what lets a caller size
+///   an allocation before asking for the data.
+/// - **Enumerate**: writes all `count` entries and returns `count`.
+///
+/// # Truncation is an error, never a short answer
+///
+/// If `arg1 < count` the call fails with [`KernelError::BufferTooSmall`]
+/// (`ERANGE`) and **nothing is written**.  A prefix would be
+/// indistinguishable from a complete answer, and the consumer this exists for
+/// (libc's Linux capability words, `design-decisions.md` §312) folds the list
+/// into a bitmask: a silently-short list becomes a `CAP_*` bit reading *false*
+/// for authority the process genuinely holds.  Under-reporting authority is
+/// the same class of bug as over-reporting it, in the direction nobody
+/// notices.
+///
+/// Note this differs from `SYS_FS_LIST_XATTR`, which on overflow also writes
+/// nothing but reports the required size as a *success*.  That shape is
+/// dictated by the POSIX `listxattr` contract it implements; this syscall has
+/// no legacy contract to honour, so it takes the form where ignoring the
+/// failure is not possible — a caller that only checks the sign of the return
+/// value still cannot mistake truncation for success.  The required size stays
+/// available through the probe mode.
+///
+/// # Concurrency
+///
+/// The entries are snapshotted under the process-table lock and copied out
+/// after it is dropped: writing to user memory can fault, and the fault
+/// handler needs that same lock.  The snapshot is therefore point-in-time, and
+/// so is the count a prior probe returned — a caller racing its own grants may
+/// see `BufferTooSmall` on the second call and must simply retry.
 pub fn sys_cap_query(args: &SyscallArgs) -> SyscallResult {
-    let _ = args;
+    use crate::cap::CapEntryInfo;
     use crate::proc::{pcb, thread};
 
     let task_id = sched::current_task_id();
@@ -5169,10 +5204,34 @@ pub fn sys_cap_query(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::ok(0);
     }
 
-    let count = pcb::cap_count(pid).unwrap_or(0);
+    let out_ptr = args.arg0;
+    let capacity = args.arg1 as usize;
+
+    // Probe: answer from the cheap accessor without building a snapshot.
+    if out_ptr == 0 || capacity == 0 {
+        let count = pcb::cap_count(pid).unwrap_or(0);
+        #[allow(clippy::cast_possible_wrap)]
+        return SyscallResult::ok(count as i64);
+    }
+
+    // `cap_entries` drops the process-table lock before returning, so
+    // everything below runs without it held.
+    let entries = pcb::cap_entries(pid).unwrap_or_default();
+    if entries.len() > capacity {
+        return SyscallResult::err(KernelError::BufferTooSmall);
+    }
+
+    let out: alloc::vec::Vec<CapEntryInfo> =
+        entries.iter().map(CapEntryInfo::from_entry).collect();
+
+    // `write_user_items` validates the destination and copies in one pass;
+    // it is a no-op for an empty slice, which is the zero-capability case.
+    if let Err(e) = crate::mm::user::write_user_items(out_ptr, &out) {
+        return SyscallResult::err(e);
+    }
 
     #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(count as i64)
+    SyscallResult::ok(out.len() as i64)
 }
 
 /// `SYS_CAP_REQUEST` — request a capability the caller does not hold.

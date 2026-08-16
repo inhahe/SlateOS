@@ -16,7 +16,7 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 use std::collections::{HashMap, HashSet};
@@ -179,6 +179,7 @@ impl WindowPicker {
                 font_size: FEATURE_HEADER_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + FEATURE_TEXT_PAD,
@@ -188,6 +189,7 @@ impl WindowPicker {
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else if let Some(ref res) = self.result {
             // Result panel
@@ -217,6 +219,7 @@ impl WindowPicker {
                 font_size: FEATURE_HEADER_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let labels = [
@@ -235,6 +238,7 @@ impl WindowPicker {
                     font_size: FEATURE_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(80.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: x + 90.0,
@@ -244,6 +248,7 @@ impl WindowPicker {
                     font_size: FEATURE_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 98.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -551,6 +556,7 @@ impl BlockingAnalyzer {
             font_size: FEATURE_HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += FEATURE_ROW_HEIGHT;
 
@@ -582,6 +588,7 @@ impl BlockingAnalyzer {
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += FEATURE_ROW_HEIGHT;
         }
@@ -596,6 +603,7 @@ impl BlockingAnalyzer {
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             for (i, link) in info.chain.iter().enumerate() {
@@ -620,6 +628,7 @@ impl BlockingAnalyzer {
                         font_size: FEATURE_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -638,6 +647,7 @@ impl BlockingAnalyzer {
                     font_size: FEATURE_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - indent - FEATURE_TEXT_PAD * 2.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Holder info on same row if known.
@@ -650,6 +660,7 @@ impl BlockingAnalyzer {
                         font_size: FEATURE_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(170.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
 
@@ -822,6 +833,7 @@ impl AffinityMask {
             font_size: FEATURE_HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += FEATURE_ROW_HEIGHT + 4.0;
 
@@ -848,6 +860,7 @@ impl AffinityMask {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(btn_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         cy += btn_h + 6.0;
@@ -886,6 +899,7 @@ impl AffinityMask {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(cell_size - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1052,6 +1066,7 @@ impl PrioritySelector {
             font_size: FEATURE_HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += FEATURE_ROW_HEIGHT;
 
@@ -1072,6 +1087,7 @@ impl PrioritySelector {
             font_size: FEATURE_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0 - 30.0),
+            overflow: TextOverflow::Ellipsis,
         });
         // Dropdown arrow.
         let arrow = if self.dropdown_open { "^" } else { "v" };
@@ -1083,6 +1099,7 @@ impl PrioritySelector {
             font_size: FEATURE_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += FEATURE_ROW_HEIGHT;
 
@@ -1113,6 +1130,7 @@ impl PrioritySelector {
                     font_size: FEATURE_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - FEATURE_TEXT_PAD * 2.0 - 16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += FEATURE_ROW_HEIGHT;
             }
@@ -1163,6 +1181,7 @@ impl PrioritySelector {
                 font_size: FEATURE_HEADER_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(dlg_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: dlg_x + 12.0,
@@ -1172,6 +1191,7 @@ impl PrioritySelector {
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dlg_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: dlg_x + 12.0,
@@ -1181,6 +1201,7 @@ impl PrioritySelector {
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dlg_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Confirm button.
@@ -1201,6 +1222,7 @@ impl PrioritySelector {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             // Cancel button.
             cmds.push(RenderCommand::FillRect {
@@ -1219,6 +1241,7 @@ impl PrioritySelector {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1426,6 +1449,7 @@ impl EnvViewer {
             font_size: FEATURE_HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += FEATURE_ROW_HEIGHT;
 
@@ -1456,6 +1480,7 @@ impl EnvViewer {
             font_size: FEATURE_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0 - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += FEATURE_ROW_HEIGHT + 2.0;
 
@@ -1486,6 +1511,7 @@ impl EnvViewer {
             font_size: FEATURE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(name_col_w - FEATURE_TEXT_PAD),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + name_col_w,
@@ -1495,6 +1521,7 @@ impl EnvViewer {
             font_size: FEATURE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - name_col_w - FEATURE_TEXT_PAD),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += FEATURE_ROW_HEIGHT;
 
@@ -1533,6 +1560,7 @@ impl EnvViewer {
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(name_col_w - FEATURE_TEXT_PAD * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + name_col_w,
@@ -1542,6 +1570,7 @@ impl EnvViewer {
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - name_col_w - FEATURE_TEXT_PAD),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cy += FEATURE_ROW_HEIGHT;
@@ -1565,6 +1594,7 @@ impl EnvViewer {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -1811,6 +1841,7 @@ impl MemoryMap {
             font_size: FEATURE_HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += FEATURE_ROW_HEIGHT;
 
@@ -1835,6 +1866,7 @@ impl MemoryMap {
             font_size: FEATURE_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0 - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += FEATURE_ROW_HEIGHT + 4.0;
 
@@ -1898,6 +1930,7 @@ impl MemoryMap {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(legend_item_w - 18.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         cy += FEATURE_ROW_HEIGHT;
@@ -1929,6 +1962,7 @@ impl MemoryMap {
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(cw - 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
             hx += cw;
         }
@@ -1967,6 +2001,7 @@ impl MemoryMap {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_widths[0] - 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
             rx += col_widths[0];
 
@@ -1979,6 +2014,7 @@ impl MemoryMap {
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_widths[1] - 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
             rx += col_widths[1];
 
@@ -1991,6 +2027,7 @@ impl MemoryMap {
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_widths[2] - 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
             rx += col_widths[2];
 
@@ -2003,6 +2040,7 @@ impl MemoryMap {
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_widths[3] - 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
             rx += col_widths[3];
 
@@ -2015,6 +2053,7 @@ impl MemoryMap {
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_widths[4] - 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cy += FEATURE_ROW_HEIGHT;

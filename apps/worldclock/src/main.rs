@@ -19,7 +19,7 @@
 //! other has not.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // The same zone engine the libc's `localtime`, osh's `printf '%(…)T'`, the
@@ -667,6 +667,7 @@ impl WorldClockApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // View/style buttons
@@ -700,6 +701,7 @@ impl WorldClockApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             bx += w + 4.0;
         }
@@ -732,6 +734,7 @@ impl WorldClockApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 12.0),
+                overflow: TextOverflow::Ellipsis,
             });
             bx += w + 4.0;
         }
@@ -754,6 +757,7 @@ impl WorldClockApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: Some(36.0),
+            overflow: TextOverflow::Ellipsis,
         });
         bx += 52.0;
 
@@ -774,6 +778,7 @@ impl WorldClockApp {
             color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(70.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // UTC time
@@ -786,6 +791,7 @@ impl WorldClockApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(170.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -887,6 +893,7 @@ impl WorldClockApp {
                 color: PEACH,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         if entry.tz_idx == self.home_tz_idx {
@@ -898,6 +905,7 @@ impl WorldClockApp {
                 color: GREEN,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -910,6 +918,7 @@ impl WorldClockApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(Self::CARD_W - 56.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + 12.0,
@@ -919,6 +928,7 @@ impl WorldClockApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(Self::CARD_W - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         match self.clock_style {
@@ -932,6 +942,7 @@ impl WorldClockApp {
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(Self::CARD_W - 24.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: x + Self::CARD_W - 36.0,
@@ -941,6 +952,7 @@ impl WorldClockApp {
                     color: Self::day_night_color(h),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(30.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             ClockStyle::Analog => {
@@ -957,6 +969,7 @@ impl WorldClockApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(Self::CARD_W / 2.0 - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + Self::CARD_W / 2.0 + 8.0,
@@ -966,6 +979,7 @@ impl WorldClockApp {
             color: TEAL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(Self::CARD_W / 2.0 - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
         let dn_label = if is_day { "Daytime" } else { "Nighttime" };
         cmds.push(RenderCommand::Text {
@@ -976,6 +990,7 @@ impl WorldClockApp {
             color: Self::day_night_color(h),
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
         // The date rollover, which the old time-of-day-only model could not
         // express: the single most useful thing a world clock tells you is
@@ -990,6 +1005,7 @@ impl WorldClockApp {
                 color: PEACH,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(64.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1115,6 +1131,7 @@ impl WorldClockApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(150.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1163,6 +1180,7 @@ impl WorldClockApp {
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(180.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: 16.0,
@@ -1172,6 +1190,7 @@ impl WorldClockApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(180.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: 200.0,
@@ -1181,6 +1200,7 @@ impl WorldClockApp {
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(170.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: 380.0,
@@ -1190,6 +1210,7 @@ impl WorldClockApp {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(130.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: 520.0,
@@ -1199,6 +1220,7 @@ impl WorldClockApp {
                     color: TEAL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(90.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 let dn_icon = Self::day_night_icon(h);
                 let dn_label = if Self::is_daytime(h) { "Day" } else { "Night" };
@@ -1210,6 +1232,7 @@ impl WorldClockApp {
                     color: Self::day_night_color(h),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(100.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 let day_label = self.day_label(&rule);
                 if !day_label.is_empty() {
@@ -1221,6 +1244,7 @@ impl WorldClockApp {
                         color: PEACH,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(90.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -1259,6 +1283,7 @@ impl WorldClockApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(pw - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Search input
@@ -1288,6 +1313,7 @@ impl WorldClockApp {
             color: search_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(pw - 48.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Timezone list
@@ -1324,6 +1350,7 @@ impl WorldClockApp {
                     color: if already { OVERLAY0 } else { TEXT_COLOR },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(pw - 40.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: px + 16.0,
@@ -1336,6 +1363,7 @@ impl WorldClockApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(200.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 if already {
                     cmds.push(RenderCommand::Text {
@@ -1346,6 +1374,7 @@ impl WorldClockApp {
                         color: GREEN,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(50.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -1370,6 +1399,7 @@ impl WorldClockApp {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(400.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: self.width - 120.0,
@@ -1379,6 +1409,7 @@ impl WorldClockApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(110.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

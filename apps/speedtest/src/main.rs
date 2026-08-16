@@ -20,7 +20,7 @@ use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::fold;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -1137,6 +1137,7 @@ impl SpeedTestUI {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x: self.width - 200.0,
@@ -1146,6 +1147,7 @@ impl SpeedTestUI {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1177,6 +1179,7 @@ impl SpeedTestUI {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 30.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Dropdown arrow.
@@ -1193,6 +1196,7 @@ impl SpeedTestUI {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1246,6 +1250,7 @@ impl SpeedTestUI {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1324,6 +1329,7 @@ impl SpeedTestUI {
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1365,6 +1371,7 @@ impl SpeedTestUI {
             font_size: 32.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Unit label.
@@ -1376,6 +1383,7 @@ impl SpeedTestUI {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Latency readout below gauge.
@@ -1388,6 +1396,7 @@ impl SpeedTestUI {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1450,6 +1459,7 @@ impl SpeedTestUI {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Arrow between phases.
@@ -1462,6 +1472,7 @@ impl SpeedTestUI {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1497,6 +1508,7 @@ impl SpeedTestUI {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1511,6 +1523,7 @@ impl SpeedTestUI {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(240.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             return;
@@ -1529,6 +1542,7 @@ impl SpeedTestUI {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x: dl_x,
@@ -1538,6 +1552,7 @@ impl SpeedTestUI {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Upload.
@@ -1550,6 +1565,7 @@ impl SpeedTestUI {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x: ul_x,
@@ -1559,6 +1575,7 @@ impl SpeedTestUI {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Latency / Jitter.
@@ -1571,6 +1588,7 @@ impl SpeedTestUI {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x: lat_x,
@@ -1584,6 +1602,7 @@ impl SpeedTestUI {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1616,6 +1635,7 @@ impl SpeedTestUI {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let plot_x = GRAPH_X + 50.0;
@@ -1655,6 +1675,7 @@ impl SpeedTestUI {
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(42.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1693,6 +1714,7 @@ impl SpeedTestUI {
                     font_size: 9.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         } else {
@@ -1705,6 +1727,7 @@ impl SpeedTestUI {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1738,6 +1761,7 @@ impl SpeedTestUI {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let content_y = HISTORY_Y + 30.0;
@@ -1760,6 +1784,7 @@ impl SpeedTestUI {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(HISTORY_WIDTH - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             // Show results newest-first.
@@ -1791,6 +1816,7 @@ impl SpeedTestUI {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(HISTORY_WIDTH - 24.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1826,6 +1852,7 @@ impl SpeedTestUI {
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(HISTORY_WIDTH - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1854,6 +1881,7 @@ impl SpeedTestUI {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 

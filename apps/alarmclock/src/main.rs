@@ -15,7 +15,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -535,6 +535,7 @@ impl Alarm {
             font_size: 28.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width * 0.6),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Label.
@@ -547,6 +548,7 @@ impl Alarm {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.5),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -560,6 +562,7 @@ impl Alarm {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Enable/disable toggle indicator.
@@ -728,6 +731,7 @@ impl Timer {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -748,6 +752,7 @@ impl Timer {
             font_size: 32.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width * 0.6),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Total time indicator.
@@ -759,6 +764,7 @@ impl Timer {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Progress bar.
@@ -812,6 +818,7 @@ impl Timer {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(72.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -1024,6 +1031,7 @@ impl Stopwatch {
             font_size: 48.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // State indicator.
@@ -1040,6 +1048,7 @@ impl Stopwatch {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Lap stats.
@@ -1059,6 +1068,7 @@ impl Stopwatch {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1087,6 +1097,7 @@ impl Stopwatch {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(60.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: col_split_x,
@@ -1096,6 +1107,7 @@ impl Stopwatch {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: col_elapsed_x,
@@ -1105,6 +1117,7 @@ impl Stopwatch {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Lap rows (most recent first, limited display).
@@ -1140,6 +1153,7 @@ impl Stopwatch {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(50.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: col_split_x,
@@ -1149,6 +1163,7 @@ impl Stopwatch {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(120.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: col_elapsed_x,
@@ -1158,6 +1173,7 @@ impl Stopwatch {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(120.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1505,6 +1521,7 @@ impl AlarmClockApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_width - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1545,6 +1562,7 @@ impl AlarmClockApp {
             font_size: 36.0,
             font_weight: FontWeightHint::Light,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Next alarm indicator.
@@ -1574,6 +1592,7 @@ impl AlarmClockApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             cmds.push(RenderCommand::Text {
@@ -1584,6 +1603,7 @@ impl AlarmClockApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1608,6 +1628,7 @@ impl AlarmClockApp {
                 font_size: 16.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             for alarm in &self.alarms {
@@ -1637,6 +1658,7 @@ impl AlarmClockApp {
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(btn_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -1655,6 +1677,7 @@ impl AlarmClockApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let preset_y = y + 24.0;
@@ -1679,6 +1702,7 @@ impl AlarmClockApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(preset_btn_w - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1692,6 +1716,7 @@ impl AlarmClockApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // HH:MM:SS input fields (placeholder display).
@@ -1719,6 +1744,7 @@ impl AlarmClockApp {
                 font_size: 16.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(field_w - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
             if i < 2 {
                 let cx = fx + field_w + 2.0;
@@ -1730,6 +1756,7 @@ impl AlarmClockApp {
                     font_size: 18.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(colon_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1756,6 +1783,7 @@ impl AlarmClockApp {
                 font_size: 16.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             let running = self.running_timer_count();
@@ -1774,6 +1802,7 @@ impl AlarmClockApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
             timer_y += 20.0;
             for timer in &self.timers {

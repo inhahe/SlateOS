@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 
 use guitk::color::Color;
 use guitk::layout::FlexDirection;
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::{CornerRadii, Edges};
 use guitk::text;
 use guitk::widget::{Widget, WidgetTree};
@@ -1019,6 +1019,7 @@ fn render_search_bar(rt: &mut RenderTree, state: &AppState, x: f32, y: f32, w: f
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Search query text
@@ -1040,6 +1041,7 @@ fn render_search_bar(rt: &mut RenderTree, state: &AppState, x: f32, y: f32, w: f
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(w - 200.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Type filter badge
@@ -1062,6 +1064,7 @@ fn render_search_bar(rt: &mut RenderTree, state: &AppState, x: f32, y: f32, w: f
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 
@@ -1106,6 +1109,7 @@ fn render_tab_bar(rt: &mut RenderTree, state: &AppState, x: f32, y: f32, w: f32,
                 FontWeightHint::Regular
             },
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tx += tab_w + 4.0;
     }
@@ -1167,6 +1171,7 @@ fn render_history_panel(rt: &mut RenderTree, state: &AppState, x: f32, y: f32, w
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1196,6 +1201,7 @@ fn render_history_panel(rt: &mut RenderTree, state: &AppState, x: f32, y: f32, w
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }
@@ -1255,6 +1261,7 @@ fn render_entry_row(
         font_size: 10.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Pin indicator
@@ -1267,6 +1274,7 @@ fn render_entry_row(
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1280,6 +1288,7 @@ fn render_entry_row(
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(w - 80.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Timestamp + source on right
@@ -1292,6 +1301,7 @@ fn render_entry_row(
         font_size: 10.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     rt.push(RenderCommand::Text {
         x: x + w - 70.0,
@@ -1301,6 +1311,7 @@ fn render_entry_row(
         font_size: 10.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Tag count
@@ -1314,6 +1325,7 @@ fn render_entry_row(
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }
@@ -1346,6 +1358,7 @@ fn render_detail_panel(
         font_size: 15.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     cy += 22.0;
 
@@ -1364,6 +1377,7 @@ fn render_detail_panel(
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(w - pad * 2.0),
+        overflow: TextOverflow::Ellipsis,
     });
     cy += 18.0;
 
@@ -1377,6 +1391,7 @@ fn render_detail_panel(
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 16.0;
     }
@@ -1402,6 +1417,7 @@ fn render_detail_panel(
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tx += tag_w + 4.0;
         }
@@ -1428,6 +1444,7 @@ fn render_detail_panel(
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 24.0;
     }
@@ -1467,6 +1484,7 @@ fn render_detail_panel(
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - pad * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1503,6 +1521,7 @@ fn render_templates_panel(rt: &mut RenderTree, state: &AppState, x: f32, y: f32,
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     cy += 22.0;
 
@@ -1515,6 +1534,7 @@ fn render_templates_panel(rt: &mut RenderTree, state: &AppState, x: f32, y: f32,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 20.0;
     } else {
@@ -1537,6 +1557,7 @@ fn render_templates_panel(rt: &mut RenderTree, state: &AppState, x: f32, y: f32,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Show placeholder count
@@ -1550,6 +1571,7 @@ fn render_templates_panel(rt: &mut RenderTree, state: &AppState, x: f32, y: f32,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             cy += 36.0;
@@ -1577,6 +1599,7 @@ fn render_templates_panel(rt: &mut RenderTree, state: &AppState, x: f32, y: f32,
         font_size: 13.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     cy += 20.0;
 
@@ -1589,6 +1612,7 @@ fn render_templates_panel(rt: &mut RenderTree, state: &AppState, x: f32, y: f32,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     let name_display = if state.template_name_input.is_empty() {
         "e.g. Email Reply"
@@ -1615,6 +1639,7 @@ fn render_templates_panel(rt: &mut RenderTree, state: &AppState, x: f32, y: f32,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(w - pad * 2.0 - 80.0),
+        overflow: TextOverflow::Ellipsis,
     });
     cy += 26.0;
 
@@ -1627,6 +1652,7 @@ fn render_templates_panel(rt: &mut RenderTree, state: &AppState, x: f32, y: f32,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     let body_display = if state.template_body_input.is_empty() {
         "Dear {name}, ..."
@@ -1653,6 +1679,7 @@ fn render_templates_panel(rt: &mut RenderTree, state: &AppState, x: f32, y: f32,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(w - pad * 2.0 - 80.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     rt.push(RenderCommand::PopClip);
@@ -1694,6 +1721,7 @@ fn render_toolbar(rt: &mut RenderTree, _state: &AppState, x: f32, y: f32, w: f32
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         bx += btn_w + gap;
     }
@@ -1718,6 +1746,7 @@ fn render_stats_bar(rt: &mut RenderTree, state: &AppState, x: f32, y: f32, w: f3
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(w - 20.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Show filtered count on right
@@ -1730,6 +1759,7 @@ fn render_stats_bar(rt: &mut RenderTree, state: &AppState, x: f32, y: f32, w: f3
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 

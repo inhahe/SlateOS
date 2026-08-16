@@ -17,7 +17,7 @@
 //! Uses the guitk library for UI rendering.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1439,6 +1439,7 @@ pub fn render_toolbar(
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(btn_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         x += btn_w + 4.0;
@@ -1495,6 +1496,7 @@ pub fn render_path_bar(
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         x += 28.0;
     }
@@ -1532,6 +1534,7 @@ pub fn render_path_bar(
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width - path_x - 24.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Bottom separator
@@ -1578,6 +1581,7 @@ pub fn render_sidebar(
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(w - 16.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     if let Some(archive) = &state.archive {
@@ -1630,6 +1634,7 @@ pub fn render_sidebar(
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Folder icon and name.
@@ -1642,6 +1647,7 @@ pub fn render_sidebar(
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - indent - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // File count badge.
@@ -1655,6 +1661,7 @@ pub fn render_sidebar(
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1707,6 +1714,7 @@ pub fn render_column_headers(
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_w - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Column separator.
@@ -1795,6 +1803,7 @@ pub fn render_file_row(
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(Column::Name.default_width() - 8.0),
+        overflow: TextOverflow::Ellipsis,
     });
     x += Column::Name.default_width();
 
@@ -1808,6 +1817,7 @@ pub fn render_file_row(
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(Column::Size.default_width() - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
     x += Column::Size.default_width();
@@ -1822,6 +1832,7 @@ pub fn render_file_row(
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(Column::CompressedSize.default_width() - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
     x += Column::CompressedSize.default_width();
@@ -1844,6 +1855,7 @@ pub fn render_file_row(
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(Column::Ratio.default_width() - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
     x += Column::Ratio.default_width();
@@ -1857,6 +1869,7 @@ pub fn render_file_row(
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(Column::Date.default_width() - 8.0),
+        overflow: TextOverflow::Ellipsis,
     });
     x += Column::Date.default_width();
 
@@ -1870,6 +1883,7 @@ pub fn render_file_row(
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(Column::Crc.default_width() - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
     x += Column::Crc.default_width();
@@ -1883,6 +1897,7 @@ pub fn render_file_row(
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(Column::Method.default_width() - 8.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -1954,6 +1969,7 @@ pub fn render_file_list(
             font_size: 16.0,
             font_weight: FontWeightHint::Light,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x_offset + width / 2.0 - 100.0,
@@ -1963,6 +1979,7 @@ pub fn render_file_list(
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(220.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -1999,6 +2016,7 @@ pub fn render_progress_bar(
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width - 16.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Progress bar track.
@@ -2047,6 +2065,7 @@ pub fn render_progress_bar(
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // File count.
@@ -2061,6 +2080,7 @@ pub fn render_progress_bar(
         font_size: 10.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     bar_h
@@ -2103,6 +2123,7 @@ pub fn render_status_bar(
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width / 2.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Format badge on the right.
@@ -2116,6 +2137,7 @@ pub fn render_status_bar(
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(110.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2162,6 +2184,7 @@ pub fn render_drag_overlay(
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(badge_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         DragState::DraggingIn {
@@ -2202,6 +2225,7 @@ pub fn render_drag_overlay(
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(badge_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

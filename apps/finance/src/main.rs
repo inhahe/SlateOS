@@ -11,7 +11,7 @@
 //! trends, manage accounts, and get financial summaries.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -869,6 +869,7 @@ impl FinanceApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(Self::SIDEBAR_W - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Nav items
@@ -903,6 +904,7 @@ impl FinanceApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(Self::SIDEBAR_W - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -917,6 +919,7 @@ impl FinanceApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(Self::SIDEBAR_W - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: 16.0,
@@ -926,6 +929,7 @@ impl FinanceApp {
             color: total_color,
             font_weight: FontWeightHint::Bold,
             max_width: Some(Self::SIDEBAR_W - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -952,6 +956,7 @@ impl FinanceApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Monthly summary in header
@@ -977,6 +982,7 @@ impl FinanceApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
             // Expenses are accumulated as a positive magnitude; render them as
             // a money-out (negative) figure so the header reads "-$X.XX".
@@ -993,6 +999,7 @@ impl FinanceApp {
                 color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(140.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1011,6 +1018,7 @@ impl FinanceApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let card_w = (cw - 16.0) / 2.0;
@@ -1055,6 +1063,7 @@ impl FinanceApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(card_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1069,6 +1078,7 @@ impl FinanceApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(card_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Progress bar
@@ -1107,6 +1117,7 @@ impl FinanceApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let top_cats = self.top_expense_categories();
@@ -1124,6 +1135,7 @@ impl FinanceApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(140.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::FillRect {
                 x: cx + 150.0,
@@ -1141,6 +1153,7 @@ impl FinanceApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1154,6 +1167,7 @@ impl FinanceApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut sorted: Vec<&Transaction> = self.month_transactions();
@@ -1168,6 +1182,7 @@ impl FinanceApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(90.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: cx + 100.0,
@@ -1177,6 +1192,7 @@ impl FinanceApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
             let (amt_str, amt_color) = Self::format_currency_colored(tx.amount);
             cmds.push(RenderCommand::Text {
@@ -1187,6 +1203,7 @@ impl FinanceApp {
                 color: amt_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(110.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1226,6 +1243,7 @@ impl FinanceApp {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(cw - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Filter indicator
@@ -1246,6 +1264,7 @@ impl FinanceApp {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1273,6 +1292,7 @@ impl FinanceApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1310,6 +1330,7 @@ impl FinanceApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: cx + 98.0,
@@ -1319,6 +1340,7 @@ impl FinanceApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(270.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: cx + 388.0,
@@ -1328,6 +1350,7 @@ impl FinanceApp {
                 color: tx.category.color(),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
             let (amt_str, amt_color) = Self::format_currency_colored(tx.amount);
             cmds.push(RenderCommand::Text {
@@ -1338,6 +1361,7 @@ impl FinanceApp {
                 color: amt_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             if tx.recurring {
                 cmds.push(RenderCommand::Text {
@@ -1348,6 +1372,7 @@ impl FinanceApp {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(20.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1370,6 +1395,7 @@ impl FinanceApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let item_h = 80.0;
@@ -1410,6 +1436,7 @@ impl FinanceApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(250.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1424,6 +1451,7 @@ impl FinanceApp {
                 color: if remaining >= 0 { GREEN } else { RED },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(190.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Progress bar
@@ -1460,6 +1488,7 @@ impl FinanceApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             let rem_text = if remaining >= 0 {
                 format!("{} remaining", Self::format_currency(remaining))
@@ -1474,6 +1503,7 @@ impl FinanceApp {
                 color: if remaining >= 0 { TEAL } else { RED },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1491,6 +1521,7 @@ impl FinanceApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let card_w = (cw - 16.0) / 2.0;
@@ -1520,6 +1551,7 @@ impl FinanceApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(card_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: ax + 12.0,
@@ -1529,6 +1561,7 @@ impl FinanceApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: ax + 12.0,
@@ -1538,6 +1571,7 @@ impl FinanceApp {
                 color: bal_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(card_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1559,6 +1593,7 @@ impl FinanceApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let income = self.month_income();
@@ -1591,6 +1626,7 @@ impl FinanceApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sw - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: sx + 12.0,
@@ -1600,6 +1636,7 @@ impl FinanceApp {
                 color: *color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(sw - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1612,6 +1649,7 @@ impl FinanceApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Category breakdown
@@ -1623,6 +1661,7 @@ impl FinanceApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let top = self.top_expense_categories();
@@ -1640,6 +1679,7 @@ impl FinanceApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(140.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::FillRect {
                 x: cx + 150.0,
@@ -1657,6 +1697,7 @@ impl FinanceApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(150.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1678,6 +1719,7 @@ impl FinanceApp {
                 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1700,6 +1742,7 @@ impl FinanceApp {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(400.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

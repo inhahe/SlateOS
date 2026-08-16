@@ -35,7 +35,7 @@
 #![allow(clippy::doc_markdown)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1504,6 +1504,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Recording indicator.
@@ -1534,6 +1535,7 @@ impl AutomatorApp {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1552,6 +1554,7 @@ impl AutomatorApp {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1586,6 +1589,7 @@ impl AutomatorApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_w - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1722,6 +1726,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(btn_w - 12.0),
+            overflow: TextOverflow::Ellipsis,
         });
         x + btn_w + 6.0
     }
@@ -1756,6 +1761,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Macro list.
@@ -1799,6 +1805,7 @@ impl AutomatorApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(SIDEBAR_WIDTH - 3.0 * PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Action count badge.
@@ -1811,6 +1818,7 @@ impl AutomatorApp {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(30.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Trigger indicator.
@@ -1867,6 +1875,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(half - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Delete button.
@@ -1887,6 +1896,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(half - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1933,6 +1943,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(list_w - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         match self.active_tab {
@@ -1982,6 +1993,7 @@ impl AutomatorApp {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 2.0 * PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         };
@@ -1995,6 +2007,7 @@ impl AutomatorApp {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 2.0 * PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -2037,6 +2050,7 @@ impl AutomatorApp {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(30.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Action type badge.
@@ -2057,6 +2071,7 @@ impl AutomatorApp {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(20.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Action label.
@@ -2068,6 +2083,7 @@ impl AutomatorApp {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 160.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Delay badge.
@@ -2081,6 +2097,7 @@ impl AutomatorApp {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(60.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -2132,6 +2149,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(small_btn_w - 12.0),
+            overflow: TextOverflow::Ellipsis,
         });
         bx += small_btn_w + 4.0;
 
@@ -2152,6 +2170,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(small_btn_w - 12.0),
+            overflow: TextOverflow::Ellipsis,
         });
         bx += small_btn_w + 4.0;
 
@@ -2172,6 +2191,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(small_btn_w),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2211,6 +2231,7 @@ impl AutomatorApp {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(30.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Line content -- color based on content type.
@@ -2232,6 +2253,7 @@ impl AutomatorApp {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 54.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2255,6 +2277,7 @@ impl AutomatorApp {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2286,6 +2309,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(apply_w - 12.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2327,6 +2351,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PROPERTIES_WIDTH - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let prop_y = content_y + ROW_HEIGHT + PADDING;
@@ -2400,6 +2425,7 @@ impl AutomatorApp {
                         font_size: FONT_SIZE,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(PROPERTIES_WIDTH - 2.0 * PADDING),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cy += 22.0;
 
@@ -2502,6 +2528,7 @@ impl AutomatorApp {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(PROPERTIES_WIDTH - 2.0 * PADDING),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         } else {
@@ -2514,6 +2541,7 @@ impl AutomatorApp {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(PROPERTIES_WIDTH - 2.0 * PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2536,6 +2564,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PROPERTIES_WIDTH - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let selected_speed = self
@@ -2571,6 +2600,7 @@ impl AutomatorApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(speed_btn_w - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2583,6 +2613,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PROPERTIES_WIDTH - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let selected_repeat = self
@@ -2617,6 +2648,7 @@ impl AutomatorApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(60.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2638,6 +2670,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: panel_x + 90.0,
@@ -2647,6 +2680,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(PROPERTIES_WIDTH - 100.0),
+            overflow: TextOverflow::Ellipsis,
         });
         y + 20.0
     }
@@ -2673,6 +2707,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width / 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Recording state on right.
@@ -2689,6 +2724,7 @@ impl AutomatorApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

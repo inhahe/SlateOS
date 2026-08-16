@@ -2081,7 +2081,7 @@ impl Default for ClientSettings {
 
 // ─── Application ─────────────────────────────────────────────────────
 
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
@@ -2531,6 +2531,7 @@ impl TorrentApp {
             color: colors::BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Toolbar buttons
@@ -2561,6 +2562,7 @@ impl TorrentApp {
                 color: colors::TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             bx += bw + 8.0;
         }
@@ -2621,6 +2623,7 @@ impl TorrentApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(sidebar_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             fy += 32.0;
         }
@@ -2635,6 +2638,7 @@ impl TorrentApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         fy += 20.0;
         for label in &self.labels {
@@ -2661,6 +2665,7 @@ impl TorrentApp {
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sidebar_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             fy += 28.0;
         }
@@ -2712,6 +2717,7 @@ impl TorrentApp {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tx += tw + 4.0;
         }
@@ -2765,6 +2771,7 @@ impl TorrentApp {
             color: colors::SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -2793,6 +2800,7 @@ impl TorrentApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(*cw),
+                overflow: TextOverflow::Ellipsis,
             });
             cx += cw + 8.0;
         }
@@ -2830,6 +2838,7 @@ impl TorrentApp {
                 color: colors::TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(250.0),
+                overflow: TextOverflow::Ellipsis,
             });
             if !torrent.label.is_empty() {
                 cmds.push(RenderCommand::Text {
@@ -2840,6 +2849,7 @@ impl TorrentApp {
                     color: colors::MAUVE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(250.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             cx += 258.0;
@@ -2853,6 +2863,7 @@ impl TorrentApp {
                 color: colors::SUBTEXT1,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cx += 88.0;
 
@@ -2894,6 +2905,7 @@ impl TorrentApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cx += 128.0;
 
@@ -2914,6 +2926,7 @@ impl TorrentApp {
                 color: status_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cx += 88.0;
 
@@ -2926,6 +2939,7 @@ impl TorrentApp {
                 color: colors::TEAL,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cx += 88.0;
 
@@ -2938,6 +2952,7 @@ impl TorrentApp {
                 color: colors::PEACH,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cx += 88.0;
 
@@ -2950,6 +2965,7 @@ impl TorrentApp {
                 color: colors::SUBTEXT1,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cx += 68.0;
 
@@ -2965,6 +2981,7 @@ impl TorrentApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             ry += row_h;
@@ -2979,6 +2996,7 @@ impl TorrentApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -2998,6 +3016,7 @@ impl TorrentApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         };
@@ -3085,6 +3104,7 @@ impl TorrentApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: value_x,
@@ -3094,6 +3114,7 @@ impl TorrentApp {
                 color: colors::TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_val_w),
+                overflow: TextOverflow::Ellipsis,
             });
             dy += 22.0;
         }
@@ -3114,6 +3135,7 @@ impl TorrentApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         };
@@ -3180,6 +3202,7 @@ impl TorrentApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -3199,6 +3222,7 @@ impl TorrentApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         };
@@ -3266,6 +3290,7 @@ impl TorrentApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         };
@@ -3409,6 +3434,7 @@ impl TorrentApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: value_x,
@@ -3418,6 +3444,7 @@ impl TorrentApp {
                 color: colors::TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_val_w),
+                overflow: TextOverflow::Ellipsis,
             });
             sy += 22.0;
         }
@@ -4176,6 +4203,7 @@ mod tests {
                 font_size,
                 font_weight,
                 max_width: Some(_),
+                overflow: TextOverflow::Ellipsis,
                 ..
             } = cmd
             else {
@@ -4209,6 +4237,7 @@ mod tests {
                     text,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_),
+                    overflow: TextOverflow::Ellipsis,
                     ..
                 } if (tx - left).abs() < 0.01 => Some(text.clone()),
                 _ => None,

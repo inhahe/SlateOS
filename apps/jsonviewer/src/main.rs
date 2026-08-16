@@ -46,7 +46,7 @@
 #![allow(dead_code)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
@@ -2625,6 +2625,7 @@ impl App {
             font_size: TITLE_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Toolbar buttons
@@ -2652,6 +2653,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             bx += bw + 8.0;
         }
@@ -2714,6 +2716,7 @@ impl App {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_width - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Close button
@@ -2726,6 +2729,7 @@ impl App {
                     font_size: SMALL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -2749,6 +2753,7 @@ impl App {
             font_size: NORMAL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Bottom line
@@ -2803,6 +2808,7 @@ impl App {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             mode_x += mode_width + 4.0;
@@ -2861,6 +2867,7 @@ impl App {
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -2890,6 +2897,7 @@ impl App {
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - PADDING * 2.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 return;
             }
@@ -2942,6 +2950,7 @@ impl App {
                         font_size: SMALL_TEXT,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -2955,6 +2964,7 @@ impl App {
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width * 0.4),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Colon separator
@@ -2967,6 +2977,7 @@ impl App {
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Value
@@ -2979,6 +2990,7 @@ impl App {
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - value_x - PADDING),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -2999,6 +3011,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -3050,6 +3063,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(gutter_width - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Highlighted spans
@@ -3069,6 +3083,7 @@ impl App {
                         font_size: NORMAL_TEXT,
                         font_weight: span_weight,
                         max_width: Some(width - span_x - PADDING),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     // A key is drawn bold and its value is not, so each run
                     // has to advance the pen by its own width in its own
@@ -3095,6 +3110,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -3120,6 +3136,7 @@ impl App {
                 font_size: NORMAL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         }
@@ -3157,6 +3174,7 @@ impl App {
                         FontWeightHint::Regular
                     },
                     max_width: Some(width - PADDING * 2.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -3179,6 +3197,7 @@ impl App {
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 return;
             }
@@ -3368,6 +3387,7 @@ impl App {
                 font_size: NORMAL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         }
@@ -3383,6 +3403,7 @@ impl App {
             font_size: HEADER_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         if diff_results.is_empty() {
@@ -3399,6 +3420,7 @@ impl App {
                 font_size: NORMAL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         }
@@ -3447,6 +3469,7 @@ impl App {
                     font_size: HEADER_TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Path
@@ -3458,6 +3481,7 @@ impl App {
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width * 0.6),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Values
@@ -3470,6 +3494,7 @@ impl App {
                         font_size: SMALL_TEXT,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width * 0.4),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
                 if !entry.right.is_empty() {
@@ -3481,6 +3506,7 @@ impl App {
                         font_size: SMALL_TEXT,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width * 0.4),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -3528,6 +3554,7 @@ impl App {
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         section_y += 20.0;
 
@@ -3551,6 +3578,7 @@ impl App {
                     font_size: SMALL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 12.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -3575,6 +3603,7 @@ impl App {
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         section_y += 20.0;
 
@@ -3595,6 +3624,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: sidebar_x + PADDING + 6.0,
@@ -3604,6 +3634,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 12.0),
+                overflow: TextOverflow::Ellipsis,
             });
             section_y += 48.0;
         } else if doc.parsed.is_some() {
@@ -3623,6 +3654,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             section_y += 30.0;
         } else {
@@ -3634,6 +3666,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             section_y += 24.0;
         }
@@ -3657,6 +3690,7 @@ impl App {
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         section_y += 20.0;
 
@@ -3677,6 +3711,7 @@ impl App {
                     font_size: SMALL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cmds.push(RenderCommand::Text {
                     x: sidebar_x + PADDING + 80.0,
@@ -3686,6 +3721,7 @@ impl App {
                     font_size: SMALL_TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 section_y += 18.0;
             }
@@ -3711,6 +3747,7 @@ impl App {
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         section_y += 20.0;
 
@@ -3733,6 +3770,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: sidebar_x + PADDING + 80.0,
@@ -3742,6 +3780,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             section_y += 16.0;
         }
@@ -3792,6 +3831,7 @@ impl App {
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Center: edit mode indicator
@@ -3804,6 +3844,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -3817,6 +3858,7 @@ impl App {
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -3843,6 +3885,7 @@ impl App {
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Search input
@@ -3870,6 +3913,7 @@ impl App {
             font_size: NORMAL_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(284.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Result count
@@ -3886,6 +3930,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         } else if !self.search_query.is_empty() {
             cmds.push(RenderCommand::Text {
@@ -3896,6 +3941,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -3924,6 +3970,7 @@ impl App {
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Close button
@@ -3935,6 +3982,7 @@ impl App {
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Bottom line
@@ -3985,6 +4033,7 @@ impl App {
             font_size: NORMAL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Error details
@@ -3999,6 +4048,7 @@ impl App {
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PADDING * 2.0 - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

@@ -21,7 +21,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -1283,6 +1283,7 @@ impl PdfViewerApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
             btn_x += 128.0;
         }
@@ -1328,6 +1329,7 @@ impl PdfViewerApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(140.0),
+                overflow: TextOverflow::Ellipsis,
             });
             btn_x += 148.0;
         }
@@ -1419,6 +1421,7 @@ impl PdfViewerApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1509,6 +1512,7 @@ impl PdfViewerApp {
                 font_size: TAB_TITLE_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(title_room),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Close button (x) on each tab
@@ -1522,6 +1526,7 @@ impl PdfViewerApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             tab_x += tab_w + 2.0;
@@ -1544,6 +1549,7 @@ impl PdfViewerApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1606,6 +1612,7 @@ impl PdfViewerApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(panel_tab_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1652,6 +1659,7 @@ impl PdfViewerApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         };
@@ -1696,6 +1704,7 @@ impl PdfViewerApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(thumb_w),
+                overflow: TextOverflow::Ellipsis,
             });
 
             y += thumb_h + 24.0;
@@ -1719,6 +1728,7 @@ impl PdfViewerApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         };
@@ -1732,6 +1742,7 @@ impl PdfViewerApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -1755,6 +1766,7 @@ impl PdfViewerApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -1771,6 +1783,7 @@ impl PdfViewerApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(SIDEBAR_WIDTH - indent - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             y += line_h;
@@ -1794,6 +1807,7 @@ impl PdfViewerApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         };
@@ -1813,6 +1827,7 @@ impl PdfViewerApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -1853,6 +1868,7 @@ impl PdfViewerApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 46.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             y += 22.0;
@@ -1913,6 +1929,7 @@ impl PdfViewerApp {
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         tree.push(RenderCommand::Text {
@@ -1923,6 +1940,7 @@ impl PdfViewerApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Recent files
@@ -1935,6 +1953,7 @@ impl PdfViewerApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let mut ry = cy + 94.0;
@@ -1952,6 +1971,7 @@ impl PdfViewerApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(280.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 ry += 20.0;
             }
@@ -2119,6 +2139,7 @@ impl PdfViewerApp {
                 font_size: font_sz,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2171,6 +2192,7 @@ impl PdfViewerApp {
                     font_size: 12.0 * zoom,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             AnnotationType::Freehand {
@@ -2317,6 +2339,7 @@ impl PdfViewerApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Search query text
@@ -2338,6 +2361,7 @@ impl PdfViewerApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(180.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Match count
@@ -2351,6 +2375,7 @@ impl PdfViewerApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2401,6 +2426,7 @@ impl PdfViewerApp {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(200.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 sx += 210.0;
             }
@@ -2414,6 +2440,7 @@ impl PdfViewerApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             sx += 110.0;
 
@@ -2430,6 +2457,7 @@ impl PdfViewerApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             sx += 110.0;
 
@@ -2443,6 +2471,7 @@ impl PdfViewerApp {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(60.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -2467,6 +2496,7 @@ impl PdfViewerApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(60.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

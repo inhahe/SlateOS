@@ -5,7 +5,7 @@
 //! image viewers, document readers, and custom file type associations.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -699,6 +699,7 @@ impl DefaultAppsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Tab bar
@@ -732,6 +733,7 @@ impl DefaultAppsUI {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             tab_x += tw + 4.0;
@@ -781,6 +783,7 @@ impl DefaultAppsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 24.0;
 
@@ -801,6 +804,7 @@ impl DefaultAppsUI {
             color: PEACH,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         for category in ContentCategory::all() {
@@ -826,6 +830,7 @@ impl DefaultAppsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Category name
@@ -837,6 +842,7 @@ impl DefaultAppsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Current default app
@@ -849,6 +855,7 @@ impl DefaultAppsUI {
                 color: BLUE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Expand indicator
@@ -860,6 +867,7 @@ impl DefaultAppsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // If expanded, show alternative apps
@@ -896,6 +904,7 @@ impl DefaultAppsUI {
                             FontWeightHint::Regular
                         },
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
 
                     alt_x += chip_w + 8.0;
@@ -938,6 +947,7 @@ impl DefaultAppsUI {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 44.0;
 
@@ -953,6 +963,7 @@ impl DefaultAppsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 24.0;
 
@@ -985,6 +996,7 @@ impl DefaultAppsUI {
                 color: SUBTEXT1,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             row_y += 20.0;
 
@@ -1022,6 +1034,7 @@ impl DefaultAppsUI {
                     color: LAVENDER,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // App name
@@ -1033,6 +1046,7 @@ impl DefaultAppsUI {
                     color: if is_custom { PEACH } else { TEXT },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Custom badge
@@ -1045,6 +1059,7 @@ impl DefaultAppsUI {
                         color: PEACH,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -1070,6 +1085,7 @@ impl DefaultAppsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 24.0;
 
@@ -1101,6 +1117,7 @@ impl DefaultAppsUI {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 44.0;
 
@@ -1136,6 +1153,7 @@ impl DefaultAppsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Description
@@ -1147,6 +1165,7 @@ impl DefaultAppsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 120.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // System badge
@@ -1167,6 +1186,7 @@ impl DefaultAppsUI {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -1182,6 +1202,7 @@ impl DefaultAppsUI {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 32.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 

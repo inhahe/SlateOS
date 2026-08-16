@@ -17,7 +17,7 @@
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ---------------------------------------------------------------------------
@@ -509,6 +509,7 @@ impl MetronomeApp {
             font_size: 28.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Playing indicator
@@ -525,6 +526,7 @@ impl MetronomeApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // BPM display
@@ -544,6 +546,7 @@ impl MetronomeApp {
             font_size: 56.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: 200.0,
@@ -553,6 +556,7 @@ impl MetronomeApp {
             font_size: 18.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Tempo name
@@ -564,6 +568,7 @@ impl MetronomeApp {
             font_size: 18.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Time signature & subdivision
@@ -581,6 +586,7 @@ impl MetronomeApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Beat indicator (circles for each beat in the measure)
@@ -629,6 +635,7 @@ impl MetronomeApp {
                 font_size: 16.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -672,6 +679,7 @@ impl MetronomeApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -699,6 +707,7 @@ impl MetronomeApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -720,6 +729,7 @@ impl MetronomeApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -733,6 +743,7 @@ impl MetronomeApp {
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -743,6 +754,7 @@ impl MetronomeApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let settings = [
@@ -797,6 +809,7 @@ impl MetronomeApp {
                 font_size: 15.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }

@@ -33,7 +33,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -1564,6 +1564,7 @@ impl SchedulerUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Task count in header.
@@ -1580,6 +1581,7 @@ impl SchedulerUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1660,6 +1662,7 @@ impl SchedulerUI {
             font_size: FONT_SIZE,
             font_weight: if tasks_selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         if tasks_selected {
@@ -1684,6 +1687,7 @@ impl SchedulerUI {
             font_size: FONT_SIZE,
             font_weight: if hist_selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         if hist_selected {
@@ -1741,6 +1745,7 @@ impl SchedulerUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(140.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1801,6 +1806,7 @@ impl SchedulerUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(145.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Command.
@@ -1812,6 +1818,7 @@ impl SchedulerUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(215.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Frequency.
@@ -1823,6 +1830,7 @@ impl SchedulerUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(135.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Next run.
@@ -1839,6 +1847,7 @@ impl SchedulerUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(135.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Last result.
@@ -1855,6 +1864,7 @@ impl SchedulerUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(115.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1868,6 +1878,7 @@ impl SchedulerUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1912,6 +1923,7 @@ impl SchedulerUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(180.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1940,6 +1952,7 @@ impl SchedulerUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(165.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Task name.
@@ -1951,6 +1964,7 @@ impl SchedulerUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(195.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Status.
@@ -1967,6 +1981,7 @@ impl SchedulerUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(110.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Duration.
@@ -1978,6 +1993,7 @@ impl SchedulerUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(115.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Error.
@@ -1990,6 +2006,7 @@ impl SchedulerUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(195.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -2004,6 +2021,7 @@ impl SchedulerUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2040,6 +2058,7 @@ impl SchedulerUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2095,6 +2114,7 @@ impl SchedulerUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_w - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut field_y = dy + 44.0;
@@ -2111,6 +2131,7 @@ impl SchedulerUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
         self.render_text_field(cmds, value_x, field_y - 2.0, 280.0, &self.form.name);
         field_y += field_spacing;
@@ -2124,6 +2145,7 @@ impl SchedulerUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
         self.render_text_field(cmds, value_x, field_y - 2.0, 280.0, &self.form.command);
         field_y += field_spacing;
@@ -2137,6 +2159,7 @@ impl SchedulerUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
         let freq_label = FREQUENCY_LABELS
             .get(self.form.frequency_index)
@@ -2159,6 +2182,7 @@ impl SchedulerUI {
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(100.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 self.render_text_field(cmds, value_x, field_y - 2.0, 280.0, day);
                 field_y += field_spacing;
@@ -2173,6 +2197,7 @@ impl SchedulerUI {
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(100.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 let day_text = format!("{}", self.form.monthly_day);
                 self.render_text_field(cmds, value_x, field_y - 2.0, 280.0, &day_text);
@@ -2188,6 +2213,7 @@ impl SchedulerUI {
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(100.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 let min_text = format!("{}", self.form.interval_minutes);
                 self.render_text_field(cmds, value_x, field_y - 2.0, 280.0, &min_text);
@@ -2203,6 +2229,7 @@ impl SchedulerUI {
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(100.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 self.render_text_field(cmds, value_x, field_y - 2.0, 280.0, &self.form.cron_expr);
                 field_y += field_spacing;
@@ -2220,6 +2247,7 @@ impl SchedulerUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::StrokeRect {
             x: value_x,
@@ -2300,6 +2328,7 @@ impl SchedulerUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_w - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Message.
@@ -2317,6 +2346,7 @@ impl SchedulerUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Buttons.
@@ -2364,6 +2394,7 @@ impl SchedulerUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 12.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2397,6 +2428,7 @@ impl SchedulerUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

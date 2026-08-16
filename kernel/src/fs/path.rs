@@ -492,6 +492,24 @@ impl core::borrow::Borrow<Path> for PathBuf {
     }
 }
 
+/// The other half of the `Borrow` pair, and the one `Cow<'_, Path>` requires.
+///
+/// `Path` is unsized, so the blanket `impl<T: Clone> ToOwned for T` does not
+/// apply and this has to be spelled out — exactly as `std` spells it out for
+/// `str`, `[T]` and its own `Path`. Without it there is no way to express "this
+/// path is either the borrowed input or a newly built one", which is the shape
+/// of every path-translation API in the kernel (`namespace::resolve_path` and
+/// friends): the common case returns its input untouched, and typing that as
+/// `PathBuf` forces an allocation and a byte copy purely to say *nothing
+/// happened*.
+impl ToOwned for Path {
+    type Owned = PathBuf;
+
+    fn to_owned(&self) -> PathBuf {
+        self.to_path_buf()
+    }
+}
+
 impl AsRef<Path> for PathBuf {
     fn as_ref(&self) -> &Path {
         self.as_path()

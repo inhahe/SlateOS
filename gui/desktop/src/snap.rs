@@ -28,7 +28,7 @@
 //! ```
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -808,6 +808,7 @@ impl SnapManager {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(zone.width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -855,6 +856,7 @@ impl SnapManager {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(zone.width - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -937,6 +939,7 @@ impl SnapManager {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PICKER_WIDTH - 2.0 * PICKER_PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Thumbnails.

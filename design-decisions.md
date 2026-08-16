@@ -13119,3 +13119,1053 @@ work (*"the first fastpy utility clears both bars"*), so the person who causes
 the event is the person reading the file's subject matter at that moment. If
 that proves optimistic, the escalation is a check in the task-completion
 checklist, not a bigger file.
+
+## §200 — The B-KNULLJUMP hunt runs the *uninstrumented* kernel first (E), and escalates to the optimized KASAN build (A) only if that fails to settle it
+
+**Date:** 2026-08-15
+**Decided by:** Operator (Claude proposed this option — it was Claude's revised
+recommendation after measuring the instrumented boot; the operator adopted it)
+
+**In short:** there is a rare bug — a jump through a null pointer inside the
+kernel, `B-KNULLJUMP` — that shows up on roughly **1 boot in 120**. To catch it
+in the act we built a special "instrumented" kernel that checks every memory
+access, but that kernel turned out to boot **~20× slower**, which would make the
+hunt take over a week of machine time. The question was how to make the hunt
+affordable. The answer: **first just run the ordinary kernel** many times, now
+that it carries a suspected fix, and see whether the bug stops happening. Only
+if that is inconclusive do we go back to the slow instrumented kernel, built
+with optimizations on to claw back the speed.
+
+**The options, and why E won.** The full option set (A–E, with measurements) is
+preserved in `open-questions.md` → Q43's original analysis, which this entry
+replaces as the decision of record.
+
+- **E — soak the plain kernel carrying the `B-NO-CLD-ON-INTERRUPT-ENTRY` fix.**
+  Cheap (~283–318 s/boot, versus 5500–8500 s instrumented), and it tests the
+  thing we actually care about: whether the bug still happens in the kernel we
+  ship. Chosen as the first step.
+- **A — build the instrumented kernel `--release` and soak that.** Kept as the
+  fallback, not discarded.
+
+**"If necessary" has a specific shape, and it is not symmetric.** This is the
+half most likely to be misread later:
+
+- **E *catching* a B-KNULLJUMP falsifies the `B-NO-CLD-ON-INTERRUPT-ENTRY`
+  hypothesis**, and is precisely the outcome that gives A a well-motivated job.
+- **E coming back clean is suggestive, not proof.** It cannot separate "fixed"
+  from "got lucky" at a 1-in-120 base rate. A clean E is therefore **a reason to
+  stop, not a reason to escalate** — escalating on it would spend a week of
+  machine time to re-answer a question E has already answered as well as it can
+  be answered.
+
+**A's cheap gate still stands, and is not optional.** **No release kernel has
+ever been booted in this project** — every boot test to date is the debug
+profile. So before any release soak: build `--release`, run
+`scripts/kasan-check-preshadow.py`, and attempt **exactly one** boot (~30 min).
+That answers both unknowns — does it boot at all, and what does it actually
+cost — before the soak is committed to.
+
+**A clean *release* soak is weaker evidence than a clean debug one.**
+Optimization perturbs instruction timing and layout, which is exactly what a
+1-in-120 race depends on; the base rate itself is a debug-build measurement and
+may not carry over. Any result reported from A must carry this caveat attached
+(§119 already records it).
+
+**Two caveats on E's own numbers**, from the 2026-08-13 update: it samples a
+SMAP-enabled kernel, which the 1-in-120 base rate was **not** measured on, and
+its per-boot wall time is ~355 s rather than the ~283–318 s the ~21 h soak
+budget was built from.
+
+**Where it lives:** `scripts/kasan-build.sh`,
+`scripts/kasan-check-preshadow.py`, `scripts/boot-test.sh` (the soak driver),
+`known-issues.md` → `B-KNULLJUMP` and `B-NO-CLD-ON-INTERRUPT-ENTRY`, and
+§107/§118/§119 for how the instrumented profile got here.
+
+**Provenance:** the operator answered in a Lane B session ("q43: e, then a if
+necessary"); Lane B relayed it as `requests/b-a-operator-answered-q43.md`
+rather than writing into Lane A's §200–299 range itself.
+
+## §201 — Install the GNAT/SPARK toolchain **with `gnatprove`**; clang + lld (and therefore CFI) is deferred, not refused
+
+**Date:** 2026-08-15
+**Decided by:** Operator (both halves; on the prover, the operator challenged
+Claude's original framing and was right — see below)
+
+**In short:** two unrelated compiler installs were bundled into one question.
+**Ada/SPARK** is a second programming language whose toolchain can
+mathematically *prove* that driver code has no buffer overflows and no illegal
+state transitions; `design.txt` (lines 84–95) wants it for safety-critical
+drivers. That one is **approved, including the prover program `gnatprove`**.
+**clang + lld** is an alternative C compiler and linker, whose point would be
+enabling **CFI** (Control-Flow Integrity — a compiler feature that stops an
+attacker redirecting a function call to code of their choosing). That one is
+**"not yet"**: deferred with a trigger, not rejected.
+
+**On the prover — why "including gnatprove" is the load-bearing half.** The
+original question carried a con reading, in effect, *"if we install a toolchain
+without the prover we get FFI plumbing and none of the proof."* The operator
+challenged it — *"why wouldn't we install gnatprove?"* — and that challenge was
+correct on the facts: `gnatprove` is **freely available on this platform**.
+SPARK is open source, AdaCore publishes Windows x86-64 binaries, there is an
+Alire crate (`alr with gnatprove`), and `GNAT-FSF-builds` ships FSF builds. No
+licence and no cost blocks it. The bullet was a **route warning**, not a veto.
+The operator then answered by explicitly naming the prover, which settles it:
+**the prover is part of the definition of done.** Ada-without-SPARK is just
+another systems language, and we already have a memory-safe one — the feature
+is justified in `design.txt` on the *proof* specifically.
+
+**Three consequences that follow directly:**
+
+1. **The install route cannot be MSYS2.** `mingw-w64-x86_64-gcc-ada` ships
+   `gnat` and `gprbuild` and **no** `gnatprove`, and MSYS2 has no such package.
+   Taking the easy route would buy the entire cost of the feature and none of
+   its justification. The route must be **Alire** (`alr toolchain --select`,
+   then the `gnatprove` crate) or **AdaCore's own download**.
+2. **The prover stack is a further install:** Why3 + Alt-Ergo, optionally Z3 and
+   CVC5. `gnatprove` without a solver proves nothing.
+3. **GPL is not a problem here.** The toolchain is a tool we *run*, not
+   something we link; it does not reach our output.
+
+**Two sub-decisions this does *not* settle — they are Lane A's to make:**
+
+- **Which GNAT distribution.** FSF-via-Alire now looks clearly preferable to
+  GNAT Pro precisely because it carries `gnatprove`, but nobody has recorded
+  that as a decision.
+- **The restricted runtime: ZFP vs light.** A freestanding kernel cannot use
+  the full Ada runtime, which wants an OS underneath it. Configuration work
+  with real content, not part of the install.
+
+**On clang + lld — "not yet" is a deferral with a trigger.** The install is
+small and uncontroversial; what is missing is a *reason*. We use C only for
+ported code, and the one piece of C compiled today
+(`scripts/create-ext4-rootfs.sh`) is built with gcc — so enabling CFI now would
+change Lane B's build for a benefit that only materialises when the large C
+ports land, and would pull in LTO (whole-program optimization at link time),
+which slows every build it touches. Nothing is blocked by waiting. It moves to
+`deferred-questions.md` as **D-Q2**, with the trigger being **the first
+substantial C port entering the build**, so it returns when the payoff is real
+instead of being quietly dropped.
+
+**Where it lives:** the Ada/SPARK FFI bridge is a Lane A roadmap item, so the
+follow-through is Lane A's; `deferred-questions.md` → D-Q2 for the clang half;
+`design.txt` lines 84–95 for the original justification.
+
+**Provenance:** the operator answered in a Lane B session, verbatim *"q44: a,
+including gratprove."* The `q44` label is a typo for **A-Q1** — it arrived
+immediately after the real Q44 answer (`Q44: a.`), and Q44 (the libc capability
+mapping) has no option "including gnatprove". Relayed as
+`requests/b-a-operator-answered-a-q1.md`.
+
+---
+
+## §202 — When the answer does not fit, `SYS_CAP_QUERY` returns an error and writes nothing, rather than truncating and reporting the size it wanted
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+
+**In short:** A program can ask the kernel "list the permissions I hold." It
+passes a buffer — a chunk of its own memory for the kernel to write the list
+into — and says how many entries fit. Sometimes the list is longer than the
+buffer. There are two conventional ways to handle that, and this records which
+one this call uses and why: **it fails with a distinct error and writes nothing
+at all**, rather than filling the buffer with as much as fits and returning a
+number the caller might not check.
+
+**Terms:** *truncation* = writing a partial answer. *`ERANGE`* = the POSIX error
+number meaning "result too large for what you gave me" — as opposed to `EINVAL`
+("your request was malformed"), which tells a caller to stop rather than retry.
+*Probe* = calling with a null buffer purely to learn the required size.
+
+### The two shapes
+
+| Shape | On overflow | Failure mode when the caller is careless |
+|---|---|---|
+| **A — POSIX `listxattr` style** (used by `SYS_FS_LIST_XATTR`, `handlers.rs:8882`) | Return **success**, with the *required* size as the return value; write nothing | The caller treats a success as "here is your list", reads the untouched buffer, and sees whatever was there before |
+| **B — chosen here** | Return `BufferTooSmall` (`-9` → `ERANGE`); write nothing | The caller gets a negative return it must handle; ignoring it cannot be mistaken for data |
+
+### Why B, and why the codebase now has both
+
+The deciding argument is what a *silent* wrong answer means for this particular
+call. `SYS_CAP_QUERY` enumerates authority. Lane B's libc projects its result
+onto Linux `CAP_*` bits (§312). A truncated list does not read as "an error
+happened" — it reads as **"this process does not hold that capability."** So the
+failure lands as a *false negative on a permission check*, which is the
+direction nobody notices: things quietly do not work, or worse, a security
+decision is made on a short list. Under-reporting authority is the same class of
+bug as over-reporting it, minus the alarm.
+
+Shape A is not a mistake where it is used — `SYS_FS_LIST_XATTR` implements the
+POSIX `listxattr` contract, and that contract is not ours to redesign; callers
+are ported code that already expects it. This call has **no legacy contract**,
+so it takes the shape where ignoring the failure is impossible.
+
+The convenience A buys — learning the required size from the failed call — is
+retained without the hazard: **probe mode**. Passing a null pointer or a zero
+capacity returns the count and writes nothing, so "ask how big, then ask for the
+data" is two cheap calls rather than one call with two meanings. That also keeps
+the probe path off the expensive route entirely: it is answered from
+`cap_count()` without ever building the snapshot.
+
+### The cost, stated plainly
+
+A caller racing against its own capability set (one that gains a capability
+between the probe and the fetch) gets `ERANGE` and must loop. Shape A would have
+handed it the new size in the same call. The loop is two lines and terminates —
+capability grants are not adversarially fast — and this is the trade taken.
+
+### Consequence for Lane B
+
+`posix/src/errno.rs` mirrors kernel codes as a **non-exhaustive** constant
+table, so adding `-9` cannot break their build; it falls through to `EIO` until
+they map it. Until they do, an overflow reports as a generic I/O error rather
+than the retryable `ERANGE` — annoying, not wrong. Filed in the reply to
+`requests/b-a-cap-enumerating-query-syscall.md`.
+## §427 — Text that does not fit carries an overflow policy on the draw command, and the compositor draws the ellipsis
+
+**Date:** 2026-08-15
+**Decided by:** Operator (answering `open-questions.md` Q45 — "q45: a."; Claude
+raised the question and recommended A)
+**Zone:** gui-core, gui-toolkit, apps
+
+**In short.** When a piece of text is too wide for the space it was given, we
+currently just stop drawing it — no "…", no mark of any kind. So a label reading
+`Gateway 192.168.1.1 res` looks like a complete sentence rather than a truncated
+one, and a reader has no way to tell that anything was cut. The fix is to make
+every text-drawing instruction say up front what should happen when the text
+does not fit — either cut it silently or end it with "…" — so that the question
+can no longer be left unanswered by accident. The cost is that every place in
+the codebase that draws text has to be edited to say which it wants.
+
+**Context.** `RenderCommand::Text` carries an optional `max_width`. The
+compositor honours it in `draw_text` by walking glyphs and breaking before the
+first one that would cross the limit. Nothing is drawn to mark the break. A
+caller who wants the cut marked has to call `text::elide` beforehand — which
+measures the string to find the cut point, and then the compositor measures it
+again while drawing it, answering the same question twice with two
+implementations that can disagree.
+
+The result is the failure mode in `known-issues.md` →
+`TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`: well over a hundred single-line labels
+across `gui/**` and `apps/**` pass `max_width` without eliding. Most are safe
+only because their values are short and app-authored. The ones that bite carry
+user or network data — file names, SSIDs, error strings, host names — where a
+plausible-looking truncation is indistinguishable from the real value.
+
+**Options.**
+
+1. **`overflow: TextOverflow` (`Clip` | `Ellipsis`) as a field on
+   `RenderCommand::Text`; the compositor draws the ellipsis.** *What changes:*
+   text cut by `max_width` ends in "…" wherever a caller asks for it, and the
+   ellipsis is placed by the party that knows exactly where the glyphs ran out.
+   *Cost:* Rust has no per-field default in a struct variant, so this edits
+   **every** construction of `Text` in the tree.
+2. **A second variant, `RenderCommand::ElidedText`.** *What changes:* the same
+   visible outcome, with no edit to existing call sites. *Cost:* every renderer,
+   every test and every match on `RenderCommand` splits an arm forever to encode
+   one boolean.
+3. **A builder — `Text::new(..).ellipsis()`.** *What changes:* the same outcome,
+   opt-in. *Cost:* the struct-literal form stays available and stays wrong, so
+   the next label someone writes still has the bug.
+4. **Sweep `text::elide` across the call sites that need it.** *What changes:*
+   today's hundred-odd bad labels get fixed. *Cost:* nothing prevents the
+   hundred-and-first, and the double-measurement stays.
+
+**The decision: option 1.** It is the only option that makes the mistake
+*unrepresentable* — after it, a `Text` command cannot exist without having
+answered "and what if it doesn't fit?". The operator was told the churn was
+several hundred sites and chose A anyway, on exactly that ground. (Measured
+afterwards: **4517 `RenderCommand::Text {` sites across 208 files**, well above
+the estimate. That does not reopen the decision — the decision was about
+representability, not diff size — but it does mean the edit is *scripted*, not
+made by hand.)
+
+**Execution constraint, and it is load-bearing.** This lands as **its own commit
+with nothing else in flight.** A four-thousand-site mechanical diff entangled
+with real work cannot be separated afterwards; that is precisely the trap §310
+(the repo-wide rustfmt) exists to document, and it cost a revert-and-redo cycle
+in `posix` when it happened there.
+
+**A sub-decision left to Claude, recorded here so it can be overruled.** For the
+sites that pass `max_width: None`, the choice is vacuous and they get `Clip`.
+For the sites that *do* set a `max_width`, the mechanical translation would be
+`Clip` — that preserves today's behaviour exactly. It is nonetheless the wrong
+default: today's behaviour *is* the reported bug, and a scripted sweep that
+faithfully preserves a bug at four thousand sites has done nothing. Those sites
+default to **`Ellipsis`**. The consequence is that some labels which currently
+fill their box to the last pixel will end in "…" one glyph earlier; that is the
+intended change, not a regression. Sites where clipping is genuinely correct —
+a progress bar's fill, a decorative rule — are those that should be
+individually set back to `Clip` afterwards, because they are the rare case and
+can be argued for one at a time.
+
+**Where it lands.** `gui/toolkit/src/render.rs` (`RenderCommand::Text`, the
+`RenderTree::text()` helper), `gui/compositor/src/main.rs` (`draw_text` — the
+`break` at the limit becomes the place the ellipsis is drawn),
+`gui/toolkit/src/text.rs` (`elide` / `elide_start`, which now overlap the
+compositor's job and need reconciling rather than deleting — they still serve
+callers who need the *string*, not the pixels), and every `max_width: Some(..)`
+in `gui/**` and `apps/**`. Closes `known-issues.md` →
+`TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`.
+
+## §428 — Normalization stays font-blind; the font-fitting stage decomposes what the face cannot draw
+
+**Date:** 2026-08-15
+**Decided by:** Operator (answering `open-questions.md` C-Q1 — "c-q1: c.";
+Claude raised the question and recommended C)
+**Zone:** gui-core
+
+**In short.** Some accented letters can be written two ways: as one character
+(`ḉ`) or as a plain `c` with two accent marks stacked on it. A font may contain
+the pieces but not the single combined character. Today, when that happens, we
+draw an empty box — the "missing character" rectangle — where other systems draw
+the letter correctly by falling back to the pieces. The question was *which part
+of our code should notice*. We chose: the part that already knows what the font
+contains, rather than the part that converts text into its canonical spelling.
+The visible result is that those letters render correctly; the text-conversion
+step keeps knowing nothing about fonts, which is what lets it be tested and
+cached on its own.
+
+**Context.** `gui/font/src/norm.rs` is layered on a principle written into its
+module doc: **`nfc` answers a question about *text*** — NFC is the Unicode rule
+that spells `e` + `´` as the single character `é` — **and never looks at a font;
+`fit_to_face` answers a question about the *font*** and does not renormalize.
+Composition is a property of the string, so it is decided before any face
+(a font file as loaded for rendering) is consulted.
+
+HarfBuzz — the reference text shaper (the library that turns characters into
+positioned glyphs), which we run a differential sweep against — does the
+opposite. It decomposes to NFD (the fully-separated spelling) and then
+*recomposes only where the face has a glyph*, so the same string normalizes
+differently in two different fonts.
+
+The question surfaced as the entire residue of that sweep. Fixing
+`TD-FONT-HAS-A-HANGUL-SHAPER-NOTHING-CALLS` took the disagreement count from 892
+to 339, and the remaining 339 are **one question asked 339 times**, not a
+scatter: `\u1e09` (ḉ, c with cedilla and acute) 255 cases, `\u212b` (Å, the
+angstrom sign) 57, `été` 10, and a short tail. Concretely, for `\u1e09` in a
+face holding `c`, the cedilla and the acute but no precomposed `ḉ`: we emit one
+missing-glyph box, HarfBuzz emits three glyphs that stack into the right-looking
+character.
+
+**Options.**
+
+- **A — keep the current layering unchanged.** *What changes:* nothing; we keep
+  drawing a box where HarfBuzz draws correct text. *Pro:* each stage has one job
+  and one input. *Con:* the user does not care which stage was principled.
+- **B — adopt HarfBuzz's font-aware recomposition wholesale.** *What changes:*
+  the sweep residue goes to near zero and partial-coverage faces render
+  correctly. *Con:* normalization becomes a function of `(text, face)` — no
+  longer hoistable out of a loop, no longer cacheable per string, not reasonable
+  about without a font in hand; `norm.rs`'s layering claim becomes false.
+- **C — a narrow fallback: `nfc` stays pure, but `fit_to_face` decomposes a
+  composed character it cannot draw when the pieces *are* drawable.** *What
+  changes:* the same visible outcome as B for exactly the failing case, with A's
+  layering intact. *Con:* two mechanisms where HarfBuzz has one — we agree with
+  it on output while diverging on structure.
+
+**The decision: option C.** The decomposition happens in the stage that already
+owns "what can this face draw", and `split_undrawable` already exists with
+exactly that shape — which is why C was the recommendation rather than a
+compromise between the other two. Expected result: the 339 disagreements move to
+`agree` without `nfc` ever taking a face as input.
+
+**The cost accepted, and what to actually test.** Running two mechanisms where
+HarfBuzz runs one means we can match its output while diverging on how we got
+there, and divergence in structure eventually shows up as divergence in output.
+The concrete risk named in the question is **mark reordering after a late
+decomposition** — when several accents attach to one letter, their order matters,
+and HarfBuzz gets it right by construction because it decomposes before
+reordering, whereas we would decompose after. Treat that as the thing to verify
+rather than assume: the sweep is the instrument, and any ordering case it
+surfaces is this decision's bill coming due, not a surprise.
+
+**Why B is worth keeping written down.** If a future case cannot be fixed inside
+`fit_to_face`, B is the argument that has to be beaten, and it should not be
+re-litigated from scratch. It was refused for one reason: it makes normalization
+depend on the font, and everything we do with normalized text — caching it,
+hoisting it out of a render loop, testing it without a font — depends on it not
+doing that.
+
+**Where it lands.** `gui/font/src/norm.rs` (`fit_to_face`, `split_undrawable`,
+and the module doc's layering paragraph, which now needs a sentence saying the
+fallback exists and why it does not violate the principle),
+`gui/font/src/scaled.rs::shape` (call order), and
+`gui/font/tools/harfbuzz_sweep.py` (the 339 should move to `agree`). Reference:
+HarfBuzz `src/hb-ot-shape-normalize.cc`,
+`HB_OT_SHAPE_NORMALIZATION_MODE_COMPOSED_DIACRITICS_NO_SHORT_CIRCUIT`.
+
+## §429 — A required field on a shared type is added and filled in one commit, across lane boundaries
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous) — lane C
+
+**In short:** The project is worked by three agents who each own a slice of the
+tree and are forbidden from editing each other's files. When one of them needs a
+change in another's slice, they leave a note in a `requests/` folder and the
+other picks it up later. That works when the two halves of the change are
+independently valid. It does not work when a shared data structure gains a
+field that every user of it *must* fill in: the half that adds the field and the
+half that fills it in are each, alone, a codebase that does not compile. There
+is no order to do them in. This entry decides that in that specific case the
+adding lane fills in the other lanes' sites too, in the same commit, and tells
+them afterwards.
+
+### The situation that forced it
+
+§427 added a required `overflow` field to `guitk::render::RenderCommand::Text`.
+That type lives in lane C's tree but is *constructed* wherever anything draws
+text: 4,517 occurrences across 208 files in lane C's own tree, and 31 more in
+`init/login/src/main.rs`, which belongs to lane B. `net/`, `netscan/` and `pkg/`
+have none, so that one file is the whole out-of-lane reach. That number had to
+be measured before the options below could be weighed at all — the shape of the
+fallout is what decides whether this is a request or something else — and it is
+what makes option D tractable. Had the reach been thirty files across two lanes,
+the answer would be C.
+
+Rust has no per-field default in an enum struct variant. That is not incidental
+to §427; it is the whole mechanism the operator chose it for. So:
+
+- Lane C adds the field. `init/login` no longer compiles. Because the boot test
+  builds the whole workspace, **`main` is red for every lane** until lane B
+  happens to read its dropbox — which, as `roadmap.md` notes from experience,
+  can be a day, because `requests/` is a set of files on a branch rather than a
+  mailbox, and a request is invisible until the recipient merges.
+- Lane B fills the field in first. It cannot: the field does not exist.
+
+Both orderings are red. The two halves are not independently valid, and the
+request mechanism can only express changes that are.
+
+### The options
+
+**A. File a request and let the tree stay red in between.** Honest about the
+ownership rule and costs nothing to implement. It also means deliberately
+pushing a `main` that does not build, for an unbounded period, in a project
+whose stated rule is "never merge a red tree to `main` to unblock myself" —
+and it blocks the *other* lane too, which had no part in the change.
+
+**B. Add the field with a `Default` so unfilled sites still compile.** Keeps
+every commit green and every lane inside its own tree. It also destroys the
+point: a defaulted `overflow` means all 4,548 sites silently keep today's
+behaviour,
+and today's behaviour is the reported bug. The operator considered and rejected
+exactly this under §427. Reintroducing it here as a *process* convenience would
+be overturning a decision that was not mine to overturn.
+
+**C. Add a second variant / a parallel type, migrate lane by lane, delete the
+old one at the end.** Every commit is green and no lane touches another's files.
+It is the textbook answer and it is a real option. Against it: it is three
+round-trips through the dropbox for a mechanical change, the intermediate state
+has two ways to spell the same command (which is its own bug surface), and the
+"delete the old one at the end" step is the one that never happens — it depends
+on every lane having finished, with nothing failing if it is skipped.
+
+**D. (chosen) The commit that adds a required field to a shared type also fills
+in every construction of it, wherever it lives, and notifies the other lane
+afterwards via `requests/`.** One green commit, no intermediate dialect, no
+dangling cleanup step. The cost is real and is the reason this entry exists:
+lane C wrote to lane B's tree, which the ownership rule forbids outright, and
+the ownership rule exists to prevent the single most expensive failure in this
+arrangement — two agents editing one file and one silently clobbering the other.
+
+### Why D, and what makes it safe
+
+The clobber risk is not a constant; it is a function of whether the other lane
+has work in flight in that file. That is measurable, so it was measured before
+the decision rather than assumed: `origin/lane-b` was **0 commits ahead of
+`origin/main`** — nothing in flight anywhere in lane B — and
+`init/login/src/main.rs` had last been touched only by a repo-wide rename. The
+risk the rule guards against was, at that moment, nil.
+
+So D is conditional, and the conditions are the decision:
+
+1. **The change must be mechanical.** A rule stated in one line, applied
+   uniformly, with no judgement about the other lane's screens. Here:
+   `max_width: Some(..)` → `Ellipsis`, `max_width: None` → `Clip`.
+2. **The other lane's branch must be at or behind `main` in the affected
+   files** — checked with `git log origin/lane-<x> --not origin/main -- <path>`,
+   not assumed. If they have work in flight, this is off the table and the
+   answer reverts to C.
+3. **It must be scripted, and the script committed**, so the other lane can read
+   precisely what was done to their file and re-run it to confirm it is a fixed
+   point. (`scripts/q45_apply.py`.)
+4. **A `requests/<mine>-<theirs>-*.md` must be filed in the same commit**,
+   stating what was changed, by what rule, and that they may freely correct any
+   site without asking — it is their file and they know what those screens are
+   for.
+
+If any of the four fails, C is the fallback, and the extra round-trips are the
+price of not writing to someone else's tree.
+
+### What this does not license
+
+It is not a general exemption from the ownership rule. It covers exactly the
+case where a change is **atomic by the type system** — the compiler will not
+accept either half alone. Anything a lane could plausibly do in two green
+commits still goes through `requests/` and waits. In particular, "it would be
+faster if I just did it" is not this rule; the trigger is "there is no ordering
+of commits that compiles", which is a fact about the change and not a judgement
+about the schedule.
+
+### Where it bites
+
+`scripts/q45_apply.py` (the `ROOTS` list includes `init`, with a comment
+pointing here), `requests/c-b-render-text-gained-a-required-field.md`, and
+`roadmap.md` → "Three-Agent Parallel Execution", whose `requests/` protocol this
+entry qualifies. The next required field on a shared type will hit the same wall;
+this is the answer for it.
+
+## §430 — A language is a *list* of OpenType tags generated from HarfBuzz, and the first one the font registers wins
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+
+**In short:** A font can hold rules that apply to one language and not another
+written in the same alphabet — Turkish spells the lowercase of `I` as a dotless
+`ı`, Romanian wants a comma under `ș` rather than a cedilla. To reach those
+rules the shaper has to turn what the caller knows ("this text is Turkish",
+written `tr`) into the four-letter code the font filed them under (`TRK `).
+There is no rule that derives one from the other: it is a lookup table of about
+eleven hundred entries that Microsoft maintains. Three things were decided
+here — where that table comes from, what to do when one language maps to
+several codes, and what to store per font.
+
+### The decisions
+
+**1. The table is generated from HarfBuzz's source, not written by hand.**
+`gui/font/tools/gen_lang_tables.py` parses HarfBuzz's `hb-ot-tag-table.hh` and
+`hb-ot-tag.cc` and emits `gui/font/src/lang_tables.rs` (148 complex rules, 188
+two-letter keys, 916 three-letter keys, 162 blocked codes). A registry update
+is a regeneration, not an edit.
+
+*Alternative:* transcribe the Microsoft registry by hand, or write the mapping
+as code. Both were rejected for the same reason: the crate measures itself
+against HarfBuzz with `tools/harfbuzz_sweep.py`, and a table that disagrees
+with HarfBuzz's turns every sweep difference into an argument about whose
+registry is right instead of a bug report. Taking the data from the shaper we
+compare against makes any remaining difference *ours*.
+
+*Cost:* the generator is coupled to the layout of two HarfBuzz source files and
+will break when they are restructured. It is written to fail loudly rather than
+silently emit a short table — it checks HarfBuzz's own stated run lengths, and
+refuses on a key collision between two of the tables — so a break is a stopped
+run and not a wrong answer.
+
+**2. One BCP 47 tag maps to up to three OpenType tags, tried in order, and the
+first the *font registers* wins.** `ro-MD` is `MOL ` then `ROM `; `ml` is
+Malayalam Traditional then Reformed; `ga` is `IRI ` then `IRT `. The cap of
+three is HarfBuzz's `HB_OT_MAX_TAGS_PER_LANGUAGE`.
+
+*Alternative — and this is what the first version of the fix did:* keep only
+the first tag of each list, on the reasoning that a language has one code and
+the rest are historical spellings. That is wrong, and the HarfBuzz sweep proved
+it within one run: 66 of this host's 556 faces (`Candara.ttf` among them)
+register `('latn', 'ROM ')` and no `MOL ` at all, so Romanian's comma-below
+reached Moldavian in HarfBuzz and not in us. The `ro-MD` disagreement bucket
+was 345 against plain `ro`'s 279; after the rework it is 279, exactly. The
+candidates are not synonyms — they are an ordered search, and a font gets to
+answer at whichever spelling it chose.
+
+*Why cap at three rather than keep every candidate:* HarfBuzz truncates there,
+and a fourth candidate we honoured and HarfBuzz did not would be a divergence
+in the one place the two engines are meant to agree exactly. The cap is also
+the widest run the registry actually contains, so today it truncates nothing.
+
+**3. `ByScript` stores a language's lookup selection only when it differs from
+its script's default — but stores the language's *tag* either way.** Two thirds
+of the 3031 LangSysRecords on this host select exactly what their script's
+default does; storing those would be storing a second copy of an answer already
+present.
+
+The second half of that sentence is the subtle part, and it is forced by
+decision 2. "Which candidate wins" must be decided by what the font
+**registers**, never by what happened to be worth storing — otherwise a face
+that registers `MOL ` and gives it no rules of its own would fall through to
+`ROM ` and apply Romanian's overrides to Moldavian, on the strength of an
+optimisation. So `ByScript` carries a second sorted list of every (script,
+language) pair the face names, at 8 bytes each (~5 per face here), and consults
+that to choose the candidate before looking up what it selects.
+`gsub::tests::the_first_candidate_a_face_registers_wins_even_when_it_selects_nothing`
+is the regression guard; mutating `selection` to search the stored selections
+directly fails exactly that test and nothing else.
+
+### If this is ever revisited
+
+The thing to preserve is the invariant that the mapping is *HarfBuzz's*, not a
+reasonable approximation of it. Every one of the three decisions above bends
+toward that, and the one time it was bent away from — keeping the head of each
+candidate list — cost a wrong answer on 12% of the host's fonts that 521 green
+unit tests could not see.
+
+**Where:** `gui/font/src/lang.rs`, `gui/font/src/lang_tables.rs` (generated),
+`gui/font/tools/gen_lang_tables.py`, `gui/font/src/otl.rs`
+(`select`, `ByScript::parse`, `ByScript::selection`),
+`known-issues.md` → `TD-FONT-IGNORES-LANGSYS-OVERRIDES`.
+
+## §431 — When the host cannot falsify a shaping pass, synthesize a font that can
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+
+**In short:** Everything the font crate does is checked by shaping the same
+string with our code and with HarfBuzz (the reference text-shaping library
+every browser uses) over all 556 fonts installed on this machine, and
+comparing. That works only while some installed font actually exercises the
+code being checked. For the Thai fallback below, *none* does — so the sweep
+would have printed "agree" for a pass that never ran, which is worse than no
+test at all. The decision: when no installed font can disprove a pass, build
+one that can, with fontTools, and check it in.
+
+### The problem, concretely
+
+A Thai font that predates OpenType ships the shifted forms of its tone marks
+(a tone mark moves down and left when it has to clear a tall consonant) as
+extra glyphs in the *private use area* — the block of codepoints Unicode
+reserves for "whatever the font vendor wants" — at U+F700 for Windows and
+U+F880 for the Mac. Picking those glyphs is the shaping engine's job, and the
+engine only does it when the font contains no Thai layout rules of its own.
+
+Every Thai font Windows ships today *does* contain its own layout rules, which
+turns the fallback off. A direct probe confirmed it: of the 556 faces
+installed here, **zero** carry a single one of those private-use glyphs. So
+the fallback was unfalsifiable against the host collection — the sweep asks
+each face for glyphs, both engines answer with the same missing-glyph boxes,
+and the report says the two agree.
+
+### The decision
+
+`gui/font/tools/gen_thai_legacy.py` builds three faces with fontTools that do
+not exist on this machine and could not: the Thai block, the private-use
+block, and deliberately **no `GSUB`/`GPOS`/`GDEF` at all**. That absence is
+the whole point — it is what makes both engines take their fallback path over
+the same face, so the two answers become comparable.
+
+Three faces, and the third is as load-bearing as the first two:
+
+| face | holds | what it proves |
+|---|---|---|
+| `ThaiLegacyWin` | Windows private-use forms only | the fallback fires and picks the right form |
+| `ThaiLegacyMac` | Mac forms only | the vendor preference is *tested*, not assumed |
+| `ThaiNoPua` | Thai glyphs, no private-use forms | the pass runs, finds nothing, and damages nothing |
+
+`ThaiNoPua` is the case every real modern face without Thai layout rules is
+in. A fallback that mangled *that* would mangle a lot of real fonts, and no
+amount of agreement on the first two faces would have caught it.
+
+Result: 78 of 78 strings agree with HarfBuzz across the three faces. The
+corpus (`gui/font/tools/thai-pua-corpus.txt`) names one string per edge of the
+two state machines rather than sampling real text, since a synthetic font's
+only purpose is to reach edges real text reaches rarely.
+
+*What it cost:* two generated files and a fontTools dependency for the test
+tooling (not for the crate). *Alternative rejected:* hand-write unit tests
+asserting specific glyph ids. Those assert what I believe HarfBuzz does; the
+synthetic face asks HarfBuzz. When the two disagree, only the second one
+tells me which of us is wrong — and it did, immediately, by catching that the
+pass was gated on the wrong predicate and never fired at all.
+
+**Generalization.** This is now the rule for the three shapers still to come
+(Khmer, Myanmar, USE) and for anything else the host cannot exercise: if the
+sweep cannot disagree with a pass, the pass is untested, and the fix is a
+font that can disagree — not a weaker claim in the commit message.
+`harfbuzz_sweep.py` grew a `--corpus FILE` flag so each such oracle brings its
+own strings instead of bloating the built-in corpus.
+
+**Where:** `gui/font/tools/gen_thai_legacy.py`,
+`gui/font/tools/thai-pua-corpus.txt`, `gui/font/tools/harfbuzz_sweep.py`
+(`--fonts`, `--corpus`), `gui/font/src/thai.rs` (`pua_shape`),
+`known-issues.md` → `TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`.
+
+## §432 — The Thai SARA AM pass runs between decomposition and the mark sort, not after normalization
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+
+**In short:** Thai has one letter, SARA AM, that is drawn as two separate
+marks in two different places — a small circle above the consonant and a
+stroke after it. Unicode never says so, so we were asking fonts for a single
+glyph almost none of them have. Splitting it is straightforward; *when* to
+split it is the decision, because the shaper also sorts marks into a standard
+order, and doing these two things in the wrong order draws the circle on the
+wrong side of a tone mark.
+
+### The two candidate placements
+
+The crate already has a precedent for a script-specific rewrite of the
+character sequence: the Korean pass, which runs *after* normalization is
+completely finished. Copying that shape would have been the tidy choice.
+
+It is wrong here, and the proof is a trace rather than an argument. Take
+`<0E14, 0E4B, 0E38, 0E33>` — a consonant, a tone mark, a below-base vowel, and
+SARA AM:
+
+| order | result |
+|---|---|
+| split first, then sort (HarfBuzz) | `<0E14, 0E38, 0E4B, 0E4D, 0E32>` |
+| sort first, then split | `<0E14, 0E38, 0E4D, 0E4B, 0E32>` |
+
+Same five characters, and the circle (`0E4D`) lands on the opposite side of
+the tone mark (`0E4B`). Only the first matches HarfBuzz, and the sweep sees
+the difference as a different glyph order.
+
+So the pass is a parameter of the normalizer (`SaraAm::Decompose` /
+`LeaveAlone`), invoked between decomposition and the sort. It is safe there
+because no character decomposes to or from a Thai or Lao one, so the pass
+cannot see a half-decomposed sequence and cannot create work for the
+decomposer. `norm::nfc` passes `LeaveAlone`, so plain NFC stays exactly NFC —
+the pass is shaping, not normalization, and only the shaping entry point asks
+for it.
+
+### Why it cannot be a combining-class table instead
+
+The obvious-looking simplification — express the reordering as combining
+classes and let the existing sort do it — does not work, and the reason is
+worth recording so nobody tries it later. The circle this pass produces has to
+move back over above-base marks. A circle the *user typed* (U+0E4D directly)
+must not move at all. They are the same character; only their provenance
+differs, and a combining class is a property of a character. HarfBuzz has the
+same constraint and solves it the same way, by doing the move at the moment
+of splitting, while the provenance is still known.
+
+*Cost of the choice:* `norm::normalize` gained a third parameter and a
+script-specific call, which is a small dent in its generality. *Measured
+benefit:* host sweep agreement 18806 → 21015 and differences 3382 → 1176,
+with every Thai and Lao string agreeing on all 556 faces.
+
+**Where:** `gui/font/src/thai.rs` (`preprocess`), `gui/font/src/norm.rs`
+(`normalize`, `SaraAm`, `pieces`), `gui/font/src/hangul.rs` (the contrasting
+precedent), `known-issues.md` →
+`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`.
+
+## §433 — A feature belongs to exactly one stage, enforced where the stages are built rather than where they are applied
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+
+**In short:** A font's shaping rules are grouped into named "features"
+(`ccmp` composes characters, `blwf` picks the below-the-line form of a letter,
+and so on), and the shaper runs them in a fixed sequence of stages. Both the
+Indic and the Khmer shaper were listing some features in an early stage and
+then *again* in a final catch-all stage, so those features ran twice. Usually
+that changes nothing — running a rule on its own output is normally a no-op —
+but it is not what HarfBuzz does, and the second application can rewrite a
+glyph the first one already produced. The decision is where to fix it: in the
+code that applies stages, or in the code that builds them.
+
+### How it was found, and why that matters
+
+Not by reading. The duplication had been in `indic_shape.rs` since that shaper
+was written, and every one of the 556 faces installed on this host agreed with
+HarfBuzz anyway, because a real font's lookups are overwhelmingly idempotent:
+substituting a below-base form for a glyph that is already a below-base form
+matches nothing the second time. It took the Khmer probe font of §431 — where
+every feature's lookup appends a marker glyph, and so is *deliberately* not
+idempotent — to make the second application visible, as a doubled marker.
+
+That is the §431 argument arriving a second time from a different direction:
+the host had been reporting agreement about a code path it could not exercise,
+and the bug it hid was not in the shaper being written but in one that had
+been shipping for weeks.
+
+### The two places it could be fixed
+
+**In `gsub::apply_stages`** — track which feature bits have already run and
+mask them out of later stages. This is closest to what HarfBuzz literally
+does: `hb_ot_map_builder_t::compile` sorts the collected features by tag,
+merges duplicates, and keeps `hb_min` of the two stage numbers.
+
+**In each shaper's stage list** — build the stages so they are disjoint by
+construction, by masking the earlier stages out of the final catch-all.
+
+The second was chosen, for two reasons that pull the same way:
+
+* **`apply_stages` has a legitimate reason to run the same lookup twice.**
+  Deduplication belongs to *features*, not lookups. Two different features
+  routinely point at one lookup, and when they are in different stages that
+  lookup genuinely must run twice, with different masks — that is how a
+  feature that is on for one syllable and off for the next is expressed at
+  all. A dedup living in `apply_stages` would be one refactor away from being
+  written against lookups instead of features, and that version would be
+  silently wrong in a way no host face would reveal either.
+* **A shaper that names a feature twice has a bug in its stage list**, and the
+  stage list is where a reader looks to answer "when does `blwf` run?". Fixing
+  it downstream leaves the wrong answer written in the place people read.
+
+So `khmer.rs` and `indic_shape.rs` each grew a `stages()` function returning
+the stage masks, with the final stage computed as
+`ALL_FEATURES & !already_staged & !liga`. Extracting it from `shape` was the
+point of the exercise rather than tidiness: a `stages()` that returns a value
+can be asserted about, and four tests now pin the invariant — the stages are
+pairwise disjoint, their union is every feature except `liga`, the first stage
+is exactly the basic set, and the global features fall in the last stage only.
+A comment saying the same thing is deletable by anyone who thinks it is
+redundant.
+
+*Cost of the choice:* the invariant is restated once per shaper rather than
+enforced once centrally, so a fourth shaper can reintroduce it. That is what
+the tests are for, and a shaper without the corresponding test is a shaper
+whose stage list nobody checked. *Benefit:* `apply_stages` keeps the ability
+to run one lookup under two features, which the alternative would have put at
+risk, and the Khmer probe went from **1 agreement of 45 to 43** — measured by
+putting the duplication back and re-running, not estimated. That figure is the
+other half of the point: against a face that can object, a feature applied
+twice is not a subtle difference, it is almost every string. Against the 556
+faces installed here it was none of them.
+
+**Where:** `gui/font/src/khmer.rs` (`stages`, `shape`, and the two stage
+tests), `gui/font/src/indic_shape.rs` (the same four), `gui/font/src/gsub.rs`
+(`apply_stages`, deliberately unchanged), `gui/font/tools/gen_khmer_probe.py`
+(the oracle that exposed it), `design-decisions.md` §431.
+
+## §434 — What a lookup wants at a position travels *into* the skip walk, and the never-drawn characters get a third answer
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+
+**In short:** Some characters are typed to instruct the text engine and are
+never meant to appear on screen — the soft hyphen you put in a long word to
+say "you may break it here", the zero-width joiner that asks two letters to be
+drawn as one. Until now every one of them acted as a wall: the font's rule for
+turning `f` and `i` into a single `fi` shape could not see past it, so writing
+`f`, joiner, `i` — which is literally a request for that shape — produced the
+opposite of what was asked. The fix is to let a rule *step over* such a
+character. The decision recorded here is where the "is this the character I
+wanted?" test has to live for that to work: inside the walk, not after it.
+
+### The problem the obvious design cannot express
+
+A lookup asks the run "give me the next glyph I may look at". Before this
+change that question had two answers: **hidden** (the lookup's own flags say
+to pass over marks, or ligatures, or a named set) and **not hidden**. A
+never-drawn character needs a third: *step over it unless it is exactly what
+the rule asked for at this position.* HarfBuzz calls this `SKIP_MAYBE`, and
+resolves it against the rule's criterion — `matcher_t::may_match` — in the
+same loop iteration as the skip test.
+
+Try to keep the criterion outside the walk and it cannot be expressed at all:
+
+```rust
+let pos = skip.next(glyphs, at)?;        // walk returns a position
+if glyphs[pos].gid != want { return None }   // caller judges it
+```
+
+When the caller rejects a glyph it has no way to say *carry on* rather than
+*fail* — and "carry on" is the correct answer for precisely the ignorable
+case, while "fail" is correct for every other. The walk is the only place that
+still knows which of the two the position was. A caller that re-entered the
+walk from `pos + 1` would get the other error: it would hop over an ordinary
+glyph that failed the criterion, and ligate across a letter.
+
+### The decision
+
+`Skipper::scan` — one private loop — takes the criterion as
+`Option<impl FnMut(usize) -> bool>` and returns the first position that both
+the flags admit and the criterion accepts, stopping at the first admitted
+position that is neither ignorable nor accepted. `next`/`prev` pass `None`,
+which reproduces HarfBuzz's `MATCH_MAYBE`: no criterion means an ignorable is
+always stepped over. `next_matching` passes the ligature component. And
+`walk_forward`/`walk_backward` pass the caller's existing `each` closure —
+which already returned `Option<()>` and already deferred its side effects
+until after the match succeeded, so the criterion was in the API all along and
+only needed routing one level deeper.
+
+*Cost accepted:* `each` now has a load-bearing contract — it may be called at
+positions that are not part of the final match, so it must record nothing
+before it returns `Some`. That is written on `walk_forward`, and every
+existing caller in `context.rs` already honoured it, which is the evidence
+that the contract fits the callers rather than being imposed on them.
+
+### The three-way table, and why the joiners are not symmetric
+
+`Joiners` carries which kind of lookup is asking. The answers differ per kind
+of character:
+
+| | `GSUB` input | `GSUB` context | `GPOS` |
+|---|---|---|---|
+| ZWNJ | never | if `auto_zwnj` | always |
+| ZWJ | if `auto_zwj` | always | always |
+| hidden (CGJ, Mongolian FVS, tags) | never | never | always |
+| everything else ignorable | always | always | always |
+
+ZWJ is stepped over and ZWNJ is not, because that asymmetry *is* what the two
+characters mean: ZWJ asks for the ligature, so the walk looking for one should
+reach past it; ZWNJ forbids it, so the same walk must stop dead. Reading the
+row the other way makes `f ZWNJ i` ligate, which is exactly what the writer
+typed the character to prevent.
+
+`auto_zwnj`/`auto_zwj` go *off* for features whose own subject is the joiners
+— the Indic and Khmer basic features, where a joiner selects between a
+conjunct and a half-form rather than decorating a ligature. This is
+HarfBuzz's `F_MANUAL_JOINERS`, and it had to be modelled rather than
+hard-coded per shaper, because one lookup can be reached by two features:
+`manual_joiners` is a mask on the plan, and a lookup whose feature mask
+intersects it is manual. Merging that way (manual wins) is the direction
+HarfBuzz's `hb_ot_map_builder_t::compile` merges it (`auto_zwj &=`). Note that
+`locl` and `ccmp` are *not* in the manual set for either shaper — they are
+enabled with `F_PER_SYLLABLE` alone — and that is observable: it decides
+whether a `ccmp` ligature may form across a ZWJ.
+
+### The divergence from HarfBuzz that is kept
+
+After this, the host sweep's `misplaced` count is 170, and all 170 are corpus
+strings containing an ignorable. In every one, the glyphs agree and every
+*visible* glyph's position agrees; what differs is the x of the erased,
+zero-advance glyph itself.
+
+The cause is where a legacy `kern` table's adjustment is charged. HarfBuzz
+puts it on the right-hand glyph, as both an advance and an x-offset; we charge
+it to the pair's left glyph. For adjacent glyphs the two are indistinguishable
+— same drawn positions, same total width. They separate only when a
+zero-advance glyph stands between the pair, which is exactly the erased
+ignorable. For `a` CGJ `b` in Arial Rounded, HarfBuzz's erased glyph sits at
+the *unkerned* pen, 1203, while `b` is drawn at 1190 — 13 units inside the
+following letter's image. Ours sits at 1190, where the next glyph actually
+starts.
+
+Ours is kept. The x of an invisible zero-advance glyph is good for one thing
+— placing a caret on that character's cluster — and for that, "where the next
+glyph is drawn" is the right answer and "inside the next glyph" is not.
+Matching HarfBuzz here would also mean adopting its representation of a kern
+throughout, which fights `ShapedGlyph`'s own model, where `advance` and
+`kern_next` deliberately describe the gap *after* a glyph.
+
+*Cost accepted:* the sweep will report 170 `misplaced` forever, and a future
+reader must not take that as a regression. That is what this section and the
+`known-issues.md` entry are for; if the number moves, or a string that is not
+in the ignorable set appears in that list, something real broke.
+
+**Measured.** Host sweep, 556 faces × 60 strings: `differ` on `f\u200di` from
+76 faces to 0, `misplaced` from 331 to 170. Khmer probe: 45/45 before and
+after — the Indic-family features read the joiners themselves and had to come
+through untouched, and that they did is the check on `manual_joiners`.
+
+**Where:** `gui/font/src/skip.rs` (`Joiners`, `steps_over`, `scan`,
+`next_matching`, and the walk pair), `gui/font/src/norm.rs` (`Ignorable`, the
+five-way classification), `gui/font/src/gsub.rs` (`Staging`, `Ctx`,
+`skipper`, `ligature_matches`), `gui/font/src/scaled.rs` (the kerning
+transparency of an erased glyph), `gui/font/src/gpos.rs` and `kern.rs` (the
+`POSITIONING` call sites), `gui/font/src/khmer.rs` and `indic_shape.rs`
+(`manual_joiners`), `known-issues.md`
+(`TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES`).
+
+## §203 — A benchmark that is not recorded must say so out loud: every measurement window is either scored, tracked, or *declared* a diagnostic
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** The kernel benchmark suite prints ~90 timing measurements per
+`--bench` boot, but only some of them get filed into `bench/history.jsonl`, which
+is the file the regression comparator reads. The rest are printed to the serial
+log and forgotten — no history, so nothing can ever notice them getting slower.
+Nobody knew which were which. This records the rule adopted: **every measurement
+must be classified**, and the suite now prints a line each boot naming any
+measurement that hasn't been.
+
+**Terms:** *score* = file the measurement with a target to grade it against.
+*track* = file it with no target, so it is compared to previous boots but never
+graded pass/fail. *diagnostic* = a number that is deliberately not filed, because
+it means nothing on its own. *window* = one measurement — one call to the
+harness's `run()`.
+
+**The decision.** Three destinations, and a measurement must reach exactly one:
+
+| | Filed to history? | Graded? | For |
+|---|---|---|---|
+| `score(name, r, target)` | yes | yes | a benchmark with a defensible published or measured target |
+| `track(name, r)` | yes | no | a benchmark worth comparing run-over-run with nothing to grade against |
+| `run_diagnostic(name, …)` | no | no | a number that is only meaningful *relative to another number in the same block* |
+
+The coverage line at the end of the suite reports the three counts plus a fourth
+— `unjudged` — and names every unjudged window. `unjudged` is expected to be 0
+forever; anything else is a measurement whose author has not said which of the
+three it is.
+
+**The tradeoff, which is real in both directions.**
+
+*Against having a `diagnostic` category at all:* it is an opt-out from
+regression detection, and opt-outs get used to silence inconvenient reports.
+Every window `run_diagnostic` covers is a number that can now degrade forever
+unwatched. The maximally-safe design is "record everything" — `track` costs
+almost nothing, and the comparator can always be told to ignore an entry later.
+
+*For it:* recording a decomposition stage does not give you regression detection
+on it, it gives you *noise*. `sd_ktrace_pair` measures two ktrace calls in
+isolation so they can be subtracted from the syscall-dispatch total; its absolute
+value is meaningless, it swings with TCG scheduling, and a comparator watching it
+would fire on nothing. Worse, the eleven decomposition sub-measurements would
+have been ~13% of the record, all of them noisy, which degrades the
+signal-to-noise of the whole file. And the alternative to a `diagnostic`
+category is not "record them" — it is *the status quo*, where they were
+unrecorded **and unmarked**, indistinguishable from a benchmark someone forgot.
+
+That last point is what settles it. The category is not licence to skip work;
+it is the mechanism that makes skipped work *visible*. Before it, the coverage
+report could only ever say "21 windows unrecorded" and would say it every boot
+forever, which is the shape of a check people learn to ignore — the same failure
+as an assertion that fires on every healthy boot. With it, the report reads 0 and
+any non-zero is real news.
+
+**Guard against the obvious abuse.** `run_diagnostic`'s doc comment states the
+rule as a question about the *number*, not about convenience: reach for `track`
+whenever the value would mean something on its own next boot, including when it
+has no target — "untargeted is not the same as uncomparable, and conflating the
+two is the easier mistake." That conflation is exactly what had happened: the
+pass that adopted this rule found **eight** genuine benchmarks printed and
+discarded, among them `rdtsc_overhead`, which is the instrument every other
+benchmark in the suite is measured with.
+
+**Rejected alternative: infer coverage by name.** The first implementation
+diffed the measured names against the scorecard names. It is wrong, and not
+marginally: five benchmarks record under a different name than they measure
+under (`lock_tracked`→`lock_uncontended`, `heap_raw_alloc_free_64`→
+`heap_alloc_free_64`, and three more), so a name diff reports five fully-covered
+benchmarks as uncovered. Coverage is now keyed by `BenchResult::seq`, an index
+into the measurement list, so a window is covered precisely when *that window*
+was handed to `record` — which leaves benchmark naming free rather than making
+it load-bearing for an unrelated instrument.
+
+**Where the `track`/`diagnostic` line actually falls: a scaling sweep is
+tracked, a decomposition is not.** The first boot under the new instrument
+forced this distinction to be stated rather than felt. `bench_pick_next_scaling`
+measures run-queue pick cost at five depths; `bench_syscall_dispatch_breakdown`
+measures six stages of one syscall. Both are "a group of related numbers", and a
+rule of thumb about groups would have put them in the same bucket. The rule that
+decides them is instead **what each number claims on its own**:
+
+- A *decomposition*'s stages are meaningless apart from their siblings — stage 3
+  of a syscall is not an operation anyone performs, and a comparator handed its
+  history has nothing to compare it against. Diagnostics.
+- A *scaling sweep*'s points are each a complete measurement of the same
+  operation under a different load, and the claim being made is **the shape they
+  trace**. Tracked. The in-kernel verdict tests only the two endpoints against a
+  4x threshold with generous headroom, so a regression that bent the middle of
+  the curve — the exact failure the sweep exists to detect — passed it silently.
+  Recording each point is what makes the shape diffable across boots.
+
+That fix needed a rename, not just a wiring change, which is the sharper lesson:
+all five depths ran under one name, and five history entries under one key is
+not a series but four values overwriting each other. A measurement's name is
+part of whether it *can* be recorded at all.
+
+**A second failure of the static scan, in the other direction.** The rejected
+alternative above records that a name diff produces false *positives*. The audit
+script that replaced it produced a false *negative* on this same sweep: it
+searched forward from `run()` for a `score`/`track` naming the same binding and
+matched a `&result` belonging to a different function sixty lines downstream.
+Two independent static approaches, two opposite errors, one runtime instrument
+that got it right — which is the argument for keeping the authority at runtime
+rather than adding a third scanner.
+
+**The invariant is asserted, not just printed.** `scripts/boot-test.sh` gained
+`check_bench_coverage()`. A coverage line nobody greps is prose, and this project
+has a precedent for what prose costs: `BUG-LIVENESS-DEADLINE-FALSE-FIRE` required
+a clean liveness log from 2026-07-27 and runs that violated it still exited 0.
+The one design point worth recording is the **absent** case — under `--bench` the
+line is *required*, because a missing coverage line means the instrument stopped
+running, and scoring that as "nothing to complain about" would reproduce this
+very bug one level up. It was confirmed to fire against the real pre-fix log
+before being trusted on a passing one.
+
+**Where it lives:** `kernel/src/bench.rs` — `MEASUREMENTS`, `note_measurement`,
+`declare_diagnostic`, `run_diagnostic`, `record`, and the coverage block in
+`print_scorecard`; `scripts/boot-test.sh` — `check_bench_coverage`. Written up in
+`known-issues.md` under the scorecard-coverage entry.

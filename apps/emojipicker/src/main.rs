@@ -18,7 +18,7 @@ use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderTree};
+use guitk::render::{FontWeightHint, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -1014,6 +1014,7 @@ fn render_tab_bar(state: &EmojiPickerState, tree: &mut RenderTree) {
             font_size: TAB_ICON_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(tab_width),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1069,6 +1070,7 @@ fn render_search_field(state: &EmojiPickerState, tree: &mut RenderTree) {
         font_size: LABEL_FONT_SIZE,
         font_weight: FontWeightHint::Regular,
         max_width: Option::None,
+        overflow: TextOverflow::Clip,
     });
 
     // Query text or placeholder.
@@ -1083,6 +1085,7 @@ fn render_search_field(state: &EmojiPickerState, tree: &mut RenderTree) {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w - 36.0),
+            overflow: TextOverflow::Ellipsis,
         });
     } else {
         tree.push(guitk::render::RenderCommand::Text {
@@ -1093,6 +1096,7 @@ fn render_search_field(state: &EmojiPickerState, tree: &mut RenderTree) {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w - 36.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -1138,6 +1142,7 @@ fn render_grid(state: &EmojiPickerState, tree: &mut RenderTree) {
             font_size: EMOJI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(CELL_SIZE - CELL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1161,6 +1166,7 @@ fn render_skin_tone_bar(state: &EmojiPickerState, tree: &mut RenderTree) {
         font_size: LABEL_FONT_SIZE - 1.0,
         font_weight: FontWeightHint::Regular,
         max_width: Option::None,
+        overflow: TextOverflow::Clip,
     });
 
     // Skin tone circles.
@@ -1231,6 +1237,7 @@ fn render_preview(state: &EmojiPickerState, tree: &mut RenderTree) {
                 font_size: PREVIEW_EMOJI_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Option::None,
+                overflow: TextOverflow::Clip,
             });
             // Name.
             tree.push(guitk::render::RenderCommand::Text {
@@ -1241,6 +1248,7 @@ fn render_preview(state: &EmojiPickerState, tree: &mut RenderTree) {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(WINDOW_WIDTH - 64.0),
+                overflow: TextOverflow::Ellipsis,
             });
             // Category.
             tree.push(guitk::render::RenderCommand::Text {
@@ -1251,6 +1259,7 @@ fn render_preview(state: &EmojiPickerState, tree: &mut RenderTree) {
                 font_size: LABEL_FONT_SIZE - 2.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(WINDOW_WIDTH - 64.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         Option::None => {
@@ -1262,6 +1271,7 @@ fn render_preview(state: &EmojiPickerState, tree: &mut RenderTree) {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(WINDOW_WIDTH - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

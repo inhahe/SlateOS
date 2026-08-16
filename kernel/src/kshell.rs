@@ -76186,6 +76186,20 @@ fn cmd_sclatency(args: &str) {
     shell_println!("=== Syscall Latency Histogram ({} calls) ===", s.total_calls);
     shell_println!("");
     shell_println!("  min={}ns  mean={}ns  max={}ns", s.min_ns, s.mean_ns, s.max_ns);
+
+    // The bucket rows below sum to `total_calls - uncalibrated`, so say so
+    // when they differ.  Samples taken before the TSC was calibrated have no
+    // known duration; they used to be binned as "<1us", which made the
+    // histogram most confident exactly when it knew least.
+    if s.uncalibrated > 0 {
+        shell_println!(
+            "  {} call(s) recorded before TSC calibration — duration unknown, not bucketed below",
+            s.uncalibrated
+        );
+    }
+    if !s.calibrated {
+        shell_println!("  WARNING: TSC uncalibrated — no further sample can be bucketed");
+    }
     shell_println!("");
 
     // Find max bucket count for bar scaling.
@@ -76195,7 +76209,11 @@ fn cmd_sclatency(args: &str) {
         if count == 0 {
             continue;
         }
-        let pct = count.saturating_mul(100) / s.total_calls.max(1);
+        // Percentage of *bucketed* calls, not of all calls: dividing by
+        // `total_calls` while the uncalibrated ones are excluded above would
+        // make the column silently fail to reach 100%.
+        let bucketed = s.total_calls.saturating_sub(s.uncalibrated).max(1);
+        let pct = count.saturating_mul(100) / bucketed;
         let bar_len = (count.saturating_mul(30) / max_count) as usize;
         let bar: alloc::string::String = "#".repeat(bar_len);
         shell_println!("  {:>9} [{:>5} {:>3}%] {}",

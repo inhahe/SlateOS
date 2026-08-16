@@ -22,7 +22,7 @@ use guitk::color::Color;
 use guitk::event::{Event, Key, MouseButton, MouseEvent, MouseEventKind};
 #[cfg(test)]
 use guitk::event::{KeyEvent, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -1027,6 +1027,7 @@ impl Match3 {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Score.
@@ -1038,6 +1039,7 @@ impl Match3 {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // High score.
@@ -1050,6 +1052,7 @@ impl Match3 {
             font_size: HEADER_FONT_SIZE - 2.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Mode-specific info.
@@ -1065,6 +1068,7 @@ impl Match3 {
                     font_size: HEADER_FONT_SIZE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             GameMode::Moves => {
@@ -1077,6 +1081,7 @@ impl Match3 {
                     font_size: HEADER_FONT_SIZE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             GameMode::Classic => {
@@ -1088,6 +1093,7 @@ impl Match3 {
                     font_size: HEADER_FONT_SIZE - 2.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1163,6 +1169,7 @@ impl Match3 {
             font_size: CELL_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Special gem indicator.
@@ -1280,6 +1287,7 @@ impl Match3 {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1311,6 +1319,7 @@ impl Match3 {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1321,6 +1330,7 @@ impl Match3 {
             font_size: OVERLAY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let high = self.high_scores.get(self.mode);
@@ -1332,6 +1342,7 @@ impl Match3 {
             font_size: OVERLAY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1342,6 +1353,7 @@ impl Match3 {
             font_size: OVERLAY_FONT_SIZE - 2.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 

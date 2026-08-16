@@ -7,7 +7,7 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -652,6 +652,7 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
         font_size: size,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 
@@ -761,6 +762,7 @@ fn render_text_field(
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(FIELD_INPUT_WIDTH - 20.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     y + FIELD_HEIGHT + 8.0
@@ -805,6 +807,7 @@ fn render_dropdown_row(tree: &mut RenderTree, x: f32, y: f32, label: &str, value
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(FIELD_INPUT_WIDTH - 36.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Dropdown arrow indicator
@@ -839,6 +842,7 @@ fn render_warning(tree: &mut RenderTree, x: f32, y: f32, message: &str) -> f32 {
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(CONTENT_WIDTH - 48.0),
+        overflow: TextOverflow::Ellipsis,
     });
     y + 44.0
 }
@@ -947,6 +951,7 @@ fn render_dyndns_section(
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(CONTENT_WIDTH - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
         y += 18.0;
     }
@@ -1140,6 +1145,7 @@ fn render_remote_desktop_section(
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(CONTENT_WIDTH - 32.0),
+        overflow: TextOverflow::Ellipsis,
     });
     y += 48.0;
 
@@ -1168,6 +1174,7 @@ pub fn render_remote_access_page(
         font_size: 20.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     tree.push(RenderCommand::Text {
         x,
@@ -1177,6 +1184,7 @@ pub fn render_remote_access_page(
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     y += 56.0;
 

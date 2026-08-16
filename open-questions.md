@@ -105,170 +105,6 @@ Three constraints on how it lands, from §310:
 - Each reformat commit must contain **nothing but** formatting, so
   `--ignore-rev` is safe to apply wholesale.
 
-## Q43 — The compiler-KASAN kernel is ~20× slower to boot, so the B-KNULLJUMP soak it was built for would take over a week. How should the hunt be made viable? — Status: **ANSWERED 2026-08-15 — Lane A to record in `design-decisions.md`**
-
-> **Operator's answer (2026-08-15, given to Lane B): "e, then a if necessary."**
->
-> That is Claude's revised recommendation: run **E** — soak the ordinary,
-> uninstrumented kernel carrying the `B-NO-CLD-ON-INTERRUPT-ENTRY` fix and see
-> whether B-KNULLJUMP stops — and fall back to **A** (build the instrumented
-> kernel `--release` and soak that) only if E fails to settle it. Note what "if
-> necessary" covers: E catching a B-KNULLJUMP is a *falsification* of the DF
-> hypothesis and is exactly the case that hands A a well-motivated job. E coming
-> back clean is suggestive, not proof — it cannot distinguish "fixed" from "got
-> lucky" — so a clean E is a reason to stop, not a reason to escalate.
->
-> **A still carries the caveat that made it operator-worthy:** no release kernel
-> has ever been booted in this project, so the cheap gate stands — build
-> `--release`, run `kasan-check-preshadow.py`, attempt **one** boot (~30 min)
-> before committing to a soak. And treat a clean release soak as weaker evidence
-> than a debug one, since optimization perturbs the instruction timing a rare
-> race depends on.
->
-> **This is Lane A's item.** The answer was delivered in a Lane B session, so it
-> is recorded here rather than in `design-decisions.md` §200–299 — Lane A owns
-> that range. See `requests/b-a-operator-answered-q43.md`. Lane A: record it,
-> then delete this section.
-
-The original analysis follows, unchanged, because it is what E and A have to be
-executed against.
-
-
-**Raised by Claude** (2026-08-12), on measuring the profile the operator
-approved in §107.
-
-**The finding.** The instrumented kernel from `scripts/kasan-build.sh` now
-survives everything that used to kill it (§118's pre-shadow triple fault,
-§119's user-pointer `#GP`) and boots normally — but it is far slower than the
-"roughly doubled" figure §119 was written with. A plain debug boot reaches
-`BOOT_OK` in **~283–318 s** (`soak-20260723-190300`, 100/100 iterations). The
-instrumented one spent **975 s to reach 17 %** of that log, with 48 of the 66
-ring-3 spawn tests and 178 MB of the 217 MB of test ELF still ahead; line-rate
-and remaining-ELF extrapolations agree on **5500–8500 s per boot**, i.e. ~20×.
-
-**Why it matters.** For the one validating boot this is only tedious. For the
-hunt it is disqualifying. B-KNULLJUMP fires at ~1 boot in 120, so an
-even-odds soak needs ~80 boots: **over a week of wall-clock** here, versus ~7 h
-for the plain-build soak that has already been run several times. The
-escalation to compiler instrumentation was justified precisely because the
-passive tooling could not localize the bug (§107, and the Path-A exhaustion note
-in `known-issues.md`) — so the profile working but being unaffordable to soak
-leaves the bug exactly where it was.
-
-**Options.**
-- **A — build the instrumented kernel optimized (`kasan-build.sh --release`).**
-  *Pro:* most of the 20× is almost certainly `-O0` codegen and the outlined call
-  per access, not the shadow check itself; `-O2` would fold most redundant
-  checks and could plausibly land within 2–3× of a plain debug boot, which makes
-  the soak affordable at close to its usual cadence. The flag already exists and
-  the build gate (`kasan-check-preshadow.py`) validates the release binary the
-  same way, so the invariants stay mechanically proven.
-  *Con:* two real risks. (1) **No release kernel has ever been booted in this
-  project** — every boot test to date is the debug profile, so `--release` may
-  surface latent UB that debug codegen hides, and debugging *that* in the middle
-  of a corruption hunt is the worst possible time. (2) Optimization perturbs
-  instruction timing and layout, which is exactly what a rare race depends on;
-  the 1-in-120 rate is a *debug-build* measurement and may not carry over. A
-  release soak that comes back clean would be much weaker evidence than a debug
-  one.
-- **B — soak the debug instrumented build anyway, accepting >1 week.** *Pro:*
-  changes nothing about the population being sampled, so a catch is
-  unambiguous and a clean run is comparable to the existing 100-iter baseline.
-  *Con:* a week of the machine doing one thing, and it is only even odds at the
-  end of it.
-- **C — cut the instrumented boot's workload rather than its cost per
-  instruction** (e.g. a cmdline that runs only the Path-Z spawn tests
-  B-KNULLJUMP has been seen near, skipping the rest). *Pro:* potentially a large
-  constant-factor win with debug codegen retained, so timing is perturbed much
-  less than by (A). *Con:* the bug has never been localized to a specific test —
-  that is the whole problem — so trimming the workload may trim away the
-  trigger, and a clean soak would then prove nothing. Also needs new
-  test-selection plumbing that does not exist.
-- **D — leave the instrumented profile as a validated tool, do not soak it now,
-  and spend the time on roadmap work instead.** *Pro:* the profile is finished
-  and committed either way, ready for the moment a *reproducible* trigger is
-  found; B-KNULLJUMP does not block other work and never has. *Con:* the bug
-  stays open with the escalation built but unused.
-
-**Claude's recommendation.** **A, gated on a cheap experiment**: build
-`--release`, run the checker, and attempt one boot. That costs ~30 min and
-answers both unknowns at once (does a release kernel boot at all; what is the
-real per-boot cost). If it boots green and fast, soak with it and treat a clean
-result as suggestive rather than exonerating — the §119 update already records
-that timing caveat. If it does not boot, fall back to **D** rather than **B**:
-a week of machine time for even odds is a bad trade while roadmap work is
-unblocked. I have not started (A) because "boot an optimized kernel for the
-first time" is a change of profile for the whole project, which reads as
-operator-decision-worthy rather than mine to take unilaterally.
-
-**Where it bites:** `scripts/kasan-build.sh`, `scripts/wedge-soak.sh` (which now
-catches `[kasan] CRITICAL:` and documents the raised `SOAK_TIMEOUT`),
-`design-decisions.md` §107/§119, and `known-issues.md` → `B-KNULLJUMP-SIGNAL`.
-
-### UPDATE 2026-08-12 — a concrete suspect appeared, which adds a much cheaper option E
-
-Since this question was written, a specific candidate root cause for
-B-KNULLJUMP was found and fixed: `known-issues.md` →
-`B-NO-CLD-ON-INTERRUPT-ENTRY`. No IDT stub cleared the direction flag, so the
-kernel ran with whatever DF ring 3 left set, and every `rep`-string
-operation — including compiler-emitted `memset`/`memcpy` — walked backwards,
-writing *before* each intended destination.
-
-The precondition is confirmed rather than assumed: the exact `libc.so.6` staged
-into `rootfs.ext4` contains `std; rep movsb; cld` in `__memmove_erms`'s
-overlapping-backward path, so ring 3 demonstrably holds DF = 1 across an
-interruptible window whose width is proportional to the copy length.
-
-**This changes the economics of the question.** The original framing was "we
-have no lead, so we must sample blindly, and instrumentation is the only way to
-localize a catch." There is now a *falsifiable hypothesis*, and testing a
-hypothesis is far cheaper than searching without one:
-
-- **E — soak the ordinary (uninstrumented) fixed kernel and see whether
-  B-KNULLJUMP stops.** *Pro:* no instrumentation cost at all, so it runs at the
-  ~283–318 s per-boot rate the existing 100-iteration baseline was measured
-  at — directly comparable, same codegen, same timing, no release-build gamble.
-  ~250 boots (≈2× the 1-in-120 base rate, ~21 h unattended) coming back clean
-  would be strong evidence the fix landed; a single catch immediately falsifies
-  the hypothesis and hands the instrumented profile a much better-motivated job.
-  Either outcome is informative, which is not true of options A–D.
-  *Con:* a clean result is statistical, not proof of causation — it cannot
-  distinguish "fixed" from "got lucky", and the confidence is only as good as
-  the 1-in-120 estimate.
-
-**Claude's revised recommendation: E first, then re-ask this question.** The
-instrumented profile stays exactly where option D leaves it — built, gated and
-ready — but there is no longer a reason to spend a week of machine time on a
-blind search *before* spending a night on a targeted one. If E comes back
-clean, this question may be moot; if it catches, A–D are all still available and
-better aimed. I have started E, since it commits nothing and reverses freely;
-A (booting an optimized kernel for the first time) remains yours to call.
-
-#### UPDATE 2026-08-13 — the first attempt at E would have been worthless; E is now genuinely running
-
-The E soak described above was launched once and **aborted before it could
-produce a misleading answer.** B-KNULLJUMP has only ever been observed inside
-the tcc-driven Path-Z rungs, and `/bin/tcc` had silently fallen out of
-`rootfs.ext4`, so all 26 of those rungs (Parts 35–60) were no-opping on every
-boot while `boot-test.sh` still reported PASSED. The sampled population did not
-contain the trigger: 250 clean boots would have looked like strong evidence and
-meant nothing. See `known-issues.md` → `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`,
-now fixed so a rung that skips says so and the harness reprints it.
-
-The image was rebuilt with tinycc present and a full boot verified that all 26
-tcc rungs run and pass, ending in `Path-Z prerequisites: complete — 0 rungs
-skipped`. **The real E soak is now running** against that frozen, verified image
-(`MAX_ITERS=250 HUNT=0 SOAK_TIMEOUT=600 STALL_SECS=150`, `--no-stage`), watching
-for the `RIP=0x0` / `error=0x10` signature.
-
-Two caveats for whoever reads the result:
-
-- It samples a **SMAP-enabled** kernel (`qemu64,+smep,+smap,+umip`), which the
-  1-in-120 base rate was not measured on. Treat that rate as order-of-magnitude.
-- Per-boot wall time is now ~355 s, not the ~283–318 s the ~21 h figure above
-  was built on, so budget ~24 h for the full 250.
-
-
 ## Q44 — libc reports "all Linux capabilities held" to every process because nothing maps our `(ResourceType, Rights)` handles onto `CAP_*` bits. Which mapping do you want? — Status: **RESOLVED 2026-08-15 → design-decisions.md §312**
 
 **Answer: A — conservative projection.** Decided by the operator; Claude
@@ -307,306 +143,30 @@ for loud breakage in every port that calls it informationally.
    flip from advisory to enforcing is boot-test-visible and lands with QEMU
    free.
 
-## Q45 — Text clipped by `max_width` is cut mid-glyph with no ellipsis. Should `RenderCommand::Text` carry an overflow policy? — Status: **ANSWERED 2026-08-15 — Lane C to record in `design-decisions.md`**
+## Q45 — Text clipped by `max_width` is cut mid-glyph with no ellipsis. Should `RenderCommand::Text` carry an overflow policy? — Status: **RESOLVED 2026-08-15 → design-decisions.md §427**
 
-### ANSWER 2026-08-15 — option **A**: `RenderCommand::Text` gets an `overflow` field
+**Answer: A — `RenderCommand::Text` gets an `overflow: TextOverflow` field
+(`Clip` | `Ellipsis`), and the compositor draws the ellipsis.** Decided by the
+operator ("q45: a."); Claude raised the question and recommended this option.
 
-The operator answered in a Lane B session. Verbatim: **"q45: a."** That is
-Claude's own recommendation, so nothing about the plan changes — but it is a
-decision now, not a proposal.
+A is the only option that makes the mistake *unrepresentable*: after it, a text
+command cannot exist without having answered "and what if it doesn't fit?". The
+operator was told the churn was several hundred call sites and chose it on that
+ground anyway. Rejected: **B** (a second `RenderCommand` variant) splits a match
+arm in every renderer and test forever to encode one boolean; **C** (a builder)
+leaves the wrong struct-literal form available; **D** (sweep `text::elide`
+across today's bad call sites) fixes today's hundred and not the
+hundred-and-first.
 
-**What was chosen.** Add an `overflow: TextOverflow` field (`Clip` | `Ellipsis`)
-to `RenderCommand::Text`, and let the **compositor** draw the ellipsis, because
-it is the only party that knows exactly where the glyphs ran out. One
-measurement instead of two, and the policy is visible at every call site.
+Two things the entry in §427 carries that this summary does not: the site count
+turned out to be **4517 across 208 files**, so the edit is scripted rather than
+hand-made; and the sites that already set a `max_width` default to `Ellipsis`
+rather than to the behaviour-preserving `Clip`, because today's behaviour *is*
+the reported bug. That sub-decision is Claude's and is written down in §427 to
+be overruled if the operator disagrees.
 
-**The cost that was accepted, so it is on the record.** Rust has no default for
-a struct-variant field, so this edits **every construction of `Text` in the
-tree** — several hundred sites across `gui/**` and `apps/**`. The question said
-so, and the answer is still A. Two consequences follow:
-
-- **Land it as its own commit with nothing else in flight.** A several-hundred-
-  site mechanical diff conflicts with anything else touching rendering, and this
-  is the same trap `§310` (the rustfmt reformat) was about — a wide mechanical
-  change entangled with real work cannot be separated afterwards.
-- **`gui/**` and `apps/**` are Lane C's tree.** Lane B is recording the answer,
-  not implementing it. Filed as
-  `requests/b-c-operator-answered-q45-and-c-q1.md`.
-
-**Recording:** `design-decisions.md` under Lane C's §400–499 range. Lane B has
-deliberately not written it there — inventing a section number from another
-lane's range is how two lanes collide after a merge. Also close
-`known-issues.md` → `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED` when it lands.
-
-**Raised by Claude** (2026-08-14), falling out of the pass that closed
-`known-issues.md` → `TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP`. Logged there as
-`TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`.
-
-**The situation.** `max_width` on a `Text` command clips: the compositor walks
-glyphs and stops before the first one that would cross the limit, drawing no
-mark. A label that does not fit therefore ends mid-word and ends *plausibly* —
-"Gateway 192.168.1.1 res" looks like a complete string to a reader who cannot
-see the field it was cut from. A caller that wants the cut marked must call
-`text::elide` first, which measures the string a second time to answer a
-question the compositor is about to answer again while drawing it. Well over a
-hundred single-line labels across `gui/**` and `apps/**` pass `max_width`
-without eliding; most are safe only because their values are short and
-app-authored, and the ones that bite carry user or network data — file names,
-SSIDs, error strings, host names.
-
-**Why this needs you rather than me.** Every option is a different tax on the
-same several-hundred call sites, and the cheapest-to-write one is the one that
-does not actually stop the mistake recurring. That is a taste call about the
-API's shape, and it lands across three lanes' in-flight work.
-
-- **A — add an `overflow: TextOverflow` field to `RenderCommand::Text`**
-  (`Clip` | `Ellipsis`), and let the compositor draw the mark, since it is the
-  only party that knows exactly where the glyphs ran out. *Pro:* one
-  calculation, right by construction, and the policy is visible at every call
-  site. *Con:* Rust has no default for a struct-variant field, so this edits
-  every construction of `Text` in the tree — several hundred, mechanical but
-  wide, and it conflicts with anything else in flight that touches rendering.
-- **B — a second variant** (`TextClipped` / `TextElided`). *Pro:* no churn at
-  existing call sites. *Con:* splits the match arms in every renderer and every
-  test that walks a command list, forever, to encode one boolean.
-- **C — a constructor/builder** (`RenderCommand::text(..).elided()`), leaving
-  the struct literal as it is. *Pro:* no churn; opt in where it matters.
-  *Con:* the literal form stays available and stays wrong, so it prevents
-  nothing — it is documentation with a return type.
-- **D — sweep `text::elide` across the data-bearing call sites** and leave the
-  command alone. *Pro:* smallest diff, fixes the sites that actually bite.
-  *Con:* keeps the double measurement, and the next label someone adds has the
-  bug again.
-
-**Claude's recommendation.** **A**, done as its own commit with nothing else in
-flight, because it is the only option that makes the mistake unrepresentable —
-and the churn is mechanical, which is the cheap kind. **D** is the sensible
-answer if you would rather not spend a wide diff on this now; in that case it
-should be scoped to labels carrying user or network data rather than swept
-blindly.
-
-**Where it bites:** `gui/toolkit/src/render.rs` (`RenderCommand::Text`),
-`gui/compositor/src/main.rs` (`draw_text`, the `break` at the limit),
-`gui/toolkit/src/text.rs` (`elide` / `elide_start`), and every `max_width:
-Some(..)` in `gui/**` and `apps/**`.
-
-## A-Q1 — Install the GNAT/SPARK and LLVM toolchains? — Status: **FULLY ANSWERED 2026-08-15 — Lane A to record in `design-decisions.md`**
-
-**In short:** this entry asked about **two unrelated compiler installs** in one
-question. Both are now answered, separately.
-
-| | What it is | Answer |
-|---|---|---|
-| **A** | **Ada/SPARK** — a second programming language whose toolchain can mathematically *prove* driver code has no buffer overflows and no bad state transitions. `design.txt` wants it for safety-critical drivers. | ✅ **Install it, with the prover (`gnatprove`).** |
-| **B** | **clang + lld** — an alternative C compiler and linker. Installing them is what would let us switch on **CFI** (Control-Flow Integrity: a compiler feature that stops an attacker redirecting a function call to code of their choosing). | ⏸ **"not yet."** Deferred, not refused → `deferred-questions.md` **D-Q2**. |
-
-**On B — "not yet" (operator, 2026-08-15).** The install itself is small and
-uncontroversial; what is missing is a reason. We use C only for *ported* code,
-and the one piece of C we compile today (`scripts/create-ext4-rootfs.sh`) is
-built with gcc — so turning CFI on now would change Lane B's build for a benefit
-that only materialises when the big C ports land, and would pull in LTO
-(whole-program optimization at link time), which slows every build it touches.
-Nothing is blocked by waiting. It moves to `deferred-questions.md` as **D-Q2**
-with an explicit trigger — the first substantial C port entering the build — so
-it comes back when the payoff is real rather than being quietly dropped.
-
-*(Two smaller follow-ups inside A are still unsettled — which GNAT distribution
-to install, and which cut-down Ada runtime to use — but those are Lane A's calls
-to make, not the operator's. They are spelled out at the end of the answer
-below.)*
-
-### ANSWER 2026-08-15 — option **A**, including `gnatprove`. Option **B**: "not yet" (deferred as D-Q2).
-
-The operator answered in a Lane B session. Verbatim:
-
-> q44: a, including gratprove.
-
-The `q44` label is a typo for this question — it arrived in the same message as
-the real Q44 answer, immediately after it, and Q44 has no option "including
-gnatprove". Read as **A-Q1: A**.
-
-**What was decided: install GNAT/SPARK *with the prover*.** The "including
-gnatprove" is the load-bearing half, and it closes the correction in the
-`UPDATE 2026-08-15` block below — the prover is part of the definition of done,
-not an optional extra, because Ada-without-SPARK is just another systems
-language and we already have a memory-safe one.
-
-**Consequences that follow directly from "including gnatprove":**
-
-- **The install route cannot be MSYS2.** `mingw-w64-x86_64-gcc-ada` ships
-  `gnat` and `gprbuild` and no `gnatprove`, and MSYS2 has no such package.
-  Taking the easy route would buy the entire cost of the feature and none of its
-  justification. The route must be **Alire** (`alr toolchain --select`, then the
-  `gnatprove` crate) or **AdaCore's own download**.
-- **The prover stack is a further install:** Why3 + Alt-Ergo, optionally Z3 and
-  CVC5. `gnatprove` without a solver proves nothing.
-- **GPL is not a problem here.** The toolchain is a tool we *run*, not something
-  we link; it does not reach our output.
-
-**Two sub-decisions this answer does not settle.** Both are Lane A's to make or
-to escalate:
-
-- **Which GNAT distribution.** The FSF-via-Alire route now looks clearly
-  preferable to GNAT Pro precisely because it carries `gnatprove`, but nobody
-  has said so as a decision.
-- **The restricted runtime: ZFP vs light.** A freestanding kernel cannot use the
-  full Ada runtime, which wants an OS underneath it. This is configuration work
-  with real content, not part of the install.
-
-**Option B (clang + lld, for LLVM CFI) — the operator's answer was "not yet."**
-It arrived separately, after the A answer, because this question says out loud
-that A and B "are separable, so please answer them independently" and only A had
-come back. **"Not yet" is a deferral, not a refusal**, and the reasoning is the
-one already written into B's cons: cheap and uncontroversial to install, but the
-payoff is currently near zero — C is used only for ports, the one piece of C we
-compile today (`scripts/create-ext4-rootfs.sh`) is built with gcc and is Lane
-B's tree, and CFI wants LTO, which changes build times and link behaviour
-everywhere it reaches.
-
-**Do not silently drop it.** It is carried in `deferred-questions.md` as
-**D-Q2**, whose trigger is *the first substantial C port entering the build*
-(ext4, Mesa, or anything else that makes `clang`'s CFI govern a meaningful
-amount of compilation). Whoever starts such a port promotes D-Q2 back into this
-file. Note the ordering that follows: **install clang/lld and decide CFI at the
-start of that port, not after it**, because retrofitting CFI onto a landed port
-means re-linking and re-testing it rather than building it that way once.
-
-**Recording:** the decision belongs in `design-decisions.md` under Lane A's
-§200–299 range. Lane B has deliberately **not** written it there — inventing a
-§2xx number from another lane is how two lanes end up with the same section
-number after a merge. See `requests/b-a-operator-answered-a-q1.md`.
-
-
-*(Renumbered from `Q40` on 2026-08-15 by Lane B. It collided with the pre-split `Q40` above, and the operator's one-word answer "q40: b" was genuinely ambiguous between the two. Lane-prefixed per `roadmap.md`'s convention, as `B-Q1`/`C-Q1` already are.)*
-
-**Question.** The Lane A roadmap backlog has five items. Three are either
-"Later" (NTFS/Btrfs/ZFS/F2FS), lane-C-driven (TCP/IP stack), or a very large
-port that wants its own go-ahead (AMDGPU / i915-xe). The remaining two are the
-natural next increments — and **both are blocked on a compiler that is not
-installed on this machine**, not on any design or code question:
-
-| Roadmap item | Needs | Probe result |
-|---|---|---|
-| `[A]` Ada/SPARK FFI bridge for kernel-space drivers | `gnat`, `gprbuild`, `gnatprove` | all missing |
-| `[A]` Enable LLVM CFI as default for C/C++ compilation | `clang`, `lld` | both missing |
-
-(Probed 2026-08-14 via `command -v`. The `*ada*` directories under
-`userspace/` are coincidental CLI names — `ada-cli`, `cutadapt-cli` — not an
-Ada toolchain. A stray `ld.lld` exists under an Embarcadero install but is not
-a usable LLVM toolchain.)
-
-Per the global tooling rule I install missing tools myself when that is safe
-and self-contained, and pause to ask when it is heavyweight, system-wide, or
-has licensing implications. Both of these are in the "ask" category, and they
-are separable, so please answer them independently.
-
-**Option A — install GNAT/SPARK (unblocks the Ada FFI bridge).**
-
-- *Pro:* it is the only thing standing between the roadmap and a design-spec
-  feature. `design.txt` (lines 84-95) is specific about what it buys: SPARK
-  *proves* driver logic has no buffer overflows, no integer overflows and no
-  invalid state transitions, and the layering it names — Rust kernel → FFI →
-  SPARK driver in kernel space → IOMMU-constrained DMA — is a real
-  defence-in-depth story rather than a nice-to-have.
-- *Con:* it is the heaviest of the three asks. Beyond the ~1-2 GB toolchain
-  there is a **licensing fork** worth your call (FSF GNAT via MSYS2/MinGW vs
-  AdaCore's GNAT Pro; GNAT Community is discontinued), and a real technical
-  cost: a freestanding kernel needs a **restricted Ada runtime** (ZFP or
-  light), because the full runtime wants an OS underneath it. That is
-  configuration work, not just an install.
-- *Con:* `gnatprove` is what makes this "SPARK" rather than "Ada". If we
-  install a toolchain without the prover, we get FFI plumbing and none of the
-  proof — i.e. the entire justification.
-
-**Option B — install clang + lld (unblocks LLVM CFI).**
-
-- *Pro:* much lighter and less contentious; clang/lld are a standard,
-  well-understood install with no licensing question.
-- *Con:* the payoff is presently small. The rule is that C is used *only* when
-  porting existing C code (ext4, Mesa, Chromium), so "CFI as default for C/C++"
-  currently governs a very small amount of compilation — the C in
-  `scripts/create-ext4-rootfs.sh` is built with **gcc**, and that script is
-  Lane B's. Enabling CFI as a default would therefore reach across a lane
-  boundary to change Lane B's build for a benefit that only materialises once
-  the big C ports land.
-- *Con:* CFI wants LTO, which changes build times and link behaviour for
-  everything it touches.
-
-**Option C — install neither now; defer both.**
-
-- *Pro:* neither item is on the critical path today, and there is unblocked
-  Lane A work (see below), so the cost of waiting is zero.
-- *Con:* it leaves the Lane A roadmap backlog effectively down to
-  "Later"/large-port items, so the *next* time Lane A needs a task the same
-  question comes back.
-
-**Claude's recommendation:** **B now, A when you want the driver-safety story
-started, and tell me which GNAT.** clang/lld is cheap, uncontroversial, and I
-can install it without further input if you say go. GNAT/SPARK I would rather
-not choose for you: the FSF-vs-AdaCore call and the restricted-runtime
-decision are both yours, and installing the wrong one wastes the larger
-download. I would also want to sequence A *after* the IOMMU work it pairs with
-in `design.txt`, so it is not urgent.
-
-**What I am doing in the meantime — this question blocks nothing.** I have
-moved to `TD-KSHELL-LINE-EDITOR-IS-UTF8`, which is unblocked, in-lane, pure
-Rust, and a genuine correctness item rather than polish: `CLAUDE.md`'s rule 7
-says OS-boundary data is bytes and must never be forced through UTF-8, and the
-kshell line editor currently holds the command line as a `String`, so a
-filename containing a non-UTF-8 byte can be listed but neither typed nor
-tab-completed. Please do **not** treat this question as a reason to expect me
-idle.
-
-**Where it bites:** `scripts/kasan-build.sh`-style toolchain probing generally;
-for A, a new `drivers/spark/` tree plus a `build.rs` FFI shim and
-`toolchain/`-side runtime configuration; for B, `.cargo/config.toml` C flags
-and `scripts/create-ext4-rootfs.sh` (Lane B — would need a `requests/` entry).
-Roadmap lines ~297-298 (`roadmap.md` Lane A backlog) and `design.txt` lines
-84-95.
-
----
-
-### UPDATE 2026-08-15 — the operator asked why we would not install `gnatprove`; the con was overstated
-
-**The operator's question:** *"why wouldn't we install gnatprove?"* Fair — the
-bullet as written implies a reason to skip it, and there isn't one. Corrected:
-
-**`gnatprove` is freely available, including on this machine's platform.** SPARK
-is open source, AdaCore publishes binaries for Windows x86-64 / Linux x86-64 /
-macOS x86-64, there is an Alire crate (`alr with gnatprove`), and the
-alire-project `GNAT-FSF-builds` repository ships FSF builds. No licence blocks
-it and no money is involved.
-
-**So the real content of that bullet is a route warning, not a veto.** The
-obvious way to get Ada on this box — MSYS2's `mingw-w64-x86_64-gcc-ada` — gives
-`gnat` and `gprbuild` and **no** `gnatprove`; MSYS2 has no such package. Stop
-there and we would have paid the whole cost of the feature (a second language
-and toolchain in the build, an FFI bridge, a restricted ZFP/light runtime for a
-freestanding kernel) and collected none of the benefit, because
-**Ada-without-SPARK is just another systems language and we already have a
-memory-safe one.** `design.txt` lines 84-95 justify this on the *proof*
-specifically — no prover, no justification.
-
-**Therefore, if A is chosen, the prover is part of the definition of done**, and
-the install route must be one that can actually deliver it: Alire
-(`alr toolchain --select`, then the `gnatprove` crate) or AdaCore's own
-download, not MSYS2 alone. Two things worth knowing before committing:
-`gnatprove` needs its prover stack (Why3 + Alt-Ergo, optionally Z3/CVC5)
-installed too, and the toolchain is GPL — it is a tool we *run*, not something
-we link, so it does not reach our output.
-
-**What is still open, and still yours.** Nothing above chooses for you. The
-remaining calls are (i) go/no-go on **B** (clang + lld — cheap, uncontroversial,
-I can do it on a one-word yes), (ii) go/no-go on **A**, and (iii) if A, which
-GNAT distribution — the FSF-via-Alire route now looks clearly preferable to
-GNAT Pro given that it carries `gnatprove`, but the restricted-runtime
-(ZFP vs light) configuration is still real work and still a decision. Claude's
-recommendation is unchanged: **B now, A when you want the driver-safety story
-started, sequenced after the IOMMU work it pairs with in `design.txt`.**
-
-*Sources for the availability claim: AdaCore SPARK User's Guide §3
-"Installation of GNATprove"; alire.ada.dev crate `gnatprove`; alire-project
-`GNAT-FSF-builds`.*
+**Execution constraint:** its own commit, nothing else in flight — see §310.
+Closes `known-issues.md` → `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`.
 
 ## B-Q1 — The zoneinfo reader is done and nothing on disk to read: which tzdata do we ship, from where, and how is it updated? — Status: **RESOLVED 2026-08-15 → design-decisions.md §311**
 
@@ -632,100 +192,271 @@ The two tests asserting the current UTC fallback
 failing the day the data lands** — that is the signal it worked, not a
 regression.
 
-## C-Q1 — Should normalization consult font coverage? The last 339 sweep disagreements are all this one question — Status: **ANSWERED 2026-08-15 — Lane C to record in `design-decisions.md`**
+## C-Q1 — Should normalization consult font coverage? The last 339 sweep disagreements are all this one question — Status: **RESOLVED 2026-08-15 → design-decisions.md §428**
 
-### ANSWER 2026-08-15 — option **C**: keep `nfc` pure, let `fit_to_face` decompose what it cannot draw
+**Answer: C — keep `nfc` font-blind; let `fit_to_face` decompose a composed
+character the face cannot draw when the pieces are drawable.** Decided by the
+operator ("c-q1: c."); Claude raised the question and recommended this option.
 
-The operator answered in a Lane B session. Verbatim: **"c-q1: c."** That is
-Lane C's own recommendation, so the plan is unchanged — but it is now a decision
-and needs recording.
+`norm.rs`'s layering principle stands: `nfc` answers a question about *text* and
+never looks at a font, `fit_to_face` answers a question about the *font*. The
+fallback goes in the second stage, where `split_undrawable` already lives and
+already has that shape. The 339 residual HarfBuzz sweep disagreements — 255 of
+them `\u1e09`, 57 `\u212b` — should move to `agree` without `nfc` ever taking a
+face as input.
 
-**What was chosen.** The layering principle in `norm.rs`'s module doc **stands**:
-`nfc` answers a question about *text* and never looks at a font; `fit_to_face`
-answers a question about the *font*. The narrow fallback goes in the second
-stage — when `fit_to_face` meets a composed character the face cannot draw, and
-the *pieces* are drawable, it decomposes. `split_undrawable` already exists and
-already has this shape, which is why C was the recommendation.
+Rejected: **A** (change nothing) draws a missing-glyph box where HarfBuzz draws
+correct text, and the user does not care which stage was principled. **B**
+(adopt HarfBuzz's font-aware recomposition wholesale) makes normalization a
+function of `(text, face)` — no longer hoistable, cacheable, or testable without
+a font in hand. §428 keeps B's argument written out, because it is what has to
+be beaten if some future case cannot be fixed inside `fit_to_face`.
 
-Result for the 339 residual sweep disagreements: they should move to `agree`
-without `nfc` ever taking a face as input.
+**The bill to watch for:** mark reordering after a late decomposition, which
+HarfBuzz gets right by construction and we would not. The sweep is the
+instrument; an ordering case it surfaces is this decision's cost coming due, not
+a surprise.
 
-**The cost that was accepted.** Two mechanisms where HarfBuzz has one — we agree
-with HarfBuzz on output while diverging on structure. The concrete risk the
-question named is **mark reordering after a late decomposition**, which HarfBuzz
-gets right by construction and we would not. Treat that as the thing to test
-rather than assume: the sweep is the instrument, and any ordering case it
-surfaces is this decision's bill, not a surprise.
+## Q45 — [A] The kshell byte-purity conversion is ~40× larger than its own scoping estimate. Convert the whole shell, or make only the *expanded word* byte-clean? — Status: OPEN
 
-**Not chosen, and why it matters later:** **B** (adopt HarfBuzz's font-aware
-recomposition) was refused because it makes normalization a function of
-`(text, face)` — no longer hoistable, no longer cacheable per string, not
-reasonable about without a font in hand. If a future case cannot be fixed inside
-`fit_to_face`, that is the argument that has to be beaten, not re-litigated from
-scratch.
+**Background.** `known-issues.md` → `TD-KSHELL-LINE-EDITOR-IS-UTF8` records that
+the shell cannot type or tab-complete a non-UTF-8 filename, and prescribes
+converting the editor **and** the statement executors together, on the
+reasoning that a partial conversion just relocates the lossy step from the
+keyboard to the parser entry, where it is *less* visible. Stage (a) of that
+plan has landed (`kernel/src/bytestr.rs`, commit `d19372dd4`).
 
-**Recording:** `design-decisions.md` under Lane C's §400–499 range — Lane C's own
-question, Lane C's own range, so Lane B has recorded the answer here only. Filed
-as `requests/b-c-operator-answered-q45-and-c-q1.md`.
+**What changed.** Measuring the remaining stages against the actual file, the
+scope is far larger than the entry assumed. `kernel/src/kshell.rs` is **84,845
+lines**, and **879 of its 1,024 functions** take or return `&str`/`String`.
+The entry's "~1520 call sites" counted *method calls*, not signatures.
+`execute_single` is a full bash-like parser — alias expansion, array syntax,
+`(( ))` arithmetic, `eval`, pipes, redirects, heredocs — and its logic is
+text-oriented throughout (`line.starts_with("((")`, `line.get(2..)`, …). So
+"one coherent change over the editor and the statement executors" means
+rewriting essentially the entire shell in a single commit.
 
-**Raised by Claude (Lane C)** (2026-08-15), on finishing `known-issues.md` →
-`TD-FONT-HAS-A-HANGUL-SHAPER-NOTHING-CALLS`. That fix took the HarfBuzz
-differential sweep from 892 disagreements to 339, and the 339 that remain are
-**one question asked 339 times**, not a scatter of unrelated bugs: `\u1e09`
-(ḉ — c with cedilla and acute) 255 cases, `\u212b` (Å angstrom sign) 57,
-`été` 10, and a short tail.
-
-**Question.** `norm.rs` is layered on a deliberate principle, written into its
-module doc: **`nfc` answers a question about *text* and knows nothing about
-fonts; `fit_to_face` answers a question about the *font* and does not
-renormalize.** Unicode composition is a property of the string, so it is
-decided before any face is consulted. HarfBuzz does the opposite — it
-decomposes to NFD, then *recomposes only where the face has a glyph*, so the
-same string normalizes differently in two fonts. Which layering do we want?
-
-Concretely, for `\u1e09` in a face that has `c`, the cedilla and the acute but
-no precomposed ḉ: we emit one missing-glyph box, HarfBuzz emits three glyphs
-that stack into the right-looking character.
+Worth noting what is *not* implicated: only **6** `from_utf8_lossy` sites exist
+in the whole file, and all six are file-*content* formatting (`column`, `diff`),
+not path handling. The byte-purity problem is confined to the path pipeline.
 
 **Options.**
 
-- **A — keep the current layering** (`nfc` is pure Unicode; font coverage is
-  `fit_to_face`'s problem). *Pro:* each stage has one job and one input, which
-  is why the module reads clearly and why the Hangul work above was four small
-  edits rather than a rewrite; normalization is reproducible without a font in
-  hand, so it can be tested, cached, and shared across faces. *Con:* we draw a
-  box where HarfBuzz draws correct text, on real strings, in real fonts. The
-  user does not care which stage was principled.
-- **B — adopt HarfBuzz's font-aware recomposition.** *Pro:* matches the
-  reference implementation and every other shaper, closes the sweep's residue
-  to near zero, and is strictly better output on faces with partial coverage.
-  *Con:* normalization becomes a function of `(text, face)`, so it can no
-  longer be hoisted, cached per string, or reasoned about without a font;
-  `norm.rs`'s layering claim becomes false and its doc has to be rewritten to
-  say the opposite.
-- **C — a narrow fallback: keep `nfc` pure, but let `fit_to_face` decompose a
-  composed character it cannot draw when the parts *are* drawable.** *Pro:*
-  gets B's user-visible outcome for exactly the failing case while keeping
-  A's layering, because the decomposition happens in the stage that already
-  owns "what can this face draw" — `split_undrawable` is already that
-  function and already takes this shape. *Con:* it is two mechanisms where
-  HarfBuzz has one, so we would agree with HarfBuzz on output while diverging
-  on structure, and the sweep may surface ordering cases (mark reordering
-  after a late decomposition) that HarfBuzz gets right by construction.
+- **A — Convert the whole shell as one commit, per the original entry.**
+  *Pros:* no lossy step anywhere; matches the entry's stated reasoning; every
+  command becomes byte-clean including non-path arguments.
+  *Cons:* an 879-signature rewrite of an 85k-line file, unreviewable as one
+  diff, landing against a working shell; a single mechanical slip breaks a
+  shell that currently works, for a defect the entry itself classifies as *not*
+  data loss ("nothing is corrupted or silently lost… a usability gap in one
+  interactive front end"). Costly to reverse. Many boot-test cycles.
 
-**My recommendation: C**, and I have *not* implemented it. It is the only
-option that does not require choosing between correct pixels and a coherent
-module boundary, and `split_undrawable` already exists as the hook. But it is
-a user-visible rendering-policy change on a design principle that was written
-down deliberately, so it is yours rather than mine. Meanwhile the behaviour is
-A (unchanged) and the residue is documented, not silently tolerated.
+- **B — Make the *expanded word* byte-clean, not the command line.** Keep the
+  source line as text; convert word expansion, `resolve_path`, tab completion
+  and the path-consuming commands to `[u8]`. The user reaches arbitrary bytes
+  via the `$'\xff'` escape, and completion emits that spelling for candidates
+  that are not valid UTF-8.
+  *Pros:* this is **exactly how bash works** — the script source is text, the
+  expanded argument is a byte string; the shell already parses `$'…'` (7 sites),
+  so the input mechanism exists; it fixes the actual user-visible bug; the diff
+  is a small fraction of A and is genuinely coherent along the *data-flow* axis
+  rather than the layer axis, so it introduces no lossy step.
+  *Cons:* a literal raw 0xFF byte still cannot be *typed* directly (it must be
+  escaped); departs from the plan recorded in the entry.
 
-**Where it bites:** `gui/font/src/norm.rs` (`nfc`, `normalize`,
-`decompose_once`, `split_undrawable`, `fit_to_face`, and the module doc's
-layering paragraph), `gui/font/src/scaled.rs::shape` (call order), and
-`gui/font/tools/harfbuzz_sweep.py` (the 339 would move to `agree`). Reference:
-HarfBuzz `src/hb-ot-shape-normalize.cc`,
-`HB_OT_SHAPE_NORMALIZATION_MODE_COMPOSED_DIACRITICS_NO_SHORT_CIRCUIT`.
+- **C — Leave it as documented debt.** *Pros:* zero regression risk. *Cons:*
+  the gap persists; CLAUDE.md's byte-purity rule stays violated in this front
+  end.
+
+**Claude's recommendation: B.** It fixes the real defect (a non-UTF-8 filename
+becomes reachable and completable) at a small fraction of A's risk, and it is
+the design real shells actually use — the entry's "partial conversion is worse
+than none" objection targets a *layer* split (editor byte-clean, parser not),
+which B is not: B converts one data path end-to-end. A's extra benefit over B
+is byte-purity for non-path arguments, which no known use case needs.
+
+This is flagged rather than decided because A vs. B is an architectural fork on
+a large, costly-to-reverse change, and because B knowingly departs from a plan
+already written into `known-issues.md`.
+
+**Where it bites.** `kernel/src/kshell.rs`: `resolve_path` (208, 270 call
+sites), `get_cwd` (194), the editor — `line_buf` (2872), `History.entries`
+(2631), `replace_line` (2921), `redraw_from_cursor` (2955),
+`reverse_search_mode` (3061), `read_line` (3191) — and `execute` (3872) /
+`execute_single` (4149) plus the sibling statement executors. Helpers already
+exist in `kernel/src/bytestr.rs`.
+
+**In the meantime** Claude is not starting either conversion, and is picking up
+other unblocked Lane A work.
+
+---
+
+## Q46 — [A] Every benchmark ever recorded measured an `opt-level = 0` kernel. Should the *non-bench* boot test also switch to release, or only the bench path? — Status: OPEN
+
+**Background.** `scripts/boot-test.sh:602` runs a bare `cargo build` and stages
+`target/x86_64-unknown-none/debug/kernel`. The bench suite is compiled in
+unconditionally — `--bench` only changes which serial marker is awaited — and
+`[profile.dev]` has no kernel `opt-level` override, so all 5 records and all 63
+benchmarks in `bench/history.jsonl` were measured unoptimised and scored
+against `baselines.toml` targets drawn from optimised Linux/Fuchsia/L4
+implementations. Full write-up:
+`known-issues.md` → `B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL`.
+
+**What is not in question.** That `--bench` must build `--release` is not a
+tradeoff — a benchmark that does not measure the shipped build is not a
+benchmark, and `[profile.release.package.kernel]` (`opt-level = 3`,
+`codegen-units = 1`) already exists for exactly this. Claude is proceeding with
+that plus an append-only `profile` field in each history record, so debug
+records are never diffed against release ones. **The question is only about the
+default, non-bench boot test.**
+
+**Option A — leave the default boot test on debug (Claude's lean).**
+- *For:* fast iteration on the ~405 s TCG cycle; readable panics and intact
+  frame pointers when a boot fails; `--bench` already roughly doubles the cycle
+  so the slow path is opt-in.
+- *Against:* two kernel builds live in the tree, and release-only behaviour —
+  miscompiles, UB that only manifests optimised, different timing and stack
+  layout — is then exercised *only* on bench runs, which are the runs nobody
+  reads for correctness. That is a real correctness gap, not just a tidiness
+  one.
+
+**Option B — build release everywhere; the boot test always tests what ships.**
+- *For:* one binary, and the boot test's PASS then means the shipped kernel
+  boots. Any release-only bug surfaces on every run rather than on bench runs.
+- *Against:* slower rebuilds on every iteration, and degraded diagnostics
+  exactly when a boot fails, which is when they matter most. `opt-level = 3`
+  with `codegen-units = 1` on this kernel is not a cheap build.
+
+**Option C — debug by default, plus a periodic release boot test.**
+- *For:* keeps fast iteration and still exercises the release binary on a
+  schedule.
+- *Against:* another mode to maintain, and "periodic" needs a trigger nobody
+  has defined; in practice it tends to mean "never".
+
+**Recommendation: A, with the gap named rather than ignored** — the bench path
+becomes the release path, and if a release-only defect ever shows up there it
+promotes this to B immediately. Claude will not decide between A and B
+unilaterally because B changes the default cost and diagnostics of every boot
+test the other two lanes run, which is theirs to feel as much as Lane A's.
+
+**Update 2026-08-15 — the common work is done, and it moved the tradeoff.**
+The `--bench` → release change and the `profile` history field are in
+(`880c3bfe5`, `c1806720b`). Two things changed since the options were written:
+
+1. **`scripts/boot-test.sh --profile=debug|release` now exists**, decoupling the
+   build profile from the serial marker being awaited. So "run a release boot
+   test" is one flag, on any run, by any lane. **Option C's only real objection
+   — "another mode to maintain" — is gone; the mode is already built and
+   tested.** What C still lacks is a *trigger*, which remains the honest
+   objection to it.
+2. **Release is not the slow build the options assumed it would be at the boot
+   level.** Measured this session on the full bench suite: release QEMU window
+   142 s vs debug 615 s. The release *build* is slower, but the release *boot*
+   is ~4× faster because the kernel executes ~40× fewer instructions under TCG.
+   Option B's "*Against: slower rebuilds on every iteration*" is real, but its
+   implied "slower boot tests" is backwards — B would make the run-time half of
+   every cycle substantially quicker.
+
+Neither point decides A vs B; both are still cost claims and B still changes
+what the other two lanes feel on every boot. But the question is now cheaper to
+answer either way, and if the answer is C, it is already implemented and needs
+only a trigger (Claude's suggestion for one, if C is chosen: a release boot test
+before any lane merges to `main`, since that is already the moment a lane runs
+the slow verification anyway).
+
+*What changes, restated as observable differences:*
+- **A:** `./scripts/boot-test.sh` keeps taking ~405 s and keeps printing
+  readable panics; the shipped (optimised) kernel is only ever booted on
+  `--bench` runs.
+- **B:** every boot test builds longer but boots faster, and a panic prints
+  optimised, harder-to-read frames.
+- **C:** as A day-to-day, plus one extra release boot at merge time.
+
+*If never answered:* current behaviour (A) is safe and nothing is blocked — the
+gap is that release-only defects surface only on bench runs. It does not get
+worse with time, but it does get *more* likely to matter as more kernel code
+lands unexercised in optimised form.
+
+---
+
+## Q47 — [A] The `D:` drive filled to 0 bytes free and destroyed a source file. Should the three lanes share one build-output directory? — Status: OPEN (narrowed — C is done; the question is now only A vs B)
+
+**In short:** The drive the project lives on ran completely out of space today.
+An edit that was half-written when the space ran out left one kernel source
+file **empty** — 18 KB of code replaced by nothing. It was recovered from git in
+under a minute because it happened to be already committed, but five other files
+being edited at the same moment were *not* committed and would have been gone
+for good. The space is going to compiler output: three parallel agents each keep
+their own copy of every compiled artefact, and deleting just one agent's copy
+freed **13 GB**. The question is whether the three should share one output
+directory (much less disk, but they would have to take turns compiling) or keep
+their own (fast, independent, and this happens again).
+
+**Terms:** a *build-output directory* (`target/`) is where the compiler puts
+everything it produces — object files, libraries, the kernel image. It is
+entirely regenerable: deleting it costs a rebuild, never source. Rust's build
+tool locks that directory, so two builds sharing one **queue** rather than run
+at once.
+
+| Option | *What changes:* | Cost |
+|---|---|---|
+| **A — Share one directory** (`CARGO_TARGET_DIR` set to a single path for all three lanes) | Roughly a quarter of the disk footprint; a lane that starts a build while another is compiling **waits** instead of proceeding | Lanes serialise on the build lock. Wall-clock per lane goes up whenever two build at once |
+| **B — Keep separate directories, add pruning** | Nothing changes day to day, except a scheduled/opportunistic `cargo clean` on lanes that have been idle | Keeps parallel builds, but the pruning has to be remembered, and "idle" is a guess |
+| **C — Keep separate, and add a free-space floor to the tooling** | `boot-test.sh` and the test runner refuse to start below (say) 20 GB free and say why | Does not free anything; converts a corrupting failure into an honest refusal |
+| **D — Move the build output off `D:` entirely** | Compiler output goes to another volume; `D:` holds only source and the operator's data | Needs a volume with tens of GB free — operator knows whether one exists; also slower if that volume is slower |
+
+**Measured 2026-08-15, a few hours after the incident** (so you can size the
+options rather than guess at them):
+
+| Where | Build output |
+|---|---|
+| `os` (the integration checkout) | 59.1 GB |
+| `os-lane-b` | 40.4 GB |
+| `os-lane-c` | 35.0 GB |
+| `os-lane-a` | 3.5 GB — small only because it was deleted today to recover |
+| **total** | **138 GB** |
+| free on `D:` right now | **41 GB (2% of a 1.9 TB drive)** |
+
+Two things this makes concrete. First, the footprint is dominated by the
+**integration checkout**, which nobody actively builds in — it is the largest
+single consumer at 59 GB and the cheapest to reclaim, which makes B better than
+it looks on paper. Second, 41 GB free is *less* than a single full rebuild of
+all four trees would need, so the current margin is one careless afternoon wide.
+
+**Claude's recommendation: C now (it is Lane A's to do unilaterally and is
+strictly protective), plus A if you are willing to trade build parallelism.**
+A's serialisation is arguably a *bonus* rather than a cost here: concurrent lane
+builds are already the single largest source of the benchmark contamination
+documented throughout `known-issues.md`, so forcing the lanes to take turns
+would make the performance numbers more trustworthy, not less. But that is a
+real change to how all three agents work, which is why it is not being made
+unilaterally.
+
+**Option C is DONE (2026-08-15, lane A) — you are no longer choosing whether to
+have a safety net, only how to pay for the space.** `scripts/boot-test.sh` now
+refuses to build or stage below **20 GiB** free, naming the incident and telling
+you which worktree to prune. Override per run with `--min-free-gb=N`, or
+`BOOT_TEST_MIN_FREE_GB=N` (0 disables). It is checked twice — before the build
+and again before staging — because the build is itself what consumes the margin,
+and it is staging a partial ~200 MiB kernel image that produces the
+boots-a-stale-kernel failure. If `df` cannot produce a number it prints a warning
+saying the floor is *not* being enforced, rather than skipping silently: a check
+that cannot run must not look like a check that passed.
+
+This does not free a single byte — it converts a corrupting failure into an
+honest refusal, which is why it did not need your decision. **A vs B still does.**
+
+**Also worth re-measuring before you decide:** free space on `D:` is **91 GiB**
+as of this update, up from the 41 GiB in the table above, because the other lanes
+pruned during the day. So the immediate emergency is over and the choice can be
+made on its merits rather than under pressure.
+
+**If never answered:** the disk fills again — more slowly now, and it will
+announce itself as a refused boot test rather than as a truncated source file.
+Today's damage was one committed file and cost a minute; the same event during a
+large uncommitted change loses that change outright. Note the floor protects the
+*harness* only: a `cargo build` you run by hand, or an editor writing a file, is
+still unguarded, so this reduces the blast radius without removing it.
 
 ---
 

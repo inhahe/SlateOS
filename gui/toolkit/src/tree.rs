@@ -6,7 +6,7 @@
 
 use crate::color::Color;
 use crate::event::{Key, KeyEvent, Modifiers};
-use crate::render::{FontWeightHint, RenderCommand};
+use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 
 /// Unique identifier for tree nodes.
@@ -482,6 +482,7 @@ impl TreeView {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -499,6 +500,7 @@ impl TreeView {
                     FontWeightHint::Regular
                 },
                 max_width: Some(width - (label_x - x) - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 

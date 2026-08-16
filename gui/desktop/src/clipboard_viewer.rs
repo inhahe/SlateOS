@@ -5,7 +5,7 @@
 //! Integrates with the gui/clipboard service.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -563,6 +563,7 @@ impl ClipboardViewer {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Entry count badge.
@@ -583,6 +584,7 @@ impl ClipboardViewer {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Search field.
@@ -618,6 +620,7 @@ impl ClipboardViewer {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Format filter tabs.
@@ -650,6 +653,7 @@ impl ClipboardViewer {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(tab_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tab_x += tab_w + 4.0;
         }
@@ -668,6 +672,7 @@ impl ClipboardViewer {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             for (i, entry) in visible.iter().enumerate() {
@@ -705,6 +710,7 @@ impl ClipboardViewer {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Preview text.
@@ -739,6 +745,7 @@ impl ClipboardViewer {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(preview_room),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Meta line (age, size, source).
@@ -766,6 +773,7 @@ impl ClipboardViewer {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Light,
                     max_width: Some(meta_room),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Pin indicator.
@@ -778,6 +786,7 @@ impl ClipboardViewer {
                         font_size: 11.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(16.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
 
@@ -791,6 +800,7 @@ impl ClipboardViewer {
                         font_size: 10.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(16.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -821,6 +831,7 @@ impl ClipboardViewer {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Pinned count.
@@ -834,6 +845,7 @@ impl ClipboardViewer {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 

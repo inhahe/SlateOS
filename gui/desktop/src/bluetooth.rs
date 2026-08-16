@@ -11,7 +11,7 @@
 //! - System tray indicator
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -595,6 +595,7 @@ impl BluetoothSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Power toggle.
@@ -634,6 +635,7 @@ impl BluetoothSettingsUI {
                 color: MOCHA_OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return cmds;
         }
@@ -649,6 +651,7 @@ impl BluetoothSettingsUI {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 20.0;
 
@@ -679,6 +682,7 @@ impl BluetoothSettingsUI {
             color: MOCHA_BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 40.0;
 
@@ -693,6 +697,7 @@ impl BluetoothSettingsUI {
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 22.0;
 
@@ -723,6 +728,7 @@ impl BluetoothSettingsUI {
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 22.0;
 
@@ -745,6 +751,7 @@ impl BluetoothSettingsUI {
                     color: MOCHA_TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cy += 22.0;
 
@@ -793,6 +800,7 @@ impl BluetoothSettingsUI {
             color: MOCHA_BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Name.
@@ -804,6 +812,7 @@ impl BluetoothSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Status.
@@ -815,6 +824,7 @@ impl BluetoothSettingsUI {
             color: dev.state.color(),
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Battery (right side).
@@ -834,6 +844,7 @@ impl BluetoothSettingsUI {
                 color: bat_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 

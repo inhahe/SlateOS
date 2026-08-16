@@ -37,7 +37,7 @@
 //! ```
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -569,6 +569,7 @@ impl ResourceMonitor {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - PANEL_PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let panels = [
@@ -627,6 +628,7 @@ impl ResourceMonitor {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w * 0.4),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Current value text.
@@ -639,6 +641,7 @@ impl ResourceMonitor {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(74.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Peak value (dimmer).
@@ -651,6 +654,7 @@ impl ResourceMonitor {
             font_size: 9.0,
             font_weight: FontWeightHint::Light,
             max_width: Some(w * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Graph area (below labels).

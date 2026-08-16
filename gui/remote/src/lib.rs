@@ -55,7 +55,7 @@
 )]
 
 use guitk::color::Color;
-use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 
 pub mod scene;
@@ -73,7 +73,16 @@ pub const MAGIC: [u8; 4] = *b"ORDR";
 
 /// Current protocol version. Increment on any breaking change to the wire
 /// format; never reuse a version number.
-pub const PROTOCOL_VERSION: u8 = 1;
+///
+/// **2** — `Tag::Text` gained a trailing overflow byte ([`TextOverflowTag`])
+/// when `RenderCommand::Text` gained its `overflow` field
+/// (`design-decisions.md` §427). Unlike the [`FontFamilyTag`] addition below,
+/// this changes the payload of an *existing* tag: a version-1 decoder reading a
+/// version-2 frame would take that byte as the next command's tag and
+/// desynchronise for the rest of the frame — silently, since 0x00 and 0x01 are
+/// both plausible tags. That is exactly the failure a version number exists to
+/// turn into a clean [`DecodeError::UnsupportedVersion`].
+pub const PROTOCOL_VERSION: u8 = 2;
 
 /// Frame header size (magic + version + flags + cmd-count).
 const HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -169,6 +178,43 @@ impl FontFamilyTag {
     }
 }
 
+/// Wire encoding of [`TextOverflow`].
+///
+/// A whole byte for one bit, matching every other enum here: the alternative is
+/// to steal a bit from a neighbouring field, which saves nothing measurable on
+/// a frame of hundreds of commands and makes the format unreadable in a hex
+/// dump — the one debugging tool that always works on a wire protocol.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextOverflowTag {
+    Clip = 0x00,
+    Ellipsis = 0x01,
+}
+
+impl TextOverflowTag {
+    fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0x00 => Some(Self::Clip),
+            0x01 => Some(Self::Ellipsis),
+            _ => None,
+        }
+    }
+
+    fn to_overflow(self) -> TextOverflow {
+        match self {
+            Self::Clip => TextOverflow::Clip,
+            Self::Ellipsis => TextOverflow::Ellipsis,
+        }
+    }
+
+    fn from_overflow(o: TextOverflow) -> Self {
+        match o {
+            TextOverflow::Clip => Self::Clip,
+            TextOverflow::Ellipsis => Self::Ellipsis,
+        }
+    }
+}
+
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FontWeightTag {
@@ -229,6 +275,8 @@ pub enum DecodeError {
     BadFontWeight(u8),
     /// A `FontFamily` tag byte was unknown.
     BadFontFamily(u8),
+    /// A `TextOverflow` tag byte was unknown.
+    BadTextOverflow(u8),
     /// A string field was not valid UTF-8.
     BadUtf8,
     /// A scene frame's window or removed-id count exceeds [`scene::MAX_WINDOWS_PER_FRAME`].
@@ -251,6 +299,7 @@ impl core::fmt::Display for DecodeError {
             Self::BadTag(b) => write!(f, "unknown command tag {b:#04x}"),
             Self::BadFontWeight(b) => write!(f, "unknown font-weight tag {b:#04x}"),
             Self::BadFontFamily(b) => write!(f, "unknown font-family tag {b:#04x}"),
+            Self::BadTextOverflow(b) => write!(f, "unknown text-overflow tag {b:#04x}"),
             Self::BadUtf8 => write!(f, "string field was not valid UTF-8"),
             Self::TooManyWindows(n) => {
                 write!(
@@ -326,7 +375,7 @@ fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
             write_f32(out, *line_width);
             write_radii(out, *corner_radii);
         }
-        RenderCommand::Text { x, y, text, color, font_size, font_weight, max_width } => {
+        RenderCommand::Text { x, y, text, color, font_size, font_weight, max_width, overflow } => {
             out.push(Tag::Text as u8);
             write_f32(out, *x);
             write_f32(out, *y);
@@ -335,6 +384,7 @@ fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
             write_f32(out, *font_size);
             out.push(FontWeightTag::from_weight(*font_weight) as u8);
             write_optional_f32(out, *max_width);
+            out.push(TextOverflowTag::from_overflow(*overflow) as u8);
         }
         RenderCommand::Image { x, y, width, height, image_id } => {
             out.push(Tag::Image as u8);
@@ -654,6 +704,10 @@ fn decode_command(r: &mut Reader<'_>) -> Result<RenderCommand, DecodeError> {
                 .ok_or(DecodeError::BadFontWeight(weight_byte))?
                 .to_weight();
             let max_width = r.read_optional_f32()?;
+            let overflow_byte = r.read_u8()?;
+            let overflow = TextOverflowTag::from_byte(overflow_byte)
+                .ok_or(DecodeError::BadTextOverflow(overflow_byte))?
+                .to_overflow();
             RenderCommand::Text {
                 x,
                 y,
@@ -662,6 +716,7 @@ fn decode_command(r: &mut Reader<'_>) -> Result<RenderCommand, DecodeError> {
                 font_size,
                 font_weight,
                 max_width,
+                overflow,
             }
         }
         Tag::Image => RenderCommand::Image {
@@ -777,6 +832,7 @@ mod tests {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
+            overflow: TextOverflow::Ellipsis,
         });
         t.commands.push(RenderCommand::Text {
             x: 0.0,
@@ -786,6 +842,7 @@ mod tests {
             font_size: 12.0,
             font_weight: FontWeightHint::Light,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         t.commands.push(RenderCommand::Image {
             x: 30.0,
@@ -1078,6 +1135,7 @@ mod tests {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         let bytes = encode_frame_to_vec(&t);
         let (d, _) = decode_frame(&bytes).unwrap();
@@ -1101,6 +1159,7 @@ mod tests {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         let bytes = encode_frame_to_vec(&t);
         let (d, _) = decode_frame(&bytes).unwrap();
@@ -1135,6 +1194,7 @@ mod tests {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         let bytes = encode_frame_to_vec(&t);
@@ -1142,5 +1202,93 @@ mod tests {
         assert!(bytes.len() < 4096, "frame is {} bytes", bytes.len());
         let (d, _) = decode_frame(&bytes).unwrap();
         assert_eq!(d.commands.len(), 40);
+    }
+
+    // ---- text overflow on the wire (design-decisions.md §427) --------------
+
+    /// Encodes one `Text` command with the given policy and hands back the
+    /// frame. `overflow` is the last field of the command and the command is
+    /// the last thing in the frame, so its byte is the frame's last byte —
+    /// which is what lets the corruption test below reach it without
+    /// re-deriving the whole layout.
+    fn one_text(overflow: TextOverflow) -> Vec<u8> {
+        let mut t = RenderTree::new();
+        t.commands.push(RenderCommand::Text {
+            x: 3.0,
+            y: 4.0,
+            text: "value".to_string(),
+            color: Color::rgb(9, 9, 9),
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(80.0),
+            overflow,
+        });
+        encode_frame_to_vec(&t)
+    }
+
+    fn decoded_overflow(bytes: &[u8]) -> TextOverflow {
+        let (t, _) = decode_frame(bytes).unwrap();
+        match t.commands.first().expect("one command") {
+            RenderCommand::Text { overflow, .. } => *overflow,
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    /// Pinned to the literal, not to the constant: `header_layout_is_stable`
+    /// compares the header byte *against* `PROTOCOL_VERSION`, so it would pass
+    /// unchanged if the constant were edited. This test is the one that fails,
+    /// and a version bump is exactly the change that must never be accidental —
+    /// every peer has to be updated in step with it.
+    #[test]
+    fn protocol_version_is_two() {
+        assert_eq!(PROTOCOL_VERSION, 2);
+    }
+
+    #[test]
+    fn both_overflow_policies_survive_the_wire() {
+        for overflow in [TextOverflow::Clip, TextOverflow::Ellipsis] {
+            assert_eq!(decoded_overflow(&one_text(overflow)), overflow);
+        }
+    }
+
+    /// The two policies must differ on the wire. If the encoder wrote a
+    /// constant, the round-trip test above would still pass — both would decode
+    /// to whatever that constant meant — and every remote window would clip in
+    /// silence, which is the bug §427 exists to end.
+    #[test]
+    fn the_two_policies_are_distinguishable_on_the_wire() {
+        assert_ne!(
+            one_text(TextOverflow::Clip),
+            one_text(TextOverflow::Ellipsis)
+        );
+    }
+
+    /// A frame arrives from another process and may be anything. An unknown
+    /// policy byte has to be an error rather than a guess: guessing `Clip`
+    /// would reintroduce the silent cut, and guessing `Ellipsis` would mark
+    /// text that was never truncated.
+    #[test]
+    fn an_unknown_overflow_byte_is_rejected() {
+        let mut bytes = one_text(TextOverflow::Clip);
+        *bytes.last_mut().expect("non-empty frame") = 0xEE;
+        match decode_frame(&bytes) {
+            Err(DecodeError::BadTextOverflow(0xEE)) => {}
+            other => panic!("expected BadTextOverflow(0xEE), got {other:?}"),
+        }
+    }
+
+    /// The byte really is the last one — if the layout ever changes so that it
+    /// is not, the corruption test above would silently start poking some other
+    /// field and pass for the wrong reason.
+    #[test]
+    fn the_overflow_byte_is_the_last_byte_of_the_frame() {
+        assert_eq!(
+            *one_text(TextOverflow::Ellipsis).last().unwrap(),
+            TextOverflowTag::Ellipsis as u8
+        );
+        assert_eq!(
+            *one_text(TextOverflow::Clip).last().unwrap(),
+            TextOverflowTag::Clip as u8
+        );
     }
 }

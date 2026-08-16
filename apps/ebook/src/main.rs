@@ -26,7 +26,7 @@
 #![allow(clippy::fn_params_excessive_bools)]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 #[allow(unused_imports)]
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -1592,6 +1592,7 @@ impl EbookApp {
             font_size: 18.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: self.window_width - 200.0,
@@ -1601,6 +1602,7 @@ impl EbookApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Separator
@@ -1640,6 +1642,7 @@ impl EbookApp {
                 font_size: 16.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(self.window_width - 200.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Author
@@ -1651,6 +1654,7 @@ impl EbookApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.window_width - 200.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Progress and word count
@@ -1680,6 +1684,7 @@ impl EbookApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(self.window_width - 200.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Separator between items
@@ -1722,6 +1727,7 @@ impl EbookApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Book title in toolbar
@@ -1733,6 +1739,7 @@ impl EbookApp {
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.window_width - 250.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Font size indicator
@@ -1744,6 +1751,7 @@ impl EbookApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Bookmark indicator
@@ -1756,6 +1764,7 @@ impl EbookApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1772,6 +1781,7 @@ impl EbookApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Light,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Toolbar separator
@@ -1800,6 +1810,7 @@ impl EbookApp {
                 font_size: font_sz,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_text_width),
+                overflow: TextOverflow::Ellipsis,
             });
             y_offset += line_h;
         }
@@ -1868,6 +1879,7 @@ impl EbookApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.window_width - 2.0 * CONTENT_PADDING - 120.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Match count
@@ -1884,6 +1896,7 @@ impl EbookApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1929,6 +1942,7 @@ impl EbookApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Progress percentage
@@ -1941,6 +1955,7 @@ impl EbookApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Progress bar
@@ -2021,6 +2036,7 @@ impl EbookApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(overlay_w - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Separator
@@ -2061,6 +2077,7 @@ impl EbookApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(overlay_w - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2112,6 +2129,7 @@ impl EbookApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(overlay_w - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Line {
@@ -2133,6 +2151,7 @@ impl EbookApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(overlay_w - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             let item_h = 32.0f32;
@@ -2161,6 +2180,7 @@ impl EbookApp {
                     font_size: 14.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(overlay_w - 40.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }

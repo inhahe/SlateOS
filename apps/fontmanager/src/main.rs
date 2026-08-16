@@ -14,7 +14,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexWrap, Size};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::{CornerRadii, Edges};
 use guitk::text;
@@ -1067,6 +1067,7 @@ impl FontManagerState {
                         _ => FontWeightHint::Regular,
                     },
                     max_width: Some(PREVIEW_PANEL_WIDTH - CONTENT_PADDING * 2.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 y += size + 12.0;
@@ -1184,6 +1185,7 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
         font_size: size,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 

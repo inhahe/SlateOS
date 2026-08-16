@@ -1784,6 +1784,52 @@ pub const SYS_PROCESS_SET_EXEC_FDS: u64 = 1061;
 /// a second syscall number. See `handlers::WAIT_INFO_SIZE` for the layout.
 pub const SYS_PROCESS_WAIT_STATUS: u64 = 1063;
 
+/// `getrusage` for the native ABI — the calling process's *own* resource
+/// accounting.
+///
+/// | arg  | meaning |
+/// |------|---------|
+/// | `arg0` | `who`: 0 = `RUSAGE_SELF`, -1 = `RUSAGE_CHILDREN`, 1 = `RUSAGE_THREAD` |
+/// | `arg1` | user `*mut RusageInfo` |
+/// | `arg2` | size of that buffer, in bytes |
+///
+/// Returns 0 on success.
+///
+/// # Why this exists as its own number
+///
+/// The counters were already there and the kernel already encoded all 144
+/// bytes of a Linux `struct rusage` from them — but only in
+/// `linux::sys_getrusage`, which is registered on the *Linux* ABI table.
+/// `AbiMode` is per-process, so a program linked against our own libc could
+/// never reach it. What it reached instead was
+/// [`SYS_CPU_TIMES`](self::SYS_CPU_TIMES), which takes a *field selector*,
+/// not a pid: every process on the machine got the same machine-wide number
+/// back, labelled as its own, growing forever. A wrong CPU time is never
+/// implausible, so nothing could notice. See
+/// `requests/b-a-native-getrusage-reports-system-wide-cpu-as-per-process.md`.
+///
+/// # Units, and why they are not ticks
+///
+/// Microseconds, matching `WaitInfo` — and for the same reason: ticks would
+/// force every caller to know `USER_HZ`, and a caller that guessed wrong
+/// would be wrong by a factor of ten with no way to notice. The two paths
+/// share one image builder (`handlers::rusage_info_image`) so that the usage
+/// a parent reads for a reaped child and the usage that child could have
+/// read for itself agree by construction rather than by review.
+///
+/// # `RUSAGE_THREAD`
+///
+/// Genuinely per-thread, not an alias for `RUSAGE_SELF`: the scheduler keeps
+/// the counters per task and folds them into the process on thread exit, so
+/// both scopes are real. `ru_maxrss` is the exception — it is a property of
+/// the address space, which threads share, so `SELF` and `THREAD` report the
+/// same peak. That is also what Linux does.
+///
+/// Follows the same extensible-struct convention as
+/// [`SYS_PROCESS_WAIT_STATUS`]: `min(caller, kernel)` bytes written, tail
+/// zero-filled. See `handlers::RUSAGE_INFO_SIZE` for the layout.
+pub const SYS_PROCESS_GET_RUSAGE: u64 = 1064;
+
 /// Retrieve initial argv/envp for the current process.
 ///
 /// Called by the child process's POSIX layer during startup to read

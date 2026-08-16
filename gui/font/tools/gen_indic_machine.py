@@ -34,11 +34,22 @@ matter of editing seven lines.
 # What is deliberately dropped
 
 `RS` (register shifter) and `VD` (dependent vowel) appear in HarfBuzz's
-grammar but no character in our table derives to either: `RS` is Khmer's
-alone and the Khmer block is excluded, and nothing anywhere maps to `VD`
-(HarfBuzz gives it the same machine symbol as `A`). Their branches are
-therefore unreachable, and are left out rather than encoded as states
-nothing can enter. This is the only difference from upstream's grammar.
+grammar but no character in our table derives to either: every `RS` is
+Khmer's U+17C9 or U+17CA, which the category overrides turn into `Robatic`
+before the table is written, and nothing anywhere maps to `VD` (HarfBuzz
+gives it the same machine symbol as `A`). Their branches are therefore
+unreachable, and are left out rather than encoded as states nothing can
+enter. This is the only difference from upstream's grammar.
+
+# Why the Khmer categories are columns here
+
+`CATEGORIES` is shared with the Khmer machine, so this table has seven
+columns — `VAbv`, `VBlw`, `VPre`, `VPst`, `Robatic`, `Xgroup`, `Ygroup` —
+that no Indic rule names. They are not wasted: `other = any` is written as
+an alternation over *every* category, so a Khmer character arriving at the
+Indic machine is one non-Indic syllable rather than an index off the end of
+a row. It should never arrive — the two are dispatched on script — but a
+table that answers rather than panics is the one to have.
 """
 
 import pathlib
@@ -247,14 +258,20 @@ class Nfa:
         return self.closure(out)
 
 
-def compile_dfa():
-    """Subset-construct the scanner. Returns (transitions, accepts)."""
+def compile_rules(rules):
+    """Subset-construct a scanner over `rules`. Returns (transitions, accepts).
+
+    `rules` is a sequence of `(pattern, syllable_name)`, listed in the order
+    ragel would list them: ties go to the earliest. `gen_khmer_machine.py`
+    calls this with its own three rules — the construction is the same, only
+    the grammar differs.
+    """
     nfa = Nfa()
     start = nfa.state()
     # `accepting[state] = rule index`. A DFA state accepts the *lowest*
     # rule index among the NFA states in it, which is ragel's tie-break.
     accepting = {}
-    for i, (pattern, _) in enumerate(RULES):
+    for i, (pattern, _) in enumerate(rules):
         sub_in, sub_out = nfa.build(pattern)
         nfa.eps[start].add(sub_in)
         accepting[sub_out] = min(accepting.get(sub_out, i), i)
@@ -325,7 +342,7 @@ def minimise(transitions, accepts):
 
 
 def main():
-    transitions, accepts = compile_dfa()
+    transitions, accepts = compile_rules(RULES)
     before = len(transitions)
     transitions, accepts = minimise(transitions, accepts)
     if len(transitions) > 250:

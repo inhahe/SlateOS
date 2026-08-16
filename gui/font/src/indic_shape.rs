@@ -47,9 +47,10 @@ use alloc::vec::Vec;
 
 use crate::bidi::{self, Class};
 use crate::gsub::{ALL_FEATURES, SubGlyph, Substitutions, feature_bit, feature_bits};
-use crate::indic::{Category, Char, Position, Syllable, syllables};
+use crate::indic::{Category, Position, Syllable, syllables};
 use crate::lang::Lang;
 use crate::script::ScriptTags;
+use crate::syllabic;
 
 /// One of the nine scripts this shaper shapes.
 ///
@@ -522,12 +523,7 @@ fn is_joiner(g: &SubGlyph) -> bool {
 /// of a reordered syllable — that it has no interior boundary a caret can
 /// honestly point at — by giving the whole of it one offset.
 fn merge(glyphs: &mut [SubGlyph]) {
-    let Some(first) = glyphs.iter().map(|g| g.cluster).min() else {
-        return;
-    };
-    for g in glyphs {
-        g.cluster = first;
-    }
+    syllabic::merge_clusters(glyphs);
 }
 
 /// The longest syllable this lays out cluster-by-cluster rather than wholesale.
@@ -1654,52 +1650,15 @@ fn setup_syllables(glyphs: &mut [SubGlyph]) {
     cats.extend(glyphs.iter().map(|g| g.indic.category));
     let mut ranges: Vec<(usize, usize, Syllable)> = Vec::new();
     syllables(&cats, &mut ranges);
-    // The serial lives in the high nibble and is stored pre-shifted, so that
-    // stamping is an `|` and stepping is an add. It cycles through fifteen
-    // values and never takes zero, which is what a glyph no syllable covers
-    // keeps — HarfBuzz numbers from one for the same reason.
-    let mut serial = 0x10u8;
-    for &(start, end, kind) in &ranges {
-        let stamp = serial | kind.code();
-        for g in glyphs.get_mut(start..end).unwrap_or_default() {
-            g.syllable = stamp;
-        }
-        serial = serial.wrapping_add(0x10);
-        if serial == 0 {
-            serial = 0x10;
-        }
-    }
+    syllabic::stamp(glyphs, &ranges, Syllable::code);
 }
 
-/// Call `f` on each syllable of `glyphs` in turn.
-///
-/// The syllable is the maximal run of glyphs sharing a stamp, re-derived every
-/// time rather than remembered, for the reason [`setup_syllables`] gives. `f`
-/// is handed the kind the stamp records, whether the syllable begins a word,
-/// and the syllable itself as a slice it may permute but not resize.
+/// Call `f` on each syllable of `glyphs` in turn, with the kind its stamp
+/// records.
 fn for_each_syllable(glyphs: &mut [SubGlyph], mut f: impl FnMut(Syllable, bool, &mut [SubGlyph])) {
-    let mut at = 0usize;
-    while at < glyphs.len() {
-        let Some(&first) = glyphs.get(at) else { break };
-        let end = glyphs
-            .iter()
-            .enumerate()
-            .skip(at)
-            .find(|&(_, g)| g.syllable != first.syllable)
-            .map_or(glyphs.len(), |(j, _)| j);
-        // A syllable begins a word when nothing that continues one precedes
-        // it. See [`SubGlyph::word`].
-        let word_start = at
-            .checked_sub(1)
-            .and_then(|prev| glyphs.get(prev))
-            .is_none_or(|g| !g.word);
-        if let Some(syllable) = glyphs.get_mut(at..end) {
-            f(Syllable::from_code(first.syllable), word_start, syllable);
-        }
-        // The floor of one is unreachable — a syllable is never empty — and is
-        // here so the walk terminates without relying on that.
-        at = end.max(at.saturating_add(1));
-    }
+    syllabic::for_each(glyphs, |stamp, word_start, syllable| {
+        f(Syllable::from_code(stamp), word_start, syllable);
+    });
 }
 
 /// Everything that happens between `ccmp` and the first basic feature.
@@ -1723,63 +1682,19 @@ fn final_reordering(plan: &Plan, glyphs: &mut [SubGlyph]) {
     });
 }
 
-/// Give every broken cluster something to hang its marks on.
+/// Give every broken cluster a dotted circle: [`syllabic::insert_dotted_circles`]
+/// with the Indic grammar's answers filled in.
 ///
-/// A broken cluster is a matra or a virama with no consonant — text that is not
-/// a syllable. Drawing it as written would stack the marks on whatever happened
-/// to precede them; the convention every shaper follows is to show them on a
-/// dotted circle instead, so that what appears on screen says "these marks
-/// belong to nothing" rather than silently corrupting the word before.
-///
-/// Nothing happens in a face with no U+25CC, which is the honest answer there:
-/// there is no circle to draw.
+/// The circle goes *after* a repha, not before it: a repha is drawn above the
+/// letter that follows, and the letter that follows is the circle.
 fn insert_dotted_circles(glyphs: &mut Vec<SubGlyph>, dotted: Option<u16>) {
-    let Some(gid) = dotted else { return };
-    if !glyphs
-        .iter()
-        .any(|g| Syllable::from_code(g.syllable) == Syllable::Broken)
-    {
-        return;
-    }
-    let mut out: Vec<SubGlyph> = Vec::with_capacity(glyphs.len().saturating_add(1));
-    // No stamp is ever zero, so the first glyph of the run always compares
-    // unequal and a broken cluster starting at index zero is not missed.
-    let mut last = 0u8;
-    let mut i = 0usize;
-    while let Some(&g) = glyphs.get(i) {
-        if g.syllable == last || Syllable::from_code(g.syllable) != Syllable::Broken {
-            out.push(g);
-            i = i.saturating_add(1);
-            continue;
-        }
-        last = g.syllable;
-        // The circle goes *after* a repha, not before it: a repha is drawn
-        // above the letter that follows, and the letter that follows is the
-        // circle.
-        while let Some(&repha) = glyphs.get(i) {
-            if repha.syllable != last || repha.indic.category != Category::Repha {
-                break;
-            }
-            out.push(repha);
-            i = i.saturating_add(1);
-        }
-        // Cluster, mask and stamp are the *cluster's own* — taken from the
-        // glyph the circle is being inserted in front of, before the repha
-        // skip, so that the circle belongs to the same cluster and is eligible
-        // for the same features as the marks it is about to carry.
-        out.push(SubGlyph {
-            gid,
-            cluster: g.cluster,
-            mask: g.mask,
-            syllable: g.syllable,
-            indic: Char {
-                category: Category::DottedCircle,
-                position: Position::End,
-            },
-            ..SubGlyph::cursive(gid, g.cluster, None)
-        });
-    }
-    *glyphs = out;
+    syllabic::insert_dotted_circles(
+        glyphs,
+        dotted,
+        Category::DottedCircle,
+        |stamp| Syllable::from_code(stamp) == Syllable::Broken,
+        |g| g.indic.category == Category::Repha,
+    );
 }
 
 #[cfg(test)]
@@ -1794,6 +1709,7 @@ mod tests {
     use super::*;
     use crate::fixture::{gsub_from_scripts, ligature, ligature_set, ligature_subst, script_list, span};
     use crate::gsub::{LOOKUP_LIGATURE, Lig};
+    use crate::indic::Char;
     use alloc::vec::Vec;
 
     /// Every script, so a table change cannot be tested against only the one

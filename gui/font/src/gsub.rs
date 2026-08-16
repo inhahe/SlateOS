@@ -168,6 +168,13 @@ pub(crate) const FEATURES: &[&[u8; 4]] = &[
     // which slot the jamo occupies. Appended rather than inserted, so that no
     // bit constant above moves.
     b"ljmo", b"vjmo", b"tjmo",
+    // Khmer: `cfar` is the one feature the Khmer shaper asks for that the
+    // Indic run above does not already list — everything else it uses
+    // (`pref`, `blwf`, `abvf`, `pstf`, `pres`, `abvs`, `blws`, `psts`) is a
+    // tag it shares with Indic. Appended for the same reason the Hangul three
+    // were: `LJMO`, `VJMO` and `TJMO` are written as literal shifts, so
+    // inserting this beside its Indic relatives would move them.
+    b"cfar",
 ];
 
 /// The feature mask every glyph carries: bits for the fourteen unconditional

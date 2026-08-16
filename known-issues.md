@@ -63969,7 +63969,41 @@ Myanmar is next, then USE.
 and `indic_machine.rs` — the models to copy; `gui/font/tools/harfbuzz_sweep.py`
 — `CORPUS`, which needs a string per family before any of this is measurable.
 
-## TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES
+## TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES — RESOLVED 2026-08-15
+
+**Resolved in two commits, because it was two bugs wearing one name.**
+
+*Half one — erasing them* (`88ee69ca7`): `norm::ignorable` classifies the
+character, `SubGlyph::ignorable` carries the answer and is cleared wherever a
+`GSUB` lookup rewrites the glyph, and `ScaledFont::shape` replaces what is left
+with the space glyph, or drops it where the face has none.
+
+*Half two — stepping over them* (this commit): erasing an ignorable at the end
+is not enough, because the lookups in between still saw it as a wall. `f ZWJ i`
+did not ligate; a contextual alternate did not match across a soft hyphen. The
+matcher now answers three ways rather than two, as HarfBuzz's does — hide,
+*step over*, or consider — with the kind of ignorable and the kind of lookup
+deciding which. See `design-decisions.md` §434 for the shape of that, and
+`gui/font/src/skip.rs`'s `Joiners` for the table.
+
+**Measured.** Host sweep, 556 faces × 60 strings: `differ` on `f\u200di` went
+from 76 faces to 0, and `misplaced` from 331 to 170. Khmer probe: 45/45 before
+and after, which is the point — the Indic-family features read the joiners
+themselves and had to come through unchanged.
+
+**The 170 that remain are a deliberate divergence, not a residue.** They are
+every corpus string containing an ignorable, and in all of them the glyphs and
+every *visible* glyph's position agree; what differs is the x of the erased,
+zero-advance glyph itself. HarfBuzz spends a legacy `kern` on the right-hand
+glyph's offset, so its erased glyph sits at the *unkerned* pen — 13 units
+inside the following letter's image, for `a◌͏b` in Arial Rounded. We charge the
+kern to the pair's left glyph, so ours sits exactly where the next glyph is
+drawn. A caret asked to land on the ignorable's cluster wants ours. Recorded in
+`design-decisions.md` §434; do not "fix" it without reading that first.
+
+---
+
+*The original entry follows, as filed.*
 
 **What.** A handful of characters exist to instruct the shaper and are never
 meant to be drawn: the zero-width joiner and non-joiner, the soft hyphen, the

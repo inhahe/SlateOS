@@ -364,6 +364,62 @@ no value bits, and shifting a `u8` by 8 is not a shift), and the slideshow's
 `elapsed_ms += elapsed_ms` — the crate's only unbounded accumulator, fed by a
 caller-supplied duration — is now `saturating_add`.
 
+### Sweep progress: `connect4` 174 → 0, all lint classes (2026-08-16)
+
+Sixth crate, and the first to reach **zero warnings of every class** —
+101 `indexing_slicing`, 69 `arithmetic_side_effects`, 3 `unwrap_used` and 1
+`slicing` all gone. Tests 100 → 108. Non-test code shrank 941 → 901 lines
+*while gaining* the doc comments that explain the new invariants.
+
+No **reachable** panic fell out of this one, and that is worth stating plainly
+rather than dressing two latent defects up as live bugs. Both defects below are
+real and both are now proven by tests that fail against the old code — but each
+was reachable only from a caller that does not exist, so neither shipped:
+
+- **`undo_drop` indexed `heights` with an unchecked column.** `can_drop(col)`
+  tested `col < COLS`; `undo_drop(col)` opened with `self.heights[col] == 0`
+  and tested nothing. Every caller passes a column from `valid_moves()`, so it
+  was never reached. Reverting the fix makes
+  `an_off_board_column_is_declined_rather_than_indexed` panic with `index out
+  of bounds: the len is 7 but the index is 7`.
+- **The AI dropped and undid as two unpaired statements**, discarding both
+  `Option`s. Had `drop_piece` ever been refused, the following `undo_drop`
+  would still have run and removed a piece a *different* move had put there.
+  `valid_moves()` filters full columns, so it was never refused. Reverting the
+  fix makes `with_move_on_a_full_column_runs_nothing_and_undoes_nothing` fail
+  with the board's top-of-column-0 piece missing.
+
+The structural work was pattern 1 in a form not seen in the earlier crates:
+**the same bound written out eight times, four of those with the offsets
+spelled into the indices.** `has_won` and `evaluate_board` each contained four
+hand-written nested scans — horizontal, vertical, and both diagonals — with
+bodies like `grid[row][col] == p && grid[row+1][col-1] == p && grid[row+2]
+[col-2] == p && grid[row+3][col-3] == p`, guarded from a distance by
+`for col in 3..COLS`. `find_winner` had a fifth copy of the guards, and
+`check_line` a sixth of the stepping. One `DIRECTIONS` table plus a
+`line_cells(row, col, dr, dc) -> Option<[(usize, usize); RUN]>` replaced all of
+them; `all_lines()` yields the 69 runs that fit on a 7x6 board and every scan
+now reads from it.
+
+Two consequences beyond the lint count:
+
+- **`has_won` and `find_winner` can no longer disagree.** They were independent
+  hand-written scans answering the same question — one drives the AI's search,
+  the other decides the game the player sees — and nothing checked that they
+  agreed. They now share `all_lines`, and
+  `has_won_and_find_winner_agree_across_a_played_out_game` walks a full game
+  asserting it at every position.
+- **`with_move(col, piece, f)` replaced the drop/undo pair** at all four AI call
+  sites, so "these two calls must be paired" stopped being a convention the
+  caller had to keep and became something the caller cannot get wrong. It also
+  collapsed `ai_best_move`'s two identical win/block loops into one, and
+  `minimax`'s duplicated maximizing/minimizing bodies into one.
+
+The `arithmetic_side_effects` count reached zero here without contortion, which
+is a useful data point for the open question of whether that lint earns its keep
+tree-wide: the game-logic arithmetic was all genuinely `saturating_*` or
+`checked_*` in meaning, and the float layout arithmetic the lint does not flag.
+
 ## A BMP declaring a height of `i32::MIN` panics the file explorer (lane C)
 
 **Status: FIXED 2026-08-16** (lane C). Verified by reverting the fix and

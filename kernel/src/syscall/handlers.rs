@@ -3899,15 +3899,27 @@ fn write_wait_info(
     size: usize,
     found: &crate::syscall::wait::FoundEvent,
 ) -> KernelResult<()> {
+    write_extensible_struct(ptr, size, &wait_info_image(found))
+}
+
+/// Copy a fixed kernel-side struct image out under the extensible-struct
+/// convention described on [`write_wait_info`].
+///
+/// Factored out rather than duplicated because the *tail-zeroing* half is the
+/// part that is easy to get subtly wrong and impossible to notice: a caller
+/// that passes a larger size than this kernel knows reads whatever its own
+/// allocator left in the gap, which for a counter is indistinguishable from a
+/// real measurement. Two copies of that loop is two chances to skip it. Both
+/// `WaitInfo` and `RusageInfo` go through here, and any third structure that
+/// grows a size argument should too.
+fn write_extensible_struct(ptr: u64, size: usize, image: &[u8]) -> KernelResult<()> {
     if ptr == 0 || size == 0 {
         return Ok(());
     }
-    let image = wait_info_image(found);
-    let known = size.min(WAIT_INFO_SIZE);
-    // SAFETY: `image` is a live kernel-owned array of exactly WAIT_INFO_SIZE
-    // bytes and `known <= WAIT_INFO_SIZE`, so the source range is in bounds;
-    // `copy_to_user` validates the destination and brackets the store with
-    // STAC/CLAC.
+    let known = size.min(image.len());
+    // SAFETY: `image` is a live kernel-owned slice and `known <= image.len()`,
+    // so the source range is in bounds; `copy_to_user` validates the
+    // destination and brackets the store with STAC/CLAC.
     unsafe { crate::mm::user::copy_to_user(image.as_ptr(), ptr, known)? }
     // Zero the tail this kernel does not know about, so a newer caller reads
     // "no data" rather than whatever its allocator left there.
@@ -4045,6 +4057,198 @@ pub fn sys_process_wait_status(args: &SyscallArgs) -> SyscallResult {
     }
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(found.pid as i64)
+}
+
+// ---------------------------------------------------------------------------
+// SYS_PROCESS_GET_RUSAGE — the caller's own accounting, on the native ABI
+// ---------------------------------------------------------------------------
+
+/// `who` selectors for [`sys_process_get_rusage`], matching POSIX/Linux
+/// `getrusage` so libc passes its argument through rather than translating
+/// it. A translation table is a place for the two sides to disagree.
+pub mod rusage_who {
+    /// The calling process: every thread it has now plus every thread it has
+    /// had.
+    pub const SELF: i32 = 0;
+    /// Descendants that have already been reaped. Live children are not
+    /// counted — their usage is still theirs, and arrives at reap.
+    pub const CHILDREN: i32 = -1;
+    /// The calling thread alone.
+    pub const THREAD: i32 = 1;
+}
+
+/// Size in bytes of the `RusageInfo` structure [`sys_process_get_rusage`]
+/// writes, and the layout it uses.
+///
+/// ```text
+///   off  size  field
+///     0     8  utime_us    u64   user CPU time, microseconds
+///     8     8  stime_us    u64   system CPU time, microseconds
+///    16     8  minflt      u64   faults resolved without I/O
+///    24     8  majflt      u64   faults that required I/O
+///    32     8  nvcsw       u64   voluntary context switches
+///    40     8  nivcsw      u64   involuntary context switches
+///    48     8  maxrss_kib  u64   peak resident set size, KiB
+/// ```
+///
+/// The first six fields are `WaitInfo`'s last six, in the same order and the
+/// same units, deliberately: a parent reading a reaped child's usage and that
+/// child reading its own must not be able to disagree, and the cheapest way
+/// to guarantee that is for the two images to be built from one set of
+/// counters by one converter. `maxrss_kib` has no `WaitInfo` counterpart
+/// because peak RSS is a property of an address space that no longer exists
+/// by the time the parent reaps.
+///
+/// Everything absent from this table is absent because **no counter exists
+/// behind it** — not because a counter exists and was dropped. That is the
+/// distinction design-decisions.md §319 draws, and it is why libc can leave
+/// the remaining `struct rusage` fields zero and say honestly that they are
+/// unmeasured.
+pub const RUSAGE_INFO_SIZE: usize = 56;
+
+/// Read the live counters for `who`, returning them in the same
+/// [`ProcessUsage`](crate::proc::thread::ProcessUsage) shape the wait family
+/// uses plus the peak RSS in KiB.
+///
+/// Split from [`rusage_info_image`] on purpose: the encoder is then a pure
+/// function of its arguments, so the boot self-test can pin the on-wire byte
+/// offsets down with *synthetic* counters. An encoder that read the live
+/// scheduler could only be tested against whatever this boot happened to
+/// accumulate, which is a test that passes on a transposed field.
+fn collect_rusage(who: i32) -> (crate::proc::thread::ProcessUsage, u64) {
+    let pid = caller_pid().unwrap_or(0);
+    let tid = sched::current_task_id();
+
+    let (user_ticks, sys_ticks) = match who {
+        rusage_who::THREAD => sched::cpu_ticks(tid).unwrap_or((0, 0)),
+        rusage_who::CHILDREN => pcb::process_child_ticks(pid),
+        _ => crate::proc::thread::process_cpu_ticks(pid),
+    };
+    let (min_flt, maj_flt) = match who {
+        rusage_who::THREAD => sched::fault_counts(tid).unwrap_or((0, 0)),
+        rusage_who::CHILDREN => pcb::process_child_faults(pid),
+        _ => crate::proc::thread::process_fault_counts(pid),
+    };
+    let (nvcsw, nivcsw) = match who {
+        rusage_who::THREAD => sched::ctxsw_counts(tid).unwrap_or((0, 0)),
+        rusage_who::CHILDREN => pcb::process_child_ctxsw(pid),
+        _ => crate::proc::thread::process_ctxsw_counts(pid),
+    };
+    // Peak RSS belongs to the address space, which threads share — so SELF
+    // and THREAD report the same figure, exactly as Linux does (its gate is
+    // `who != RUSAGE_CHILDREN`).  CHILDREN stays 0 because we keep no
+    // `cmaxrss`: the child's address space is gone by the time anyone asks.
+    let maxrss_kib = if who == rusage_who::CHILDREN {
+        0
+    } else {
+        crate::mm::accounting::query(crate::mm::page_table::active_pml4_phys())
+            .map_or(0, |stats| stats.peak_rss_bytes() / 1024)
+    };
+
+    (
+        crate::proc::thread::ProcessUsage {
+            user_ticks,
+            sys_ticks,
+            min_flt,
+            maj_flt,
+            nvcsw,
+            nivcsw,
+        },
+        maxrss_kib,
+    )
+}
+
+/// Build the `RusageInfo` byte image.
+///
+/// Crate-visible and independent of any user address space so the boot
+/// self-test can pin the on-wire offsets down from a bare kernel task — the
+/// same reason [`wait_info_image`] is factored out. The layout is an ABI
+/// promise; a test that could only reach it through `copy_to_user` could not
+/// check it at all before there is a ring-3 process to write into.
+pub(crate) fn rusage_info_image(
+    usage: &crate::proc::thread::ProcessUsage,
+    maxrss_kib: u64,
+) -> [u8; RUSAGE_INFO_SIZE] {
+    /// One tick is 10 ms at `USER_HZ == 100`. Shared with `wait_info_image`
+    /// and `linux::sys_getrusage`, which consume the same counters and must
+    /// not disagree about what a tick is worth.
+    const US_PER_TICK: u64 = 10_000;
+
+    let &crate::proc::thread::ProcessUsage {
+        user_ticks,
+        sys_ticks,
+        min_flt,
+        maj_flt,
+        nvcsw,
+        nivcsw,
+    } = usage;
+
+    let mut buf = [0u8; RUSAGE_INFO_SIZE];
+    let mut put = |off: usize, v: u64| {
+        if let Some(dst) = buf.get_mut(off..off.saturating_add(8)) {
+            dst.copy_from_slice(&v.to_le_bytes());
+        }
+    };
+    put(0, user_ticks.saturating_mul(US_PER_TICK));
+    put(8, sys_ticks.saturating_mul(US_PER_TICK));
+    put(16, min_flt);
+    put(24, maj_flt);
+    put(32, nvcsw);
+    put(40, nivcsw);
+    put(48, maxrss_kib);
+    buf
+}
+
+/// `SYS_PROCESS_GET_RUSAGE` — the calling process's own resource accounting.
+///
+/// | arg  | meaning |
+/// |------|---------|
+/// | `arg0` | `who` — see [`rusage_who`] |
+/// | `arg1` | user `*mut RusageInfo` |
+/// | `arg2` | size of that buffer, in bytes |
+///
+/// Returns 0 on success.
+///
+/// # Gate order
+///
+/// `who` is validated *before* the pointer, matching Linux
+/// (`kernel/sys.c::SYSCALL_DEFINE2(getrusage)`): an unrecognised selector is
+/// `EINVAL` even with a null pointer, so a caller probing for support gets
+/// the same answer from both kernels. Accepting an unknown selector and
+/// returning `SELF`'s numbers under it would be the worse failure — it hands
+/// back a plausible answer to a question we did not understand, which is the
+/// exact defect this syscall exists to remove.
+///
+/// A null pointer or zero size is **not** "don't want it" here, unlike
+/// `WaitInfo`'s optional out-parameter: this syscall has no other result, so
+/// a call that writes nothing did nothing. It is `EFAULT`, as in Linux.
+///
+/// # Why this is not a capability-gated syscall
+///
+/// It reports only the caller's own accounting — there is no pid argument
+/// and no way to name another process — so there is nothing to check
+/// authority over. Adding a `pid` selector later would change that, and
+/// would need `(Process, pid, READ)` the way the inspect syscalls do.
+pub fn sys_process_get_rusage(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let who = args.arg0 as i32;
+    if who != rusage_who::SELF && who != rusage_who::CHILDREN && who != rusage_who::THREAD {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let ptr = args.arg1;
+    let size = args.arg2 as usize;
+    if ptr == 0 || size == 0 {
+        return SyscallResult::err(KernelError::InvalidAddress);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(ptr, size) {
+        return SyscallResult::err(e);
+    }
+    let (usage, maxrss_kib) = collect_rusage(who);
+    let image = rusage_info_image(&usage, maxrss_kib);
+    if let Err(e) = write_extensible_struct(ptr, size, &image) {
+        return SyscallResult::err(e);
+    }
+    SyscallResult::ok(0)
 }
 
 /// `SYS_PROCESS_WAIT` — wait for a child process to exit.
@@ -5029,24 +5233,56 @@ pub fn sys_process_get_credentials(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_PROCESS_SET_CREDENTIALS` — mutate the caller's own real uid/gid.
 ///
-/// A thin mutation primitive backing POSIX `setuid()`/`setgid()` (and the
+/// The mutation primitive backing POSIX `setuid()`/`setgid()` (and the
 /// `sete/re/res` family, all collapsed onto the single real uid/gid in our
-/// flat credential model). See the syscall-number doc for the full policy
-/// discussion: **the cap/identity permission check is performed by the
-/// userspace posix wrappers** (POSIX caps are userspace-only, so the kernel
-/// cannot re-check them — exactly as with every other cap-gated op). The
-/// only invariant enforced here is structural: the call always targets the
-/// *caller's own* process.
+/// flat credential model).
 ///
 /// `arg0`/`arg1` carry the new uid/gid as `u32` widened to `u64`; the
 /// sentinel `0xFFFF_FFFF` means "leave that field unchanged". Both fields
-/// are applied atomically (computed, then written once). Fails only if the
-/// caller has no owning process.
+/// are applied atomically (computed, then written once).
+///
+/// # The capability gate, and why it exists here as well as in userspace
+///
+/// A call that would **change** the identity requires the caller to hold
+/// [`Rights::SET_CREDENTIALS`](crate::cap::Rights::SET_CREDENTIALS) on
+/// [`ResourceType::Process`](crate::cap::ResourceType::Process); one that
+/// leaves both fields at their current values does not.
+///
+/// This used to be enforced *only* by the userspace posix wrappers, on the
+/// reasoning (design-decisions.md §83) that POSIX capabilities are a userspace
+/// concept the kernel has no way to check. That reasoning was correct when it
+/// was written and is not any more: §207 introduced `Rights::SET_CREDENTIALS`
+/// as a **kernel-side, handle-backed** right, and §312 made posix's
+/// `CAP_SETUID`/`CAP_SETGID` *project from it*. The authority the kernel was
+/// said not to have is now the authority the userspace answer is derived from,
+/// so declining to check it here left the only gate on `setuid()` outside the
+/// kernel — and a userspace-enforced capability is not a capability, it is a
+/// convention. Any ring-3 process could reach uid 0 by issuing syscall 530
+/// directly, and posix's cold-boot cap set is *all capabilities held*, so the
+/// userspace gate is open by default until a projection refresh narrows it.
+///
+/// The same predicate is used on both sides — `(Process, SET_CREDENTIALS)`,
+/// **id-agnostic** — deliberately. If the kernel gate and the projection asked
+/// different questions, the projection would stop being a projection: userspace
+/// would authorise calls the kernel refuses, or worse, the reverse.
+///
+/// # Why an unchanged identity is free
+///
+/// `setuid(getuid())` is permitted to every process in POSIX, and a great deal
+/// of code calls it unconditionally when dropping privilege it may not have had.
+/// Gating a no-op would break those callers while protecting nothing: the state
+/// after a refused no-op and after an allowed one is identical. Only a genuine
+/// identity change is an exercise of authority, so only that is gated.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] — the caller is a kernel task with no
+///   owning process, or has no recorded credentials.
+/// - [`KernelError::PermissionDenied`] — the call would change uid or gid and
+///   the caller holds no `(Process, SET_CREDENTIALS)` capability.
 pub fn sys_process_set_credentials(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::{ResourceType, Rights};
     use crate::proc::{pcb, thread};
-
-    /// `u32` "leave unchanged" sentinel (matches POSIX `(uid_t)-1`).
-    const KEEP: u64 = 0xFFFF_FFFF;
 
     let task_id = sched::current_task_id();
     let Some(pid) = thread::owner_process(task_id) else {
@@ -5057,25 +5293,75 @@ pub fn sys_process_set_credentials(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::NoSuchProcess);
     };
 
-    // Apply each requested field (KEEP leaves it untouched), then write the
-    // credentials back in a single update so uid/gid change together.
-    if args.arg0 != KEEP {
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            creds.uid = args.arg0 as u32;
-        }
+    // Resolve what was asked for BEFORE deciding whether it is allowed: the
+    // gate turns on whether the identity would actually move, which KEEP and a
+    // redundant self-assignment both make false for different reasons.
+    let ((want_uid, want_gid), is_change) =
+        resolve_credential_request((creds.uid, creds.gid), args.arg0, args.arg1);
+
+    if is_change && !pcb::has_capability_type(pid, ResourceType::Process, Rights::SET_CREDENTIALS)
+    {
+        return SyscallResult::err(KernelError::PermissionDenied);
     }
-    if args.arg1 != KEEP {
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            creds.gid = args.arg1 as u32;
-        }
-    }
+
+    // Write both fields back in a single update so uid and gid change together;
+    // a half-applied identity would otherwise be observable.
+    creds.uid = want_uid;
+    creds.gid = want_gid;
 
     match pcb::set_credentials(pid, creds) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// `u32` "leave this field unchanged" sentinel for
+/// [`sys_process_set_credentials`], matching POSIX's `(uid_t)-1`.
+///
+/// Note it is `u32::MAX` widened, not `u64::MAX`: `setuid(0xFFFF_FFFF)` means
+/// *keep*, and there is consequently no way to become uid 4294967295. That is
+/// POSIX's own corner and is reproduced deliberately.
+pub(crate) const CREDENTIALS_KEEP: u64 = 0xFFFF_FFFF;
+
+/// Resolve a `SYS_PROCESS_SET_CREDENTIALS` request against the identity the
+/// caller currently has: the identity it is asking for, and whether reaching it
+/// is a *change*.
+///
+/// Split out of the handler because the capability gate hangs entirely off the
+/// second half of that answer, and the handler cannot be called for a synthetic
+/// caller — it reads `current_task_id()`. Testing the gate through the syscall
+/// would mean spawning a process per case; testing this function costs a table.
+///
+/// The two ways an identity does not move are distinct and both matter:
+/// `CREDENTIALS_KEEP` says "do not touch this field", while passing the value
+/// the field already holds says "set it to what it is". POSIX permits the
+/// second to every process — `setuid(getuid())` is a no-op that a lot of code
+/// issues unconditionally when shedding privilege it may never have had — so
+/// collapsing it into "an identity change" would deny callers a capability they
+/// have no need of, to protect a transition that does not occur.
+pub(crate) fn resolve_credential_request(
+    current: (u32, u32),
+    arg0: u64,
+    arg1: u64,
+) -> ((u32, u32), bool) {
+    let (cur_uid, cur_gid) = current;
+    // Truncation is intentional and, importantly, happens *before* the
+    // comparison as well as before the write — so a caller that sets high bits
+    // above a matching low half is judged on the same value that would be
+    // stored, and cannot be told it changed something it did not.
+    #[allow(clippy::cast_possible_truncation)]
+    let uid = if arg0 == CREDENTIALS_KEEP {
+        cur_uid
+    } else {
+        arg0 as u32
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let gid = if arg1 == CREDENTIALS_KEEP {
+        cur_gid
+    } else {
+        arg1 as u32
+    };
+    ((uid, gid), uid != cur_uid || gid != cur_gid)
 }
 
 /// `SYS_PROCESS_GET_NICE` — read the caller's scheduling nice value.

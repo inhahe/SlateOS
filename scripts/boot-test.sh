@@ -348,6 +348,74 @@ report_pathz_skips() {
     return 0
 }
 
+# Refuse to boot a rootfs.ext4 whose staged binaries no longer match the tree.
+#
+# WHY A NEW GUARD, when this script already has three staleness checks: every
+# one of them asks "was this ELF built from the current source?" -- a question
+# about `build/` and `target/`.  None asks "is the ELF we just checked the one
+# that is actually INSIDE the image we are about to attach."  rootfs.ext4 is
+# produced by a separate, manual step (`wsl -d Ubuntu -- bash
+# scripts/create-ext4-rootfs.sh`) that the boot test does not run, so the image
+# can lag the tree by days while every existing guard stays green.  The result
+# is not a missing warning, it is a FALSE GREEN: the Path-Z rungs run, they
+# pass, and what they exercised was last week's binary.  Filed by lane B as
+# requests/b-a-boot-test-boots-a-rootfs-image-that-may-predate-the-fixtures-in-it.md.
+#
+# WHY CONTENT HASHES AND NOT MTIME: QEMU opens the image read-write, so a boot
+# updates its mtime.  The image's timestamp records when it was last *run*, not
+# when it was last *packed* -- it is newer than the tree after every boot,
+# which makes the obvious `-ot` test (the idiom the staged-kernel guard below
+# uses) not merely weak here but inverted.  `ctest-fixtures.py image-check`
+# compares a sha256 per staged ELF against rootfs.ext4.manifest instead, and
+# fails closed when the manifest is absent -- an image that predates the check
+# cannot have its contents established, which is not the same as matching.
+#
+# WHY FATAL: this is the same class of failure as the staged-kernel staleness
+# check ("the thing we are about to boot is not the thing we just built"), and
+# that one exits 1 before QEMU starts.  A run that boots the wrong bits and
+# prints PASSED is worse than one that refuses to start, because only the
+# second kind gets noticed.
+#
+# The one case that is NOT fatal is a host with no python: that is a property
+# of this machine, not of the tree under test, and aborting for it would make a
+# perfectly good kernel untestable here.  It warns, sets ROOTFS_UNVERIFIED, and
+# finish_pass re-prints that at the bottom of the run so a qualified green
+# cannot scroll away above several hundred lines of serial log.
+ROOTFS_UNVERIFIED=""
+check_rootfs_freshness() {
+    if [ "${BOOT_TEST_SKIP_ROOTFS_CHECK:-0}" != "0" ]; then
+        ROOTFS_UNVERIFIED="BOOT_TEST_SKIP_ROOTFS_CHECK was set"
+        echo "=== WARNING: rootfs.ext4 freshness check SKIPPED by request ==="
+        echo "    Path-Z results from this run may reflect stale binaries."
+        return 0
+    fi
+
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        ROOTFS_UNVERIFIED="no python interpreter on this host"
+        echo "=== WARNING: cannot verify rootfs.ext4 -- no python found ==="
+        echo "    The Path-Z rungs will run against whatever is in the image,"
+        echo "    which may predate the tree.  Treat their results as"
+        echo "    unconfirmed rather than as coverage."
+        return 0
+    fi
+
+    echo "=== Verifying rootfs.ext4 matches the built fixtures ==="
+    if ! "$py" "$SCRIPT_DIR/ctest-fixtures.py" image-check; then
+        echo "ERROR: rootfs.ext4 does not match the binaries in this tree." >&2
+        echo "       Booting it would run the Path-Z self-tests against stale" >&2
+        echo "       binaries and then report PASSED.  Rebuild the image:" >&2
+        echo "         wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh" >&2
+        echo "       To boot it anyway (and get a loud UNVERIFIED banner):" >&2
+        echo "         BOOT_TEST_SKIP_ROOTFS_CHECK=1 ./scripts/boot-test.sh" >&2
+        exit 1
+    fi
+}
+
 # Directories whose contents are performance-critical per CLAUDE.md's
 # "Performance-Critical Subsystems" table.  A change under any of these is a
 # change that CLAUDE.md requires benchmarking, so it is the trigger for
@@ -1151,6 +1219,17 @@ finish_pass() {
     fi
     report_pathz_skips "$file"
 
+    # A green run whose rootfs could not be verified is still green -- the
+    # kernel booted -- but its Path-Z coverage claim is unbacked.  Re-print the
+    # reason here rather than only at attach time: that warning is several
+    # hundred lines of serial log above the PASSED banner, and the banner is
+    # what gets read.
+    if [ -n "$ROOTFS_UNVERIFIED" ]; then
+        echo "=== ROOTFS UNVERIFIED ($ROOTFS_UNVERIFIED) ==="
+        echo "  Path-Z rungs in this run may have exercised stale binaries."
+        echo "  Their PASS is not evidence about the current tree."
+    fi
+
     if [ "$BENCH_RECORDER_STATUS" -ne 0 ]; then
         echo "=== Boot test INCOMPLETE ($WAIT_MARKER reached, but --bench recorded nothing) ==="
         exit 3
@@ -1342,6 +1421,10 @@ fi
 ROOTFS_IMG="$PROJECT_ROOT/rootfs.ext4"
 ROOTFS_ARGS=()
 if [ -f "$ROOTFS_IMG" ]; then
+    # Before QEMU is told to attach it: the image is packed by hand and can be
+    # older than the tree, and a stale one produces passing Path-Z rungs that
+    # tested nothing current.  See check_rootfs_freshness.
+    check_rootfs_freshness
     ROOTFS_IMG_WIN="$(to_win_path "$ROOTFS_IMG")"
     ROOTFS_ARGS=(
         -device virtio-blk-pci,drive=rootfs-disk

@@ -1784,6 +1784,52 @@ pub const SYS_PROCESS_SET_EXEC_FDS: u64 = 1061;
 /// a second syscall number. See `handlers::WAIT_INFO_SIZE` for the layout.
 pub const SYS_PROCESS_WAIT_STATUS: u64 = 1063;
 
+/// `getrusage` for the native ABI — the calling process's *own* resource
+/// accounting.
+///
+/// | arg  | meaning |
+/// |------|---------|
+/// | `arg0` | `who`: 0 = `RUSAGE_SELF`, -1 = `RUSAGE_CHILDREN`, 1 = `RUSAGE_THREAD` |
+/// | `arg1` | user `*mut RusageInfo` |
+/// | `arg2` | size of that buffer, in bytes |
+///
+/// Returns 0 on success.
+///
+/// # Why this exists as its own number
+///
+/// The counters were already there and the kernel already encoded all 144
+/// bytes of a Linux `struct rusage` from them — but only in
+/// `linux::sys_getrusage`, which is registered on the *Linux* ABI table.
+/// `AbiMode` is per-process, so a program linked against our own libc could
+/// never reach it. What it reached instead was
+/// [`SYS_CPU_TIMES`](self::SYS_CPU_TIMES), which takes a *field selector*,
+/// not a pid: every process on the machine got the same machine-wide number
+/// back, labelled as its own, growing forever. A wrong CPU time is never
+/// implausible, so nothing could notice. See
+/// `requests/b-a-native-getrusage-reports-system-wide-cpu-as-per-process.md`.
+///
+/// # Units, and why they are not ticks
+///
+/// Microseconds, matching `WaitInfo` — and for the same reason: ticks would
+/// force every caller to know `USER_HZ`, and a caller that guessed wrong
+/// would be wrong by a factor of ten with no way to notice. The two paths
+/// share one image builder (`handlers::rusage_info_image`) so that the usage
+/// a parent reads for a reaped child and the usage that child could have
+/// read for itself agree by construction rather than by review.
+///
+/// # `RUSAGE_THREAD`
+///
+/// Genuinely per-thread, not an alias for `RUSAGE_SELF`: the scheduler keeps
+/// the counters per task and folds them into the process on thread exit, so
+/// both scopes are real. `ru_maxrss` is the exception — it is a property of
+/// the address space, which threads share, so `SELF` and `THREAD` report the
+/// same peak. That is also what Linux does.
+///
+/// Follows the same extensible-struct convention as
+/// [`SYS_PROCESS_WAIT_STATUS`]: `min(caller, kernel)` bytes written, tail
+/// zero-filled. See `handlers::RUSAGE_INFO_SIZE` for the layout.
+pub const SYS_PROCESS_GET_RUSAGE: u64 = 1064;
+
 /// Retrieve initial argv/envp for the current process.
 ///
 /// Called by the child process's POSIX layer during startup to read
@@ -1855,26 +1901,38 @@ pub const SYS_PROCESS_GET_CREDENTIALS: u64 = 529;
 /// - `arg0` — new uid (or `0xFFFF_FFFF` to keep the current uid)
 /// - `arg1` — new gid (or `0xFFFF_FFFF` to keep the current gid)
 ///
-/// **Policy lives in userspace, not here.** POSIX capabilities
-/// (`CAP_SETUID`/`CAP_SETGID`) are tracked entirely in the userspace posix
-/// layer (see `posix::sys_capability`), so — exactly like every other
-/// POSIX-capability-gated operation — the kernel cannot see or re-check
-/// them and instead *trusts* that the posix `setuid`/`setgid` wrappers
-/// performed the cap/identity check before issuing this call. The only
-/// invariant the kernel enforces is structural: a process may set **its
-/// own** credentials (the syscall always targets the caller). It fails
-/// only if the caller has no owning process.
+/// **The kernel enforces two invariants.** The first is structural: a process
+/// may set only **its own** credentials — the syscall always targets the
+/// caller, and there is no pid argument for it to target anything else. The
+/// second is a capability gate: a call that would *change* uid or gid requires
+/// the caller to hold `(Process, SET_CREDENTIALS)`; a call that leaves both at
+/// their current values does not, because `setuid(getuid())` is permitted to
+/// everyone in POSIX and refusing a no-op would break callers while protecting
+/// nothing.
 ///
-/// KNOWN LIMITATION (tracked in `known-issues.md`): because policy is in
-/// userspace, a ring-3 process could issue this raw syscall directly to set
-/// its uid to 0, bypassing the wrapper's cap check. This is inert today —
-/// no kernel authorization derives from the credential uid (the real
-/// authority is the handle-based `CapTable`; see the `ProcessCredentials`
-/// doc "the user/group model is enforced once a login service exists").
-/// When credential uid *does* gain kernel authority, POSIX caps and this
-/// policy must move into the kernel together.
+/// **This gate is new, and it reverses half of design-decisions.md §83.** That
+/// entry put the whole policy in the userspace posix wrappers, on the
+/// reasoning that POSIX capabilities are userspace-only and the kernel
+/// therefore had nothing it *could* check. True then; false now. §207 added
+/// `cap::Rights::SET_CREDENTIALS` as a kernel-side, handle-backed right and
+/// §312 made `CAP_SETUID`/`CAP_SETGID` project *from* it — so the authority
+/// the kernel was said to lack is now precisely the authority userspace's
+/// answer is computed from. §83 named this exit explicitly ("or gate the
+/// syscall behind a capability"); this is that gate.
 ///
-/// Returns 0 on success. Chosen number 530 (next free slot after 529).
+/// The predicate is the same on both sides — `(Process, SET_CREDENTIALS)`,
+/// id-agnostic, matching `posix::sys_capability::project`. Two gates asking
+/// different questions would make the projection not a projection.
+///
+/// Why it mattered even though nothing yet derives authority from the
+/// credential uid: a userspace-enforced capability is not a capability. Any
+/// ring-3 process could reach uid 0 by issuing 530 directly, and posix's
+/// cold-boot cap set is *all capabilities held*, so the wrapper's check was
+/// open by default until a projection refresh narrowed it. See
+/// `known-issues.md` → `A-SET-CREDENTIALS-IS-GATED-ONLY-IN-USERSPACE`.
+///
+/// Returns 0 on success; `PermissionDenied` for an ungated identity change.
+/// Chosen number 530 (next free slot after 529).
 pub const SYS_PROCESS_SET_CREDENTIALS: u64 = 530;
 
 /// Get the calling process's scheduling **nice** value.

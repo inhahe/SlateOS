@@ -5518,6 +5518,22 @@ self_test_fastpy_slateos_setuid`; tool: `services/fastpy-setuid/`.
 `sys_process_set_credentials` (check the caller's current uid before applying),
 drop the userspace cap short-circuit, and update the Phase 192–195 tests.
 
+> **SUPERSEDED IN PART, 2026-08-16 — see §213.** The "Known limitation" above is
+> closed: syscall 530 is now gated in the kernel by `(Process,
+> SET_CREDENTIALS)` for any call that *changes* the identity. The rest of this
+> entry stands — policy is still expressed in userspace, the kernel still holds
+> no uid rule of its own, and a no-op `setuid(getuid())` still needs nothing.
+>
+> What changed was not the design but its **premise**. This entry's rationale
+> turns on "the kernel cannot correlate POSIX cap bits with the handle-based
+> `CapTable`", which was true when written and was falsified by §207 (a
+> kernel-side `Rights::SET_CREDENTIALS`) and §312 (posix's `CAP_SETUID`
+> *projects from* it). Neither of those re-read this entry. The trigger written
+> here — "when credential uid gains kernel authority" — was aimed at the wrong
+> event: what mattered was the kernel acquiring a token it could check, not the
+> uid becoming authoritative. Logged as
+> `known-issues.md` → `A-SET-CREDENTIALS-IS-GATED-ONLY-IN-USERSPACE`.
+
 ## 84. fastpy `os.nice`/`os.getpriority`/`os.setpriority` — make nice a *real* scheduler attribute via a thin kernel mutation primitive (initiative F)
 
 **Decided by:** Claude (autonomous)
@@ -10595,6 +10611,174 @@ be deleted wholesale to return to the bare race. Decision 2 is one `if` at the
 expiry branch. Both are covered by `scripts/test-boot-lock.sh`, which runs 15
 cases in ~6s with no kernel build — reverse either and the tests say which
 property you gave up.
+
+---
+
+## §212 — `resource_id == 0` names the *class*, recorded as a documented convention plus a boot check rather than a new `ResourceId` type
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous), prompted by lane B's
+`requests/b-a-does-resource-id-zero-mean-the-class-or-just-an-unknown-pid.md`
+
+**In short:** A capability in this kernel is a permission slip. Each one names
+what it applies to with a pair: a *kind* of thing (a process, a file) and a
+*number* picking out which one. Lane B found capability slips written with the
+number `0` and could not tell, from the code alone, whether `0` meant "**all**
+processes" or "one particular process whose number nobody had filled in yet" —
+and it was about to add a permission check that gives a completely different
+answer depending on which. It means **all processes**. The question was which of
+three ways to write that down: a comment, a comment plus a check that fails the
+boot if the assumption ever stops holding, or a redesign that makes the
+ambiguity impossible to express in the first place. We took the middle one.
+
+**The decision.** `resource_id == 0` in a capability entry means *the class as a
+whole*, never *an instance*. That is now stated normatively in
+`kernel/src/cap/mod.rs` (a module section, plus the `ResourceType::Process` and
+`::Thread` variant docs), and it is backed by
+`cap::verify_resource_id_zero_is_class_wide()`, which fails the boot if the next
+allocatable PID is ever `0`. No new type was introduced.
+
+**Why it needed deciding at all.** The convention was real and every call site
+already obeyed it, but it was written down nowhere — it lived in the shape of
+the code. That is survivable while exactly one predicate leans on it. Lane B was
+adding a second (`CAP_KILL`), and a second reader deriving the same unwritten
+rule from the same code is not a contract, it is a coincidence that has held
+twice. The failure mode if the two readers ever diverge is not a crash: it is a
+capability check that quietly answers a question it misunderstood.
+
+**Why the sentinel is sound.** Two properties, and only two:
+
+1. **No instance id can *be* 0.** `pcb::NEXT_PID` starts at 1 and only
+   increments; pid 0 is the kernel, which has implicit authority and is never
+   granted a capability.
+2. **Writing `0` is a statement, not an omission.** `SpawnOptions.capabilities`
+   carries the id as a full member of a `(ResourceType, u64, Rights)` triple, so
+   a caller that writes `0` chose it. The two automatic grant sites
+   (`fork.rs` step 8, `spawn.rs` step 5b) pass the child's real pid, so they can
+   never be mistaken for class-wide grants — which is precisely the property
+   lane B's fix needs.
+
+**The alternatives.**
+
+| Option | For | Against |
+|---|---|---|
+| Doc comment only | Zero code; says the true thing | Property 1 is a one-line fact in `pcb.rs`, a module neither predicate mentions. A comment cannot notice when its own premise stops being true. |
+| **Doc + boot check** (chosen) | Enforces the *one* property every call site depends on and none can check. Costs one `load` at boot. | Does not stop a site from *using* `0` incorrectly. |
+| `enum ResourceId { Class, Instance(u64) }` | Makes the ambiguity unrepresentable — the strongest form | Touches every grant site, every projection, the `CapEntryInfo` ABI (whose 24-byte layout has its own self-test) and `SpawnOptions`. Buys type safety against a confusion that has never occurred, at the price of an ABI break, in a subsystem that already has a working self-test. |
+
+**Why not the newtype, in one sentence:** the actual defect was that a *fact*
+was unrecorded, not that a *type* was too wide — and the fact is now checked by
+a machine, which a newtype would not have done any better.
+
+**What the check deliberately does not do.** It asserts only that `0` is
+unreachable as an instance id. It does not audit *which* sites pass `0`; that
+stays a policy each site owns, and enforcing it from the capability layer would
+make the layer responsible for decisions it cannot see the context of.
+
+**If it is ever reversed:** deleting the boot check returns the convention to
+comment-only status. The message it prints names the convention explicitly, so a
+future change to number processes from `0` — or to reuse a slot index as a pid —
+breaks the boot with a pointer to this section, rather than silently converting
+every class-wide grant into authority over one real process.
+
+---
+
+## §213 — `setuid()` is gated in the kernel, by the same id-agnostic predicate userspace projects from, and only when the identity actually moves
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous) — revisiting §83, which is also mine
+
+**In short:** Changing which user a program runs as is the single most
+security-relevant thing a program can ask for. Until now the kernel granted it
+to anyone who asked: the check that decided whether you were *allowed* lived in
+a userspace helper library, and nothing forced a program to call that helper —
+it could ask the kernel directly and skip it. Worse, the helper's own default
+setting was "everything is permitted", narrowed only after a later step that had
+not necessarily run yet. So the one gate on becoming root was outside the kernel
+and open by default. The kernel now checks for itself, using the same permission
+slip the userspace helper's answer is computed from — and it only checks when
+the identity would really change, so the very common "set my user to the one I
+already am" keeps working for everyone.
+
+**The decision.** `SYS_PROCESS_SET_CREDENTIALS` (530) requires
+`(ResourceType::Process, Rights::SET_CREDENTIALS)` for any call that would
+change uid or gid. Calls that resolve to the identity already held — via the
+`(uid_t)-1` KEEP sentinel or by passing the current value — require nothing.
+
+**Three things had to be got right, and each had a wrong answer that looks fine.**
+
+**1. Which predicate.** The kernel gate uses *exactly* posix's:
+`(Process, SET_CREDENTIALS)`, **id-agnostic**. The tempting alternative is to
+require `resource_id == 0` (the class sentinel, §212), which is what every
+actual grant writes and reads as the stricter, more careful choice. It is the
+wrong choice: `posix::sys_capability::project` is id-agnostic, so a kernel gate
+with an `== 0` in it would answer a *different question* from the projection.
+Then the projection is no longer a projection — userspace would compute "you may"
+from a right the kernel then refuses to honour, or the reverse, and which of the
+two is authoritative would depend on which layer a given call happened to enter
+through. Two gates on one operation must be one predicate, and the stricter of
+two disagreeing gates is not safer, it is just the one that fails.
+
+*(§212's rule that an id-agnostic `SET_CREDENTIALS` check is safe is what makes
+this available: the right has no automatic grant anywhere, so unlike `SIGNAL`
+there is no per-instance grant an id test would need to exclude. Add an
+auto-grant of `SET_CREDENTIALS` and **both** predicates must gain an `== 0` in
+the same commit.)*
+
+**2. Whether a no-op counts.** It does not. `setuid(getuid())` is permitted to
+every process in POSIX, and privilege-shedding code issues it unconditionally —
+often in code paths that never held privilege in the first place. Gating it
+would deny a capability to callers who provably need none, in order to prevent
+a transition that does not happen: the state after a refused no-op and after an
+allowed one is byte-identical. The two ways to not-move are distinct and both
+had to be handled — KEEP says "don't touch this field", passing the current
+value says "set it to what it is" — and only the first is obvious from the ABI.
+
+**3. Where the decision lives.** In `resolve_credential_request()`, a pure
+function of `(current, arg0, arg1)`, not inline in the handler. The handler
+reads `current_task_id()`, so a self-test driving it through `dispatch()` can
+only ever exercise the kernel-task path that fails before reaching the gate.
+Nine cases are pinned in `test_dispatch_set_credentials_gate`. Both failure
+directions are silent in production: a no-op misjudged as a change denies
+something harmless, and a change misjudged as a no-op *is* the escalation —
+and it would pass every other test in the tree, because the identity does end
+up where the caller asked.
+
+**Why now, rather than at §83's stated trigger.** §83 deferred this to "when
+credential-uid-based authority is introduced", which has not happened. That
+trigger was aimed at the wrong event. §83's argument for userspace policy was
+that the kernel *had nothing to check* — POSIX caps were userspace-only with no
+kernel backing. §207 then created `Rights::SET_CREDENTIALS` as a kernel-side
+handle-backed right, and §312 made `CAP_SETUID` project from it. At that moment
+the userspace check stopped being an independent policy and became a **cached
+copy of a kernel fact, enforced only on the copy** — and the condition that
+mattered was met, whatever the credential uid did or did not authorise. See
+`known-issues.md` → `A-SET-CREDENTIALS-IS-GATED-ONLY-IN-USERSPACE` for the
+mechanism by which a correct decision rotted without anyone changing it.
+
+**Alternatives.**
+
+| Option | For | Against |
+|---|---|---|
+| Leave it to userspace (§83 status quo) | Zero change; consistent with other cap-gated ops | A wrapper is not a boundary. Any process reaches uid 0 via raw syscall 530, and posix's `CAPS_DEFAULT` is *all caps held*, so the check defaults to permitting. Violates CLAUDE.md's "no ambient authority" outright. |
+| Kernel-authoritative uid rule (root may set any, others only their own) | No capability plumbing; familiar Unix semantics | Rejected in §83 and still right to reject: it invents a second, *different* policy alongside the projected one, and diverges host from target. |
+| **Capability gate, id-agnostic, change-only** (chosen) | Same predicate both sides; no new policy; provably no blast radius | Does not stop a holder from setting any uid at all — but that is what holding the right *means*. |
+
+**Blast radius: none.** `self_test_fastpy_slateos_setuid` is the only thing in
+the tree that changes identity, and `spawn.rs` already grants it
+`(Process, 0, SET_CREDENTIALS)` — placed under
+`requests/b-a-cap-grants-for-312-step3-fixtures.md` for §312 step 3. This makes
+the gate binding one layer *below* where that request expected it, and the grant
+covers the earlier event unchanged.
+
+**How to reverse:** delete the `is_change && !has_capability_type(…)` arm in
+`sys_process_set_credentials`. `resolve_credential_request` and its self-test
+stay useful either way — they describe the ABI, not the policy.
+
+**Where it lives.** `kernel/src/syscall/handlers.rs`
+(`sys_process_set_credentials`, `resolve_credential_request`,
+`CREDENTIALS_KEEP`), `kernel/src/syscall/number.rs` (the 530 doc),
+`kernel/src/syscall/dispatch.rs` (`test_dispatch_set_credentials_gate`).
 
 ---
 

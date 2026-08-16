@@ -320,6 +320,42 @@ fn scan_to_delimiter(bytes: &[u8], mut i: usize, needle: &[u8]) -> Option<usize>
     None
 }
 
+/// Offset just past the next `needle` at or after `from`, or the end of the
+/// line if there isn't one.
+///
+/// This is Markdown's inline-span rule. Spans are highlighted optimistically:
+/// a `**` with no closing `**` colours the rest of the line rather than
+/// nothing, because while the user is still typing the span there is no
+/// closing marker yet. Inline code and italic already behaved that way; bold
+/// did not — its `while i + 1 < len` stopped one byte short, so `**abc`
+/// bolded `**ab` and left `c` plain, which is neither of the two defensible
+/// answers.
+///
+/// Unlike `scan_to_delimiter` this does *not* skip backslash escapes, which
+/// preserves the existing behaviour exactly; Markdown escaping is a separate
+/// question from where a span ends.
+fn close_or_end(bytes: &[u8], from: usize, needle: &[u8]) -> usize {
+    find_close(bytes, from, needle).unwrap_or(bytes.len())
+}
+
+/// As `close_or_end`, but distinguishing "closed at the very end of the line"
+/// from "never closed".
+///
+/// Markdown's link syntax needs the distinction and the optimistic version
+/// cannot express it: `[text](url)` is a link only once `](` has been seen,
+/// and `](` occurring as the last two bytes returns the same offset as not
+/// occurring at all.
+fn find_close(bytes: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    let mut i = from;
+    while i < bytes.len() {
+        if starts_with_at(bytes, i, needle) {
+            return Some(i.saturating_add(needle.len()).min(bytes.len()));
+        }
+        i = i.saturating_add(1);
+    }
+    None
+}
+
 /// Recognise a triple-quote delimiter (`"""` or `'''`) at `i`.
 ///
 /// Returns the delimiter both as the byte string to search for and as the
@@ -695,7 +731,10 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         }
 
         // Number
-        if b.is_ascii_digit() || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
+        if b.is_ascii_digit()
+                || (b == b'.'
+                    && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+            {
             let start = i;
             let end = scan_number(bytes, i);
             push_token(&mut tokens, start, end, Token::Number);
@@ -708,7 +747,7 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
             let start = i;
             let (end, word) = scan_word(bytes, i);
             // Macro invocation: word followed by `!`
-            if end < len && bytes[end] == b'!' && !word.is_empty() {
+            if at(bytes, end) == Some(b'!') && !word.is_empty() {
                 let kind = Token::Macro;
                 push_token(&mut tokens, start, end + 1, kind);
                 i = end + 1;
@@ -718,7 +757,7 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
                 Token::Keyword
             } else if is_keyword(word, RUST_TYPES) {
                 Token::Type
-            } else if end < len && bytes[end] == b'(' {
+            } else if at(bytes, end) == Some(b'(') {
                 Token::Function
             } else if word.starts_with(|c: char| c.is_ascii_uppercase()) {
                 Token::Type
@@ -733,8 +772,8 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         // Operators
         if is_operator_byte(b) {
             let start = i;
-            while i < len && is_operator_byte(bytes[i]) {
-                i += 1;
+            while at(bytes, i).is_some_and(is_operator_byte) {
+                i = i.saturating_add(1);
             }
             push_token(&mut tokens, start, i, Token::Operator);
             continue;
@@ -830,8 +869,8 @@ fn highlight_python_normal(
         if b == b'@' {
             let start = i;
             i += 1;
-            while i < len && (is_ident_byte(bytes[i]) || bytes[i] == b'.') {
-                i += 1;
+            while at(bytes, i).is_some_and(|c| is_ident_byte(c) || c == b'.') {
+                i = i.saturating_add(1);
             }
             push_token(tokens, start, i, Token::Attribute);
             continue;
@@ -917,7 +956,10 @@ fn highlight_python_normal(
         }
 
         // Number
-        if b.is_ascii_digit() || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
+        if b.is_ascii_digit()
+                || (b == b'.'
+                    && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+            {
             let start = i;
             let end = scan_number(bytes, i);
             push_token(tokens, start, end, Token::Number);
@@ -933,7 +975,7 @@ fn highlight_python_normal(
                 Token::Keyword
             } else if is_keyword(word, PYTHON_BUILTINS) {
                 Token::Builtin
-            } else if end < len && bytes[end] == b'(' {
+            } else if at(bytes, end) == Some(b'(') {
                 Token::Function
             } else {
                 Token::Plain
@@ -946,8 +988,8 @@ fn highlight_python_normal(
         // Operators
         if is_operator_byte(b) {
             let start = i;
-            while i < len && is_operator_byte(bytes[i]) {
-                i += 1;
+            while at(bytes, i).is_some_and(is_operator_byte) {
+                i = i.saturating_add(1);
             }
             push_token(tokens, start, i, Token::Operator);
             continue;
@@ -1055,7 +1097,10 @@ fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         }
 
         // Number
-        if b.is_ascii_digit() || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
+        if b.is_ascii_digit()
+                || (b == b'.'
+                    && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+            {
             let start = i;
             let end = scan_number(bytes, i);
             push_token(&mut tokens, start, end, Token::Number);
@@ -1071,7 +1116,7 @@ fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
                 Token::Keyword
             } else if is_keyword(word, C_TYPES) {
                 Token::Type
-            } else if end < len && bytes[end] == b'(' {
+            } else if at(bytes, end) == Some(b'(') {
                 Token::Function
             } else if word.chars().all(|c| c.is_ascii_uppercase() || c == b'_' as char) && word.len() > 1 {
                 // ALL_CAPS identifiers are usually macros/constants in C.
@@ -1087,8 +1132,8 @@ fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         // Operators
         if is_operator_byte(b) {
             let start = i;
-            while i < len && is_operator_byte(bytes[i]) {
-                i += 1;
+            while at(bytes, i).is_some_and(is_operator_byte) {
+                i = i.saturating_add(1);
             }
             push_token(&mut tokens, start, i, Token::Operator);
             continue;
@@ -1273,7 +1318,10 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
         }
 
         // Number
-        if b.is_ascii_digit() || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
+        if b.is_ascii_digit()
+                || (b == b'.'
+                    && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+            {
             let start = i;
             let end = scan_number(bytes, i);
             push_token(&mut tokens, start, end, Token::Number);
@@ -1284,10 +1332,13 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
         // Identifier
         if b.is_ascii_alphabetic() || b == b'_' || b == b'$' {
             let start = i;
-            while i < len && (is_ident_byte(bytes[i]) || bytes[i] == b'$') {
-                i += 1;
+            while at(bytes, i).is_some_and(|c| is_ident_byte(c) || c == b'$') {
+                i = i.saturating_add(1);
             }
-            let word = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            let word = bytes
+                .get(start..i)
+                .and_then(|w| std::str::from_utf8(w).ok())
+                .unwrap_or("");
             let kind = if is_keyword(word, JS_KEYWORDS) {
                 Token::Keyword
             } else if is_keyword(word, JS_BUILTINS) {
@@ -1304,8 +1355,8 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
         // Operators
         if is_operator_byte(b) {
             let start = i;
-            while i < len && is_operator_byte(bytes[i]) {
-                i += 1;
+            while at(bytes, i).is_some_and(is_operator_byte) {
+                i = i.saturating_add(1);
             }
             push_token(&mut tokens, start, i, Token::Operator);
             continue;
@@ -1627,28 +1678,15 @@ fn highlight_markdown(line: &str, state: &mut HighlightState) -> Vec<StyledToken
         // Inline code: `...`
         if b == b'`' {
             let start = i;
-            i += 1;
-            while i < len && bytes[i] != b'`' {
-                i += 1;
-            }
-            if i < len {
-                i += 1; // include closing backtick
-            }
+            i = close_or_end(bytes, i.saturating_add(1), b"`");
             push_token(&mut tokens, start, i, Token::CodeBlock);
             continue;
         }
 
         // Bold: **...**
-        if b == b'*' && i + 1 < len && bytes[i + 1] == b'*' {
+        if is_pair(bytes, i, b'*', b'*') {
             let start = i;
-            i += 2;
-            while i + 1 < len {
-                if bytes[i] == b'*' && bytes[i + 1] == b'*' {
-                    i += 2;
-                    break;
-                }
-                i += 1;
-            }
+            i = close_or_end(bytes, i.saturating_add(2), b"**");
             push_token(&mut tokens, start, i, Token::Bold);
             continue;
         }
@@ -1656,13 +1694,7 @@ fn highlight_markdown(line: &str, state: &mut HighlightState) -> Vec<StyledToken
         // Italic: *...*
         if b == b'*' {
             let start = i;
-            i += 1;
-            while i < len && bytes[i] != b'*' {
-                i += 1;
-            }
-            if i < len {
-                i += 1;
-            }
+            i = close_or_end(bytes, i.saturating_add(1), b"*");
             push_token(&mut tokens, start, i, Token::Italic);
             continue;
         }
@@ -1670,27 +1702,14 @@ fn highlight_markdown(line: &str, state: &mut HighlightState) -> Vec<StyledToken
         // Link: [text](url)
         if b == b'[' {
             let start = i;
-            i += 1;
-            // Find `](`
-            let mut found_bracket = false;
-            while i < len {
-                if bytes[i] == b']' && i + 1 < len && bytes[i + 1] == b'(' {
-                    found_bracket = true;
-                    i += 2;
-                    // Find closing `)`
-                    while i < len && bytes[i] != b')' {
-                        i += 1;
-                    }
-                    if i < len {
-                        i += 1;
-                    }
-                    break;
-                }
-                i += 1;
-            }
-            if found_bracket {
+            // A link is only a link once `](` has been seen; until then the
+            // `[` could equally be a stray bracket, so the two halves are
+            // found separately rather than with one scan.
+            if let Some(after_bracket) = find_close(bytes, i.saturating_add(1), b"](") {
+                i = close_or_end(bytes, after_bracket, b")");
                 push_token(&mut tokens, start, i, Token::Link);
             } else {
+                i = len;
                 push_token(&mut tokens, start, i, Token::Plain);
             }
             continue;
@@ -1825,10 +1844,13 @@ fn highlight_shell(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         if b.is_ascii_alphabetic() || b == b'_' {
             let start = i;
             // Shell identifiers can include `-` in command names.
-            while i < len && (is_ident_byte(bytes[i]) || bytes[i] == b'-') {
-                i += 1;
+            while at(bytes, i).is_some_and(|c| is_ident_byte(c) || c == b'-') {
+                i = i.saturating_add(1);
             }
-            let word = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            let word = bytes
+                .get(start..i)
+                .and_then(|w| std::str::from_utf8(w).ok())
+                .unwrap_or("");
             let kind = if is_keyword(word, SHELL_KEYWORDS) {
                 Token::Keyword
             } else if is_keyword(word, SHELL_BUILTINS) {
@@ -2114,6 +2136,51 @@ mod tests {
             HighlightState::MultiLineString {
                 delimiter: StringDelimiter::TripleSingle
             }
+        );
+    }
+
+    #[test]
+    fn an_unclosed_markdown_span_colours_the_rest_of_the_line() {
+        // All four inline spans are highlighted optimistically: while the
+        // user is still typing one there is no closing marker yet, so the
+        // alternative is for the text to flicker uncoloured as it is typed.
+        //
+        // Regression: bold alone stopped one byte short of the end, because
+        // its scan was `while i + 1 < len` and nothing extended it after the
+        // loop. `**abc` bolded `**ab` and left `c` plain — not the
+        // colour-it-all answer and not the colour-none answer either.
+        for (line, kind, text) in [
+            ("**abc", Token::Bold, "**abc"),
+            ("*abc", Token::Italic, "*abc"),
+            ("`abc", Token::CodeBlock, "`abc"),
+            ("[abc", Token::Plain, "[abc"),
+        ] {
+            let toks = tokens_of(line, Language::Markdown);
+            assert!(
+                toks.contains(&(kind, text.to_string())),
+                "{line:?}: expected {kind:?} {text:?}, got {toks:?}"
+            );
+        }
+
+        // And the closed forms still stop at the closing marker.
+        for (line, kind, text) in [
+            ("**a** tail", Token::Bold, "**a**"),
+            ("*a* tail", Token::Italic, "*a*"),
+            ("`a` tail", Token::CodeBlock, "`a`"),
+            ("[a](u) tail", Token::Link, "[a](u)"),
+        ] {
+            let toks = tokens_of(line, Language::Markdown);
+            assert!(
+                toks.contains(&(kind, text.to_string())),
+                "{line:?}: expected {kind:?} {text:?}, got {toks:?}"
+            );
+        }
+
+        // A `[` with no `](` is not a link, however much text follows.
+        let toks = tokens_of("[not a link) at all", Language::Markdown);
+        assert!(
+            !toks.iter().any(|(k, _)| *k == Token::Link),
+            "expected no Link token, got {toks:?}"
         );
     }
 

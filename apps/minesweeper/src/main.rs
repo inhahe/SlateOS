@@ -36,13 +36,13 @@ const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 /// Colors for the neighbor-count digits 1 through 8.
 const NUMBER_COLORS: [Color; 8] = [
-    BLUE,    // 1
-    GREEN,   // 2
-    RED,     // 3
-    MAUVE,   // 4
-    PEACH,   // 5
-    TEAL,    // 6
-    YELLOW,  // 7
+    BLUE,       // 1
+    GREEN,      // 2
+    RED,        // 3
+    MAUVE,      // 4
+    PEACH,      // 5
+    TEAL,       // 6
+    YELLOW,     // 7
     TEXT_COLOR, // 8
 ];
 
@@ -69,7 +69,9 @@ impl Lcg {
 
     fn next_u64(&mut self) -> u64 {
         // LCG constants from Numerical Recipes
-        self.state = self.state.wrapping_mul(6_364_136_223_846_793_005)
+        self.state = self
+            .state
+            .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         self.state
     }
@@ -291,11 +293,11 @@ impl MinesweeperApp {
     fn compute_neighbor_counts(&mut self) {
         for row in 0..self.rows {
             for col in 0..self.cols {
-                let count = self.neighbors(row, col)
+                let count = self
+                    .neighbors(row, col)
                     .iter()
                     .filter(|&&(nr, nc)| {
-                        self.index_of(nr, nc)
-                            .is_some_and(|i| self.cells[i].is_mine)
+                        self.index_of(nr, nc).is_some_and(|i| self.cells[i].is_mine)
                     })
                     .count() as u8;
                 let idx = row * self.cols + col;
@@ -443,7 +445,8 @@ impl MinesweeperApp {
         }
 
         let nbrs = self.neighbors(row, col);
-        let flag_count = nbrs.iter()
+        let flag_count = nbrs
+            .iter()
             .filter(|&&(nr, nc)| {
                 self.index_of(nr, nc)
                     .is_some_and(|i| self.cells[i].state == CellState::Flagged)
@@ -455,7 +458,8 @@ impl MinesweeperApp {
         }
 
         // Collect neighbors to reveal (must copy to avoid borrow issues).
-        let to_reveal: Vec<(usize, usize)> = nbrs.iter()
+        let to_reveal: Vec<(usize, usize)> = nbrs
+            .iter()
             .filter(|&&(nr, nc)| {
                 self.index_of(nr, nc)
                     .is_some_and(|i| self.cells[i].state == CellState::Hidden)
@@ -540,17 +544,26 @@ impl MinesweeperApp {
 
     /// Count flagged cells.
     fn flag_count(&self) -> usize {
-        self.cells.iter().filter(|c| c.state == CellState::Flagged).count()
+        self.cells
+            .iter()
+            .filter(|c| c.state == CellState::Flagged)
+            .count()
     }
 
     /// Count revealed cells.
     fn count_revealed(&self) -> usize {
-        self.cells.iter().filter(|c| c.state == CellState::Revealed).count()
+        self.cells
+            .iter()
+            .filter(|c| c.state == CellState::Revealed)
+            .count()
     }
 
     /// Count hidden cells (not flagged, not revealed).
     fn count_hidden(&self) -> usize {
-        self.cells.iter().filter(|c| c.state == CellState::Hidden).count()
+        self.cells
+            .iter()
+            .filter(|c| c.state == CellState::Hidden)
+            .count()
     }
 
     /// Check whether a particular cell is a mine.
@@ -560,12 +573,14 @@ impl MinesweeperApp {
 
     /// Check whether a particular cell is revealed.
     fn is_revealed(&self, row: usize, col: usize) -> bool {
-        self.cell_at(row, col).is_some_and(|c| c.state == CellState::Revealed)
+        self.cell_at(row, col)
+            .is_some_and(|c| c.state == CellState::Revealed)
     }
 
     /// Check whether a particular cell is flagged.
     fn is_flagged(&self, row: usize, col: usize) -> bool {
-        self.cell_at(row, col).is_some_and(|c| c.state == CellState::Flagged)
+        self.cell_at(row, col)
+            .is_some_and(|c| c.state == CellState::Flagged)
     }
 
     /// Get the adjacent mine count for a cell.
@@ -745,14 +760,19 @@ impl MinesweeperApp {
             CellState::Hidden => {
                 // Raised-looking hidden cell
                 cmds.push(RenderCommand::FillRect {
-                    x, y, width: CELL_SIZE, height: CELL_SIZE,
+                    x,
+                    y,
+                    width: CELL_SIZE,
+                    height: CELL_SIZE,
                     color: SURFACE1,
                     corner_radii: radii,
                 });
                 // Subtle highlight on top-left edges
                 cmds.push(RenderCommand::Line {
-                    x1: x + 2.0, y1: y + 1.0,
-                    x2: x + CELL_SIZE - 2.0, y2: y + 1.0,
+                    x1: x + 2.0,
+                    y1: y + 1.0,
+                    x2: x + CELL_SIZE - 2.0,
+                    y2: y + 1.0,
                     color: SURFACE2,
                     width: 1.0,
                 });
@@ -760,7 +780,10 @@ impl MinesweeperApp {
             CellState::Flagged => {
                 // Flagged cell background
                 cmds.push(RenderCommand::FillRect {
-                    x, y, width: CELL_SIZE, height: CELL_SIZE,
+                    x,
+                    y,
+                    width: CELL_SIZE,
+                    height: CELL_SIZE,
                     color: SURFACE1,
                     corner_radii: radii,
                 });
@@ -778,14 +801,18 @@ impl MinesweeperApp {
                 // If game is lost and this flag was wrong, show X overlay
                 if self.status == GameStatus::Lost && !cell.is_mine {
                     cmds.push(RenderCommand::Line {
-                        x1: x + 4.0, y1: y + 4.0,
-                        x2: x + CELL_SIZE - 4.0, y2: y + CELL_SIZE - 4.0,
+                        x1: x + 4.0,
+                        y1: y + 4.0,
+                        x2: x + CELL_SIZE - 4.0,
+                        y2: y + CELL_SIZE - 4.0,
                         color: RED,
                         width: 2.0,
                     });
                     cmds.push(RenderCommand::Line {
-                        x1: x + CELL_SIZE - 4.0, y1: y + 4.0,
-                        x2: x + 4.0, y2: y + CELL_SIZE - 4.0,
+                        x1: x + CELL_SIZE - 4.0,
+                        y1: y + 4.0,
+                        x2: x + 4.0,
+                        y2: y + CELL_SIZE - 4.0,
                         color: RED,
                         width: 2.0,
                     });
@@ -797,7 +824,10 @@ impl MinesweeperApp {
                     let is_losing = self.losing_cell == Some((row, col));
                     let bg = if is_losing { RED } else { SURFACE0 };
                     cmds.push(RenderCommand::FillRect {
-                        x, y, width: CELL_SIZE, height: CELL_SIZE,
+                        x,
+                        y,
+                        width: CELL_SIZE,
+                        height: CELL_SIZE,
                         color: bg,
                         corner_radii: radii,
                     });
@@ -816,7 +846,10 @@ impl MinesweeperApp {
                 } else {
                     // Revealed safe cell
                     cmds.push(RenderCommand::FillRect {
-                        x, y, width: CELL_SIZE, height: CELL_SIZE,
+                        x,
+                        y,
+                        width: CELL_SIZE,
+                        height: CELL_SIZE,
                         color: SURFACE0,
                         corner_radii: radii,
                     });
@@ -1011,7 +1044,10 @@ mod tests {
         let mut app = MinesweeperApp::new(Difficulty::Beginner);
         app.reveal(4, 4);
         for (nr, nc) in app.neighbors(4, 4) {
-            assert!(!app.is_mine(nr, nc), "Neighbor ({nr}, {nc}) should not be a mine");
+            assert!(
+                !app.is_mine(nr, nc),
+                "Neighbor ({nr}, {nc}) should not be a mine"
+            );
         }
     }
 
@@ -1043,8 +1079,7 @@ mod tests {
         a.reveal(4, 4);
         b.reveal(4, 4);
         // With overwhelming probability, different seeds produce different layouts
-        let same = (0..a.total_cells())
-            .all(|i| a.cells[i].is_mine == b.cells[i].is_mine);
+        let same = (0..a.total_cells()).all(|i| a.cells[i].is_mine == b.cells[i].is_mine);
         assert!(!same);
     }
 
@@ -1055,12 +1090,16 @@ mod tests {
         for row in 0..app.rows {
             for col in 0..app.cols {
                 if !app.is_mine(row, col) {
-                    let expected = app.neighbors(row, col)
+                    let expected = app
+                        .neighbors(row, col)
                         .iter()
                         .filter(|&&(r, c)| app.is_mine(r, c))
                         .count() as u8;
-                    assert_eq!(app.adjacent_count(row, col), expected,
-                        "Wrong count at ({row}, {col})");
+                    assert_eq!(
+                        app.adjacent_count(row, col),
+                        expected,
+                        "Wrong count at ({row}, {col})"
+                    );
                 }
             }
         }
@@ -1143,10 +1182,14 @@ mod tests {
                             }
                         }
                     }
-                    if found { break; }
+                    if found {
+                        break;
+                    }
                 }
             }
-            if found { break; }
+            if found {
+                break;
+            }
         }
         assert!(found, "Could not find a numbered hidden cell to test");
     }
@@ -1259,8 +1302,11 @@ mod tests {
         for i in 0..app.total_cells() {
             if app.cells[i].is_mine {
                 // Mines should be revealed or flagged (if user flagged them)
-                assert_ne!(app.cells[i].state, CellState::Hidden,
-                    "Mine at index {i} should be revealed after loss");
+                assert_ne!(
+                    app.cells[i].state,
+                    CellState::Hidden,
+                    "Mine at index {i} should be revealed after loss"
+                );
             }
         }
     }
@@ -1315,7 +1361,8 @@ mod tests {
         // Find a revealed numbered cell, flag its mine neighbors, then chord
         if let Some((row, col)) = find_revealed_numbered_cell(&app) {
             let nbrs = app.neighbors(row, col);
-            let mine_nbrs: Vec<(usize, usize)> = nbrs.iter()
+            let mine_nbrs: Vec<(usize, usize)> = nbrs
+                .iter()
                 .filter(|&&(r, c)| app.is_mine(r, c))
                 .copied()
                 .collect();
@@ -1490,10 +1537,12 @@ mod tests {
         let app = MinesweeperApp::new(Difficulty::Beginner);
         let cmds = app.render();
         // First command should be the full background fill
-        let has_bg = cmds.iter().any(|cmd| matches!(cmd,
-            RenderCommand::FillRect { x, y, color, .. }
-            if *x == 0.0 && *y == 0.0 && *color == BASE
-        ));
+        let has_bg = cmds.iter().any(|cmd| {
+            matches!(cmd,
+                RenderCommand::FillRect { x, y, color, .. }
+                if *x == 0.0 && *y == 0.0 && *color == BASE
+            )
+        });
         assert!(has_bg, "Should have a background fill rect");
     }
 
@@ -1502,9 +1551,11 @@ mod tests {
         let app = MinesweeperApp::new(Difficulty::Beginner);
         let cmds = app.render();
         // Should have the mantle-colored header bar
-        let has_header = cmds.iter().any(|cmd| matches!(cmd,
-            RenderCommand::FillRect { color, .. } if *color == MANTLE
-        ));
+        let has_header = cmds.iter().any(|cmd| {
+            matches!(cmd,
+                RenderCommand::FillRect { color, .. } if *color == MANTLE
+            )
+        });
         assert!(has_header, "Should have a header bar");
     }
 
@@ -1512,10 +1563,12 @@ mod tests {
     fn test_render_contains_mine_counter_text() {
         let app = MinesweeperApp::new(Difficulty::Beginner);
         let cmds = app.render();
-        let has_counter = cmds.iter().any(|cmd| matches!(cmd,
-            RenderCommand::Text { text, color, .. }
-            if *color == RED && text.contains("010")
-        ));
+        let has_counter = cmds.iter().any(|cmd| {
+            matches!(cmd,
+                RenderCommand::Text { text, color, .. }
+                if *color == RED && text.contains("010")
+            )
+        });
         assert!(has_counter, "Should have mine counter text");
     }
 
@@ -1523,10 +1576,12 @@ mod tests {
     fn test_render_contains_timer_text() {
         let app = MinesweeperApp::new(Difficulty::Beginner);
         let cmds = app.render();
-        let has_timer = cmds.iter().any(|cmd| matches!(cmd,
-            RenderCommand::Text { text, color, .. }
-            if *color == BLUE && text == "00:00"
-        ));
+        let has_timer = cmds.iter().any(|cmd| {
+            matches!(cmd,
+                RenderCommand::Text { text, color, .. }
+                if *color == BLUE && text == "00:00"
+            )
+        });
         assert!(has_timer, "Should have timer text");
     }
 
@@ -1535,9 +1590,14 @@ mod tests {
         let app = MinesweeperApp::new(Difficulty::Beginner);
         let cmds = app.render();
         // Each hidden cell produces a FillRect + a Line (highlight)
-        let surface1_rects = cmds.iter().filter(|cmd| matches!(cmd,
-            RenderCommand::FillRect { color, .. } if *color == SURFACE1
-        )).count();
+        let surface1_rects = cmds
+            .iter()
+            .filter(|cmd| {
+                matches!(cmd,
+                    RenderCommand::FillRect { color, .. } if *color == SURFACE1
+                )
+            })
+            .count();
         // Should have one FillRect per cell (81 for beginner)
         assert_eq!(surface1_rects, 81);
     }
@@ -1547,9 +1607,14 @@ mod tests {
         let mut app = MinesweeperApp::with_seed(Difficulty::Beginner, 42);
         app.reveal(4, 4);
         let cmds = app.render();
-        let surface0_rects = cmds.iter().filter(|cmd| matches!(cmd,
-            RenderCommand::FillRect { color, .. } if *color == SURFACE0
-        )).count();
+        let surface0_rects = cmds
+            .iter()
+            .filter(|cmd| {
+                matches!(cmd,
+                    RenderCommand::FillRect { color, .. } if *color == SURFACE0
+                )
+            })
+            .count();
         // At least one revealed cell (flood fill)
         assert!(surface0_rects > 0);
     }
@@ -1561,10 +1626,12 @@ mod tests {
         let (fr, fc) = find_hidden_cell(&app);
         app.toggle_flag(fr, fc);
         let cmds = app.render();
-        let has_flag = cmds.iter().any(|cmd| matches!(cmd,
-            RenderCommand::Text { text, color, .. }
-            if *color == RED && text == "\u{2691}"
-        ));
+        let has_flag = cmds.iter().any(|cmd| {
+            matches!(cmd,
+                RenderCommand::Text { text, color, .. }
+                if *color == RED && text == "\u{2691}"
+            )
+        });
         assert!(has_flag, "Should have a flag symbol");
     }
 
@@ -1574,12 +1641,14 @@ mod tests {
         app.reveal(4, 4);
         let cmds = app.render();
         // Check that at least one numbered cell uses the correct color
-        let has_numbered = cmds.iter().any(|cmd| matches!(cmd,
-            RenderCommand::Text { text, color, .. }
-            if (*color == BLUE && text == "1")
-                || (*color == GREEN && text == "2")
-                || (*color == RED && text == "3")
-        ));
+        let has_numbered = cmds.iter().any(|cmd| {
+            matches!(cmd,
+                RenderCommand::Text { text, color, .. }
+                if (*color == BLUE && text == "1")
+                    || (*color == GREEN && text == "2")
+                    || (*color == RED && text == "3")
+            )
+        });
         assert!(has_numbered, "Should have colored number text");
     }
 
@@ -1588,9 +1657,14 @@ mod tests {
         let mut app = MinesweeperApp::with_seed(Difficulty::Beginner, 42);
         force_loss(&mut app);
         let cmds = app.render();
-        let mine_symbols = cmds.iter().filter(|cmd| matches!(cmd,
-            RenderCommand::Text { text, .. } if text == "\u{2739}"
-        )).count();
+        let mine_symbols = cmds
+            .iter()
+            .filter(|cmd| {
+                matches!(cmd,
+                    RenderCommand::Text { text, .. } if text == "\u{2739}"
+                )
+            })
+            .count();
         assert!(mine_symbols > 0, "Should show mine symbols after loss");
     }
 
@@ -1599,10 +1673,12 @@ mod tests {
         let mut app = MinesweeperApp::with_seed(Difficulty::Beginner, 42);
         force_loss(&mut app);
         let cmds = app.render();
-        let has_red_mine_bg = cmds.iter().any(|cmd| matches!(cmd,
-            RenderCommand::FillRect { color, width, height, .. }
-            if *color == RED && *width == CELL_SIZE && *height == CELL_SIZE
-        ));
+        let has_red_mine_bg = cmds.iter().any(|cmd| {
+            matches!(cmd,
+                RenderCommand::FillRect { color, width, height, .. }
+                if *color == RED && *width == CELL_SIZE && *height == CELL_SIZE
+            )
+        });
         assert!(has_red_mine_bg, "Losing cell should have red background");
     }
 
@@ -1664,7 +1740,10 @@ mod tests {
             counts[v] += 1;
         }
         for (i, &c) in counts.iter().enumerate() {
-            assert!(c > 500, "Bucket {i} only got {c} hits — distribution seems broken");
+            assert!(
+                c > 500,
+                "Bucket {i} only got {c} hits — distribution seems broken"
+            );
         }
     }
 
@@ -1709,13 +1788,17 @@ mod tests {
         let mut flagged = 0;
         for row in 0..app.rows {
             for col in 0..app.cols {
-                if flagged >= 12 { break; }
+                if flagged >= 12 {
+                    break;
+                }
                 if app.cells[row * app.cols + col].state == CellState::Hidden {
                     app.toggle_flag(row, col);
                     flagged += 1;
                 }
             }
-            if flagged >= 12 { break; }
+            if flagged >= 12 {
+                break;
+            }
         }
         assert!(app.mines_remaining() < 0);
     }
@@ -1781,11 +1864,19 @@ mod tests {
         force_loss(&mut app);
         let cmds = app.render();
         // Should have Line commands for the X overlay on wrong flags
-        let line_count = cmds.iter().filter(|cmd| matches!(cmd, RenderCommand::Line { color, width, .. }
-            if *color == RED && *width == 2.0
-        )).count();
+        let line_count = cmds
+            .iter()
+            .filter(|cmd| {
+                matches!(cmd, RenderCommand::Line { color, width, .. }
+                    if *color == RED && *width == 2.0
+                )
+            })
+            .count();
         // At least 2 lines (the X) for the wrong flag
-        assert!(line_count >= 2, "Should have X overlay lines for wrong flag");
+        assert!(
+            line_count >= 2,
+            "Should have X overlay lines for wrong flag"
+        );
     }
 
     // ── Helper functions for tests ──────────────────────────────────
@@ -1870,7 +1961,9 @@ mod tests {
                     }
                 }
             }
-            if !found { break; }
+            if !found {
+                break;
+            }
         }
     }
 }

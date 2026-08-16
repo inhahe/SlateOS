@@ -1,0 +1,75 @@
+------------------------------------------------------------------------------
+--  Project file for the kernel's SPARK components.
+--
+--  This exists for `gnatprove`, not for building.  The kernel's objects are
+--  produced by kernel/build.rs driving x86_64-elf-gcc directly, because the
+--  build has to be a cargo build -- there is no point where gprbuild could run
+--  and hand its output to cargo without cargo already knowing about it.  A
+--  project file is however the only way to tell gnatprove what to analyse, so
+--  the compilation settings below are kept in step with build.rs by hand.  If
+--  they drift, gnatprove proves something other than what ships; the self-test
+--  in kernel/src/ada.rs is the backstop that would notice.
+--
+--  TARGET PARAMETERS ARE PASSED TWICE, AND BOTH ARE NECESSARY
+--
+--  `for Target` alone does *not* make gnatprove analyse for x86-64 ELF.  It
+--  only selects which runtime directory to look in; gnatprove says so itself
+--  ("attribute Target of your project file is only used to determine runtime
+--  library").  Left at that, the proof is carried out with the *host's* target
+--  parameters -- Windows x86-64, LLP64, Long_Size 32 -- and would be a proof
+--  about a machine this code never runs on.  Nothing would warn about it
+--  afterwards: the summary still reads 0 unproved.
+--
+--  So `-gnateT=x86_64-elf.atp` is passed as well, which is what actually
+--  substitutes the target parameters.  That file is not written by hand; it is
+--  the cross compiler's own dump, regenerated with
+--
+--      x86_64-elf-gcc -c src/virtqueue_descriptors.adb --RTS=./rts \
+--          -gnatet=x86_64-elf.atp
+--
+--  so it cannot drift from the compiler that builds the shipping object.  It
+--  records LP64 SysV: Bits_Per_Word 64, Pointer_Size 64, Long_Size 64,
+--  Maximum_Alignment 16, little-endian.
+------------------------------------------------------------------------------
+
+project Virtqueue is
+
+   for Target use "x86_64-elf";
+   for Runtime ("Ada") use Project'Project_Dir & "rts";
+
+   for Source_Dirs use ("src");
+   for Object_Dir use "build";
+
+   --  A library, not an executable: there is no Ada main.  The kernel's Rust
+   --  side is the program; this is a set of C-callable entry points it links
+   --  against, so there is nothing for a binder to bind.
+   for Library_Name use "kernelspark";
+   for Library_Dir use "lib";
+   for Library_Kind use "static";
+
+   package Builder is
+      --  -gnateT must go here, not in Compiler'Default_Switches: gnatprove
+      --  reads target parameters from the *global* compilation switches, and
+      --  ignores per-package ones for this purpose.  It says so in the warning
+      --  it emits when they are missing.
+      for Global_Compilation_Switches ("Ada") use
+        ("-gnateT=" & Project'Project_Dir & "x86_64-elf.atp");
+   end Builder;
+
+   package Compiler is
+      --  -mno-red-zone: the SysV red zone is unusable in kernel code, where an
+      --  interrupt can arrive at any instruction and would clobber it.
+      --  -mcmodel=kernel: the kernel is mapped in the top 2 GiB.
+      --  Both must match kernel/build.rs and the Rust target spec exactly.
+      for Default_Switches ("Ada") use
+        ("-mno-red-zone", "-mcmodel=kernel", "-O2", "-gnatwa", "-gnatw.X");
+   end Compiler;
+
+   package Prove is
+      --  Level 1 is enough: the body is written so that every verification
+      --  condition is local (see the body's note 1), which is why this does
+      --  not need level 2's extra provers or a longer timeout.
+      for Proof_Switches ("Ada") use ("--level=1", "--report=all");
+   end Prove;
+
+end Virtqueue;

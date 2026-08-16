@@ -1,0 +1,5 @@
+# gnatprove/gprbuild scratch.  The shipping object is built by kernel/build.rs
+# into cargo's OUT_DIR, not here; this directory only exists because gnatprove
+# needs an object dir to write .ali files and its session files into.
+/build/
+/lib/

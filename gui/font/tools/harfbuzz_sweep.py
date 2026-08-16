@@ -175,6 +175,84 @@ CORPUS = [
     # Khmer digits and a lek attak, which reach no syllable rule at all and are
     # the control: a difference here is not the shaper.
     "\\u17e1\\u17e2\\u17e3",
+    # --- Myanmar, which the Myanmar shaper is for ---
+    #
+    # Myanmar is stored in phonetic order and drawn in visual order, and the
+    # distance between the two is larger than Khmer's: a syllable's glyphs are
+    # *sorted* by where they sit around the base rather than moved one at a
+    # time. Two of the moves are ones no face's own rules can do -- MEDIAL RA
+    # (U+103C) is written after its consonant and drawn wrapped around its left
+    # side, and the vowel E (U+1031) is written after the whole consonant
+    # cluster and drawn before all of it -- so a difference in these strings is
+    # the shaper and not the face.
+    #
+    # `mranma` -- "Myanmar". MA, MEDIAL RA, NA, ASAT, MA, AA: the medial's move
+    # is the first thing anyone notices when it does not happen.
+    "\\u1019\\u103c\\u1014\\u103a\\u1019\\u102c",
+    # `mranma bhasa` -- "the Myanmar language". A systematic breakage shows here
+    # as more than an edge case.
+    "\\u1019\\u103c\\u1014\\u103a\\u1019\\u102c\\u1018\\u102c\\u101e\\u102c",
+    # The vowel E alone and the vowel E behind a medial: KA + E, then KA +
+    # MEDIAL RA + E. Both move to the front of the syllable, and the second
+    # settles which of the two goes furthest left -- the vowel, not the medial.
+    "\\u1000\\u1031",
+    "\\u1000\\u103c\\u1031",
+    # Kinzi: NGA, ASAT, VIRAMA before a consonant, which is drawn as a small
+    # mark *above* the consonant that follows it rather than as a letter of its
+    # own. The three characters are recognised as a unit only at the very start
+    # of a syllable, so `angga` -- from `anggalip`, "English" -- and the same
+    # three characters with something in front of them are different questions.
+    "\\u1021\\u1004\\u103a\\u1039\\u1002",
+    "\\u1004\\u103a\\u1039\\u1000",
+    "\\u1000\\u1004\\u103a\\u1039\\u1000",
+    # The four medials in the order the grammar allows them -- YA, RA, WA, HA --
+    # which is the longest medial run a syllable can have, and each one after
+    # the first is a glyph the face has to find room for under or around the
+    # base.
+    "\\u1000\\u103b\\u103c\\u103d\\u103e",
+    "\\u1000\\u103d\\u103e",
+    # MEDIAL MON LA (U+1060) and MON-only MEDIAL YA (U+105E), which are in the
+    # grammar as their own categories and reach it only from Mon text.
+    "\\u1000\\u1060",
+    "\\u1000\\u105e",
+    # A vowel above and a vowel below on the same base, then the same with a
+    # DOT BELOW after them: the sort has to keep the below-base vowel and the
+    # below-base dot in the order the grammar gives them, which is not the
+    # order they are written in.
+    "\\u1000\\u102d\\u102f",
+    "\\u1000\\u102d\\u102f\\u1037",
+    # ASAT (U+103A) after a consonant, which kills its inherent vowel, and
+    # ASAT after a below vowel, which is the `(DB As?)` tail of the grammar.
+    "\\u1000\\u103a",
+    "\\u1000\\u1037\\u103a",
+    # A post-base vowel followed by MEDIAL HA, which the grammar allows only in
+    # the *post* vowel group -- the same two characters in the other order are
+    # a different parse.
+    "\\u1000\\u102c\\u103e",
+    "\\u1000\\u103e\\u102c",
+    # A pwo tone (U+1063), a visarga (U+1038) and a Shan tone (U+1087), which
+    # are three different categories that all land at the very end of the sort.
+    "\\u1000\\u1063",
+    "\\u1000\\u1038",
+    "\\u1000\\u1087",
+    # A stacked pair -- KA, VIRAMA, KA -- which is the one place Myanmar writes
+    # a subscript the way Khmer does, and the AI vowel (U+1032), whose category
+    # is the same `A` as the anusvara rather than a vowel of its own.
+    "\\u1000\\u1039\\u1000",
+    "\\u1000\\u1032",
+    "\\u1000\\u1036",
+    # A variation selector after a consonant, which the Myanmar grammar names
+    # explicitly: it is the one script whose syllable rules mention U+FE00.
+    "\\u1000\\ufe00",
+    "\\u1000\\u1031\\ufe00",
+    # A bare VIRAMA and a bare ASAT with nothing to attach to: broken clusters,
+    # which get a dotted circle to hang from.
+    "\\u1039\\u1000",
+    "\\u103c\\u1000",
+    # Myanmar digits and a section mark, which reach no syllable rule at all
+    # and are the control: a difference here is not the shaper.
+    "\\u1041\\u1042\\u1043",
+    "\\u104a\\u104b",
     # Scriptless text, which selects the font's default features.
     "123 456",
     # --- default ignorables, which shape and are then erased ---

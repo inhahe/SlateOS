@@ -13846,3 +13846,122 @@ transparency of an erased glyph), `gui/font/src/gpos.rs` and `kern.rs` (the
 `POSITIONING` call sites), `gui/font/src/khmer.rs` and `indic_shape.rs`
 (`manual_joiners`), `known-issues.md`
 (`TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES`).
+
+## §435 — Mark-advance zeroing is a three-valued question, not a boolean, because *when* it happens changes the width
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+
+**In short:** A combining mark — an accent, a vowel sign, a dot under a
+letter — is drawn on top of the letter before it, so it must not push the next
+letter along; its "advance" (the distance the pen moves after drawing it) is
+set to zero. We used to treat that as a yes/no property of the script. It is
+not: for Myanmar the zeroing has to happen *before* the font's positioning
+rules run rather than after, and doing it in the wrong order slides every glyph
+after a medial-RA hook 440 units to the left. So the answer is now one of
+three — never, before, or after — and Myanmar is the one script that says
+"before".
+
+**The alternatives.**
+
+| | *What changes* |
+|---|---|
+| **Boolean, zero after `GPOS`** (what we had) | Myanmar text in `mmrtext.ttf` draws with everything after a medial RA shifted a third of an em to the left. |
+| **Boolean, zero before `GPOS`** | Every other script loses the `GPOS` adjustments that were meant to be discarded — the mark keeps whatever a lookup charged it. |
+| **Tri-state `Zeroing { Never, BeforeGpos, AfterGpos }`** (chosen) | Each script gets the order HarfBuzz gives it, and the two call sites (`zeroes_marks_first`, `zeroes_marks`) each ask the half of the question they need. |
+
+**Why it is not a refinement.** The distinction is invisible in a face whose
+marks are all zero-width in `hmtx`, which is most of them, and decisive in one
+whose are not. `mmrtext.ttf` classes U+103C — the hook drawn under and around
+its consonant — as a `GDEF` mark *and* gives it a 440-unit advance, then charges
+that 440 back on with a `dist` feature. Zero afterwards and the `dist`
+adjustment is thrown away with it; zero first and the lookup's own number
+survives, which is what HarfBuzz prints. That is the whole of
+`HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY`, which of HarfBuzz's nine shapers
+only Myanmar and USE set.
+
+**Cost accepted.** Two predicates on `ScaledFont` where there was one, and a
+tri-state whose third arm currently has exactly one member. That is the right
+shape anyway: USE is the other `BY_GDEF_EARLY` shaper, so its tags join `mym2`
+in the `BeforeGpos` arm the moment it is written, and a boolean would have had
+to be widened then regardless.
+
+**If it is never revisited:** nothing degrades. The arms are transcribed from
+HarfBuzz's shaper table, not guessed, and the sweep pins them.
+
+**Where:** `gui/font/src/fallback.rs` (`Zeroing`, `zeroes_mark_advances`,
+`NO_ZERO_WIDTH_MARKS`), `gui/font/src/scaled.rs` (`zeroes_marks_first`,
+`zeroes_marks`), `gui/font/src/gpos.rs` (`Run::zero_marks_first`),
+`known-issues.md` (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`).
+
+## §436 — The two mark-zeroing routes are modelled separately, and the fallback owns the marks it places
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+
+**In short:** There are two entirely separate reasons a combining mark's width
+gets set to zero, and we had them merged into one. One reason is "the font, or
+failing that the character's Unicode category, says this glyph is a mark". The
+other is "we could not find positioning instructions in the font, so we are
+measuring the mark onto the letter ourselves, and a mark we place ourselves
+must not also take up room". Merging them meant marks lost their width in cases
+where they should have kept it, and in `ကို့` the dot below was drawn two
+letters to the right of where it belongs.
+
+**What HarfBuzz actually does, and what we did.**
+
+*Route 1* — `zero_mark_widths_by_gdef`. Gated on a per-script flag
+(`plan->zero_marks`, off for eleven scripts). Zeroes every glyph whose `GDEF`
+class is mark — **or**, only when the face declares no `GDEF` classes at all,
+every glyph whose Unicode general category is `Mn`. `hb_synthesize_glyph_classes`
+runs behind `if (!hb_ot_layout_has_glyph_classes(...))`; it is an either/or.
+
+*Route 2* — `_hb_ot_shape_fallback_mark_position`. Zeroes only the marks it
+actually places (combining class ≠ 0), plus every `Mn` in the cluster when the
+base glyph has no ink to measure against.
+
+We had (a) the two `||`-ed together, so a face that classifies its glyphs had
+the character's category second-guessing it, and (b) no per-script gate on
+route 1 at all.
+
+**The options.**
+
+| | *What changes* |
+|---|---|
+| **Keep the union, patch the divergences as they surface** | Each newly-measured face needs another special case; the `simsun.ttc` shift stays until someone notices the next one. |
+| **Model the two routes separately** (chosen) | A face that classifies its glyphs is believed; a face that does not falls back to categories; and the measuring pass zeroes only what it places. |
+
+**The structural consequence, which is the part worth remembering.** Route 2
+cannot be a single pass. HarfBuzz's `position_around_base` computes each mark's
+horizontal offset as an accumulation over the advances *after* zeroing, so
+`pens[base] - pens[i]` is only equal to it if the zeroing has already happened.
+`synthesize_marks` is therefore **two phases**: walk the clusters and zero, then
+compute the pens, then place. It is also where the class-zero bug lived — a mark
+with combining class 0 is neither placed nor zeroed, so the old single-phase
+splitter mistook it for a base and restarted the cluster on it.
+
+**And "owning" the marks.** `SubGlyph::mark` is derived only for runs the
+measuring fallback owns — not for runs `GPOS` reaches, and not for the complex
+scripts whose shapers decline the fallback outright (Myanmar's does; its marks
+are placed by `GPOS` or not at all). `Role::Base`/`Role::Mark(class)` carries
+the answer, so a mark in a `GPOS`-owned run is deliberately `Role::Base` here.
+That is not a lie about the character; it is the statement that this pass has no
+business touching it.
+
+**Known gap, believed unreachable.** Our cluster splitter reads `Mn` where
+HarfBuzz reads `Mn|Mc|Me` — see `known-issues.md`. It needs a spacing matra
+followed by a non-zero-class mark in one cluster, which canonical ordering does
+not produce.
+
+**Measured.** All twelve `shape_dump` probe cases byte-identical to HarfBuzz,
+including `simsun.ttc` index 1 (`0;-128;0` → HarfBuzz's `0;-640;0`); Myanmar
+sweep 58/58; full sweep back to its recorded `misplaced 170` baseline with
+`agree` up by 19 and no new divergence anywhere else.
+
+**If it is never revisited:** nothing degrades; this *is* the revisit.
+
+**Where:** `gui/font/src/scaled.rs` (`Role`, `zeroed_at`, `places_marks`,
+`zeroes_marks`, `synthesize_marks`, `hide_ignorables`),
+`gui/font/src/fallback.rs` (`positions_marks`, `attach_class`, `place`),
+`gui/font/src/norm.rs` (`is_mark`), `gui/font/src/gpos.rs` (`Run::marks`),
+`known-issues.md` (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`).

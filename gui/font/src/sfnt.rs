@@ -142,6 +142,41 @@ pub(crate) fn i16_at(d: &[u8], off: usize) -> Option<i16> {
     Some(i16::from_be_bytes(b))
 }
 
+/// A three-byte big-endian code point, which is how `cmap` format 14 spells
+/// one — the only place in the format that does.
+fn u24_at(d: &[u8], off: usize) -> Option<u32> {
+    let end = off.checked_add(3)?;
+    let b: [u8; 3] = d.get(off..end)?.try_into().ok()?;
+    Some(u32::from_be_bytes([0, b[0], b[1], b[2]]))
+}
+
+/// The index of the first of `count` records that does not sort before `base`.
+///
+/// The records begin at `first`, are `stride` bytes apart, and each opens with
+/// a three-byte code point — the shape both halves of a `cmap` format-14
+/// selector record have, and both are required to be sorted. Returns `count`
+/// when every record sorts before `base`, which the caller must treat as a
+/// miss rather than as an index.
+///
+/// A truncated table reads as "not before", which walks the search toward the
+/// low end and leaves the caller to fail the equality check it does anyway.
+/// Some faces list fourteen thousand variation sequences, so this is a binary
+/// search and not a scan.
+fn first_at_or_after(data: &[u8], first: usize, stride: usize, count: usize, base: u32) -> usize {
+    let mut lo = 0usize;
+    let mut hi = count;
+    while lo < hi {
+        let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
+        let at = first.saturating_add(mid.saturating_mul(stride));
+        if u24_at(data, at).is_some_and(|cp| cp < base) {
+            lo = mid.saturating_add(1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 pub(crate) fn u32_at(d: &[u8], off: usize) -> Option<u32> {
     let end = off.checked_add(4)?;
     let b: [u8; 4] = d.get(off..end)?.try_into().ok()?;
@@ -444,6 +479,13 @@ pub struct Face {
     outlines: Outlines,
     hmtx: Span,
     cmap: Option<CmapSub>,
+    /// Where the `cmap`'s format-14 subtable begins, if it has one — the
+    /// Unicode Variation Sequences table, which says which glyph a *pair* of
+    /// characters draws as. Kept beside `cmap` rather than as one of its
+    /// candidates because it is not an alternative to a format-4 or -12 table
+    /// but an addition to it: format 14 maps no single character at all.
+    /// `None` for nearly every face. See [`Face::variation_glyph`].
+    variations: Option<usize>,
     /// The `name` table, kept as a span rather than decoded at parse time: a
     /// face is opened to draw with, and only a font picker or a family lookup
     /// ever asks for the strings.
@@ -704,6 +746,7 @@ impl Face {
             Some(span) => Self::select_cmap(&data, span),
             None => None,
         };
+        let variations = cmap.and_then(|span| Self::find_variation_selectors(&data, span));
 
         let os2_data = os2.and_then(|s| data.get(s.off..s.off.checked_add(s.len)?));
         let style = Self::parse_style(os2_data, head_data);
@@ -751,6 +794,7 @@ impl Face {
             outlines,
             hmtx,
             cmap: cmap_sub,
+            variations,
             name,
             style,
             kerning,
@@ -899,6 +943,22 @@ impl Face {
         best.map(|(_, sub)| sub)
     }
 
+    /// Where the `cmap`'s format-14 subtable begins, if the face has one.
+    ///
+    /// Not part of [`select_cmap`](Self::select_cmap)'s contest, which picks
+    /// one subtable to map single characters with. Format 14 maps *pairs* —
+    /// a base and a variation selector — and a face that has one always has
+    /// an ordinary subtable as well.
+    fn find_variation_selectors(data: &[u8], span: Span) -> Option<usize> {
+        let num_tables = u16_at(data, span.off.checked_add(2)?)?;
+        (0..usize::from(num_tables)).find_map(|i| {
+            let rec = span.off.checked_add(4)?.checked_add(i.checked_mul(8)?)?;
+            let sub_off = u32_at(data, rec.checked_add(4)?)?;
+            let sub_off = span.off.checked_add(usize::try_from(sub_off).ok()?)?;
+            (u16_at(data, sub_off)? == 14).then_some(sub_off)
+        })
+    }
+
     /// Vertical metrics for the face, in font units.
     #[must_use]
     pub fn metrics(&self) -> FaceMetrics {
@@ -1008,6 +1068,92 @@ impl Face {
             return self.lookup(sub, 0xF000_u32.checked_add(cp)?);
         }
         None
+    }
+
+    /// The glyph a base character draws as when `selector` follows it, or
+    /// `None` when the face knows nothing about that pair.
+    ///
+    /// A variation sequence is two characters that name one glyph: U+1000
+    /// U+FE00 is "Myanmar ka, second form", and `mmrtext.ttf` draws it with a
+    /// glyph its ordinary `cmap` has no entry for at all. `None` is the answer
+    /// for nearly every pair, and the caller's job then is to draw the two
+    /// characters as it would have anyway — the selector is a default
+    /// ignorable, so it comes out as nothing.
+    ///
+    /// Three outcomes in the table and two here, which is HarfBuzz's
+    /// `get_variation_glyph`: a pair listed in the *default* half means "the
+    /// base's ordinary glyph is already right", and answering with that glyph
+    /// says the same thing as the table while still telling the caller the
+    /// pair was recognised — which matters, because a recognised pair is one
+    /// glyph and an unrecognised one is two.
+    #[must_use]
+    pub fn variation_glyph(&self, base: char, selector: char) -> Option<u16> {
+        let off = self.variations?;
+        let count = u32_at(&self.data, off.checked_add(6)?)?;
+        let base = base as u32;
+        // A linear scan, not a binary search: the record count is the number
+        // of *selectors* the face supports, which is 1 in every face seen and
+        // 259 in the worst case the standard allows.
+        let record = (0..usize::try_from(count).ok()?).find_map(|i| {
+            let rec = off.checked_add(10)?.checked_add(i.checked_mul(11)?)?;
+            (u24_at(&self.data, rec)? == selector as u32).then_some(rec)
+        })?;
+        // The default half: an inclusive range list, each entry a start and a
+        // count of *additional* code points after it. Found by searching for
+        // the first range that starts *after* the base and stepping back one,
+        // since the range that could contain it is the last one before it.
+        if let Some(table) = self.uvs_half(record.checked_add(3)?)
+            && let Some(ranges) = u32_at(&self.data, table)
+            && let Some(ranges) = usize::try_from(ranges).ok()
+            && let Some(at) = first_at_or_after(
+                &self.data,
+                table.checked_add(4)?,
+                4,
+                ranges,
+                base.saturating_add(1),
+            )
+            .checked_sub(1)
+            .and_then(|i| table.checked_add(4)?.checked_add(i.checked_mul(4)?))
+            && let Some(start) = u24_at(&self.data, at)
+            && let Some(&extra) = self.data.get(at.checked_add(3)?)
+            && base <= start.saturating_add(u32::from(extra))
+        {
+            return self.glyph_index(char::from_u32(base)?);
+        }
+        // The non-default half: an explicit code point to glyph mapping.
+        let table = self.uvs_half(record.checked_add(7)?)?;
+        let mappings = usize::try_from(u32_at(&self.data, table)?).ok()?;
+        let first = table.checked_add(4)?;
+        let i = first_at_or_after(&self.data, first, 5, mappings, base);
+        if i >= mappings {
+            return None;
+        }
+        let at = first.checked_add(i.checked_mul(5)?)?;
+        if u24_at(&self.data, at) != Some(base) {
+            return None;
+        }
+        let gid = u16_at(&self.data, at.checked_add(3)?)?;
+        (gid != 0 && gid < self.num_glyphs).then_some(gid)
+    }
+
+    /// Where one half of a format-14 selector record points, or `None` when
+    /// that half is absent — which the format spells as a zero offset, and a
+    /// zero offset is a real one everywhere else in `sfnt`, so it cannot be
+    /// left for the caller to remember.
+    fn uvs_half(&self, at: usize) -> Option<usize> {
+        let off = self.variations?;
+        let rel = u32_at(&self.data, at).filter(|&o| o != 0)?;
+        off.checked_add(usize::try_from(rel).ok()?)
+    }
+
+    /// Whether the face's `cmap` carries any variation sequences at all.
+    ///
+    /// Lets the shaper skip the pass that looks for them, which is nearly
+    /// every shaped run: a face with a format-14 subtable is rare, and text
+    /// with a variation selector in it rarer still.
+    #[must_use]
+    pub fn has_variation_sequences(&self) -> bool {
+        self.variations.is_some()
     }
 
     fn lookup(&self, sub: CmapSub, cp: u32) -> Option<u16> {
@@ -1236,6 +1382,20 @@ impl Face {
         // The two arms are exclusive: no script tag is both.
         if crate::khmer::shapes(script) {
             crate::khmer::shape(&self.data, subs, script, lang, glyphs, |ch| {
+                self.glyph_index(ch)
+            });
+            return;
+        }
+        // Myanmar *is* filtered, unlike Khmer: `mym2` is a complex script but
+        // not an always-complex one, so a face that files its features under
+        // `DFLT` or `latn` is taken at its word and the run is shaped plainly.
+        // That is HarfBuzz's rule and this crate's, and the filter has to be
+        // the same one the Indic arm below uses or the two would disagree
+        // about the same face.
+        if crate::myanmar::shapes(script)
+            && !crate::fallback::shaped_as_default(script, chosen)
+        {
+            crate::myanmar::shape(&self.data, subs, script, lang, glyphs, |ch| {
                 self.glyph_index(ch)
             });
             return;
@@ -2398,8 +2558,29 @@ pub(crate) mod tests {
     /// [`Substitutions`] is `None` outright and the only record that the face
     /// named those scripts is [`Face::gsub_scripts`].
     pub(crate) fn build_test_font_with_gsub_scripts(scripts: &[[u8; 4]]) -> Vec<u8> {
+        build_test_font_with_gsub_and_classes(scripts, &[])
+    }
+
+    /// The fixture with a `GSUB` registering `scripts` and a `GDEF`
+    /// classifying `classes`, the latter omitted when empty.
+    ///
+    /// The `GSUB` half is what [`build_test_font_with_gsub_scripts`] is for and
+    /// the `GDEF` half what [`build_test_font_with_gdef_classes`] is for; the
+    /// pair exists because which script a face files its features under is
+    /// asked of `GSUB` alone — that is where a face says whether it wants a
+    /// complex shaper at all — while whether a glyph is a mark is asked of
+    /// `GDEF` alone. A test about a run that reaches the *default* shaper in a
+    /// face that classifies its glyphs needs both, and neither single-table
+    /// builder can express it.
+    pub(crate) fn build_test_font_with_gsub_and_classes(
+        scripts: &[[u8; 4]],
+        classes: &[u16],
+    ) -> Vec<u8> {
         let mut tables = build_test_tables(TRUE_LSB_3);
         tables.push((*b"GSUB", empty_layout_table(scripts)));
+        if !classes.is_empty() {
+            tables.push((*b"GDEF", glyph_classes(classes)));
+        }
         tables.sort_unstable_by_key(|&(tag, _)| tag);
         assemble(&tables)
     }

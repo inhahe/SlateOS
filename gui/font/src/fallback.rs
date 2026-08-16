@@ -229,14 +229,50 @@ static NO_ZERO_WIDTH_MARKS: [[u8; 4]; 11] = [
     *b"tel2", *b"tml2",
 ];
 
-/// Whether a run of this script has its marks' advances zeroed.
+/// When a run's combining marks lose their advance, relative to `GPOS`.
 ///
-/// Separate from [`positions_marks`], and true for nearly everything: a
-/// combining mark takes no room whether or not anything is willing to work
-/// out where to draw it. See [`NO_ZERO_WIDTH_MARKS`] for the ten that differ,
-/// and [`shaped_as_default`] for `simple`, which puts nine of those ten back.
-pub(crate) fn zeroes_mark_advances(tags: Option<ScriptTags>, simple: bool) -> bool {
-    simple || tags.is_none_or(|tags| NO_ZERO_WIDTH_MARKS.binary_search(&tags.preferred).is_err())
+/// Three answers and not two, because HarfBuzz's `zero_width_marks` is three
+/// values — and the third is not a refinement, it changes the width a real
+/// face reports. See [`zeroes_mark_advances`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Zeroing {
+    /// Never: the mark keeps whatever `hmtx` and `GPOS` between them say.
+    Never,
+    /// Before the positioning lookups run, so a lookup that charges an advance
+    /// charges it onto nothing and the mark ends up with the width the lookup
+    /// asked for.
+    BeforeGpos,
+    /// After they have run, so whatever they charged is thrown away.
+    AfterGpos,
+}
+
+/// When a run of this script has its marks' advances zeroed.
+///
+/// Separate from [`positions_marks`], and not [`Zeroing::Never`] for nearly
+/// everything: a combining mark takes no room whether or not anything is
+/// willing to work out where to draw it. See [`NO_ZERO_WIDTH_MARKS`] for the
+/// eleven that differ, and [`shaped_as_default`] for `simple`, which puts ten
+/// of those eleven back.
+///
+/// [`Zeroing::BeforeGpos`] is Myanmar's alone here, and it is transcribed
+/// rather than measured: of HarfBuzz's nine shapers only Myanmar and USE set
+/// `HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY`, and USE is not written yet.
+/// The distinction is invisible in a face whose marks are all zero-width in
+/// `hmtx` and decisive in one whose are not: `mmrtext.ttf` classes U+103C
+/// (medial ra, the hook drawn under and around the consonant) as a `GDEF`
+/// mark but gives it a 440-unit advance, and its `dist` feature charges that
+/// 440 back on. Zeroing afterwards discards the `dist` adjustment and every
+/// glyph after the hook slides 440 units left; zeroing first keeps it, which
+/// is what HarfBuzz prints.
+pub(crate) fn zeroes_mark_advances(tags: Option<ScriptTags>, simple: bool) -> Zeroing {
+    if simple {
+        return Zeroing::AfterGpos;
+    }
+    match tags {
+        Some(tags) if NO_ZERO_WIDTH_MARKS.binary_search(&tags.preferred).is_ok() => Zeroing::Never,
+        Some(tags) if tags.preferred == *b"mym2" => Zeroing::BeforeGpos,
+        _ => Zeroing::AfterGpos,
+    }
 }
 
 /// The script tag a run of `tags` insists the face's `GPOS` name before it will
@@ -297,14 +333,6 @@ pub(crate) struct Extents {
 }
 
 impl Extents {
-    /// The box of a glyph that draws nothing.
-    pub(crate) const BLANK: Self = Self {
-        x_bearing: 0,
-        y_bearing: 0,
-        width: 0,
-        height: 0,
-    };
-
     /// The box around `x_min .. x_max` by `y_min .. y_max`.
     pub(crate) fn new(x_min: i32, y_min: i32, x_max: i32, y_max: i32) -> Self {
         Self {
@@ -533,20 +561,38 @@ mod tests {
     #[test]
     fn declining_to_place_a_mark_is_not_declining_to_zero_it() {
         for tag in [*b"thai", *b"mym2", *b"tibt", *b"latn", *b"hebr", *b"arab"] {
-            assert!(
+            assert_ne!(
                 zeroes_mark_advances(Some(ScriptTags::exactly(tag)), false),
+                Zeroing::Never,
                 "{:?} should be zeroed",
                 core::str::from_utf8(&tag)
             );
         }
         for tag in [*b"dev2", *b"bng2", *b"khmr", *b"tml2", *b"ory2"] {
-            assert!(
-                !zeroes_mark_advances(Some(ScriptTags::exactly(tag)), false),
+            assert_eq!(
+                zeroes_mark_advances(Some(ScriptTags::exactly(tag)), false),
+                Zeroing::Never,
                 "{:?} should keep its advances",
                 core::str::from_utf8(&tag)
             );
         }
-        assert!(zeroes_mark_advances(None, false));
+        assert_eq!(zeroes_mark_advances(None, false), Zeroing::AfterGpos);
+    }
+
+    /// Myanmar is the one script here that zeroes *first*, and the difference
+    /// is worth a test of its own because nothing else in the crate would
+    /// notice if it silently became `AfterGpos` — every face whose marks are
+    /// already zero-width in `hmtx` gives the same answer either way. See
+    /// [`zeroes_mark_advances`] for the face that does not.
+    #[test]
+    fn myanmar_zeroes_its_marks_before_positioning_and_thai_after() {
+        let mym2 = Some(ScriptTags::exactly(*b"mym2"));
+        assert_eq!(zeroes_mark_advances(mym2, false), Zeroing::BeforeGpos);
+        // A face that files its features under `DFLT` has called the Myanmar
+        // shaper off, and the default shaper zeroes last like every other.
+        assert_eq!(zeroes_mark_advances(mym2, true), Zeroing::AfterGpos);
+        let thai = Some(ScriptTags::exactly(*b"thai"));
+        assert_eq!(zeroes_mark_advances(thai, false), Zeroing::AfterGpos);
     }
 
     #[test]
@@ -640,9 +686,9 @@ mod tests {
     fn calling_the_shaper_off_restores_both_halves_of_the_mark_handling() {
         let deva = Some(ScriptTags::exactly(*b"dev2"));
         assert!(!positions_marks(deva, false));
-        assert!(!zeroes_mark_advances(deva, false));
+        assert_eq!(zeroes_mark_advances(deva, false), Zeroing::Never);
         assert!(positions_marks(deva, true));
-        assert!(zeroes_mark_advances(deva, true));
+        assert_eq!(zeroes_mark_advances(deva, true), Zeroing::AfterGpos);
     }
 
     /// Hebrew is the whole of the list, and the negative half is what makes it

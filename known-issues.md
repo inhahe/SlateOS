@@ -63043,7 +63043,78 @@ it, and the bug that oracle found in a shaper that had been shipping for weeks:
   on any face that maps it — so it is tracked separately under
   `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES` rather than here.
 
-Myanmar is next, then USE.
+**Step 3 of 3 done — Myanmar, 2026-08-15** (`gui/font/src/myanmar.rs`,
+`myanmar_machine.rs`, `tools/gen_myanmar_machine.py`). The shaper is the
+smallest of the three, and the pass it forced open — mark positioning — was
+the largest thing found in this whole exercise.
+
+* **The shaper.** Myanmar is syllabic like Indic and Khmer and shares their
+  category table and machine generator, but it reorders by a different
+  mechanism: it assigns a `Position` to *every* glyph of the syllable and then
+  **stably sorts** by it, rather than rotating a fixed few. Three things move —
+  a kinzi (`Ra + Asat + virama`) sorts to just after the base, a medial RA
+  (U+103C) to `PreC`, and a pre-base vowel (U+1031) to `PreM`, with a run of
+  several pre-base vowels flipped, the same repair Indic makes. The base search
+  is forwards and stops at the first consonant: there is no reph to guess at,
+  because a Myanmar kinzi is spelled out and recognised by that spelling.
+  `rphf`, `pref`, `blwf` and `pstf` each get a stage of their own with a pause,
+  where Khmer runs its basic features in one. The reordering runs *after*
+  `locl`/`ccmp` — Khmer's most surprising property inverted.
+
+* **Measured.** Myanmar sweep (`mmrtext.ttf`, `mmrtextb.ttf`): **58 of 58
+  agree**, `misplaced 0`. Full host sweep, 556 faces × 89 strings: `agree
+  48087`, `reordered 0`, `misplaced 170`, `differ 1178`, `mixed 49` — the 170
+  being the deliberate ignorable-caret divergence recorded under
+  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES`, unchanged.
+
+* **What it found: our mark fallback had HarfBuzz's *two* zeroing routes fused
+  into one.** HarfBuzz zeroes a mark's advance by two independent routes, and
+  we had been approximating them with a single union.
+  - *Route 1*, `zero_mark_widths_by_gdef`, is gated on the per-script
+    `plan->zero_marks` — which eleven scripts turn off — and zeroes every glyph
+    whose `GDEF` class is mark, **or**, only when the face has no `GDEF`
+    classes at all, every glyph whose general category is `Mn`. Either/or,
+    never both: a face that classifies has *stated* which glyphs are marks and
+    the character's category must not second-guess it.
+  - *Route 2*, `_hb_ot_shape_fallback_mark_position`, zeroes only the marks it
+    actually places (combining class ≠ 0), plus — when the base has no
+    extents — every `Mn` in the cluster.
+
+  We had the two `||`-ed together and the per-script gate missing entirely.
+  `scaled.rs` now encodes them separately: `zeroed_at` carries `zero_marks`
+  per segment, `marks` is the either/or, and `synthesize_marks` is a two-phase
+  transcription of `position_cluster_impl`/`position_around_base` — walk the
+  clusters and apply route-2 zeroing, *then* compute the pens, *then* place.
+  See `design-decisions.md` §436.
+
+* **And the bug that made it visible.** A mark whose combining class is zero is
+  not placed and not zeroed, which made it look exactly like a base to the old
+  cluster splitter, so the measurement **restarted at it** and every mark after
+  it was measured against the wrong glyph. In `ကို့` the dot below landed two
+  letters right of where HarfBuzz draws it. HarfBuzz cuts clusters on the
+  general *category* and takes the base as the first non-mark; the class only
+  decides whether a mark is moved once the base is known. Fixed, and pinned by
+  `scaled.rs`'s `a_class_zero_mark_does_not_start_a_new_cluster` and
+  `only_the_marks_the_fallback_places_lose_their_advance`. It was the whole of
+  the remaining `simsun.ttc` divergence (`0;-128;0` → HarfBuzz's `0;-640;0`).
+
+**One known gap, believed unreachable — the cluster splitter reads `Mn` where
+HarfBuzz reads `Mn|Mc|Me`.** `norm::is_mark` is `Mn`-only, which is exactly
+right for route 1 (it transcribes `hb_synthesize_glyph_classes`, which is also
+`Mn`-only) but is *narrower* than the `_hb_glyph_info_is_unicode_mark` that
+cuts fallback clusters. A spacing combining mark (`Mc` — an Indic matra) or an
+enclosing one (`Me`) would therefore end a cluster here and continue one in
+HarfBuzz. It cannot arise in NFC text: reaching it needs an `Mc` followed by a
+non-zero-class `Mn` inside one cluster, i.e. a matra with a nukta after it,
+which canonical ordering does not produce — and every path into this pass has
+already normalised. Filed rather than fixed because the fix is a second
+general-category predicate (`is_unicode_mark`) used by the splitter only, and
+adding an untestable one costs more than it buys. If a corpus string is ever
+found that reaches it, that is the fix.
+
+USE is next, and is now the only shaper left. Note for it: like Myanmar, it
+zeroes mark advances *before* `GPOS` rather than after, so its script tags have
+to join `mym2` in `fallback::Zeroing::BeforeGpos`.
 
 **Where.** `gui/font/src/sfnt.rs` — `Face::substitute`, which dispatches on
 `Script::shaping` and would gain the other families; `gui/font/src/indic.rs`

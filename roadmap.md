@@ -731,9 +731,16 @@ Roadmap:
   applied **twice** in *both* the Khmer and the long-shipping Indic shaper.
   1 of 45 probe strings agreed before the fix, 43 after (§433); the two
   remaining are a crate-wide default-ignorable bug, filed as
-  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES`. Next unblocked step is Myanmar,
-  then USE (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`, step 2 of 3 done), the
-  ignorable fix, and no device tables in `ValueRecord`. Vello itself waits on
+  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES`. **Myanmar done** — the shaper
+  that labels every glyph of a syllable with a position and stably sorts, with
+  a kinzi, a medial RA and a pre-base vowel as the three things that move;
+  Myanmar sweep 58/58, full sweep `misplaced` back to its 170 ignorable-caret
+  baseline. It also forced the mark-positioning fallback open: HarfBuzz's
+  *two* mark-advance-zeroing routes had been fused into one here, and a
+  combining mark of class zero was being mistaken for a cluster base (§435,
+  §436). **USE is the only shaper left**
+  (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`, step 3 of 3 done); after it, the
+  ignorable fix and device tables in `ValueRecord`. Vello itself waits on
   `[A]`'s GPU driver.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`

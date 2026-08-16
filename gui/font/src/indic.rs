@@ -41,28 +41,35 @@
 //! diverged from it would be a place our text differs from every other
 //! renderer's for reasons no one could reconstruct.
 //!
-//! # Khmer shares [`Category`] and [`Char::of`]
+//! # Khmer and Myanmar share [`Category`] and [`Char::of`]
 //!
-//! HarfBuzz derives Indic and Khmer from one table and then shapes them with
-//! two *different* shapers, because Khmer's reordering rules are not the Indic
-//! ones — and it stores both scripts' categories in the same buffer slot, one
-//! enum laid over another. This module does the same: [`Category`] carries the
-//! seven variants only [`khmer`](crate::khmer) reads
-//! ([`VowelAbove`](Category::VowelAbove), [`VowelBelow`](Category::VowelBelow),
-//! [`VowelPre`](Category::VowelPre), [`VowelPost`](Category::VowelPost),
-//! [`Robatic`](Category::Robatic), [`XGroup`](Category::XGroup),
-//! [`YGroup`](Category::YGroup)), and no Khmer character can reach the Indic
-//! machine anyway because the two are dispatched on script.
+//! HarfBuzz derives Indic, Khmer and Myanmar from one table and then shapes
+//! them with three *different* shapers, because neither Khmer's nor Myanmar's
+//! reordering rules are the Indic ones — and it stores all three scripts'
+//! categories in the same buffer slot, one enum laid over another. This module
+//! does the same: [`Category`] carries the seven variants only
+//! [`khmer`](crate::khmer) reads ([`VowelAbove`](Category::VowelAbove),
+//! [`VowelBelow`](Category::VowelBelow), [`VowelPre`](Category::VowelPre),
+//! [`VowelPost`](Category::VowelPost), [`Robatic`](Category::Robatic),
+//! [`XGroup`](Category::XGroup), [`YGroup`](Category::YGroup)) — Myanmar reads
+//! the first four too — and the eight only [`myanmar`](crate::myanmar) reads
+//! ([`Asat`](Category::Asat), the four medials,
+//! [`PwoTone`](Category::PwoTone),
+//! [`VariationSelector`](Category::VariationSelector),
+//! [`MedialMonLa`](Category::MedialMonLa)). No character of one script can
+//! reach another's machine anyway, because the three are dispatched on script.
 //!
-//! What is *not* shared is the grammar: [`syllables`] scans the Indic machine
-//! and [`khmer::syllables`](crate::khmer::syllables) the Khmer one.
+//! What is *not* shared is the grammar: [`syllables`] scans the Indic machine,
+//! [`khmer::syllables`](crate::khmer::syllables) the Khmer one and
+//! [`myanmar::syllables`](crate::myanmar::syllables) the Myanmar one.
+//!
+//! The Myanmar grammar names several categories this enum does not have —
+//! `IV`, `DB`, `GB`. They are HarfBuzz's aliases for [`Vowel`](Category::Vowel),
+//! [`Nukta`](Category::Nukta) and [`Placeholder`](Category::Placeholder), not
+//! separate values, and the table never produces them under those names.
 //!
 //! # What is deliberately not here
 //!
-//! * **Myanmar.** Its block brings a dozen more categories — `IV`, `As`,
-//!   `DB`, `GB`, `MH`, `MW`, `MY`, `PT`, `VS` — that only the Myanmar machine
-//!   reads. There is no Myanmar shaper yet, so neither the block nor the
-//!   categories are here.
 //! * **The Universal Shaping Engine.** Sinhala, Tibetan, Javanese, Balinese
 //!   and two dozen others are shaped by USE, a single table-driven engine that
 //!   replaced writing a shaper per script. It is a larger piece of work and
@@ -155,6 +162,30 @@ pub(crate) enum Category {
     XGroup,
     /// Khmer: a sign the grammar admits only at the tail of a syllable.
     YGroup,
+    /// Myanmar: ASAT, the sign that kills a consonant's inherent vowel. Its own
+    /// category because the grammar admits it after almost anything, and
+    /// because a kinzi is RA + ASAT + virama and nothing else.
+    Asat,
+    /// Myanmar: MEDIAL HA, written under its base.
+    MedialHa,
+    /// Myanmar: MEDIAL RA — written after its consonant and drawn wrapped
+    /// around its left side, which is one of the two moves the Myanmar
+    /// reordering exists for.
+    MedialRa,
+    /// Myanmar: MEDIAL WA, and the Shan WA.
+    MedialWa,
+    /// Myanmar: MEDIAL YA, and the Mon NA and MA that behave like it.
+    MedialYa,
+    /// Myanmar: a pwo or other tone, which ends a syllable and may itself carry
+    /// a cantillation mark and a dot below.
+    PwoTone,
+    /// A variation selector, U+FE00..U+FE0F. Not a Myanmar character, but the
+    /// Myanmar grammar is the only one that names them — everywhere else they
+    /// are something the shaper hides rather than a syllable member.
+    VariationSelector,
+    /// Myanmar: MEDIAL MON LA, which the grammar admits only after the other
+    /// medials and only in Mon text.
+    MedialMonLa,
 }
 
 /// Where in the reordered syllable a character belongs.
@@ -504,7 +535,7 @@ mod tests {
     }
 
     /// Every variant of [`Category`], in declaration order.
-    const ALL_CATEGORIES: [Category; 26] = [
+    const ALL_CATEGORIES: [Category; 34] = [
         Category::Other,
         Category::Consonant,
         Category::Vowel,
@@ -531,6 +562,14 @@ mod tests {
         Category::Robatic,
         Category::XGroup,
         Category::YGroup,
+        Category::Asat,
+        Category::MedialHa,
+        Category::MedialRa,
+        Category::MedialWa,
+        Category::MedialYa,
+        Category::PwoTone,
+        Category::VariationSelector,
+        Category::MedialMonLa,
     ];
 
     /// The scanner indexes a transition row by the category's discriminant,

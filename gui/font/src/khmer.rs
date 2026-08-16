@@ -370,7 +370,8 @@ pub(crate) fn shape(
         &Staging {
             stages: &stages,
             per_syllable: feature_bits(&BASIC),
-            manual_joiners: manual_joiners(),
+            manual_zwnj: manual_joiners(),
+            manual_zwj: manual_joiners(),
         },
         glyphs,
         |stage, glyphs| {
@@ -677,12 +678,18 @@ mod tests {
 
     /// The machine's rows are indexed by a category's discriminant, so a table
     /// generated against a different category list would silently mis-scan.
+    ///
+    /// The width is the *whole* shared enum, not the categories Khmer names:
+    /// Indic, Khmer and Myanmar are generated from one category list, so this
+    /// machine has a column for every Myanmar category too, reachable only
+    /// through the grammar's `other = any`. `MedialMonLa` is the last variant,
+    /// so its discriminant plus one is the count.
     #[test]
     fn the_machine_has_a_column_for_every_category() {
         assert!(!TRANSITIONS.is_empty(), "the machine has no states");
         assert_eq!(TRANSITIONS.len(), ACCEPTS.len());
         for row in &TRANSITIONS {
-            assert_eq!(row.len(), Category::YGroup as usize + 1);
+            assert_eq!(row.len(), Category::MedialMonLa as usize + 1);
         }
     }
 

@@ -1624,7 +1624,8 @@ pub(crate) fn shape(
     let staging = Staging {
         stages: &stages,
         per_syllable,
-        manual_joiners: manual_joiners(),
+        manual_zwnj: manual_joiners(),
+        manual_zwj: manual_joiners(),
     };
     subs.apply_stages(data, tags, lang, &staging, glyphs, |stage, glyphs| {
         if stage == 0 {

@@ -19,10 +19,13 @@ large code model) so the object is ABI-compatible with the sysroot, plus
 (including the thread start routine), which is exactly the access that
 faults when a child thread has no thread pointer.
 
-Run from the fastpy repo root so `compiler` is importable, e.g.:
+Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
+the worktree you are actually working in. There are four checkouts of this
+repo, and naming one of them in a command is how a lane ends up building
+another lane's artifact -- see `scripts/lib/worktree.sh`:
 
     PYTHONPATH="D:/visual studio projects/fastpy" \
-        python "D:/visual studio projects/os/services/ctest-tls-thread/build.py"
+        python services/ctest-tls-thread/build.py
 
 The posix sysroot (`libc.a`) must already be built and must be *current*
 with `posix/src/` — the child-thread TLS setup this fixture exercises lives

@@ -3,6 +3,7 @@
 Run from anywhere:
 
     python gui/font/tools/harfbuzz_sweep.py [--corpus FILE] [--fonts DIR]
+                                            [--ppem N]
 
 Needs `uharfbuzz`. Builds and runs the `shape_dump` example, shapes the same
 corpus with HarfBuzz, and reports every (face, string) pair the two disagree
@@ -22,6 +23,26 @@ bugs were found exactly this way and by nothing else:
   because their `cmap` keys on `U+F0xx` rather than on Unicode;
 * text was not normalized at all, so `e` + combining acute rendered as two
   glyphs where `\u00e9` rendered as one.
+
+Asking at a size
+----------------
+
+By default both halves work in the face's own design units, at no pixel size
+at all — which is the right question for glyph selection and for every
+position a font stores outright, and the wrong one for `GPOS` **device
+tables**, whose whole content is a per-pixel-size correction that applies
+only inside a range of sizes. Every real device table on this host tops out
+below 30 ppem, so a sizeless sweep never reaches one, and both halves agree
+about them by each doing nothing.
+
+`--ppem N` fixes that. It sets `ppem` on the HarfBuzz font while leaving its
+scale at the face's em, and passes the same N to `shape_dump`, which opens the
+face at N pixels and divides the positions back into font units. Both sides
+then report design units *with* the corrections that apply at N pixels folded
+in — HarfBuzz computes a delta as `pixels * scale / ppem` with `scale` the em,
+which is exactly what a reader converting pixels to font units does. Nothing
+else in either half changes with the size, so a difference under `--ppem` that
+is not there without it is a device table and nothing else.
 
 Reading the output
 ------------------
@@ -253,8 +274,55 @@ CORPUS = [
     # and are the control: a difference here is not the shaper.
     "\\u1041\\u1042\\u1043",
     "\\u104a\\u104b",
+    # --- GPOS device tables, which only exist at a size ---
+    #
+    # A device table is a per-pixel-size correction hung off a `GPOS` value or
+    # anchor, and it applies only inside the range of sizes it names. So it is
+    # invisible to a sweep in design units, and the strings that reach one are
+    # worth naming: run with `--ppem`, they are where a device-table bug shows.
+    #
+    # NNYA + MEDIAL HA in Myanmar Text, whose four tables run 11..35 ppem --
+    # the medial rides one pixel higher over that whole range and sits at its
+    # stored height outside it.
+    "\\u100a\\u103e",
+    #
+    # The other reachable one is already in the corpus: LAM, FATHA, ALEF above,
+    # in Microsoft Sans Serif, which is 130 of this host's 152 real device
+    # tables and applies at exactly 11 ppem and at no other size. At 11 the
+    # fatha drops from y=380 to y=8; at 10 or 12 it does not move at all. That
+    # single-size range is why the size a sweep is run at has to be chosen from
+    # `device_survey.py`'s output rather than guessed.
+    #
     # Scriptless text, which selects the font's default features.
     "123 456",
+    # --- characters shared between scripts (UAX #24 Script_Extensions) ---
+    #
+    # A character's `Script` says which script it belongs to; its
+    # `Script_Extensions` says which scripts *use* it, and the two differ for
+    # 669 characters. The run splitter resolves through the second, and these
+    # are the strings where that decides which features a run is shaped with.
+    #
+    # THAANA HAA, ARABIC-INDIC DIGIT ZERO, THAANA HAA. The digit's script is
+    # Arabic, but Thaana writes its numbers with it: resolving on `Script`
+    # alone cut this into three runs and asked the face for Arabic features in
+    # the middle of a Thaana word. `mvboli.ttf` is the face that answers.
+    "\\u0780\\u0660\\u0780",
+    # BENGALI KA, DANDA, BENGALI KA. The danda is `Common` and twenty-one
+    # Brahmic scripts use it; between two Bengali words it is Bengali.
+    "\\u0995\\u0964\\u0995",
+    # SYRIAC ALAPH, ARABIC TATWEEL, SYRIAC BETH. Tatweel is `Common` and nine
+    # scripts use it, Syriac among them, so this is one Syriac run and the
+    # joining forms have to carry across it.
+    "\\u0710\\u0640\\u0715",
+    # HIRAGANA A, PROLONGED SOUND MARK, KATAKANA A. Two Unicode scripts, one
+    # OpenType tag (`kana`), and therefore one run -- a splitter that worked
+    # in Unicode scripts rather than in tags would cut Japanese here for a
+    # difference no font can act on.
+    "\\u3042\\u30fc\\u30a2",
+    # HEBREW ALEF with a COMBINING ACUTE, which is used by eight scripts and
+    # not by Hebrew. The mark shares nothing with its base and must still stay
+    # in its run: a mark alone in a run is a mark that never gets attached.
+    "\\u05d0\\u0301",
     # --- default ignorables, which shape and are then erased ---
     #
     # A joiner, a soft hyphen, a bidi control and a variation selector are
@@ -438,11 +506,12 @@ def font_files(root):
     return sorted(out)
 
 
-def ours(corpus, fonts):
+def ours(corpus, fonts, ppem=None):
     """`{(path, index): ((lgids, lpos), (vgids, vpos))}` from this crate.
 
     `l` is logical order, `v` is the order rule L2 draws in, and a position is
-    `(advance, dx, dy)` in font units.
+    `(advance, dx, dy)` in font units. `ppem`, if given, is the pixel size the
+    face is opened at; the positions come back in font units either way.
     """
     with tempfile.NamedTemporaryFile(
         "w", suffix=".txt", delete=False, encoding="utf-8", newline="\n"
@@ -478,9 +547,8 @@ def ours(corpus, fonts):
         )
         if not os.path.exists(exe):
             exe = exe[: -len(".exe")]
-        run = subprocess.run(
-            [exe, input_path], capture_output=True, text=True, encoding="utf-8"
-        )
+        argv = [exe, input_path] + ([str(ppem)] if ppem else [])
+        run = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8")
         if run.returncode != 0:
             sys.exit(run.stderr or "shape_dump failed")
     finally:
@@ -507,7 +575,7 @@ def positions(field):
     return [tuple(int(n) for n in p.split(";")) for p in field.split(",") if p]
 
 
-def theirs(path, questions):
+def theirs(path, questions, ppem=None):
     """`[([gid, ...], [(adv, dx, dy), ...], rtl), ...]`, or `None` if it will
     not open.
 
@@ -527,12 +595,23 @@ def theirs(path, questions):
     Positions are in font units: an `hb.Font` with no scale set reports the
     face's own design units, which is why `shape_dump` builds its face at the
     em size rather than at some pixel size that would round.
+
+    `ppem` sets the pixel size *without* touching that scale, which is the only
+    combination that answers the device-table question in comparable units.
+    HarfBuzz gates device tables on `font->x_ppem` being non-zero and then
+    computes the correction as `pixels * x_scale / ppem`; leaving `x_scale` at
+    the em therefore yields the correction in font units, on top of positions
+    that are still in font units. Setting the scale as well would give a 26.6
+    number that has to be divided back, and the division is where a comparison
+    starts arguing about rounding instead of about shaping.
     """
     try:
         with open(path, "rb") as f:
             blob = hb.Blob(f.read())
         face = hb.Face(blob)
         font = hb.Font(face)
+        if ppem:
+            font.ppem = (ppem, ppem)
     except Exception:  # noqa: BLE001 - a face HarfBuzz rejects is not a result
         return None
 
@@ -639,6 +718,13 @@ def main():
         help="file of `[language<TAB>]string` lines to sweep instead of the "
         "built-in corpus, with the same backslash-u escapes",
     )
+    ap.add_argument(
+        "--ppem",
+        type=int,
+        default=0,
+        help="pixel size to ask both halves at, which is what reaches GPOS "
+        "device tables (default: none, i.e. design units only)",
+    )
     args = ap.parse_args()
 
     corpus, mixed_entries = CORPUS, MIXED
@@ -656,8 +742,9 @@ def main():
         sys.exit(f"no fonts under {args.fonts}")
 
     questions = [(lang_of(entry), unescape(string_of(entry))) for entry in corpus]
-    print(f"{len(fonts)} faces x {len(questions)} strings")
-    mine = ours(corpus, fonts)
+    at = f" at {args.ppem}ppem" if args.ppem else ""
+    print(f"{len(fonts)} faces x {len(questions)} strings{at}")
+    mine = ours(corpus, fonts, args.ppem)
 
     agree = 0
     order_only = Counter()
@@ -668,7 +755,7 @@ def main():
     placed_examples = {}
     skipped = 0
     for path in fonts:
-        hb_out = theirs(path, questions)
+        hb_out = theirs(path, questions, args.ppem)
         if hb_out is None:
             skipped += 1
             continue

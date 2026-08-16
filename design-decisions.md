@@ -11238,6 +11238,84 @@ for artifacts nothing points at. Before adopting one, ask what cites the thing
 — and note that markdown, unlike code, has no compiler to tell you when the
 answer changes.
 
+## §316 — The zig cross-toolchain is version- and hash-pinned, and cached once per machine rather than per worktree
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** To build the copy of GNU bash we ship, this repo needs a C
+compiler that can target our OS. That compiler is `zig`, and until today
+nothing in the repo said which version of it was needed or where to download it
+— someone had simply put a copy in one of the four working directories by hand,
+in a folder git does not track. So the build worked in that one directory and
+was impossible in the other three, or in a fresh download of the project, and
+nothing announced this. The fix is a small function that fetches a *specific*
+zig version, checks it against a known fingerprint, and keeps it in one shared
+place on the machine instead of four copies.
+
+**What was wrong.** `design-decisions.md` §305 makes `bash-slateos.elf` a
+shipped product and `scripts/bash-spike/` its build recipe — the README there
+says in as many words, "keep them working." But the recipe had an unwritten
+prerequisite:
+
+| | Before | After |
+|---|---|---|
+| zig version required | recorded nowhere | `SLATE_ZIG_VERSION=0.13.0` in `scripts/lib/worktree.sh` |
+| where to get it | recorded nowhere | fetched from `ziglang.org` by `slate_ensure_zig` |
+| integrity check | none | SHA-256 pinned, verified *before* extraction |
+| worktrees able to run the spikes | 1 of 4 (`os` only) | all, plus fresh clones |
+
+This is the same failure this session has now hit six times: **a step that
+appears to work because of undocumented local state.** It is close kin to the
+hard-coded worktree paths fixed in the same commit range — there, a lane read
+another lane's `libc.a`; here, three lanes could not build at all, and the one
+that could did so on a toolchain nobody had pinned.
+
+**The decision, and the line it draws.** `scripts/lib/worktree.sh` exists
+precisely to stop one worktree touching another's files, so putting a *shared*
+path back into it deserves justification. The distinction drawn:
+
+- **Build outputs** — `libc.a`, bash's objects, the ELFs — stay strictly
+  per-worktree. They encode *this tree's source*, so reading another lane's is
+  the bug §B-THE-BASH-RELINK-SCRIPT… documents.
+- **Pinned third-party input** — the zig tarball — is shared. Pinned by version
+  *and* hash, it has identical bytes for every lane by construction, so sharing
+  it cannot make one lane's artifact depend on another lane's source. That is
+  the whole of the hazard, and it is absent here.
+
+The cache lives at `~/.cache/slateos/` — outside every worktree. Deliberately
+not inside `os/build/spike/`, which would have "fixed" lane B by making it
+depend on the `os` checkout existing, i.e. the exact bug being fixed, wearing a
+different hat.
+
+**Alternatives rejected.**
+
+1. *Copy zig into each worktree's `build/spike/`.* Works, but four ~200 MB
+   copies of a byte-identical read-only input, and it leaves the real defect —
+   nothing records the version — completely untouched. A fresh clone still
+   cannot build.
+2. *Document the download in the README and leave provisioning manual.* Better
+   than nothing, and the README does now explain it. But a documented manual
+   step is still a step that silently did not happen; the artifact it produces
+   is shipped, so "did you remember to install the right zig?" should not be a
+   question anyone has to answer correctly from memory.
+3. *Use whatever `zig` is on `$PATH`.* Floating the compiler version under a
+   shipped binary. The linked result would change with the host's package
+   manager, and `self_test_bash_on_slateos_libc` would keep reporting OK about
+   whichever toolchain happened to be installed.
+
+**Why verify before extracting rather than after.** The extracted archive's
+first use is *being executed as a compiler*, and its output is a binary we put
+in the image. Checking afterwards would mean the untrusted archive had already
+been unpacked and run. Cost is one `sha256sum` of a 47 MB file, once per
+machine.
+
+**Standing lesson.** A build recipe is only as reproducible as its least
+documented prerequisite. When a recipe "works on my machine", check first
+whether the machine is carrying an unrecorded input — and prefer a pinned,
+verified, automatic fetch to a documented manual one, because the second kind
+fails silently and the first kind cannot.
+
 ## §400 — Every GUI process finds its own UI font, lazily, from a compiled-in fallback list
 
 **Date:** 2026-08-14
@@ -14812,6 +14890,521 @@ than the shaper (two corpus lines are mixed-script and marked `!`). The default
 Sinhala lines that measure it.
 
 ---
+
+## §440 — Device corrections are folded into the value at read time, against a size the face itself does not have
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** OpenType lets a font say "this accent sits a bit lower when
+you're drawing at 11 pixels tall" — a *device table*, a correction stated in
+whole pixels that applies only inside a range of sizes it names. This crate
+used to skip past those. Reading them raises three questions with real answers
+on both sides: where the correction gets added, what a sizeless object should
+answer, and what to do about a second, unrelated feature that occupies the same
+eight bytes. What follows is what was chosen and why. Nothing here is
+user-visible except at small sizes on the five host faces that ship the
+tables — where it is the difference between an Arabic fatha sitting on its
+letter and sitting inside it.
+
+**The correction is added where the value is read, not carried alongside it.**
+`Value::read` and `mark::anchor` return a coordinate with the delta already in
+it; nothing downstream knows a device table was involved.
+
+*The alternative* was to return the correction separately — a `Value` plus a
+`Device` — and apply it at draw time. That would let one parse serve two sizes,
+which matters for a cache keyed on the face rather than on the scaled font.
+It was rejected because the seam it creates is exactly the one this crate has
+already been bitten by: two readers of one table, which is what
+`kern.rs`'s own doc warns about ("a pair that measures at one correction and
+draws at another puts the caret in the wrong place"). Positioning is not cached
+across sizes here — `Run` is produced by a `ScaledFont`, which *is* a size — so
+the flexibility bought nothing and the risk was live.
+
+**A `Face` answers `Ppem::NONE`, and that is an answer rather than a
+fallback.** `Face` is the parsed bytes; it has no size, so it has no device
+corrections, and every device table reads as zero through it.
+`Face::kern_across` keeps its old signature and its old meaning — design units
+— and a new `kern_across_at` carries a size for `ScaledFont::kern_across` to
+call.
+
+*The alternative* was to make `Face`'s positioning API take a size, forcing
+every caller to state one. Rejected: it would make callers that legitimately
+want design-unit metrics (layout at nominal size, measurement for a cache key)
+invent a pixel size to get them, and an invented size is a silently wrong
+correction rather than an absent one. Two entry points, one of which is
+explicitly sizeless, says what is true.
+
+**`deltaFormat` is checked before `startSize`/`endSize`, and this is measured,
+not stylistic.** The same eight bytes are also used for a `VariationIndex`
+(`deltaFormat == 0x8000`), whose first four bytes are indices into a variable
+font's `ItemVariationStore` rather than a size range. A reader that
+range-checks first reads those indices as a start and end size, and applies a
+delta out of the wrong array whenever they happen to bracket the size being
+drawn.
+
+*How often that happens here:* of this host's 9,215 `VariationIndex` records,
+3,146 would bracket 9 ppem, 3,086 would bracket 12, and 2,832 would bracket 16
+(`gui/font/tools/device_survey.py`). The wrong answer is not a slightly wrong
+correction; it is an arbitrary one. Variation indices outnumber real device
+tables 60 to 1 on this machine, so this is the *common* path through the
+reader, not the edge case — see `TD-FONT-DOES-NOT-READ-VARIATION-STORES`.
+
+**Pixels are converted to font units by truncation, not rounding.** A delta is
+in pixels and the value it corrects is in font units, so it is multiplied by
+`upem / ppem`. HarfBuzz's `Device::get_delta` does `pixels * (int64_t)scale /
+ppem`, which truncates toward zero.
+
+*The alternative* — rounding — is arguably more accurate and was rejected
+anyway, because the oracle this crate is measured against truncates, and a
+reader that is more accurate than its oracle produces a sweep full of
+one-unit differences that have to be explained every time someone reads it.
+Matching the reference implementation is worth more than a half-unit.
+
+**Where it lives.** `gui/font/src/device.rs` — `Ppem`, `pixel_delta`;
+`gui/font/src/gpos.rs` — `Value::read` and `Run::ppem`;
+`gui/font/src/mark.rs` — `anchor`; `gui/font/src/sfnt.rs` — `Face::ppem` and
+`kern_across_at`; `gui/font/tools/device_survey.py` — the numbers above;
+`gui/font/tools/harfbuzz_sweep.py` — `--ppem`, which is the only way to
+measure any of it.
+
+---
+
+## §441 — Script runs resolve through `Script_Extensions`, one row per OpenType tag pair, with direction cut in afterwards
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** Some characters are shared between writing systems. The Arabic
+zero `٠` is also how Thaana and Yezidi write zero; the Devanagari full stop `।`
+is used by twenty-one Indian scripts. Text has to be cut into stretches of one
+script before a font can be asked for that script's rules, and a shared
+character sitting in the middle of a word must not cut it — ask a Thaana font
+for Arabic rules and you get Arabic-specific substitutions applied to Thaana
+letters. Unicode records the sharing as `Script_Extensions`, and this change
+resolves runs through it. Three sub-decisions had a real case on both sides.
+
+**One table row per OpenType tag pair, not per Unicode script.** A run
+boundary is a change of *row index*, so two Unicode scripts that OpenType files
+under one tag are one script here.
+
+*The alternative* — a row per Unicode script, comparing tags to decide
+sameness — is the more faithful model of Unicode and was rejected because it is
+the wrong faithfulness. Hiragana and Katakana are both `kana`, and they are the
+only pair that collides, so the entire practical effect of keeping them apart
+is that ordinary Japanese gets cut at every change between the two — for a
+difference the font cannot express, since it has exactly one `kana` feature
+list to offer either way. Rows also make the extension sets smaller, because a
+set naming both collapses to one member.
+
+**A character with no `Script` of its own may narrow a run but never end
+one.** When the intersection empties, a character that *has* a script (the
+Arabic zero, whose `Script` is Arabic) ends the run and starts a new one; one
+that does not (a danda, a tatweel, any combining mark) is left in the run
+unchanged.
+
+*The alternative* — treat an empty intersection as a boundary regardless — is
+what UAX #24's plain statement suggests and is what was implemented first. It
+failed a test written from first principles: `"א" + U+0301 COMBINING ACUTE`
+came out as two runs, because U+0301's extension set names eight scripts and
+Hebrew is not among them. A mark in a run of its own is a mark whose base's
+`GPOS` mark-attachment can never reach it, so the accent lands at the origin
+instead of over the letter. The rule that fixes it is stateable in one line —
+such a character has an *affinity*, not an identity, and an affinity may refine
+a decision but must not make one — and it costs nothing, because a character
+with no script had no claim to press in the first place.
+
+**Script is resolved over the whole text first; direction boundaries are cut
+into the answer afterwards.** Two passes (`by_script`, then `runs`) rather than
+one.
+
+*The alternative* — one pass, closing the open script when the direction turns
+— is simpler and is what this module did before. It is also measurably wrong.
+In `"ހ٠ހ"` (Thaana with an Arabic-Indic digit in it) the digit is bidi class
+`AN`, and rule I2 raises it to an even level inside odd-level Thaana, so it is
+its own directional run. A one-pass splitter re-derives the script inside that
+run, sees one Arabic-Indic digit, and calls it Arabic — which showed up in the
+HarfBuzz sweep as a real disagreement on `SansSerifCollection.ttf`, a face that
+registers a `locl` under `arab` and none under Thaana. Pango
+(`PangoScriptIter`) and Blink (`RunSegmenter`) both resolve script over the
+whole text and intersect with bidi afterwards, for this reason.
+
+*The exception to it*, which the sweep also found: a character with **no**
+script at all belongs to the directional run it is *drawn* in. The space in
+`"hello שלום world"` is scriptless, so under a whole-text pass it extends the
+Hebrew run — and the direction cut then strands it in a one-glyph Hebrew run,
+losing the kern between it and `w`. It joins what follows it instead. Only
+scriptless characters move this way; one that merely shares its scripts with
+its neighbours keeps them across the turn, which is what preserves the Thaana
+answer above.
+
+**How it is measured.** 556 faces × 95 strings against HarfBuzz: `agree`
+51422 → 51423, `differ` 1179 → 1178, `misplaced` 170 and `reordered` 0
+unchanged. The corpus gained a section of shared-character strings — the three
+cases above plus `あーア` (which must stay one `kana` run) — so a regression
+here is caught by the oracle and not only by the unit tests.
+
+**Where it lives.** `gui/font/src/script.rs` — `ScriptSet`, `by_script`,
+`runs`, and the module doc; `gui/font/tools/gen_script_tables.py` —
+`extension_ranges`, `pool`, `row_for`; `gui/font/src/script_tables.rs` —
+generated, `SCRIPT_EXT_RANGES` / `SCRIPT_EXT_POOL` / `WIDEST_EXTENSION`;
+`gui/font/tools/harfbuzz_sweep.py` — the corpus section.
+
+---
+
+## §442 — A caret is a position on the screen with an affinity, and the run carries its bidi levels to answer for one
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** When a line mixes English and Hebrew, one place in the *text* can
+be two places on the *screen*. Put the cursor between the English and the
+Hebrew: it can be drawn at the right end of the English, or at the right end of
+the Hebrew word — which is somewhere else entirely, because Hebrew is drawn
+starting from the right. Both are correct; which one the user meant depends on
+which side they arrived from. This adds that "which side" as a value called an
+**affinity**, and makes the two caret queries measure across the screen rather
+than through the string.
+
+**The caret carries an affinity rather than being answered with one x.**
+`offset_at` (pixel → text position) returns a `Hit { offset, affinity }`, and
+`x_of` (text position → pixel) takes an `Affinity`.
+
+*The alternative* — return the one x that the text's own direction implies, and
+let the caller live with it — is what almost every naive implementation does,
+and it is not so much wrong as unanswerable. At a boundary the two positions
+are equally correct and the run has no way to prefer one: the information that
+decides it (which direction the user was moving, whether they just typed) lives
+in the editor, not in the shaping. Answering anyway makes the caret jump for
+half of all boundary crossings and gives the editor nothing to fix it with.
+ICU (`UBiDi` leading/trailing), DirectWrite (`isTrailingHit`) and Chromium
+(`SelectionAffinity`) all model it explicitly for the same reason. The cost is
+one enum on two signatures; on left-to-right text — every run this crate builds
+today — the two affinities name the same point, so a caller with no opinion
+passes `Downstream` and is not wrong.
+
+**The run stores per-glyph bidi levels, not just the L2 permutation.**
+`ShapedRun` gained `levels: Vec<Level>` beside `visual: Vec<u32>`, kept
+whenever any level is odd even if the permutation is the identity.
+
+*The alternative* — derive direction from the permutation, since a reversed
+stretch is exactly a right-to-left one — is appealingly economical and is
+wrong on the smallest case there is. Reversing a **one-glyph** run is the
+identity permutation, so a single Hebrew letter between two Latin words looks
+unreordered while still being read from its right edge: a caret reading the
+permutation alone would put itself at the wrong end of it. The permutation
+answers "where is this glyph drawn"; a caret also needs "which end of it does
+the reader start at", and only the levels say that. The extra vector is empty
+for all left-to-right text, which is the case that has to stay free.
+
+**The old logical-order sum survives under a name that says what it is.**
+`width_upto(at, end)` is the previous `x_of` body verbatim.
+
+*The alternative* — delete it, since the caret is now correct — would have
+removed the number that truncation and ellipsis placement actually want. Those
+callers cut the string and measure the piece; "how wide is the prefix" is a
+real question with a monotone answer, and it is only wrong when it is called a
+caret. Keeping both, named apart, is also what let the regression assertion in
+`tests/host_fonts.rs` be moved rather than deleted: "the caret never moves
+backwards as it advances through the string" is true of `width_upto` and is
+precisely what a correct visual caret must violate, for the length of every
+right-to-left run.
+
+**A cluster is one box.** Both queries treat a cluster — a ligature's several
+characters, or a decomposed character's several glyphs — as a single
+rectangle whose left edge is the leftmost slot any of its glyphs occupies. That
+is sound rather than approximate: rule L2 reverses whole level runs, and a
+cluster lies inside one, so its glyphs may be drawn in the other order but are
+still drawn side by side.
+
+**Where it lives.** `gui/font/src/shape.rs` — `Affinity`, `Hit`,
+`ShapedRun::levels`, `reordered`, `slot_of`, `cluster_box`, `leading_edge`,
+`trailing_edge`, `offset_at`, `x_of`, `width_upto`;
+`gui/font/src/scaled.rs` — the per-glyph levels are now hoisted out of the
+reordering branch and handed to the run; `gui/toolkit/src/text.rs` —
+`char_index_at`, which drops the affinity because a character *index* is the
+same on both sides of a boundary.
+
+---
+
+## §443 — A base direction is a third argument to one full `shape_with`, and it switches off the left-to-right fast path
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** Which way a line of text runs is usually decided by the text
+itself — if it starts with a Hebrew letter it runs right to left. That guess is
+wrong whenever the direction is a property of *where the text is* rather than
+what it says: an `OK` button in a Hebrew interface, a Hebrew folder name in a
+left-to-right path bar. The shaper had no way to be told. It does now, and two
+things about how are worth recording.
+
+**One full form with defaults, not a method per knob.** `shape_with(text, lang,
+base)`; `shape(text)` is `(text, None, Base::Auto)` and `shape_lang(text,
+lang)` is `(text, lang, Base::Auto)`.
+
+*The alternative* — `shape_with(text, base)` beside the existing
+`shape_lang(text, lang)`, which is what the issue that asked for this proposed
+— reads better at each individual call site and does not survive the second
+knob. Language and direction are orthogonal: a Hebrew UI rendering a Turkish
+place name needs both, and under the two-method shape there is nowhere to say
+so short of a fourth method. Three methods where the third is the full form and
+the other two are it with defaults is the arrangement that does not grow when a
+fourth parameter arrives.
+
+*The alternative also considered* — an options struct, `shape_with(text,
+ShapeOptions { .. })` — is what this becomes if a fourth parameter does arrive.
+It was not worth introducing for two fields, and introducing it later is a
+mechanical change at three call sites rather than a redesign.
+
+**The left-to-right fast path is gated on the base, not only on the text.**
+`byte_levels` returns an empty level vector — skipping the entire bidi
+algorithm — for any string `bidi::is_trivially_ltr` accepts. That now requires
+`base != Base::Rtl` as well.
+
+*The alternative* — keep the check purely textual, since the text really does
+contain no right-to-left character — is wrong in a way worth naming, because
+the check reads like a property of the string and is not one. What
+`is_trivially_ltr` actually asserts is a property of the *answer*: every level
+comes out even, so the permutation is the identity and rule L4 mirrors nothing.
+That is true under `Auto` and under `Ltr`, and false under `Rtl`, where the
+same plain-Latin string resolves to level 2 inside a level-1 paragraph — the
+letters still read left to right, but the neutrals around them take the
+paragraph's direction and any brackets mirror. Left ungated, the fast path
+would have discarded the base the caller had just supplied, and done it
+silently and only for the strings where the caller most needed it: a UI label
+is exactly the kind of string that has no strong right-to-left character in it.
+
+**A note on the example this was filed with.** The issue's motivating case was
+`"(123)"` in a right-to-left paragraph, "the parentheses come out mirrored the
+wrong way". They do not: under `Base::Rtl` rule L4 mirrors both brackets and
+rule L2 then swaps their positions, and the two cancel exactly, so the string
+renders identically to the `Auto` answer. That is correct — a number inside a
+Hebrew sentence reads left to right, brackets and all. The cancellation is
+general for a balanced pair around a single embedded run, which is why the
+regression test uses the unbalanced `"(a"` instead: `(a` under `Auto`, `a)`
+under `Rtl`. Recorded because the wrong example was persuasive enough to sit in
+the issue file unchallenged, and a test written from it would have passed
+against a `base` argument that did nothing at all.
+
+**How it is measured.** A host-font test over 547 of this machine's faces
+asserts the drawn order and the mirrored glyph, taking every glyph id out of a
+*whole shaped string* rather than out of a character shaped alone — on
+`Amiri-Bold.ttf` a lone `(` is scriptless and shapes to glyph 3, while the `(`
+in `"(a"` joins the Latin run and reaches a `latn` lookup that substitutes
+6460. An oracle built from isolated characters would have been testing the
+itemizer. The test also does *not* assert that the two directions measure the
+same width: L4 substitutes a genuinely different glyph, and Amiri-Bold gives
+`)` a different advance from `(` — 11.904 px against 11.552. What is asserted
+is that each answer is self-consistent, drawn width equal to measured width.
+
+**Where it lives.** `gui/font/src/scaled.rs` — `shape`, `shape_lang`,
+`shape_with`, `byte_levels`; `gui/font/src/bidi.rs` — `Base`, unchanged, and
+`is_trivially_ltr`, whose doc already said what it asserts;
+`gui/font/tests/host_fonts.rs` —
+`a_paragraph_direction_can_be_given_and_changes_the_answer`.
+
+---
+
+## §444 — A selection is a set of boxes, not a box
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** When you drag across text to highlight it, the highlight was
+drawn as one rectangle stretching from the first selected character to the
+last. That is only right when the text runs one way. In a line that mixes
+English and Hebrew, characters the user did *not* select can sit physically
+between the ones they did, so a single rectangle paints them too — the
+highlight claims you selected words you never touched. The fix is that asking
+for a selection's shape now returns a *list* of rectangles, one per stretch
+that really is contiguous on screen, and every caller loops.
+
+`ShapedRun::selection_rects(from, to, end) -> Vec<(f32, f32)>` replaces the
+two-edge form `x_of(to) - x_of(from)` at every call site
+(`guitk::text::selection_boxes`, `pathbar`'s edit-mode highlight, `textview`'s
+selection and search-match highlights).
+
+**Why a list rather than a rectangle.** A byte range is contiguous in the
+string by construction; it is *not* contiguous on the screen. Rule L2 of the
+bidi algorithm reverses each right-to-left run in place, so a logical range
+that straddles a direction change lands as two separated boxes, and the gap
+between them is occupied by characters outside the range. The two-edge form has
+no way to express that — it can only report one interval — so it necessarily
+over-paints. The over-painting is not cosmetic: a highlight is the UI's answer
+to "what will Copy copy?", and a wrong answer there is a wrong answer about the
+user's own data. The shaped run already knows the exact answer, because it
+knows the visual order; the only thing missing was a return type able to carry
+it.
+
+*The alternative* — return the bounding box of the selected glyphs — is the
+same bug with more arithmetic behind it, and is worse for being harder to
+recognise as wrong.
+
+**Why `Vec` rather than `impl Iterator`.** Every other geometry query in
+`ShapedRun` is lazy, so this one is the odd member and the departure is worth
+recording. It cannot be lazy: the caller wants the boxes in drawing order
+(left to right), the map from logical index to *selected* must therefore be
+complete before the first box can be emitted, and the glyph drawn first may be
+the last one logically. A lazy adaptor would have to build the same map inside
+its first `next()` — the allocation is not avoided, only hidden, and hiding it
+would cost the caller the ability to ask how many boxes there are.
+
+**Why the sweep runs in slot space, not pixel space.** Adjacent boxes are
+coalesced into one, and adjacency is decided by comparing *slot indices* —
+integers — rather than by comparing a box's right edge to the next box's left
+edge. Both quantities are sums of the same advances, but summed in different
+orders, and float addition is not associative: the comparison would need a
+tolerance, and any tolerance is a number that is too small on a long line and
+too large on a short one. Integers need none. (`textview`'s cross-*span*
+coalescing does still compare pixels with a 0.01 tolerance, because separate
+spans are separately shaped and there is no shared slot space to appeal to.)
+
+**A cluster is always painted whole.** Selecting one half of a ligature
+highlights all of it. This falls out rather than being enforced: L2 reverses
+whole level runs and a cluster lies entirely inside one, so a cluster always
+occupies one contiguous screen box whatever the reordering did. Marking the
+cluster through `group_end` is what makes the run-accumulation see it as one
+stretch.
+
+**Where it lives.** `gui/font/src/shape.rs` — `selection_rects` and its five
+tests (including `selection_boxes_are_ordered_disjoint_and_add_up`, which
+checks all 28 sub-ranges of a six-character bidi string);
+`gui/toolkit/src/text.rs` — `selection_boxes`/`selection_boxes_in`;
+`gui/toolkit/src/pathbar.rs`, `gui/toolkit/src/textview.rs` — the callers.
+
+---
+
+## §445 — Syntax state entering a line is memoized per line and invalidated from the first edited line
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** A block comment opened near the top of a file colours everything
+below it, so to draw the lines currently on screen the editor has to know
+whether the line above the screen was inside a comment — and that answer depends
+on every line above it, all the way to line 1. Scrolling to line 4000 of a file
+therefore costs re-reading 4000 lines, every frame, unless the answer is
+remembered. The editor now keeps one small "what was I in the middle of when
+this line started" value per line, and throws away everything from the first
+line an edit touched.
+
+**The three options.**
+
+| | Cost to draw a frame | Cost of an edit | Can it be wrong? |
+|---|---|---|---|
+| Recompute the prefix each frame | O(lines above the viewport) | free | no |
+| Memoize, invalidate on edit *(chosen)* | O(visible lines), amortised | O(lines below the edit), lazily | only if a new edit path forgets to invalidate |
+| Recompute the whole file on each edit | O(visible lines) | O(file) eagerly | no |
+
+Recomputing per frame is the honest one and it is what the editor would have
+done had highlighting simply been switched on. It is also the one that gets
+slower the further down a file the user scrolls, which is the wrong shape: the
+user's experience of a large file would degrade with position in it, for no
+reason they could see. At 4000 lines and 60 Hz it is a quarter of a million line
+tokenizations per second to draw fifty lines.
+
+Recomputing the whole file on each edit has the opposite shape — drawing is
+cheap, but every keystroke pays for the whole document, and the common case
+(typing at the top of a 50,000-line file) is the worst case.
+
+The memo pays only for what changed. `hl_entry[i]` is the highlighter state
+*entering* line `i`; `entry_state(line)` extends the vector lazily from the last
+known entry, and every mutating operation calls `invalidate_highlight(first_line)`,
+which truncates to `first_line + 1`. Typing on line 3 of a 50,000-line file
+discards 49,997 entries and recomputes only as far down as the viewport actually
+reaches. This is what Vim, VS Code, Sublime and Emacs all do, in the same shape.
+
+**The cost is the third column of that table, and it is real.** The memo is the
+only one of the three that can disagree with the buffer, and it does so
+silently: a forgotten `invalidate_highlight` in some future edit path shows up
+as stale colours in one region of one file, which is exactly the kind of bug
+that gets reported as "the highlighting is a bit flaky sometimes" and never
+reproduced. So the invalidation is not left to reviewer attention.
+`the_syntax_cache_agrees_with_a_recomputation_after_every_edit` walks all ten
+editing operations and asserts, after each, that the cached entry state for
+every line equals a from-scratch recomputation. Adding an edit path without
+invalidating fails that test, which is the property that makes the memo
+affordable.
+
+**Why `RefCell`.** `entry_state` is called from the render path, which has
+`&Document`, and it mutates the memo. The alternatives were to make rendering
+take `&mut Document` — which spreads a mutable borrow across the whole draw
+call for the sake of a cache — or to fill the memo eagerly on edit, which is the
+third row of the table. Interior mutability is the narrow answer: the memo is
+not part of the document's value, it is a derived fact about it, and
+`&Document` promising "I will not change the document" is still true.
+
+**Where it lives.** `apps/editor/src/main.rs` — `Document::hl_entry`,
+`entry_state`, `invalidate_highlight`, `EditorState::render_editor`, and
+`highlight_render_tests`.
+
+---
+
+## §446 — An undo entry records what the lines were, not what the edit was
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** The editor's undo used to store a description of each edit —
+"inserted this character at this column" — and work out how to reverse it. It
+now stores the affected lines as they were before the edit and as they are
+after, and undo simply puts the old ones back. This costs memory (two copies of
+each changed line) and buys the guarantee that undo cannot be wrong, which the
+old design failed at in four separate ways at once.
+
+**What was wrong.** The four-variant enum was `Insert`/`Delete` (line, column,
+text) and `InsertLine`/`DeleteLine` (line, text). Reversing a description
+requires the description to keep agreeing with what the code actually does, and
+nothing in the language or the tests enforced that agreement. It had drifted:
+pressing Enter recorded `Insert { text: "
+" }`, but by the time undo ran, no
+line contained a newline — the split had moved the tail into a new entry — so
+undo removed a byte that was not there and left the document split; Enter's
+auto-indent was not recorded at all; `InsertLine` was matched by both `undo` and
+`redo` and constructed by nothing; and only one of the three edit entry points
+cleared the redo stack.
+
+None of those are individually deep. That is the point: they are four instances
+of one failure mode, they accumulated silently, and a fifth would have followed
+the next time someone added an editing operation.
+
+**The trade.**
+
+| | Memory per entry | Can it disagree with the buffer? | Cost of a new editing operation |
+|---|---|---|---|
+| Describe the operation | O(text changed) | yes, and silently | write a variant, an undo arm and a redo arm, and get all three consistent |
+| Record the lines *(chosen)* | O(lines touched) | no | wrap the operation in `record_edit` |
+
+The memory difference is the whole argument against recording, and it is
+smaller than it looks. A single-character insert on an 80-column line stores
+two 80-byte strings rather than a one-byte one. Across the 1000-entry cap that
+is on the order of 100 KiB for a text editor — less than one screen of the
+font atlas it is already carrying. An operation that rewrites a thousand lines
+at once would store two thousand line copies, but such an operation is already
+touching that much text.
+
+Against that: undo becomes one `Vec::splice` in each direction and has no
+per-operation code at all, so a new editing operation cannot get its undo wrong
+by construction — there is nothing to get wrong. Call sites go through
+`record_edit(line, before_count, |doc| …)`, and even the one thing they do
+state — how many lines they are about to touch — is only used to size the
+"before" snapshot; the number of lines *afterwards* is derived from how the
+buffer's total length changed, so it is observed rather than claimed.
+
+**What was deliberately not done.** A hybrid — record for multi-line edits,
+describe for single-character ones — would recover most of the memory. It was
+rejected because it reintroduces the failure mode for exactly the operations
+that are most numerous, and because the memory it saves is not memory anyone
+was short of. Compression (storing a diff of the two line sets) is available
+later if a profile ever asks for it, and would not change the interface.
+
+**Where it lives.** `apps/editor/src/main.rs` — `EditAction`,
+`Document::record_edit`/`snapshot`/`splice_lines`/`undo`/`redo`/`clamp_cursor`,
+and the `undo_tests` module.
+
+---
+
 ## §205 — The Ada toolchain is the **`x86_64-elf` cross-GNAT** on a **ZFP runtime**; the object is committed and stamped, so no other lane needs a 1 GB install
 
 **Date:** 2026-08-16

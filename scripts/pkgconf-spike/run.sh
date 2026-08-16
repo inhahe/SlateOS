@@ -49,6 +49,18 @@ make -j8 >make.log 2>&1
 echo "MAKE_EXIT=$?"
 grep -iE "error|warning: implicit" make.log | head -20 || true
 
+# Record the search path pkgconf compiled in. This is a *compile-time* default
+# we do not pass and therefore do not control, and it is the one fact needed to
+# stage .pc fixtures where the binary will actually look for them. It used to
+# live only in $WORK/config.h under /tmp, so when /tmp was cleared the path
+# became unrecoverable without a full rebuild — the same "the artifact outlived
+# the facts about it" problem that left this port's binary in /tmp for two days.
+# Echoing it puts it in the build log, which is durable.
+echo "PKGCONF_DEFAULT_PATH_FROM_CONFIG_H:"
+grep -E 'PKG_DEFAULT_PATH|SYSTEM_LIBDIR|SYSTEM_INCLUDEDIR' config.h || echo "  (not in config.h)"
+echo "PKGCONF_INSTALL_DIRS_FROM_MAKEFILE:"
+grep -E '^(prefix|exec_prefix|libdir|datadir|datarootdir) *=' Makefile || echo "  (not in Makefile)"
+
 # The decisive step. -nostdlib so we get SlateOS's libc, not zig's bundled
 # musl. libc.a is listed twice because it is Rust-built and its intra-archive
 # references are not topologically ordered; a second pass is cheaper than

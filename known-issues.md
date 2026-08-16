@@ -275,6 +275,23 @@ the workspace config reads as though the guarantee is in force.
 
 ## `apps/editor`'s syntax highlighter is complete, tested, and not connected (lane C)
 
+**Status: FIXED 2026-08-16** (lane C). The highlighter now draws the editor.
+`render_editor` tokenizes each visible line and emits one `tree.text` per token
+in the token's theme colour, and the `HighlightState` entering the first visible
+line comes from `Document::entry_state`, a per-line memo (`hl_entry:
+RefCell<Vec<HighlightState>>`) that every mutating operation truncates from the
+first line it touched. The memo is what makes a block comment opened on line 3
+colour line 4000 without re-tokenizing 4000 lines every frame. `#![allow(dead_
+code)]` is gone from `highlight.rs`, and `detect_language` became
+`language_of_path`, the one place an extension maps to a `Language`. Seven new
+tests in `main.rs`'s `highlight_render_tests` cover it, the load-bearing one
+being `the_syntax_cache_agrees_with_a_recomputation_after_every_edit`: it runs
+all ten editing operations and asserts the cached entry state equals a
+from-scratch recomputation, which is the assertion that fails if someone later
+adds an edit path and forgets to invalidate. 97 tests pass, clippy clean.
+
+*Original report follows.*
+
 **Status: OPEN 2026-08-15** (lane C). Found while sweeping for byte-at-a-time
 text walkers — `highlight.rs`'s tokenizers step bytes, so it was on the list to
 audit, and the audit turned up something larger: the module is not reachable
@@ -13017,59 +13034,6 @@ algorithmic overdraw wins have now been taken; the remaining work is a
 bandwidth/parallelism problem, not a naive-code problem. Unblocked (no Linux
 binaries / operator input needed).
 
-### BENCH-COMPOSITOR. Compositor frame benchmark — RESOLVED 2026-07-01 (benchmark added; revealed BENCH-COMPOSITOR-SLOW)
-
-**Resolution:** added `bench_compose_frame_4k` (an `#[ignore]`d measurement test
-in `gui/compositor/src/main.rs`) plus the `Compositor::bench_full_composite`
-hook (which shares `full_recomposite_into_back` with the real `compose_frame`
-so they can't drift) and the `[compositor_frame_4k]` baseline in
-`bench/baselines.toml`. The compositor is host-runnable (`cargo test -p
-compositor --target x86_64-pc-windows-gnu --release -- --ignored --nocapture
-bench_compose_frame_4k`), so a real number is measurable. Running it immediately
-surfaced the ~25x-over-target result now tracked as BENCH-COMPOSITOR-SLOW above.
-Original gap description retained below for context.
-
-**Where (original gap):** `gui/compositor/src/main.rs` — the composite path is
-`Compositor::compose_frame` (line ~2746) → `render_all_windows` (~2807) →
-`blit_buffer` (~2949). There is frame-budget *tracking* at runtime
-(`end_frame`, line ~849, returns whether the frame was within budget) but no
-benchmark that measured the actual composite cost against a target.
-
-**What:** CLAUDE.md's performance-critical-subsystems table lists "Compositor
-frame — Must composite a full desktop in < 2ms at 4K to not miss 144Hz vsync"
-as a hard benchmark target, and mandates "benchmark everything critical." Every
-other critical subsystem (syscall dispatch, IPC, context switch, page fault,
-page/heap alloc, scheduler pick_next, futex, io_uring, IOCP, ISR latency, VFS,
-FS r/w) has a benchmark in `kernel/src/bench.rs` scored against a
-`bench/baselines.toml` target. The compositor has none. `bench/` currently
-contains only `baselines.toml` (no per-subsystem benchmark crates yet), and
-`grep` finds no `criterion`/`#[bench]`/`fn bench` anywhere under `gui/`.
-
-**Why not done in the discovering session:** identified during a benchmark-gap
-audit at the tail of a long, context-heavy autonomous session. Doing it right
-(build a host- or target-runnable harness that constructs a 4K in-memory
-framebuffer + a representative multi-window damaged scene, drives
-`compose_frame`/`render_all_windows`, and records ms/frame against the 2ms
-target) is real work that deserves a fresh context rather than a rushed pass.
-
-**Proper fix:** add a compositor composite-frame benchmark. Options:
-(a) a `criterion` bench under `gui/compositor/benches/` if the compositor crate
-(deps: `guitk`, `guiremote`) builds and composites on the host with an
-in-memory framebuffer (verify `compose_frame`/`render_all_windows`/`blit_buffer`
-don't require real DRM/KMS hardware handles — construct the `Compositor` with a
-plain `Vec`-backed 3840×2160 framebuffer); or (b) if the composite path is too
-coupled to the target, add an in-kernel/target self-test bench analogous to
-`bench_pick_next_scaling`, driving a synthetic scene and using `rdtsc`. Scene
-should scale window count / damage area to expose O(n)-in-pixels or
-O(n)-in-windows behaviour. Record a `[qemu.compositor_frame_4k]` (and/or a
-host baseline) in `bench/baselines.toml` with `target_ns = 2_000_000` (2 ms).
-Note the compositor is userspace, so the on-hardware number (not the TCG figure)
-is the meaningful one; document the measurement environment.
-
-**Trigger:** next time the compositor's render path is touched, or as the next
-benchmark-infrastructure task — it is unblocked (does not need Linux binaries or
-operator input), just deferred for context reasons.
-
 ### TD23. No `/sys/devices/system/cpu/cpuN/cache/` tree — lscpu/hwloc cannot read real cache geometry — RESOLVED 2026-06-13
 
 **Resolution (2026-06-13):** Built the per-CPU `cache/indexI/` sysfs subtree in
@@ -17295,7 +17259,73 @@ mark-to-ligature lands.
 `gui/font/src/kern.rs`; `gui/font/src/mark.rs`;
 `ScaledFont::kern` in `gui/font/src/scaled.rs`.
 
+**Status: FIXED** (2026-08-16, verified rather than implemented). The entry
+predicted its own fix correctly -- "a whole-run positioning pass ... is the
+better shape and should be done when mark-to-ligature lands" -- and that is
+what happened, in the type-5/7/8 work, without this entry being revisited.
+Checked line by line today:
+
+* `gui/font/src/gpos.rs` builds a `ByScript`, and `Positioning::apply` walks
+  only `self.lookups.for_script(run.script, run.lang)`. Every lookup that moves
+  a glyph in shaped text -- pair kerning, cursive, all three mark types,
+  contextual -- is selected by the run's script and language, with the same
+  fallback chain `GSUB` uses.
+* `gui/font/src/kern.rs`'s union is reached from shaped text only for the
+  *legacy* `kern` table, which has no script systems in it to select among.
+  `scaled.rs` gates it on `!self.face.gpos_kerns(segment.script, lang)`, so a
+  run whose script does reach a `GPOS` `kern` feature never takes it.
+* The two surviving `feature_subtables` calls are in `MarkPositioning::parse`,
+  and everything they feed is `MarkPositioning::is_mark` -- "is this glyph a
+  combining mark", which is a property of the glyph and not of the run. The
+  union is the *right* answer there: a face's Arabic anchors identify Arabic
+  marks whatever script is being shaped, and narrowing it by script would make
+  `is_mark` say no to a mark whose only mention is under another script's
+  `mark` feature.
+
+What is left is the entry's own stated reason for filing, unchanged and
+harmless: `ScaledFont::kern(left, right)` takes two glyph ids with no run, so
+it cannot select and does not. It is public API with no caller in this tree
+(the compositor draws through `ShapedRun`), it is documented as the answer for
+a caller that has no script, and the overlap case the entry describes -- two
+scripts' `kern` coverage sets intersecting -- is still not observed on any of
+the 556 host faces. Narrowing it would mean re-signaturing a public method to
+serve nobody, so this closes as verified rather than as further work.
+
 ## TD-FONT-SCRIPT-RUNS-IGNORE-SCRIPT-EXTENSIONS
+
+**Status: FIXED** (2026-08-16, lane C). `gen_script_tables.py` now emits
+`SCRIPT_EXT_RANGES` / `SCRIPT_EXT_POOL` — the `Script_Extensions` property
+wherever it says something `Script` does not, which on Unicode 16.0.0 is 669
+characters in 177 ranges, 119 distinct sets, widest 23, stored in 452 pooled
+rows because a set that appears verbatim inside a longer one is stored once.
+`script::runs` carries the intersection of the open run's set with each new
+character's, exactly as the proper fix below asked.
+
+Three things the fix had to settle that the entry did not anticipate:
+
+* **`SCRIPT_TAGS` is now one row per OpenType *tag pair*, not per Unicode
+  script.** `kana` is the only pair two scripts share, and it is the one that
+  matters: comparing scripts rather than rows would cut Japanese at every
+  change between hiragana and katakana, for a difference no font can act on.
+* **A character with no `Script` of its own may narrow a run but never end
+  one** — it has an affinity, not an identity. Without this, U+0301 COMBINING
+  ACUTE (used by eight scripts, none of them Hebrew) starts a run of its own
+  after a Hebrew letter, and a mark in its own run is a mark whose base's
+  `GPOS` never attaches it.
+* **Script is resolved over the whole text first, and the direction boundaries
+  are cut into that answer afterwards** (`by_script`, then `runs`). Resolving
+  per directional run instead re-derives the script of `"ހ٠ހ"`'s middle piece,
+  which bidi rule I2 makes a run of its own, as Arabic — measured as a real
+  disagreement with HarfBuzz on `SansSerifCollection.ttf`, which has an Arabic
+  `locl` and no Thaana one. The one exception is a character with no script at
+  all: it belongs to the directional run it is *drawn* in, so the space in
+  `"hello שלום world"` joins the Latin after it rather than trailing the
+  Hebrew before it.
+
+Measured against HarfBuzz over 556 faces × 95 strings: `agree` 51422 → 51423,
+`differ` 1179 → 1178, `misplaced` and `reordered` unchanged. 711 unit tests and
+18 host-font tests pass. Kept here (not archived) until it has survived a boot
+on `main`.
 
 **What.** `script::runs` resolves a character's script from the Unicode
 `Script` property alone. UAX #24 defines the real algorithm over
@@ -17473,11 +17503,11 @@ nothing else. See `design-decisions.md` §415.
 
 The sweep's `reordered` count is **0** across all 556 host faces × 19 strings:
 every right-to-left string now matches HarfBuzz's glyph order exactly. Two
-things this entry mentioned are *not* resolved and are filed separately:
-`shape` still cannot be told a base direction other than `Base::Auto`
-(`TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION`), and the caret queries still
-measure into the text rather than across the line
-(`TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL`).
+things this entry mentioned were *not* resolved with it and were filed
+separately, and both are now closed: `shape` could not be told a base direction
+other than `Base::Auto` (`TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION`, fixed
+2026-08-16), and the caret queries measured into the text rather than across
+the line (`TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL`, fixed 2026-08-16).
 
 ## TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS
 
@@ -17590,6 +17620,39 @@ feature reached the rule, and gating context on the mask made every chaining
 
 ## TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION
 
+**Status: FIXED** (2026-08-16, lane C). `ScaledFont::shape_with(text, lang,
+base)` is the new full form; `shape` and `shape_lang` are it with defaults.
+Three departures from the sketch below, each because the sketch was wrong about
+something:
+
+* **It carries the language too**, rather than being `shape_with(text, base)`
+  beside `shape_lang(text, lang)`. Two orthogonal knobs on two methods is a
+  matrix — the next caller that knows both would have needed a fourth method.
+  One full form and two named defaults does not grow.
+* **The left-to-right fast path had to be gated on the base.** `byte_levels`
+  returned early for any string `bidi::is_trivially_ltr` accepted, and that
+  test is a claim about the *answer* — "every level comes out even" — which
+  holds only while the paragraph's own level is even. Under `Base::Rtl` the
+  same string resolves to level 2 inside a level-1 paragraph. Left alone, the
+  fast path would have silently discarded the base the caller had just given,
+  which is the single thing the function must not do.
+* **The entry's own example does not demonstrate the bug.** `"(123)"` under
+  `Base::Rtl` renders *identically* to the `Auto` answer: rule L4 mirrors both
+  brackets and rule L2 swaps their positions, and the two cancel. That is
+  correct behaviour — a number in a Hebrew sentence still reads left to right,
+  brackets and all. The case that does differ is an unbalanced or asymmetric
+  one, so the regression test uses `"(a"`, which draws as `(a` under `Auto` and
+  as `a)` under `Rtl`.
+
+No caller passes anything but the default yet; the widgets that should are
+`TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL`'s subject, and the layout stage
+that knows a container's direction is the one that will supply it.
+
+Verified: 719 lib tests (3 new on `byte_levels`), 19 host-font tests (one new,
+`a_paragraph_direction_can_be_given_and_changes_the_answer`, checking 547 of
+this host's faces), bidi conformance suite green, `clippy --all-targets` clean.
+See `design-decisions.md` §443.
+
 **What.** `ScaledFont::shape` resolves the bidi base direction with
 `Base::Auto` — UAX #9 rule P2, "the first strong character decides" — and has
 no parameter with which a caller could say otherwise.
@@ -17619,6 +17682,36 @@ not exposed.
 below it, whose doc comment names this entry.
 
 ## TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL
+
+**Status: FIXED** (2026-08-16, lane C). Implemented as the entry's own "proper
+fix" describes, with one addition it did not anticipate: the permutation is not
+enough to tell a caret which side of a glyph the reader starts at, because
+reversing a *one-glyph* right-to-left run is the identity permutation. So
+`ShapedRun` now stores the per-glyph bidi levels alongside `visual`, and both
+queries read direction from those. Three parts:
+
+* **`Affinity` and `Hit`** are new public types. `offset_at` returns a `Hit`
+  (offset + affinity) instead of a bare offset; `x_of` takes an `Affinity`. At
+  a direction boundary the two affinities give two different x's for the same
+  byte offset, which is the concept the entry said was missing.
+* **Both queries walk the screen.** `x_of` asks for a cluster's *leading* edge
+  — its left edge when drawn left to right, its right edge when not — and
+  `offset_at` tests each cluster's drawn box and splits it at its own midpoint,
+  with the leading/trailing sides swapped for a right-to-left cluster. A
+  cluster is one contiguous box whatever the reordering did, because rule L2
+  reverses whole level runs and a cluster lies inside one.
+* **`width_upto` keeps the old body** — the logical prefix sum — as an
+  explicitly-named measurement for truncation and ellipsis placement.
+
+The monotonicity assertion in `tests/host_fonts.rs` ("the caret must never move
+backwards as it advances through the string") moved to `width_upto` with it:
+that property is exactly what a correct visual caret must *not* have, and the
+assertion only ever passed because `x_of` was a prefix width wearing a caret's
+name. `x_of` keeps an in-range check, run for both affinities.
+
+Verified: 717 lib tests, the 18 host-font tests and the bidi conformance suite
+green; `clippy --all-targets` clean for `osfont` and `guitk`. See
+`design-decisions.md` §442.
 
 **What.** `ShapedRun::x_of` and `ShapedRun::offset_at` convert between a byte
 offset and an x position by summing advances in *logical* order. That is the
@@ -17897,6 +17990,58 @@ host: with the two types in `KINDS`, **18/18 agree with HarfBuzz**; with them
 removed, **18/18 misplaced**. On `DavidCLM-Medium.otf` specifically the meteg
 lands at x=77 and the qamats at x=315, both exactly HarfBuzz's, against x=2 and
 x=240 without.
+
+**Status: FIXED** (2026-08-16). Device tables were the last open item, so with
+them read this entry is closed and moves to `known-issues-resolved.md` once it
+has been on `main` through a boot test.
+
+`gui/font/src/device.rs` is the reader; `Ppem` — a pixel size and the em it is
+measured against — is threaded from `ScaledFont` through `Face::ppem` onto
+`Run`, and from there into `Value::read`, `mark::anchor` and `Kerning::pair`.
+All four value-record fields and both anchor axes are corrected, across single,
+pair, cursive, mark-to-base, mark-to-ligature and mark-to-mark.
+
+The entry's own plan for this item — "a `ValueRecord` reader change plus a ppem
+the pass is not currently told" — named the wrong half. `gui/font/tools/
+device_survey.py` was written to check it and reports that on this host **not
+one value record carries a real device table**: all 152 hang off *anchors*, in
+five faces (`micross.ttf` 130, `mmrtext.ttf` 4, `mmrtextb.ttf` 4, `taile.ttf`
+7, `taileb.ttf` 7). The half the entry named is the half that never fires here;
+the half it omitted is where all the effect is. Both were implemented.
+
+Two things the survey settled that were not going to be settled by reading the
+spec:
+
+* **The format word must be read before the size range**, not after. 9,215 of
+  this host's device-table slots are `VariationIndex` records (`deltaFormat`
+  `0x8000`), which reuse the first four bytes as indices into a variable font's
+  `ItemVariationStore`. Read as a `startSize`/`endSize` pair, those indices
+  *bracket* an ordinary UI size often enough to matter: 3,146 of them at 9
+  ppem, 3,086 at 12, 2,832 at 16. A range-check-first reader does not return a
+  slightly wrong correction for those, it returns an arbitrary one.
+* **The size a cross-check runs at has to be read off the fonts.** All 130 of
+  `micross.ttf`'s tables name `startSize == endSize == 11`. A sweep at 12 ppem
+  reaches none of them and reports agreement that both halves obtained by doing
+  nothing — which is exactly what the first run of it did.
+
+**Measured.** `harfbuzz_sweep.py` grew `--ppem N`, which sets `ppem` on the
+HarfBuzz font while leaving its scale at the em (HarfBuzz gates device tables
+on `font->x_ppem` and computes `pixels * x_scale / ppem`, so both halves then
+report design units with the correction folded in) and opens our face at N
+pixels, dividing the positions back. On `micross.ttf` shaping LAM-FATHA-ALEF
+the fatha's y goes 380 → **8** at 11 ppem and back to 380 at 10 and 12; on
+`mmrtext.ttf` shaping NNYA + MEDIAL HA it goes 650 → **735** at 24 ppem.
+HarfBuzz answers 8 and 735 at those sizes and 380 and 650 either side of them —
+identical on every glyph, truncation included. Across all 556 host faces the
+full sweep at 11 ppem is **byte-for-byte the sizeless one** (48,087 agree, 170
+misplaced, 1,178 differ, 0 reordered); at 24 ppem with the new Myanmar corpus
+string it is 48,643 agree — the same numbers plus one string agreeing on all
+556 faces. `cargo test -p osfont` is 701 passing, up from 686.
+
+Twelve of the 152 tables (Tai Le's) are not reachable from any two- or
+three-character sequence in the script's block — searched exhaustively against
+HarfBuzz at every size in their ranges — so they are covered by the unit tests
+in `device.rs` and by nothing else.
 
 ## TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS
 
@@ -21305,6 +21450,282 @@ waved through as "probably noise again".
 
 ---
 
+## TD-FONT-DOES-NOT-READ-VARIATION-STORES
+
+**What.** `gui/font/src/device.rs` reads `GPOS` device tables — the per-pixel
+correction a face hangs off a value record's field or an anchor's axis — but
+declines the *other* thing that can occupy that slot. A `Device` whose
+`deltaFormat` is `0x8000` is not a device table at all: it is a
+`VariationIndex`, whose first four bytes are a `deltaSetOuterIndex` and
+`deltaSetInnerIndex` into a variable font's `ItemVariationStore`. Reading one
+needs the store (an `ItemVariationStore` in `GDEF`, plus `fvar`/`avar` to turn
+the caller's axis settings into normalized coordinates), which this crate does
+not parse. `Ppem::delta` recognises the format and returns zero.
+
+**Symptom.** A variable font drawn at a non-default instance positions its
+marks and its kerns at the *default* instance's values. The glyph outlines
+themselves are already wrong for the same reason — `gvar` is not read either —
+so nothing here is visible in isolation: a variable face renders at its default
+weight and width throughout, and positioning is consistent with that. It is
+recorded as its own entry because it is the one place where the missing feature
+is silently *skipped inside code that is otherwise doing its job*, rather than
+absent at the top level.
+
+**Measured.** `gui/font/tools/device_survey.py` over this host's fonts: 9,215
+`VariationIndex` records across the font directory, against 152 real device
+tables. Variation indices outnumber real device tables 60 to 1 here, so the
+un-read case is by far the common one — nearly all of them in
+`anchor:base4/variation` (8,720), i.e. mark-to-base attachment.
+
+**Why it is filed rather than fixed.** It is not a device-table change; it is
+variable-font support, and the device-table slot is the last piece of it rather
+than the first. In order: `fvar` (what axes exist and their defaults), `avar`
+(the caller's axis value mapped onto the normalized -1..1 scale), `gvar`/`CFF2`
+(the outlines, which is the part a user actually sees), then
+`HVAR`/`MVAR`/`GDEF`'s `ItemVariationStore` (advances, metrics and *these*
+deltas). Reading the store on its own would apply a positioning correction for
+an instance whose outlines are the default instance's — worse than applying
+none, because the marks would move off the shapes they belong to.
+
+**Proper fix.** Parse `fvar`/`avar` into a normalized coordinate vector on
+`ScaledFont` (not on `Face` — the same parsed face must be usable at two
+instances at once), then an `ItemVariationStore` reader, and give `Ppem` a
+sibling that carries the coordinates so `Ppem::delta` can dispatch on the
+format instead of declining one arm of it. Until `gvar` exists, this should
+stay declined.
+
+**Where.** `gui/font/src/device.rs` — `VARIATION_INDEX` and the format check in
+`pixel_delta`, and the "What is not here" section of the module doc, which
+names this entry.
+
+## TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL
+
+**Status: FIXED 2026-08-16.** All four steps of the proper fix below landed.
+`gui/toolkit/src/text.rs` gained `TextCursor { byte, affinity }`, `caret_x`,
+`selection_boxes` and `cursor_at` (each with a `_in` sibling taking a
+`FontFamily`, for callers drawing inside a `PushFont` scope);
+`gui/font/src/shape.rs` gained `ShapedRun::selection_rects`; `pathbar`'s
+`width_before` and `textview`'s `x_of_col` are deleted, along with `pathbar`'s
+`byte_to_char_offset`/`char_to_byte_offset`, which existed only to bridge the
+character-index hit test to the byte-index cursor.
+
+Three things came out differently from the plan written below:
+
+* **`selection_rects` returns a `Vec`, not an `impl Iterator`.** The whole
+  logical→selected map has to exist before the first box can be emitted,
+  because the glyph drawn first may be the last one logically. Laziness would
+  buy a caller nothing and cost the signature its clarity.
+* **`TextCursor` is deliberately not `Ord`.** Two cursors at one offset with
+  different affinities are one place in the text and two on the screen, so
+  neither "comes first". Code wanting an order compares `.byte`.
+* **`textview` needed the *selection* half, not the caret half.** It is a
+  read-only view: it has selection and search highlights and no insertion
+  caret at all, so `x_of_col` was replaced by `selection_boxes_of_cols`, which
+  emits one box per span-and-direction run and merges the ones that abut.
+  Its sibling `col_at_x` was left counting characters, which is correct — a
+  selection endpoint is a logical position, and the affinity is a question for
+  whoever draws, which for a selection is `selection_boxes_of_cols`.
+
+Two further sites turned up that hold a text cursor but never draw one —
+`widget.rs`'s `TextInput` and `modal.rs`'s `InputDialog` — so neither needed an
+affinity. Both did, however, hold a *byte* offset and move it by *one byte* per
+keypress, which is a separate and worse bug; see
+`GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES` below.
+
+Still not done, and still deliberately out of scope: **visual-order arrow-key
+motion** (left arrow moving left on the screen whichever way the text runs).
+The affinity is a prerequisite for it, not a solution to it, and it wants its
+own entry when someone picks it up.
+
+The original entry follows.
+
+**Status:** ~~OPEN~~ FIXED
+
+**What.** The font layer now places a caret correctly in bidirectional text
+(`TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL`, fixed 2026-08-16): `ShapedRun::x_of`
+measures across the screen and takes an `Affinity`. None of the widgets that
+draw a caret call it. They all still place it by measuring the *width of the
+text before it*, which is `ShapedRun::width_upto` under another name — the
+number that entry renamed precisely because it is not a caret position.
+
+Three sites:
+
+* `gui/toolkit/src/pathbar.rs` — `width_before(text, bytes)`, which is
+  `text::width` of a prefix slice. Used for the caret **and** for the selection
+  rectangle.
+* `gui/toolkit/src/textview.rs` — `x_of_col`, which walks the spans of a
+  wrapped line summing `span_width` and then adds `text::measure(prefix)` for
+  the partial span.
+* `gui/toolkit/src/text.rs` — `char_index_at` returns `Hit::offset` and
+  discards the affinity, because its callers count characters. That is correct
+  for what it returns, but it means the affinity the click produced is thrown
+  away at the boundary of the toolkit and cannot reach whoever draws the caret.
+
+**Symptom.** In a path or a document containing a right-to-left run — a Hebrew
+or Arabic directory name, a quoted Arabic phrase in a markdown file — the caret
+is drawn at the distance *into the text*, not the position *across the line*.
+Click at the visual right end of a Hebrew word and the caret appears at its
+left end; type there and the character is inserted where the caret was drawn
+rather than where the click was. Selection highlighting in `pathbar` is wrong
+in the same way, and additionally cannot be right in its current shape: a
+logically-contiguous selection that spans a direction change is two or more
+*disjoint* rectangles on the screen, and `width_before` can only describe one.
+
+**Why it is filed rather than fixed.** The font-level fix is complete and this
+is a separate change with a design question in it: a widget cursor is a byte
+index today, and a correct caret needs a byte index *plus* an affinity. That
+value has to be stored in each widget's cursor state, updated by every
+operation that moves it (click sets it from the `Hit`; arrow keys set it from
+the direction of travel; typing and deletion set it downstream), and preserved
+across the undo stack in `textview`. Bolting `x_of(.., Affinity::Downstream)`
+onto the existing sites would fix the drawn position for exactly half of all
+boundary crossings and would silently keep the other half wrong — which is the
+failure mode the font entry argued against.
+
+**Proper fix.**
+
+1. A `TextCursor { byte: usize, affinity: Affinity }` in `gui/toolkit`, and
+   cursor fields changed from `usize` to it. `Affinity::Downstream` is the
+   right default, so `TextCursor::from(byte)` covers the sites that genuinely
+   have no opinion.
+2. `char_index_at` grows a sibling that returns the whole `Hit` — or better,
+   returns `TextCursor` — leaving the character-counting one for callers that
+   only want an index.
+3. `pathbar::width_before` and `textview::x_of_col` become `x_of` calls against
+   the shaped run, with the cursor's affinity. Both already shape the text to
+   measure it, so no extra shaping is introduced.
+4. Selection: a `selection_rects(from, to) -> impl Iterator<Item = (f32, f32)>`
+   on `ShapedRun`, walking the drawn order and emitting one box per maximal
+   stretch of the logical range that is contiguous on screen. This is the piece
+   with real work in it; the caret parts above are mechanical once (1) exists.
+
+Arrow-key motion is deliberately *not* in this list. Visual-order cursor
+movement (left arrow moves left on the screen, whichever direction the text
+runs) is a further question, and the affinity is a prerequisite for it rather
+than a solution to it.
+
+**Where.** `gui/toolkit/src/pathbar.rs` — `width_before` and its callers;
+`gui/toolkit/src/textview.rs` — `x_of_col`, `col_at_x`;
+`gui/toolkit/src/text.rs` — `char_index_at`; `gui/font/src/shape.rs` —
+`x_of`/`offset_at`/`Affinity`, which is everything the fix needs from the font.
+
+## GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES
+
+**Status: FIXED 2026-08-16**, found while auditing the widgets that hold a text
+cursor for `TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL`.
+
+**What.** `gui/toolkit/src/widget.rs` (`WidgetKind::TextInput`) and
+`gui/toolkit/src/modal.rs` (`InputDialog`) both store the cursor as a *byte*
+offset — they must, because `String::insert` and `String::remove` index by
+bytes — but moved it by **one** on every Left, Right, Backspace and (in
+`InputDialog`) every character typed.
+
+**Symptom: a panic, not a misplacement.** `String::insert`/`remove` panic when
+the offset is not on a character boundary. So one byte-sized step into a
+multi-byte character armed the crash and the *next* edit fired it. Typing
+`café` into an `InputDialog` and pressing Backspace was enough: the cursor
+landed at byte 4, in the middle of the two-byte `é`, and `remove(4)` aborted.
+Every non-ASCII input — an accented file name, any Cyrillic, Greek, Hebrew,
+Arabic, CJK or emoji text — was a crash one keystroke away. `InputDialog`'s
+insert path was worse still: it advanced by one per character typed, so the
+cursor drifted further from a boundary with every non-ASCII letter.
+
+This is the same class of bug as the caret entry above (a byte offset treated
+as though it counted characters) but strictly more serious: the caret bug drew
+in the wrong place, this one took the process down.
+
+**Fix.** Every move now steps by the width in bytes of the character being
+crossed, obtained from the string itself:
+`value.get(..cursor).and_then(|before| before.chars().next_back())` for a
+leftward step and `value.get(cursor..).and_then(|after| after.chars().next())`
+for a rightward one. Both return `None` at the ends, which replaces the
+`> 0` / `< len` guards and removes the underflow with them. `Delete` needs no
+arithmetic — `String::remove` takes the whole character at the offset — only
+the guard that the offset is inside the string.
+
+**Tests.** `widget::tests::a_text_input_survives_a_multi_byte_character` and
+`modal::tests::a_multi_byte_character_can_be_typed_moved_over_and_deleted`,
+which type `café`, step over the `é` in both directions, and delete it from
+both sides. Both panicked before the fix.
+
+**The rest of `apps/**` and `gui/**` was then audited, and is clean.** Every
+call site that edits a `String` at a cursor was checked:
+
+| Site | Verdict |
+|---|---|
+| `apps/editor` | **was broken**, fixed here |
+| `gui/toolkit` `TextInput`, `InputDialog` | **were broken**, fixed here |
+| `apps/markdowneditor` | already correct — has a `clamp_col` helper and steps by `len_utf8` throughout |
+| `apps/paint` (text tool) | already correct — scans for the adjacent character |
+| `apps/launcher`, `gui/desktop/launcher.rs` | already correct — `char_indices` |
+| `gui/desktop/run_dialog.rs` | already correct — scans back to a boundary |
+| `apps/jsonviewer` | correct by a different route: its cursor counts *characters* and is converted with `char_to_byte_pos` at every use |
+| `apps/unitconverter` | correct **only by invariant** — the field's input filter accepts nothing but ASCII digits, `.`, `-`, `e`, `E`, so one character is one byte. A comment now records that widening the filter without switching to `len_utf8` reintroduces the panic. |
+
+Everything else matching `cursor ± 1` in `apps/**` is a *grid* cursor (a row or
+column in a game board or a table), not a string index.
+
+## B-WORKSPACE-TEST-IS-RED-SLATEOS-COREUTILS-SHADOW-THE-HOSTS (lane B's tree; filed by lane C, 2026-08-16)
+
+**Status: OPEN.** Filed for lane B as
+`requests/c-b-workspace-test-red-slateos-coreutils-shadow-host.md`. Logged here
+because it blocks *every* lane's pre-merge gate, not just lane C's.
+
+**What.** `cargo test --workspace --target x86_64-pc-windows-gnu` is
+reproducibly red: `-p oils --lib` reports `1488 passed; 8 failed`. Run on its
+own, `cargo test -p oils --lib` passes all 1496.
+
+**Why.** Cargo prepends the build's output directory to `PATH` when it runs a
+test binary — that is how a test finds its crate's dynamic libraries on
+Windows. A *workspace* build puts SlateOS's own coreutils in that directory
+(`target/x86_64-pc-windows-gnu/debug/{grep,sed,cat}.exe`, and ~200 more). The
+eight failing `oils` tests each pipe through `grep`, `sed` or `cat`, so under
+`--workspace` they run **ours** rather than the host's GNU ones — and ours do
+not implement what the tests were written against. In a target directory where
+coreutils was never built, the host's tools win and the tests pass.
+
+**Proof.** The *same binary* (`osh-c93d43afff5c6245.exe` — identical hash in
+both target directories, so identical features and flags), three of the eight
+tests, one environment variable:
+
+```
+$ ./target-test/…/deps/osh-c93d43afff5c6245.exe <three tests>
+test result: ok. 3 passed; 0 failed
+$ PATH="$PWD/target/x86_64-pc-windows-gnu/debug:$PATH" ./target-test/…/<same>
+test result: FAILED. 0 passed; 3 failed
+```
+
+And the utility by hand: `printf 'declare -r a="1"\n' | ./target/…/grep.exe
+' [ab]='` matches nothing, where GNU `grep` matches. Ours has no bracket
+expressions; the log also carries `grep: unknown option: -E`, `-q` and `--`,
+and a `cat: E9: The system cannot find the file specified. (os error 2)` whose
+wording is Rust's `io::Error` rather than GNU's.
+
+**Why it is worse than one red crate.** Cargo stops at the first failing test
+binary, so `osh` failing means every test target after it alphabetically —
+`p` through `z` — **never runs** on any workspace test anyone does.
+
+**Proper fix** (lane B's to make; the request lays out the fork). Either point
+the `oils` test harness at the host's utilities explicitly, so the result stops
+depending on what else the workspace happened to build — cheapest, and makes
+the suite deterministic at once — or implement the missing coreutils features,
+which is work we owe anyway and turns these eight into a real integration test
+of our own tools. Both, in that order, is the recommendation.
+
+**Correction, same day.** This entry first said the eight were a *load-related
+flake* (transient spawn failure under a busy machine). That was wrong. It came
+from a real observation — a clean re-run of `-p oils --lib` was green — but the
+re-run had quietly changed the only variable that mattered, by using a
+different `CARGO_TARGET_DIR`. Recorded because a wrong diagnosis in a shared
+file is worse than none: the next lane would have re-run it, watched it pass in
+isolation, and believed the note.
+
+**Also, unrelated but learned alongside:** never run two `cargo test
+--workspace` invocations against one `target/`. The first attempt died with
+`os error 32` — "could not execute process colorpicker-….exe … being used by
+another process" — with nothing actually under test at the point of failure.
+---
+
 ## B-TIMED-OUT-BOOT-TEST-STRANDS-THE-CROSS-WORKTREE-LOCK-FOR-20-MINUTES
 
 **Status: OPEN** (lane B reporting; the fix is in `scripts/boot-test.sh`,
@@ -21611,6 +22032,152 @@ skipped rung inside a passing boot test reads as success
 (`B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`). The Path-Z coverage banner is what
 eventually made it visible, which is an argument for that banner existing.
 
+## B-THE-BASH-BUILD-RECIPE-DEPENDED-ON-AN-UNRECORDED-ZIG-INSTALLED-BY-HAND
+
+**Status:** FIXED 2026-08-16 (Lane B). See `design-decisions.md` §316.
+
+`design-decisions.md` §305 makes `bash-slateos.elf` a shipped product and
+`scripts/bash-spike/` its build recipe — the README there says "keep them
+working". The recipe had a prerequisite recorded nowhere at all: the `zig`
+cross-compiler.
+
+**Symptom.** `scripts/bash-spike/*` and `scripts/pkgconf-spike/run.sh` could not
+run in `os-lane-a`, `os-lane-b` or `os-lane-c`, or in a fresh clone. Only the
+`os` integration checkout had a usable toolchain, because at some point someone
+extracted zig by hand into `os/build/spike/zig/` — a **gitignored** directory.
+Nothing in the tree recorded the version (0.13.0), the download URL, or a
+checksum; `grep -rn "0\.13\.0"` over the whole repo returned nothing relevant.
+
+**Why it went unnoticed for ~2 weeks.** The one checkout anybody ran the spikes
+in happened to be carrying the missing piece, so the recipe looked healthy. This
+is the same shape as the four other entries around it — *a step that appears to
+work because of undocumented local state* — and it compounded the hard-coded
+path bug directly above: while `slatelink.sh` still named `os` outright, it
+found `os`'s zig too, so the two defects concealed each other.
+
+**Fix.** `scripts/lib/worktree.sh` gained `slate_ensure_zig`, which resolves the
+toolchain in three steps: an existing per-worktree `build/spike/zig/zig` if
+present (so no existing checkout re-downloads or silently changes compiler
+mid-build), else a shared cache at `~/.cache/slateos/`, else download the pinned
+tarball and **verify its SHA-256 before extracting** — the archive's first use
+is being executed as a compiler whose output we ship, so checking afterwards
+would be checking too late. `slate_make_zig_wrappers` calls it, so the spikes
+just work. Version and hash are pinned in `worktree.sh`;
+`scripts/bash-spike/README.md` gained the Prerequisites section it never had.
+
+**Standing lesson.** A build recipe is only as reproducible as its least
+documented prerequisite, and an undocumented one is invisible precisely in the
+tree where it is satisfied. Prefer a pinned, verified, automatic fetch over a
+documented manual step: the manual kind fails silently and only in checkouts
+nobody is looking at.
+
+## B-THE-ROOT-LEVEL-PS1-BOOT-SCRIPTS-HARD-CODE-`os`-SO-WINDOWS-BOOT-TESTS-THE-WRONG-TREE
+
+**Status:** OPEN — **Lane A's zone** (the boot test). Found 2026-08-16 by Lane
+B, which has deliberately changed none of these files. Filed as
+`requests/b-a-ps1-boot-scripts-hard-code-the-os-worktree.md`.
+
+Six PowerShell scripts at the repo root name `D:\visual studio projects\os`
+outright: `boot-test.ps1` and `boot-test-2cpu.ps1` (`$cwd = "…\os"`),
+`boot-test-stdio.ps1` and `run-boot-test.ps1` (`Set-Location "…\os"` plus
+`$diskImg`/`$ext4Img`/`$swapImg`), `quick-boot-test.ps1` (`$serial_log`), and
+`build-init.ps1` (`$initDir = "…\os\userspace\init"`).
+
+**Impact.** Run from a lane worktree, they boot **main's** image and report
+PASSED — a false green in which every property the lane believes it verified is
+a statement about a different checkout. This is the same family as the two
+entries above, but it is the worst instance of it, for two reasons:
+
+1. **It is documented.** `README.md:65-68` offers `powershell ./boot-test.ps1`
+   as *the* Windows equivalent of `./scripts/boot-test.sh`. An agent that
+   follows the README does the wrong thing by doing what it was told.
+2. **`build-init.ps1` writes**, to `os\userspace\init` — a cross-lane write,
+   and into Lane B's zone specifically.
+
+**Mitigating.** `scripts/boot-test.sh` derives its own paths correctly and is
+what `CLAUDE.md`, the roadmap and every automated run actually use, so no
+current CI path is affected.
+
+**Proper fix.** Derive the root from the script's own location, as
+`scripts/lib/worktree.sh` now does for shell:
+`$root = Split-Path -Parent $MyInvocation.MyCommand.Path` (twice, for a script
+under `scripts/`), plus the same bail-out check that the derived root really is
+a SlateOS checkout. **Or delete them** — only `boot-test.ps1` is referenced
+anywhere in the tree; the other five have no references at all and look
+superseded by `scripts/boot-test.sh`. An unmaintained script that boots the
+wrong image is a trap whether or not anyone runs it today.
+
+## `apps/editor` undo removed characters where it had inserted bytes (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Found while wiring up syntax
+highlighting; pre-existing, and independent of that work.
+
+`EditAction::Insert { line, col, text }` records the *bytes* inserted at a byte
+offset. Undo reverted it with `for _ in 0..text.len() { current.remove(col) }` —
+but `String::remove` removes one **character**, so undoing an inserted `e`-acute
+(two bytes) deleted two characters: the accented one and whatever followed it.
+Redo of a `Delete` had the identical loop and the identical bug. On an ASCII
+document the two counts coincide and nothing looks wrong, which is why it
+survived; the first non-ASCII character in a file made undo silently eat a
+neighbour, and if the offset landed mid-character `remove` panicked outright.
+
+Fixed by `remove_bytes(&mut String, at, len)`, which checks both ends are char
+boundaries and the range is in bounds before `replace_range(at..end, "")`, and
+does nothing if not — a no-op undo is recoverable, a panic in an editor is not.
+Covered by `undoing_a_multi_byte_insertion_removes_only_that_character`.
+
+## `apps/editor`'s undo stack described operations instead of recording them, and undo of Enter was wrong (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Found while fixing the byte-vs-character
+bug in the entry above; the two share a cause.
+
+`EditAction` was a four-variant enum naming the operation that had been
+performed — `Insert`/`Delete` with a line, a column and the text, and
+`InsertLine`/`DeleteLine` with a line and the text. `undo` and `redo` then
+reconstructed the inverse from the description. That model requires the
+description to stay in agreement with what the operation actually did, and
+nothing enforced the agreement, so it drifted in three places at once:
+
+- **Undo of Enter deleted an unrelated character.** Splitting a line pushed
+  `Insert { text: "
+" }`, and `undo` reverted it by removing one byte at `col`
+  *from that line* — but the split had already moved the tail into a new `lines`
+  entry, so no line contained the newline. In practice the removal was
+  out of bounds and did nothing, leaving the document permanently split.
+  Reproduce (before the fix): type `abcd`, put the caret between `b` and `c`,
+  press Enter, press Ctrl+Z — expected `abcd` on one line, actual two lines.
+- **Enter's auto-indent was not recorded at all.** The new line was prefixed
+  with the previous line's leading whitespace and nothing on the stack could
+  take those bytes back.
+- **`InsertLine` was matched by `undo` and by `redo` and constructed by
+  nothing** — dead in the sense that matters, since the operation it existed to
+  describe was recorded as something else. (`DeleteLine` *was* constructed, by
+  the two join paths.)
+- **Only `insert_char` cleared the redo stack.** A backspace after an undo left
+  a redo entry describing an edit against a buffer that had since moved on.
+
+**The fix was to stop describing edits and start recording them.** `EditAction`
+is now a struct holding the *text of the affected lines before* and *after* the
+edit, plus the caret position on each side; undo is `after → before`, redo is
+`before → after`, both a single `Vec::splice`. Call sites go through
+`Document::record_edit(line, before_count, |doc| …)`, which snapshots, runs the
+closure, derives the after-count from how the buffer's total length changed —
+a fact, not a claim — and records, invalidates the syntax memo and clears the
+redo stack in one place. An edit can no longer misdescribe itself, because it
+does not describe itself. Cost is two copies of each touched line per undo
+entry; for a 1000-entry stack of single-character edits that is on the order of
+100 KiB, which is the right trade for a stack that cannot disagree with the
+buffer.
+
+Seven tests in `main.rs`'s `undo_tests`. The load-bearing one is
+`every_edit_operation_round_trips_one_step_at_a_time`: it applies all ten
+editing operations to a document containing two-byte, three-byte and four-byte
+characters plus indentation, then undoes and redoes one step at a time,
+asserting against a snapshot taken *between* every pair of steps — an undo stack
+can arrive back at the original text while having been wrong at every
+intermediate point, and the intermediate points are what the user looks at.
+104 tests pass, clippy clean.
+
 ---
 
 ## B-VIRTIO-UNVALIDATED-USED-ID — a device picks the index into its own descriptor table (lane A, 2026-08-16)
@@ -21823,3 +22390,87 @@ reset the device on timeout (`recover_after_timeout`) rather than reclaiming
 descriptors underneath it. Left as tech debt: changing it to leak instead
 would trade a rare wrong-packet for a permanent queue drain on a flaky device,
 and neither is right without the reset path.
+
+## B-BOOT-TEST-HANGS-INTERMITTENTLY-WITH-A-QEMU-GLIB-HANDLE-ERROR, AND LOOKS EXACTLY LIKE A KERNEL REGRESSION (lane B, 2026-08-16)
+
+**Status: OPEN — host-level, cause not identified. Recorded so the next lane
+that hits it does not spend the time I did blaming a code change.**
+
+### What happened
+
+A boot test of `lane-b` at `462cd7d09` (a merge of `origin/main`) timed out at
+1800s, having hung at Path Z Part 20:
+
+```
+[spawn] Running REAL dash shell background job `/bin/emit > file & wait` (ring 3, Path Z) test...
+```
+
+The immediately preceding boot of `6039c7d03` had PASSED in 405s. The obvious
+reading — "the merge broke it" — was wrong. A re-run of the *same commit*,
+changing nothing, passed: the rung logged `OK` at serial line 20812, 27 lines
+after the point the previous run stopped at.
+
+### Why it was convincing as a regression, and how each theory died
+
+The merge pulled in lane A's virtqueue rework (`3f0c22500`), which moved the
+descriptor free list out of device-visible memory into an Ada-backed pool.
+`... & wait` with a redirected stdout is disk I/O, so a descriptor leak was a
+plausible fit — and lane B's image carries bash *and* pkgconf, so it does far
+more I/O than lane A's, which would explain why lane A's own boot test passed.
+
+It was still wrong. Two hypotheses, both refuted by direct evidence:
+
+| theory | refuted by |
+|---|---|
+| virtio descriptor leak / mis-completion | `grep -c "\[virtio\]"` on the hung serial log → **0**. The `ada::is_allocated` rejection path at `kernel/src/virtio/queue.rs:595` logs whenever it fires; it never fired. `[ada] FFI boundary self-test … : OK` |
+| exit-hook table exhaustion | the log's one `[sched] WARNING: exit hook table full (8 slots)` is at line **284**, immediately followed by the self-test's own cleanup unregisters. It is step 6 of `test_exit_hooks` (`kernel/src/sched/mod.rs:7942-7976`) deliberately overfilling the table to prove rejection works, and a *passing* log contains it too. Only two real registrants exist in the kernel — `pacct.rs:131` and `sched/supervisor.rs:219` — both one-time at boot |
+
+**The lesson worth keeping: an expected-and-benign log line that contains the
+word WARNING is a magnet for a wrong diagnosis.** `exit hook table full` reads
+as a resource-exhaustion bug and is in fact a self-test asserting a limit. It
+cost a full investigative pass. A self-test that provokes a warning it expects
+should say so on the same line — e.g. `(expected)`.
+
+### The actual signal
+
+QEMU emitted, on the hung run only:
+
+```
+GLib: WaitForMultipleObjectsEx failed: The handle is invalid
+```
+
+and then **overran its own 900s `-serial` timeout**, running until the outer
+`run-timeout.py` budget of 1800s killed the tree. That is a host-level fault:
+QEMU's GLib main loop lost a handle it was waiting on. A kernel that hangs does
+not stop QEMU's own timeout from firing, so the overrun points away from the
+guest.
+
+### How to tell the two apart, next time
+
+Cheap and decisive, in this order:
+
+1. **Did QEMU blow past its own `TIMEOUT`?** If the wrapper killed it rather
+   than QEMU exiting on schedule, suspect the host. A guest hang still lets
+   QEMU's timeout fire on time.
+2. **Is `GLib: WaitForMultipleObjectsEx failed` in the run log?** Only present
+   on the flaky run here.
+3. **Re-run the identical commit before filing anything against another lane.**
+   One data point is not enough to accuse another lane's change, and the
+   re-run is ~7 minutes.
+
+### What is not known
+
+Why the handle goes invalid. Candidates not investigated: host memory
+pressure from a concurrent build, an antivirus scan touching the disk image
+mid-run, or an interaction with the boot-lock wait loop that had just released.
+The frequency is unknown — one occurrence in this session's runs. If it recurs,
+capturing QEMU's stderr separately from the serial log would narrow it.
+
+### Interaction with the stale-lock issue
+
+The hung run was killed by the Job Object, so it never released the boot lock,
+and the re-run then sat for 5 minutes waiting on a dead owner before I cleared
+it by hand — see
+`B-TIMED-OUT-BOOT-TEST-STRANDS-THE-CROSS-WORKTREE-LOCK-FOR-20-MINUTES` and
+`requests/b-a-boot-lock-survives-its-dead-owner.md`. The two compound: a flaky
+hang costs the 1800s timeout *plus* up to 20 minutes of the next run's time.

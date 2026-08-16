@@ -124,6 +124,42 @@ check_selftest_failures() {
     return 0
 }
 
+# Detect a kernel that has already died, so the wait loop can stop waiting.
+#
+# WHY THIS EXISTS: the poll loop used to test only for the success marker, and
+# the "PANIC\|FATAL" check sat AFTER the loop — i.e. it only ran once the full
+# TIMEOUT had burned.  A capability self-test failure that hit serial at ~100s
+# therefore cost 1004s of wall clock before the harness said a word (observed,
+# 2026-08-15, while break-testing test_valid_entries).  Nothing about the
+# verdict changes here: a dead kernel never reaches the marker, so an early
+# check can only ever reach the SAME verdict SOONER.
+#
+# The patterns are anchored to line start, and to the exact strings the kernel
+# itself emits:
+#   kernel/src/main.rs panic handler -> "!!! KERNEL PANIC !!!"
+#                                    -> "!!! DOUBLE PANIC (panic inside ...)"
+#   every fatal path in main.rs/idt.rs -> serial_println!("FATAL: ...")
+# Anchoring matters because this check runs against a LIVE, still-booting log:
+# an unanchored "PANIC\|FATAL" would match a userspace fixture echoing the word,
+# or a diagnostic that merely mentions it, and would abort a healthy boot.  The
+# post-loop check keeps its wider unanchored net — by then the boot has already
+# failed to reach the marker, so a loose match there costs nothing.
+#
+# Returns 0 if the log shows a dead kernel, 1 otherwise.
+kernel_is_dead() {
+    local file="$1"
+    [ -f "$file" ] || return 1
+    grep -aEq '^(FATAL:|!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)' "$file" 2>/dev/null
+}
+
+# Print the death evidence from a serial log.  Shared by the in-loop early exit
+# and the post-loop check so both report the same way.
+report_kernel_death() {
+    local file="$1"
+    echo "KERNEL PANIC detected!"
+    grep -an "PANIC\|FATAL\|EXCEPTION" "$file" | head -40 || true
+}
+
 # Surface Path-Z rungs that DID NOT RUN because rootfs.ext4 lacked a binary
 # they drive.
 #
@@ -1120,6 +1156,20 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
         finish_pass "$SERIAL_FILE"
     fi
 
+    # Early death detection.  Checked AFTER the marker so a log that somehow
+    # holds both still reports PASS, matching the post-loop elif ordering.
+    # The 2s settle lets the panic handler's trailing lines (the Display of
+    # PanicInfo, the location) land before we take the emulator away, so the
+    # printed evidence is the whole panic and not just its first line.
+    if kernel_is_dead "$SERIAL_FILE"; then
+        sleep 2
+        echo "=== Kernel died after ${ELAPSED}s (not waiting out the ${TIMEOUT}s timeout) ==="
+        report_kernel_death "$SERIAL_FILE"
+        kill_qemu "$QEMU_PID"
+        echo "=== Boot test FAILED ==="
+        exit 1
+    fi
+
     # Serial-stall wedge detection (opt-in).  A wedged kernel stops writing to
     # the serial log; a slow-but-healthy boot keeps appending self-test output.
     # If the log has not grown for STALL_SECS seconds and the marker still isn't
@@ -1168,8 +1218,10 @@ if [ -f "$SERIAL_FILE" ]; then
         fi
         finish_pass "$SERIAL_FILE"
     elif grep -q "PANIC\|FATAL" "$SERIAL_FILE"; then
-        echo "KERNEL PANIC detected!"
-        grep "PANIC\|FATAL\|EXCEPTION" "$SERIAL_FILE" || true
+        # Wider (unanchored) net than the in-loop kernel_is_dead check: by this
+        # point the boot has already failed to reach the marker, so a loose
+        # match cannot turn a healthy boot into a failure.
+        report_kernel_death "$SERIAL_FILE"
         echo "=== Boot test FAILED ==="
         exit 1
     fi

@@ -802,23 +802,37 @@ impl Widget {
                     *cursor_pos += ch.len_utf8();
                     return EventResult::Consumed;
                 }
+                // `cursor_pos` is a *byte* offset: `String::insert` and
+                // `String::remove` index by bytes, and both panic outright on
+                // an offset that is not a character boundary. So every move
+                // below steps by the width of a character in bytes and never by
+                // one — a one-byte step lands inside an `é` and the next edit
+                // takes the window down.
                 match key.key {
                     crate::event::Key::Backspace => {
-                        if *cursor_pos > 0 {
-                            *cursor_pos -= 1;
+                        if let Some(ch) = value
+                            .get(..*cursor_pos)
+                            .and_then(|before| before.chars().next_back())
+                        {
+                            *cursor_pos -= ch.len_utf8();
                             value.remove(*cursor_pos);
                         }
                         EventResult::Consumed
                     }
                     crate::event::Key::Left => {
-                        if *cursor_pos > 0 {
-                            *cursor_pos -= 1;
+                        if let Some(ch) = value
+                            .get(..*cursor_pos)
+                            .and_then(|before| before.chars().next_back())
+                        {
+                            *cursor_pos -= ch.len_utf8();
                         }
                         EventResult::Consumed
                     }
                     crate::event::Key::Right => {
-                        if *cursor_pos < value.len() {
-                            *cursor_pos += 1;
+                        if let Some(ch) =
+                            value.get(*cursor_pos..).and_then(|after| after.chars().next())
+                        {
+                            *cursor_pos += ch.len_utf8();
                         }
                         EventResult::Consumed
                     }
@@ -939,5 +953,61 @@ mod tests {
             kind: MouseEventKind::Press(crate::event::MouseButton::Left),
         });
         tree.handle_event(&event);
+    }
+
+    /// Editing around a character that occupies more than one byte used to
+    /// abort the process: the cursor moved one *byte* per keypress, while
+    /// `String::remove` indexes by bytes and panics on an offset inside a
+    /// character. Any non-ASCII input — `café`, Cyrillic, CJK — was a crash one
+    /// keystroke later.
+    #[test]
+    fn a_text_input_survives_a_multi_byte_character() {
+        fn typed(ch: char) -> KeyEvent {
+            KeyEvent {
+                // The `key` code is irrelevant: a character arrives in
+                // `text`, and `Key` has no per-character variant.
+                key: crate::event::Key::Unknown(0),
+                pressed: true,
+                modifiers: crate::event::Modifiers::NONE,
+                text: Some(ch),
+            }
+        }
+        fn pressed(key: crate::event::Key) -> KeyEvent {
+            KeyEvent {
+                key,
+                pressed: true,
+                modifiers: crate::event::Modifiers::NONE,
+                text: None,
+            }
+        }
+        fn state(w: &Widget) -> (&str, usize) {
+            match &w.kind {
+                WidgetKind::TextInput {
+                    value, cursor_pos, ..
+                } => (value.as_str(), *cursor_pos),
+                _ => panic!("not a text input"),
+            }
+        }
+
+        let mut input = Widget::text_input("caf", "");
+        input.handle_key(&typed('é'));
+        assert_eq!(state(&input), ("café", 5));
+
+        // One press must cross the whole two-byte character.
+        input.handle_key(&pressed(crate::event::Key::Left));
+        assert_eq!(state(&input), ("café", 3));
+        input.handle_key(&pressed(crate::event::Key::Right));
+        assert_eq!(state(&input), ("café", 5));
+
+        // And backspace must remove it whole rather than half of it.
+        input.handle_key(&pressed(crate::event::Key::Backspace));
+        assert_eq!(state(&input), ("caf", 3));
+
+        // The empty-string edges stay no-ops rather than underflowing.
+        let mut empty = Widget::text_input("", "");
+        empty.handle_key(&pressed(crate::event::Key::Backspace));
+        empty.handle_key(&pressed(crate::event::Key::Left));
+        empty.handle_key(&pressed(crate::event::Key::Right));
+        assert_eq!(state(&empty), ("", 0));
     }
 }

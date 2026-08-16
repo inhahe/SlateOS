@@ -846,8 +846,74 @@ Roadmap:
   marks either side of its consonant, in 47 characters across a dozen scripts —
   was being recomposed before the shaper could move the front half, and undoing
   that naively cost 555 faces because HarfBuzz's decomposition is font-aware and
-  ours was not (§439). Next: the ignorable fix and device tables in
-  `ValueRecord`. Vello itself waits on `[A]`'s GPU driver.
+  ours was not (§439). The ignorable fix is done as well
+  (`TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES` closed, §434) — it was two bugs
+  under one name, erasing them *and* stepping over them, and the 170/40
+  `misplaced` that survive it are a deliberate divergence in where an erased
+  zero-advance glyph sits, not a residue. **Device tables are done too** (§440;
+  `TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING` closed — they were
+  its last open item), and the survey written to check them corrected the plan
+  this line used to carry: not one of this host's 152 real device tables is on a
+  `ValueRecord`, they are all on *anchors*, and the 9,215 `VariationIndex`
+  records that share the same eight bytes outnumber them 60 to 1 — which is why
+  the format word is read before the size range.
+  `harfbuzz_sweep.py --ppem N` is the new measurement: at 11 ppem `micross.ttf`
+  drops a fatha from y=380 to y=8 and HarfBuzz says 8 too, while the full
+  556-face sweep at that size is byte-for-byte the sizeless one. (The line
+  this replaces said right-to-left reordering was next; it was already done on
+  2026-08-14 and the line had gone stale.
+  `TD-GPOS-APPLIES-EVERY-SCRIPTS-FEATURES` closed the same day, on inspection
+  rather than on work -- the unified positioning pass had already fixed it.)
+  **UAX #24 script extensions are done too** (§441;
+  `TD-FONT-SCRIPT-RUNS-IGNORE-SCRIPT-EXTENSIONS` closed). `script::runs` now
+  carries the intersection of the open run's script set with each new
+  character's, off a generated `Script_Extensions` table (669 characters, 119
+  sets, widest 23), so an Arabic-Indic digit no longer cuts a Thaana word in
+  three and a danda between two Bengali words resolves to Bengali. Script is
+  resolved over the whole text and the direction boundaries cut in afterwards,
+  which is what stops bidi rule I2 turning that digit into a one-character
+  Arabic run. Sweep: `agree` 51422 → 51423, `differ` 1179 → 1178.
+  **Bidirectional carets are done as well** (§442;
+  `TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL` closed). `x_of` and `offset_at` now
+  measure across the screen rather than through the string, and both carry an
+  `Affinity`, because at a direction boundary one byte offset has two equally
+  correct screen positions and the run cannot know which the user meant. The
+  run stores its per-glyph bidi levels for this and not merely the L2
+  permutation: reversing a one-glyph right-to-left stretch is the identity, so
+  the permutation alone would face a lone Hebrew letter the wrong way. The old
+  logical prefix sum survives as `width_upto`, for truncation.
+  **And the paragraph direction, which was the last of them** (§443;
+  `TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION` closed).
+  `shape_with(text, lang, base)` is the full form and the other two entry
+  points are it with defaults — one method rather than a matrix, because
+  language and direction are orthogonal. The left-to-right fast path is now
+  gated on the base as well as the text: `is_trivially_ltr` asserts a property
+  of the *answer*, not of the string, and under `Base::Rtl` plain Latin
+  resolves to level 2 inside a level-1 paragraph. The issue's own `"(123)"`
+  example turned out not to demonstrate the bug — L4 and L2 cancel for a
+  balanced pair — so the test uses `"(a"`, which draws as `a)` right to left.
+  **And the widgets, which had drawn every caret by logical prefix width and
+  so benefited from none of the above** — done
+  (`TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL` closed, §444).
+  `guitk::text::TextCursor { byte, affinity }` is the caret type; a click
+  returns one through `cursor_at` and it draws back where the click was, which
+  a bare byte offset cannot do at a direction boundary. Deliberately not `Ord`:
+  two cursors at one offset with different affinities are one place in the text
+  and two on the screen. And a selection is now a **list** of rectangles
+  (`ShapedRun::selection_rects`), because a range contiguous in the string need
+  not be contiguous on screen — the old two-edge form `x_of(to) - x_of(from)`
+  painted the characters *between* the pieces, telling the user they had
+  selected text they had not. `pathbar` and `textview` both loop over the
+  boxes; `textview` is read-only, so it needed the selection half only.
+  The audit that came with it found a crash class rather than a mis-draw:
+  three widgets held a byte-offset cursor and stepped it by **one byte**, so
+  the first non-ASCII character armed a panic in the next `String::insert`/
+  `remove` (`GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES`, fixed in
+  `guitk::widget::TextInput`, `guitk::modal::InputDialog` and `apps/editor`,
+  which additionally needed `snap_to_boundary` for a column carried between
+  lines). Still open, and wanting its own entry: arrow keys move in *logical*
+  order, so a caret crossing a direction boundary jumps across the screen
+  rather than stepping. Vello itself waits on `[A]`'s GPU driver.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
   (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it

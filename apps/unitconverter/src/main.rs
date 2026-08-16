@@ -723,6 +723,16 @@ impl UnitConverterApp {
         }
 
         // Handle text input for the from field when focused.
+        //
+        // `from_cursor` is a byte offset into `from_input` — `String::insert`
+        // and `String::remove` index by bytes — and the moves below step by
+        // one. That is only sound because the filter on the typing arm accepts
+        // nothing but ASCII digits, `.`, `-`, `e` and `E`, so every character
+        // in the field is exactly one byte wide. **Widening that filter without
+        // also stepping by `ch.len_utf8()` turns the next edit into a panic**,
+        // because both methods reject an offset inside a character. See
+        // `GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES` in `known-issues.md` for the
+        // three widgets where exactly that had happened.
         if self.from_focused && !self.from_dropdown_open && !self.to_dropdown_open {
             match key.key {
                 Key::Backspace => {

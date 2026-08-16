@@ -352,49 +352,49 @@ pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
     (0x3038, 0x303B, 53), // Hani
     (0x3041, 0x3096, 54), // Hira
     (0x309D, 0x309F, 54), // Hira
-    (0x30A1, 0x30FA, 55), // Kana
-    (0x30FD, 0x30FF, 55), // Kana
+    (0x30A1, 0x30FA, 54), // Kana
+    (0x30FD, 0x30FF, 54), // Kana
     (0x3105, 0x312F, 1), // Bopo
     (0x3131, 0x318E, 28), // Hang
     (0x31A0, 0x31BF, 1), // Bopo
-    (0x31F0, 0x31FF, 55), // Kana
+    (0x31F0, 0x31FF, 54), // Kana
     (0x3200, 0x321E, 28), // Hang
     (0x3260, 0x327E, 28), // Hang
-    (0x32D0, 0x32FE, 55), // Kana
-    (0x3300, 0x3357, 55), // Kana
+    (0x32D0, 0x32FE, 54), // Kana
+    (0x3300, 0x3357, 54), // Kana
     (0x3400, 0x4DBF, 53), // Hani
     (0x4E00, 0x9FFF, 53), // Hani
-    (0xA000, 0xA48C, 56), // Yiii
-    (0xA490, 0xA4C6, 56), // Yiii
-    (0xA4D0, 0xA4FF, 57), // Lisu
-    (0xA500, 0xA62B, 58), // Vaii
+    (0xA000, 0xA48C, 55), // Yiii
+    (0xA490, 0xA4C6, 55), // Yiii
+    (0xA4D0, 0xA4FF, 56), // Lisu
+    (0xA500, 0xA62B, 57), // Vaii
     (0xA640, 0xA69F, 4), // Cyrl
-    (0xA6A0, 0xA6F7, 59), // Bamu
+    (0xA6A0, 0xA6F7, 58), // Bamu
     (0xA722, 0xA787, 0), // Latn
     (0xA78B, 0xA7DC, 0), // Latn
     (0xA7F1, 0xA7FF, 0), // Latn
-    (0xA800, 0xA82C, 60), // Sylo
-    (0xA840, 0xA877, 61), // Phag
-    (0xA880, 0xA8C5, 62), // Saur
-    (0xA8CE, 0xA8D9, 62), // Saur
+    (0xA800, 0xA82C, 59), // Sylo
+    (0xA840, 0xA877, 60), // Phag
+    (0xA880, 0xA8C5, 61), // Saur
+    (0xA8CE, 0xA8D9, 61), // Saur
     (0xA8E0, 0xA8FF, 13), // Deva
-    (0xA900, 0xA92D, 63), // Kali
-    (0xA92F, 0xA92F, 63), // Kali
-    (0xA930, 0xA953, 64), // Rjng
-    (0xA95F, 0xA95F, 64), // Rjng
+    (0xA900, 0xA92D, 62), // Kali
+    (0xA92F, 0xA92F, 62), // Kali
+    (0xA930, 0xA953, 63), // Rjng
+    (0xA95F, 0xA95F, 63), // Rjng
     (0xA960, 0xA97C, 28), // Hang
-    (0xA980, 0xA9CD, 65), // Java
-    (0xA9D0, 0xA9D9, 65), // Java
-    (0xA9DE, 0xA9DF, 65), // Java
+    (0xA980, 0xA9CD, 64), // Java
+    (0xA9D0, 0xA9D9, 64), // Java
+    (0xA9DE, 0xA9DF, 64), // Java
     (0xA9E0, 0xA9FE, 26), // Mymr
-    (0xAA00, 0xAA36, 66), // Cham
-    (0xAA40, 0xAA4D, 66), // Cham
-    (0xAA50, 0xAA59, 66), // Cham
-    (0xAA5C, 0xAA5F, 66), // Cham
+    (0xAA00, 0xAA36, 65), // Cham
+    (0xAA40, 0xAA4D, 65), // Cham
+    (0xAA50, 0xAA59, 65), // Cham
+    (0xAA5C, 0xAA5F, 65), // Cham
     (0xAA60, 0xAA7F, 26), // Mymr
-    (0xAA80, 0xAAC2, 67), // Tavt
-    (0xAADB, 0xAADF, 67), // Tavt
-    (0xAAE0, 0xAAF6, 68), // Mtei
+    (0xAA80, 0xAAC2, 66), // Tavt
+    (0xAADB, 0xAADF, 66), // Tavt
+    (0xAAE0, 0xAAF6, 67), // Mtei
     (0xAB01, 0xAB06, 29), // Ethi
     (0xAB09, 0xAB0E, 29), // Ethi
     (0xAB11, 0xAB16, 29), // Ethi
@@ -405,8 +405,8 @@ pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
     (0xAB65, 0xAB65, 2), // Grek
     (0xAB66, 0xAB69, 0), // Latn
     (0xAB70, 0xABBF, 30), // Cher
-    (0xABC0, 0xABED, 68), // Mtei
-    (0xABF0, 0xABF9, 68), // Mtei
+    (0xABC0, 0xABED, 67), // Mtei
+    (0xABF0, 0xABF9, 67), // Mtei
     (0xAC00, 0xD7A3, 28), // Hang
     (0xD7B0, 0xD7C6, 28), // Hang
     (0xD7CB, 0xD7FB, 28), // Hang
@@ -428,293 +428,293 @@ pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
     (0xFE76, 0xFEFC, 7), // Arab
     (0xFF21, 0xFF3A, 0), // Latn
     (0xFF41, 0xFF5A, 0), // Latn
-    (0xFF66, 0xFF6F, 55), // Kana
-    (0xFF71, 0xFF9D, 55), // Kana
+    (0xFF66, 0xFF6F, 54), // Kana
+    (0xFF71, 0xFF9D, 54), // Kana
     (0xFFA0, 0xFFBE, 28), // Hang
     (0xFFC2, 0xFFC7, 28), // Hang
     (0xFFCA, 0xFFCF, 28), // Hang
     (0xFFD2, 0xFFD7, 28), // Hang
     (0xFFDA, 0xFFDC, 28), // Hang
-    (0x10000, 0x1000B, 69), // Linb
-    (0x1000D, 0x10026, 69), // Linb
-    (0x10028, 0x1003A, 69), // Linb
-    (0x1003C, 0x1003D, 69), // Linb
-    (0x1003F, 0x1004D, 69), // Linb
-    (0x10050, 0x1005D, 69), // Linb
-    (0x10080, 0x100FA, 69), // Linb
+    (0x10000, 0x1000B, 68), // Linb
+    (0x1000D, 0x10026, 68), // Linb
+    (0x10028, 0x1003A, 68), // Linb
+    (0x1003C, 0x1003D, 68), // Linb
+    (0x1003F, 0x1004D, 68), // Linb
+    (0x10050, 0x1005D, 68), // Linb
+    (0x10080, 0x100FA, 68), // Linb
     (0x10140, 0x1018E, 2), // Grek
     (0x101A0, 0x101A0, 2), // Grek
-    (0x10280, 0x1029C, 70), // Lyci
-    (0x102A0, 0x102D0, 71), // Cari
-    (0x10300, 0x10323, 72), // Ital
-    (0x1032D, 0x1032F, 72), // Ital
-    (0x10330, 0x1034A, 73), // Goth
-    (0x10350, 0x1037A, 74), // Perm
-    (0x10380, 0x1039D, 75), // Ugar
-    (0x1039F, 0x1039F, 75), // Ugar
-    (0x103A0, 0x103C3, 76), // Xpeo
-    (0x103C8, 0x103D5, 76), // Xpeo
-    (0x10400, 0x1044F, 77), // Dsrt
-    (0x10450, 0x1047F, 78), // Shaw
-    (0x10480, 0x1049D, 79), // Osma
-    (0x104A0, 0x104A9, 79), // Osma
-    (0x104B0, 0x104D3, 80), // Osge
-    (0x104D8, 0x104FB, 80), // Osge
-    (0x10500, 0x10527, 81), // Elba
-    (0x10530, 0x10563, 82), // Aghb
-    (0x1056F, 0x1056F, 82), // Aghb
-    (0x10570, 0x1057A, 83), // Vith
-    (0x1057C, 0x1058A, 83), // Vith
-    (0x1058C, 0x10592, 83), // Vith
-    (0x10594, 0x10595, 83), // Vith
-    (0x10597, 0x105A1, 83), // Vith
-    (0x105A3, 0x105B1, 83), // Vith
-    (0x105B3, 0x105B9, 83), // Vith
-    (0x105BB, 0x105BC, 83), // Vith
-    (0x105C0, 0x105F3, 84), // Todr
-    (0x10600, 0x10736, 85), // Lina
-    (0x10740, 0x10755, 85), // Lina
-    (0x10760, 0x10767, 85), // Lina
+    (0x10280, 0x1029C, 69), // Lyci
+    (0x102A0, 0x102D0, 70), // Cari
+    (0x10300, 0x10323, 71), // Ital
+    (0x1032D, 0x1032F, 71), // Ital
+    (0x10330, 0x1034A, 72), // Goth
+    (0x10350, 0x1037A, 73), // Perm
+    (0x10380, 0x1039D, 74), // Ugar
+    (0x1039F, 0x1039F, 74), // Ugar
+    (0x103A0, 0x103C3, 75), // Xpeo
+    (0x103C8, 0x103D5, 75), // Xpeo
+    (0x10400, 0x1044F, 76), // Dsrt
+    (0x10450, 0x1047F, 77), // Shaw
+    (0x10480, 0x1049D, 78), // Osma
+    (0x104A0, 0x104A9, 78), // Osma
+    (0x104B0, 0x104D3, 79), // Osge
+    (0x104D8, 0x104FB, 79), // Osge
+    (0x10500, 0x10527, 80), // Elba
+    (0x10530, 0x10563, 81), // Aghb
+    (0x1056F, 0x1056F, 81), // Aghb
+    (0x10570, 0x1057A, 82), // Vith
+    (0x1057C, 0x1058A, 82), // Vith
+    (0x1058C, 0x10592, 82), // Vith
+    (0x10594, 0x10595, 82), // Vith
+    (0x10597, 0x105A1, 82), // Vith
+    (0x105A3, 0x105B1, 82), // Vith
+    (0x105B3, 0x105B9, 82), // Vith
+    (0x105BB, 0x105BC, 82), // Vith
+    (0x105C0, 0x105F3, 83), // Todr
+    (0x10600, 0x10736, 84), // Lina
+    (0x10740, 0x10755, 84), // Lina
+    (0x10760, 0x10767, 84), // Lina
     (0x10780, 0x10785, 0), // Latn
     (0x10787, 0x107B0, 0), // Latn
     (0x107B2, 0x107BA, 0), // Latn
-    (0x10800, 0x10805, 86), // Cprt
-    (0x10808, 0x10808, 86), // Cprt
-    (0x1080A, 0x10835, 86), // Cprt
-    (0x10837, 0x10838, 86), // Cprt
-    (0x1083C, 0x1083C, 86), // Cprt
-    (0x1083F, 0x1083F, 86), // Cprt
-    (0x10840, 0x10855, 87), // Armi
-    (0x10857, 0x1085F, 87), // Armi
-    (0x10860, 0x1087F, 88), // Palm
-    (0x10880, 0x1089E, 89), // Nbat
-    (0x108A7, 0x108AF, 89), // Nbat
-    (0x108E0, 0x108F2, 90), // Hatr
-    (0x108F4, 0x108F5, 90), // Hatr
-    (0x108FB, 0x108FF, 90), // Hatr
-    (0x10900, 0x1091B, 91), // Phnx
-    (0x1091F, 0x1091F, 91), // Phnx
-    (0x10920, 0x10939, 92), // Lydi
-    (0x1093F, 0x1093F, 92), // Lydi
-    (0x10940, 0x10959, 93), // Sidt
-    (0x10980, 0x1099F, 94), // Mero
-    (0x109A0, 0x109B7, 95), // Merc
-    (0x109BC, 0x109CF, 95), // Merc
-    (0x109D2, 0x109FF, 95), // Merc
-    (0x10A00, 0x10A03, 96), // Khar
-    (0x10A05, 0x10A06, 96), // Khar
-    (0x10A0C, 0x10A13, 96), // Khar
-    (0x10A15, 0x10A17, 96), // Khar
-    (0x10A19, 0x10A35, 96), // Khar
-    (0x10A38, 0x10A3A, 96), // Khar
-    (0x10A3F, 0x10A48, 96), // Khar
-    (0x10A50, 0x10A58, 96), // Khar
-    (0x10A60, 0x10A7F, 97), // Sarb
-    (0x10A80, 0x10A9F, 98), // Narb
-    (0x10AC0, 0x10AE6, 99), // Mani
-    (0x10AEB, 0x10AF6, 99), // Mani
-    (0x10B00, 0x10B35, 100), // Avst
-    (0x10B39, 0x10B3F, 100), // Avst
-    (0x10B40, 0x10B55, 101), // Prti
-    (0x10B58, 0x10B5F, 101), // Prti
-    (0x10B60, 0x10B72, 102), // Phli
-    (0x10B78, 0x10B7F, 102), // Phli
-    (0x10B80, 0x10B91, 103), // Phlp
-    (0x10B99, 0x10B9C, 103), // Phlp
-    (0x10BA9, 0x10BAF, 103), // Phlp
-    (0x10C00, 0x10C48, 104), // Orkh
-    (0x10C80, 0x10CB2, 105), // Hung
-    (0x10CC0, 0x10CF2, 105), // Hung
-    (0x10CFA, 0x10CFF, 105), // Hung
-    (0x10D00, 0x10D27, 106), // Rohg
-    (0x10D30, 0x10D39, 106), // Rohg
-    (0x10D40, 0x10D65, 107), // Gara
-    (0x10D69, 0x10D85, 107), // Gara
-    (0x10D8E, 0x10D8F, 107), // Gara
+    (0x10800, 0x10805, 85), // Cprt
+    (0x10808, 0x10808, 85), // Cprt
+    (0x1080A, 0x10835, 85), // Cprt
+    (0x10837, 0x10838, 85), // Cprt
+    (0x1083C, 0x1083C, 85), // Cprt
+    (0x1083F, 0x1083F, 85), // Cprt
+    (0x10840, 0x10855, 86), // Armi
+    (0x10857, 0x1085F, 86), // Armi
+    (0x10860, 0x1087F, 87), // Palm
+    (0x10880, 0x1089E, 88), // Nbat
+    (0x108A7, 0x108AF, 88), // Nbat
+    (0x108E0, 0x108F2, 89), // Hatr
+    (0x108F4, 0x108F5, 89), // Hatr
+    (0x108FB, 0x108FF, 89), // Hatr
+    (0x10900, 0x1091B, 90), // Phnx
+    (0x1091F, 0x1091F, 90), // Phnx
+    (0x10920, 0x10939, 91), // Lydi
+    (0x1093F, 0x1093F, 91), // Lydi
+    (0x10940, 0x10959, 92), // Sidt
+    (0x10980, 0x1099F, 93), // Mero
+    (0x109A0, 0x109B7, 94), // Merc
+    (0x109BC, 0x109CF, 94), // Merc
+    (0x109D2, 0x109FF, 94), // Merc
+    (0x10A00, 0x10A03, 95), // Khar
+    (0x10A05, 0x10A06, 95), // Khar
+    (0x10A0C, 0x10A13, 95), // Khar
+    (0x10A15, 0x10A17, 95), // Khar
+    (0x10A19, 0x10A35, 95), // Khar
+    (0x10A38, 0x10A3A, 95), // Khar
+    (0x10A3F, 0x10A48, 95), // Khar
+    (0x10A50, 0x10A58, 95), // Khar
+    (0x10A60, 0x10A7F, 96), // Sarb
+    (0x10A80, 0x10A9F, 97), // Narb
+    (0x10AC0, 0x10AE6, 98), // Mani
+    (0x10AEB, 0x10AF6, 98), // Mani
+    (0x10B00, 0x10B35, 99), // Avst
+    (0x10B39, 0x10B3F, 99), // Avst
+    (0x10B40, 0x10B55, 100), // Prti
+    (0x10B58, 0x10B5F, 100), // Prti
+    (0x10B60, 0x10B72, 101), // Phli
+    (0x10B78, 0x10B7F, 101), // Phli
+    (0x10B80, 0x10B91, 102), // Phlp
+    (0x10B99, 0x10B9C, 102), // Phlp
+    (0x10BA9, 0x10BAF, 102), // Phlp
+    (0x10C00, 0x10C48, 103), // Orkh
+    (0x10C80, 0x10CB2, 104), // Hung
+    (0x10CC0, 0x10CF2, 104), // Hung
+    (0x10CFA, 0x10CFF, 104), // Hung
+    (0x10D00, 0x10D27, 105), // Rohg
+    (0x10D30, 0x10D39, 105), // Rohg
+    (0x10D40, 0x10D65, 106), // Gara
+    (0x10D69, 0x10D85, 106), // Gara
+    (0x10D8E, 0x10D8F, 106), // Gara
     (0x10E60, 0x10E7E, 7), // Arab
-    (0x10E80, 0x10EA9, 108), // Yezi
-    (0x10EAB, 0x10EAD, 108), // Yezi
-    (0x10EB0, 0x10EB1, 108), // Yezi
+    (0x10E80, 0x10EA9, 107), // Yezi
+    (0x10EAB, 0x10EAD, 107), // Yezi
+    (0x10EB0, 0x10EB1, 107), // Yezi
     (0x10EC2, 0x10EC7, 7), // Arab
     (0x10ED0, 0x10ED8, 7), // Arab
     (0x10EFA, 0x10EFF, 7), // Arab
-    (0x10F00, 0x10F27, 109), // Sogo
-    (0x10F30, 0x10F59, 110), // Sogd
-    (0x10F70, 0x10F89, 111), // Ougr
-    (0x10FB0, 0x10FCB, 112), // Chrs
-    (0x10FE0, 0x10FF6, 113), // Elym
-    (0x11000, 0x1104D, 114), // Brah
-    (0x11052, 0x11075, 114), // Brah
-    (0x1107F, 0x1107F, 114), // Brah
-    (0x11080, 0x110C2, 115), // Kthi
-    (0x110CD, 0x110CD, 115), // Kthi
-    (0x110D0, 0x110E8, 116), // Sora
-    (0x110F0, 0x110F9, 116), // Sora
-    (0x11100, 0x11134, 117), // Cakm
-    (0x11136, 0x11147, 117), // Cakm
-    (0x11150, 0x11176, 118), // Mahj
-    (0x11180, 0x111DF, 119), // Shrd
+    (0x10F00, 0x10F27, 108), // Sogo
+    (0x10F30, 0x10F59, 109), // Sogd
+    (0x10F70, 0x10F89, 110), // Ougr
+    (0x10FB0, 0x10FCB, 111), // Chrs
+    (0x10FE0, 0x10FF6, 112), // Elym
+    (0x11000, 0x1104D, 113), // Brah
+    (0x11052, 0x11075, 113), // Brah
+    (0x1107F, 0x1107F, 113), // Brah
+    (0x11080, 0x110C2, 114), // Kthi
+    (0x110CD, 0x110CD, 114), // Kthi
+    (0x110D0, 0x110E8, 115), // Sora
+    (0x110F0, 0x110F9, 115), // Sora
+    (0x11100, 0x11134, 116), // Cakm
+    (0x11136, 0x11147, 116), // Cakm
+    (0x11150, 0x11176, 117), // Mahj
+    (0x11180, 0x111DF, 118), // Shrd
     (0x111E1, 0x111F4, 22), // Sinh
-    (0x11200, 0x11211, 120), // Khoj
-    (0x11213, 0x11241, 120), // Khoj
-    (0x11280, 0x11286, 121), // Mult
-    (0x11288, 0x11288, 121), // Mult
-    (0x1128A, 0x1128D, 121), // Mult
-    (0x1128F, 0x1129D, 121), // Mult
-    (0x1129F, 0x112A9, 121), // Mult
-    (0x112B0, 0x112EA, 122), // Sind
-    (0x112F0, 0x112F9, 122), // Sind
-    (0x11300, 0x11303, 123), // Gran
-    (0x11305, 0x1130C, 123), // Gran
-    (0x1130F, 0x11310, 123), // Gran
-    (0x11313, 0x11328, 123), // Gran
-    (0x1132A, 0x11330, 123), // Gran
-    (0x11332, 0x11333, 123), // Gran
-    (0x11335, 0x11339, 123), // Gran
-    (0x1133C, 0x11344, 123), // Gran
-    (0x11347, 0x11348, 123), // Gran
-    (0x1134B, 0x1134D, 123), // Gran
-    (0x11350, 0x11350, 123), // Gran
-    (0x11357, 0x11357, 123), // Gran
-    (0x1135D, 0x11363, 123), // Gran
-    (0x11366, 0x1136C, 123), // Gran
-    (0x11370, 0x11374, 123), // Gran
-    (0x11380, 0x11389, 124), // Tutg
-    (0x1138B, 0x1138B, 124), // Tutg
-    (0x1138E, 0x1138E, 124), // Tutg
-    (0x11390, 0x113B5, 124), // Tutg
-    (0x113B7, 0x113C0, 124), // Tutg
-    (0x113C2, 0x113C2, 124), // Tutg
-    (0x113C5, 0x113C5, 124), // Tutg
-    (0x113C7, 0x113CA, 124), // Tutg
-    (0x113CC, 0x113D5, 124), // Tutg
-    (0x113D7, 0x113D8, 124), // Tutg
-    (0x113E1, 0x113E2, 124), // Tutg
-    (0x11400, 0x1145B, 125), // Newa
-    (0x1145D, 0x11461, 125), // Newa
-    (0x11480, 0x114C7, 126), // Tirh
-    (0x114D0, 0x114D9, 126), // Tirh
-    (0x11580, 0x115B5, 127), // Sidd
-    (0x115B8, 0x115DD, 127), // Sidd
-    (0x11600, 0x11644, 128), // Modi
-    (0x11650, 0x11659, 128), // Modi
+    (0x11200, 0x11211, 119), // Khoj
+    (0x11213, 0x11241, 119), // Khoj
+    (0x11280, 0x11286, 120), // Mult
+    (0x11288, 0x11288, 120), // Mult
+    (0x1128A, 0x1128D, 120), // Mult
+    (0x1128F, 0x1129D, 120), // Mult
+    (0x1129F, 0x112A9, 120), // Mult
+    (0x112B0, 0x112EA, 121), // Sind
+    (0x112F0, 0x112F9, 121), // Sind
+    (0x11300, 0x11303, 122), // Gran
+    (0x11305, 0x1130C, 122), // Gran
+    (0x1130F, 0x11310, 122), // Gran
+    (0x11313, 0x11328, 122), // Gran
+    (0x1132A, 0x11330, 122), // Gran
+    (0x11332, 0x11333, 122), // Gran
+    (0x11335, 0x11339, 122), // Gran
+    (0x1133C, 0x11344, 122), // Gran
+    (0x11347, 0x11348, 122), // Gran
+    (0x1134B, 0x1134D, 122), // Gran
+    (0x11350, 0x11350, 122), // Gran
+    (0x11357, 0x11357, 122), // Gran
+    (0x1135D, 0x11363, 122), // Gran
+    (0x11366, 0x1136C, 122), // Gran
+    (0x11370, 0x11374, 122), // Gran
+    (0x11380, 0x11389, 123), // Tutg
+    (0x1138B, 0x1138B, 123), // Tutg
+    (0x1138E, 0x1138E, 123), // Tutg
+    (0x11390, 0x113B5, 123), // Tutg
+    (0x113B7, 0x113C0, 123), // Tutg
+    (0x113C2, 0x113C2, 123), // Tutg
+    (0x113C5, 0x113C5, 123), // Tutg
+    (0x113C7, 0x113CA, 123), // Tutg
+    (0x113CC, 0x113D5, 123), // Tutg
+    (0x113D7, 0x113D8, 123), // Tutg
+    (0x113E1, 0x113E2, 123), // Tutg
+    (0x11400, 0x1145B, 124), // Newa
+    (0x1145D, 0x11461, 124), // Newa
+    (0x11480, 0x114C7, 125), // Tirh
+    (0x114D0, 0x114D9, 125), // Tirh
+    (0x11580, 0x115B5, 126), // Sidd
+    (0x115B8, 0x115DD, 126), // Sidd
+    (0x11600, 0x11644, 127), // Modi
+    (0x11650, 0x11659, 127), // Modi
     (0x11660, 0x1166C, 39), // Mong
-    (0x11680, 0x116B9, 129), // Takr
-    (0x116C0, 0x116C9, 129), // Takr
+    (0x11680, 0x116B9, 128), // Takr
+    (0x116C0, 0x116C9, 128), // Takr
     (0x116D0, 0x116E3, 26), // Mymr
-    (0x11700, 0x1171A, 130), // Ahom
-    (0x1171D, 0x1172B, 130), // Ahom
-    (0x11730, 0x11746, 130), // Ahom
-    (0x11800, 0x1183B, 131), // Dogr
-    (0x118A0, 0x118F2, 132), // Wara
-    (0x118FF, 0x118FF, 132), // Wara
-    (0x11900, 0x11906, 133), // Diak
-    (0x11909, 0x11909, 133), // Diak
-    (0x1190C, 0x11913, 133), // Diak
-    (0x11915, 0x11916, 133), // Diak
-    (0x11918, 0x11935, 133), // Diak
-    (0x11937, 0x11938, 133), // Diak
-    (0x1193B, 0x11946, 133), // Diak
-    (0x11950, 0x11959, 133), // Diak
-    (0x119A0, 0x119A7, 134), // Nand
-    (0x119AA, 0x119D7, 134), // Nand
-    (0x119DA, 0x119E4, 134), // Nand
-    (0x11A00, 0x11A47, 135), // Zanb
-    (0x11A50, 0x11AA2, 136), // Soyo
+    (0x11700, 0x1171A, 129), // Ahom
+    (0x1171D, 0x1172B, 129), // Ahom
+    (0x11730, 0x11746, 129), // Ahom
+    (0x11800, 0x1183B, 130), // Dogr
+    (0x118A0, 0x118F2, 131), // Wara
+    (0x118FF, 0x118FF, 131), // Wara
+    (0x11900, 0x11906, 132), // Diak
+    (0x11909, 0x11909, 132), // Diak
+    (0x1190C, 0x11913, 132), // Diak
+    (0x11915, 0x11916, 132), // Diak
+    (0x11918, 0x11935, 132), // Diak
+    (0x11937, 0x11938, 132), // Diak
+    (0x1193B, 0x11946, 132), // Diak
+    (0x11950, 0x11959, 132), // Diak
+    (0x119A0, 0x119A7, 133), // Nand
+    (0x119AA, 0x119D7, 133), // Nand
+    (0x119DA, 0x119E4, 133), // Nand
+    (0x11A00, 0x11A47, 134), // Zanb
+    (0x11A50, 0x11AA2, 135), // Soyo
     (0x11AB0, 0x11ABF, 31), // Cans
-    (0x11AC0, 0x11AF8, 137), // Pauc
+    (0x11AC0, 0x11AF8, 136), // Pauc
     (0x11B00, 0x11B09, 13), // Deva
-    (0x11B60, 0x11B67, 119), // Shrd
-    (0x11BC0, 0x11BE1, 138), // Sunu
-    (0x11BF0, 0x11BF9, 138), // Sunu
-    (0x11C00, 0x11C08, 139), // Bhks
-    (0x11C0A, 0x11C36, 139), // Bhks
-    (0x11C38, 0x11C45, 139), // Bhks
-    (0x11C50, 0x11C6C, 139), // Bhks
-    (0x11C70, 0x11C8F, 140), // Marc
-    (0x11C92, 0x11CA7, 140), // Marc
-    (0x11CA9, 0x11CB6, 140), // Marc
-    (0x11D00, 0x11D06, 141), // Gonm
-    (0x11D08, 0x11D09, 141), // Gonm
-    (0x11D0B, 0x11D36, 141), // Gonm
-    (0x11D3A, 0x11D3A, 141), // Gonm
-    (0x11D3C, 0x11D3D, 141), // Gonm
-    (0x11D3F, 0x11D47, 141), // Gonm
-    (0x11D50, 0x11D59, 141), // Gonm
-    (0x11D60, 0x11D65, 142), // Gong
-    (0x11D67, 0x11D68, 142), // Gong
-    (0x11D6A, 0x11D8E, 142), // Gong
-    (0x11D90, 0x11D91, 142), // Gong
-    (0x11D93, 0x11D98, 142), // Gong
-    (0x11DA0, 0x11DA9, 142), // Gong
-    (0x11DB0, 0x11DDB, 143), // Tols
-    (0x11DE0, 0x11DE9, 143), // Tols
-    (0x11EE0, 0x11EF8, 144), // Maka
-    (0x11F00, 0x11F10, 145), // Kawi
-    (0x11F12, 0x11F3A, 145), // Kawi
-    (0x11F3E, 0x11F5A, 145), // Kawi
-    (0x11FB0, 0x11FB0, 57), // Lisu
+    (0x11B60, 0x11B67, 118), // Shrd
+    (0x11BC0, 0x11BE1, 137), // Sunu
+    (0x11BF0, 0x11BF9, 137), // Sunu
+    (0x11C00, 0x11C08, 138), // Bhks
+    (0x11C0A, 0x11C36, 138), // Bhks
+    (0x11C38, 0x11C45, 138), // Bhks
+    (0x11C50, 0x11C6C, 138), // Bhks
+    (0x11C70, 0x11C8F, 139), // Marc
+    (0x11C92, 0x11CA7, 139), // Marc
+    (0x11CA9, 0x11CB6, 139), // Marc
+    (0x11D00, 0x11D06, 140), // Gonm
+    (0x11D08, 0x11D09, 140), // Gonm
+    (0x11D0B, 0x11D36, 140), // Gonm
+    (0x11D3A, 0x11D3A, 140), // Gonm
+    (0x11D3C, 0x11D3D, 140), // Gonm
+    (0x11D3F, 0x11D47, 140), // Gonm
+    (0x11D50, 0x11D59, 140), // Gonm
+    (0x11D60, 0x11D65, 141), // Gong
+    (0x11D67, 0x11D68, 141), // Gong
+    (0x11D6A, 0x11D8E, 141), // Gong
+    (0x11D90, 0x11D91, 141), // Gong
+    (0x11D93, 0x11D98, 141), // Gong
+    (0x11DA0, 0x11DA9, 141), // Gong
+    (0x11DB0, 0x11DDB, 142), // Tols
+    (0x11DE0, 0x11DE9, 142), // Tols
+    (0x11EE0, 0x11EF8, 143), // Maka
+    (0x11F00, 0x11F10, 144), // Kawi
+    (0x11F12, 0x11F3A, 144), // Kawi
+    (0x11F3E, 0x11F5A, 144), // Kawi
+    (0x11FB0, 0x11FB0, 56), // Lisu
     (0x11FC0, 0x11FF1, 18), // Taml
     (0x11FFF, 0x11FFF, 18), // Taml
-    (0x12000, 0x12399, 146), // Xsux
-    (0x12400, 0x1246E, 146), // Xsux
-    (0x12470, 0x12474, 146), // Xsux
-    (0x12480, 0x12543, 146), // Xsux
-    (0x12F90, 0x12FF2, 147), // Cpmn
-    (0x13000, 0x13455, 148), // Egyp
-    (0x13460, 0x143FA, 148), // Egyp
-    (0x14400, 0x14646, 149), // Hluw
-    (0x16100, 0x16139, 150), // Gukh
-    (0x16800, 0x16A38, 59), // Bamu
-    (0x16A40, 0x16A5E, 151), // Mroo
-    (0x16A60, 0x16A69, 151), // Mroo
-    (0x16A6E, 0x16A6F, 151), // Mroo
-    (0x16A70, 0x16ABE, 152), // Tnsa
-    (0x16AC0, 0x16AC9, 152), // Tnsa
-    (0x16AD0, 0x16AED, 153), // Bass
-    (0x16AF0, 0x16AF5, 153), // Bass
-    (0x16B00, 0x16B45, 154), // Hmng
-    (0x16B50, 0x16B59, 154), // Hmng
-    (0x16B5B, 0x16B61, 154), // Hmng
-    (0x16B63, 0x16B77, 154), // Hmng
-    (0x16B7D, 0x16B8F, 154), // Hmng
-    (0x16D40, 0x16D79, 155), // Krai
-    (0x16E40, 0x16E9A, 156), // Medf
-    (0x16EA0, 0x16EB8, 157), // Berf
-    (0x16EBB, 0x16ED3, 157), // Berf
-    (0x16F00, 0x16F4A, 158), // Plrd
-    (0x16F4F, 0x16F87, 158), // Plrd
-    (0x16F8F, 0x16F9F, 158), // Plrd
-    (0x16FE0, 0x16FE0, 159), // Tang
-    (0x16FE1, 0x16FE1, 160), // Nshu
+    (0x12000, 0x12399, 145), // Xsux
+    (0x12400, 0x1246E, 145), // Xsux
+    (0x12470, 0x12474, 145), // Xsux
+    (0x12480, 0x12543, 145), // Xsux
+    (0x12F90, 0x12FF2, 146), // Cpmn
+    (0x13000, 0x13455, 147), // Egyp
+    (0x13460, 0x143FA, 147), // Egyp
+    (0x14400, 0x14646, 148), // Hluw
+    (0x16100, 0x16139, 149), // Gukh
+    (0x16800, 0x16A38, 58), // Bamu
+    (0x16A40, 0x16A5E, 150), // Mroo
+    (0x16A60, 0x16A69, 150), // Mroo
+    (0x16A6E, 0x16A6F, 150), // Mroo
+    (0x16A70, 0x16ABE, 151), // Tnsa
+    (0x16AC0, 0x16AC9, 151), // Tnsa
+    (0x16AD0, 0x16AED, 152), // Bass
+    (0x16AF0, 0x16AF5, 152), // Bass
+    (0x16B00, 0x16B45, 153), // Hmng
+    (0x16B50, 0x16B59, 153), // Hmng
+    (0x16B5B, 0x16B61, 153), // Hmng
+    (0x16B63, 0x16B77, 153), // Hmng
+    (0x16B7D, 0x16B8F, 153), // Hmng
+    (0x16D40, 0x16D79, 154), // Krai
+    (0x16E40, 0x16E9A, 155), // Medf
+    (0x16EA0, 0x16EB8, 156), // Berf
+    (0x16EBB, 0x16ED3, 156), // Berf
+    (0x16F00, 0x16F4A, 157), // Plrd
+    (0x16F4F, 0x16F87, 157), // Plrd
+    (0x16F8F, 0x16F9F, 157), // Plrd
+    (0x16FE0, 0x16FE0, 158), // Tang
+    (0x16FE1, 0x16FE1, 159), // Nshu
     (0x16FE2, 0x16FE3, 53), // Hani
-    (0x16FE4, 0x16FE4, 161), // Kits
+    (0x16FE4, 0x16FE4, 160), // Kits
     (0x16FF0, 0x16FF6, 53), // Hani
-    (0x17000, 0x18AFF, 159), // Tang
-    (0x18B00, 0x18CD5, 161), // Kits
-    (0x18CFF, 0x18CFF, 161), // Kits
-    (0x18D00, 0x18D1E, 159), // Tang
-    (0x18D80, 0x18DF2, 159), // Tang
-    (0x1AFF0, 0x1AFF3, 55), // Kana
-    (0x1AFF5, 0x1AFFB, 55), // Kana
-    (0x1AFFD, 0x1AFFE, 55), // Kana
-    (0x1B000, 0x1B000, 55), // Kana
+    (0x17000, 0x18AFF, 158), // Tang
+    (0x18B00, 0x18CD5, 160), // Kits
+    (0x18CFF, 0x18CFF, 160), // Kits
+    (0x18D00, 0x18D1E, 158), // Tang
+    (0x18D80, 0x18DF2, 158), // Tang
+    (0x1AFF0, 0x1AFF3, 54), // Kana
+    (0x1AFF5, 0x1AFFB, 54), // Kana
+    (0x1AFFD, 0x1AFFE, 54), // Kana
+    (0x1B000, 0x1B000, 54), // Kana
     (0x1B001, 0x1B11F, 54), // Hira
-    (0x1B120, 0x1B122, 55), // Kana
+    (0x1B120, 0x1B122, 54), // Kana
     (0x1B132, 0x1B132, 54), // Hira
     (0x1B150, 0x1B152, 54), // Hira
-    (0x1B155, 0x1B155, 55), // Kana
-    (0x1B164, 0x1B167, 55), // Kana
-    (0x1B170, 0x1B2FB, 160), // Nshu
-    (0x1BC00, 0x1BC6A, 162), // Dupl
-    (0x1BC70, 0x1BC7C, 162), // Dupl
-    (0x1BC80, 0x1BC88, 162), // Dupl
-    (0x1BC90, 0x1BC99, 162), // Dupl
-    (0x1BC9C, 0x1BC9F, 162), // Dupl
+    (0x1B155, 0x1B155, 54), // Kana
+    (0x1B164, 0x1B167, 54), // Kana
+    (0x1B170, 0x1B2FB, 159), // Nshu
+    (0x1BC00, 0x1BC6A, 161), // Dupl
+    (0x1BC70, 0x1BC7C, 161), // Dupl
+    (0x1BC80, 0x1BC88, 161), // Dupl
+    (0x1BC90, 0x1BC99, 161), // Dupl
+    (0x1BC9C, 0x1BC9F, 161), // Dupl
     (0x1D200, 0x1D245, 2), // Grek
-    (0x1D800, 0x1DA8B, 163), // Sgnw
-    (0x1DA9B, 0x1DA9F, 163), // Sgnw
-    (0x1DAA1, 0x1DAAF, 163), // Sgnw
+    (0x1D800, 0x1DA8B, 162), // Sgnw
+    (0x1DA9B, 0x1DA9F, 162), // Sgnw
+    (0x1DAA1, 0x1DAAF, 162), // Sgnw
     (0x1DF00, 0x1DF1E, 0), // Latn
     (0x1DF25, 0x1DF2A, 0), // Latn
     (0x1E000, 0x1E006, 51), // Glag
@@ -724,28 +724,28 @@ pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
     (0x1E026, 0x1E02A, 51), // Glag
     (0x1E030, 0x1E06D, 4), // Cyrl
     (0x1E08F, 0x1E08F, 4), // Cyrl
-    (0x1E100, 0x1E12C, 164), // Hmnp
-    (0x1E130, 0x1E13D, 164), // Hmnp
-    (0x1E140, 0x1E149, 164), // Hmnp
-    (0x1E14E, 0x1E14F, 164), // Hmnp
-    (0x1E290, 0x1E2AE, 165), // Toto
-    (0x1E2C0, 0x1E2F9, 166), // Wcho
-    (0x1E2FF, 0x1E2FF, 166), // Wcho
-    (0x1E4D0, 0x1E4F9, 167), // Nagm
-    (0x1E5D0, 0x1E5FA, 168), // Onao
-    (0x1E5FF, 0x1E5FF, 168), // Onao
-    (0x1E6C0, 0x1E6DE, 169), // Tayo
-    (0x1E6E0, 0x1E6F5, 169), // Tayo
-    (0x1E6FE, 0x1E6FF, 169), // Tayo
+    (0x1E100, 0x1E12C, 163), // Hmnp
+    (0x1E130, 0x1E13D, 163), // Hmnp
+    (0x1E140, 0x1E149, 163), // Hmnp
+    (0x1E14E, 0x1E14F, 163), // Hmnp
+    (0x1E290, 0x1E2AE, 164), // Toto
+    (0x1E2C0, 0x1E2F9, 165), // Wcho
+    (0x1E2FF, 0x1E2FF, 165), // Wcho
+    (0x1E4D0, 0x1E4F9, 166), // Nagm
+    (0x1E5D0, 0x1E5FA, 167), // Onao
+    (0x1E5FF, 0x1E5FF, 167), // Onao
+    (0x1E6C0, 0x1E6DE, 168), // Tayo
+    (0x1E6E0, 0x1E6F5, 168), // Tayo
+    (0x1E6FE, 0x1E6FF, 168), // Tayo
     (0x1E7E0, 0x1E7E6, 29), // Ethi
     (0x1E7E8, 0x1E7EB, 29), // Ethi
     (0x1E7ED, 0x1E7EE, 29), // Ethi
     (0x1E7F0, 0x1E7FE, 29), // Ethi
-    (0x1E800, 0x1E8C4, 170), // Mend
-    (0x1E8C7, 0x1E8D6, 170), // Mend
-    (0x1E900, 0x1E94B, 171), // Adlm
-    (0x1E950, 0x1E959, 171), // Adlm
-    (0x1E95E, 0x1E95F, 171), // Adlm
+    (0x1E800, 0x1E8C4, 169), // Mend
+    (0x1E8C7, 0x1E8D6, 169), // Mend
+    (0x1E900, 0x1E94B, 170), // Adlm
+    (0x1E950, 0x1E959, 170), // Adlm
+    (0x1E95E, 0x1E95F, 170), // Adlm
     (0x1EE00, 0x1EE03, 7), // Arab
     (0x1EE05, 0x1EE1F, 7), // Arab
     (0x1EE21, 0x1EE22, 7), // Arab
@@ -797,7 +797,10 @@ pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
 /// because OpenType revised the Indic tags and a font may use either
 /// spelling. Scripts with a single tag repeat it, so a caller can
 /// always try both without asking how many there are.
-pub(crate) static SCRIPT_TAGS: [([u8; 4], [u8; 4]); 172] = [
+///
+/// One row per tag pair, not per Unicode script: Hiragana and
+/// Katakana are both `kana`, and a font cannot tell them apart.
+pub(crate) static SCRIPT_TAGS: [([u8; 4], [u8; 4]); 171] = [
     (*b"latn", *b"latn"), // Latn
     (*b"bopo", *b"bopo"), // Bopo
     (*b"grek", *b"grek"), // Grek
@@ -852,8 +855,7 @@ pub(crate) static SCRIPT_TAGS: [([u8; 4], [u8; 4]); 172] = [
     (*b"glag", *b"glag"), // Glag
     (*b"tfng", *b"tfng"), // Tfng
     (*b"hani", *b"hani"), // Hani
-    (*b"kana", *b"kana"), // Hira
-    (*b"kana", *b"kana"), // Kana
+    (*b"kana", *b"kana"), // Hira Kana
     (*b"yi  ", *b"yi  "), // Yiii
     (*b"lisu", *b"lisu"), // Lisu
     (*b"vai ", *b"vai "), // Vaii
@@ -970,4 +972,233 @@ pub(crate) static SCRIPT_TAGS: [([u8; 4], [u8; 4]); 172] = [
     (*b"tayo", *b"tayo"), // Tayo
     (*b"mend", *b"mend"), // Mend
     (*b"adlm", *b"adlm"), // Adlm
+];
+
+/// The largest `Script_Extensions` set in this Unicode version.
+///
+/// A run's script set only ever shrinks, so this bounds the inline
+/// array a run splitter needs to carry one in.
+pub(crate) const WIDEST_EXTENSION: usize = 23;
+
+/// `Script_Extensions` where it differs from `Script`, as sorted,
+/// disjoint ranges: `(first, last, pool_offset, count)`. The rows
+/// live at `SCRIPT_EXT_POOL[pool_offset..][..count]`, the
+/// character's own script first.
+///
+/// A character in no range is used by exactly the one script
+/// `SCRIPT_RANGES` gives it, or by none at all.
+pub(crate) static SCRIPT_EXT_RANGES: [(u32, u32, u16, u16); 177] = [
+    (0x00B7, 0x00B7, 44, 16), // Latn Grek Copt Geor Glag Hani Cari Goth Perm Shaw Elba Lydi Avst Mahj Gong Dupl
+    (0x02BC, 0x02BC, 225, 7), // Latn Cyrl Deva Beng Thai Lisu Toto
+    (0x02C7, 0x02C7, 403, 2), // Latn Bopo
+    (0x02C9, 0x02CB, 403, 2), // Latn Bopo
+    (0x02CD, 0x02CD, 413, 2), // Latn Lisu
+    (0x02D7, 0x02D7, 405, 2), // Latn Thai
+    (0x02D9, 0x02D9, 403, 2), // Latn Bopo
+    (0x0300, 0x0300, 193, 8), // Latn Grek Copt Cyrl Cher Tale Perm Sunu
+    (0x0301, 0x0301, 201, 8), // Latn Grek Cyrl Cher Tale Osge Todr Sunu
+    (0x0302, 0x0302, 301, 4), // Latn Cyrl Cher Tfng
+    (0x0303, 0x0303, 282, 5), // Latn Syrc Thai Glag Sunu
+    (0x0304, 0x0304, 131, 11), // Latn Grek Copt Cyrl Syrc Cher Tfng Goth Osge Aghb Todr
+    (0x0305, 0x0305, 253, 6), // Latn Copt Glag Hira/Kana Goth Elba
+    (0x0306, 0x0306, 277, 5), // Latn Grek Cyrl Tfng Perm
+    (0x0307, 0x0307, 175, 9), // Latn Copt Hebr Syrc Tale Tfng Perm Todr Dupl
+    (0x0308, 0x0308, 142, 11), // Latn Grek Cyrl Armn Hebr Syrc Tale Tfng Goth Perm Dupl
+    (0x0309, 0x0309, 409, 2), // Latn Tfng
+    (0x030A, 0x030A, 346, 3), // Latn Syrc Dupl
+    (0x030B, 0x030B, 305, 4), // Latn Cyrl Cher Osge
+    (0x030C, 0x030C, 358, 3), // Latn Cher Tale
+    (0x030D, 0x030D, 417, 2), // Latn Sunu
+    (0x030E, 0x030E, 407, 2), // Latn Ethi
+    (0x0310, 0x0310, 417, 2), // Latn Sunu
+    (0x0311, 0x0311, 340, 3), // Latn Cyrl Todr
+    (0x0313, 0x0313, 297, 4), // Latn Grek Perm Todr
+    (0x0323, 0x0323, 259, 6), // Latn Syrc Cher Tfng Hira/Kana Dupl
+    (0x0324, 0x0324, 309, 4), // Latn Syrc Cher Dupl
+    (0x0325, 0x0325, 232, 2), // Latn Syrc
+    (0x032D, 0x032D, 343, 3), // Latn Syrc Sunu
+    (0x032E, 0x032E, 232, 2), // Latn Syrc
+    (0x0330, 0x0330, 259, 3), // Latn Syrc Cher
+    (0x0331, 0x0331, 232, 7), // Latn Syrc Thai Cher Goth Aghb Sunu
+    (0x0342, 0x0342, 45, 1), // Grek
+    (0x0345, 0x0345, 45, 1), // Grek
+    (0x0358, 0x0358, 415, 2), // Latn Osge
+    (0x035E, 0x035E, 364, 3), // Latn Aghb Todr
+    (0x0363, 0x036F, 44, 1), // Latn
+    (0x0374, 0x0375, 45, 2), // Grek Copt
+    (0x0483, 0x0483, 425, 2), // Cyrl Perm
+    (0x0484, 0x0484, 423, 2), // Cyrl Glag
+    (0x0485, 0x0486, 225, 2), // Latn Cyrl
+    (0x0487, 0x0487, 423, 2), // Cyrl Glag
+    (0x0589, 0x0589, 367, 3), // Armn Geor Glag
+    (0x060C, 0x060C, 217, 7), // Arab Syrc Thaa Nkoo Rohg Gara Yezi
+    (0x061B, 0x061B, 217, 7), // Arab Syrc Thaa Nkoo Rohg Gara Yezi
+    (0x061C, 0x061C, 217, 3), // Arab Syrc Thaa
+    (0x061F, 0x061F, 217, 8), // Arab Syrc Thaa Nkoo Rohg Gara Yezi Adlm
+    (0x0640, 0x0640, 184, 9), // Arab Syrc Mand Mani Phlp Rohg Sogd Ougr Adlm
+    (0x064B, 0x0655, 184, 2), // Arab Syrc
+    (0x0660, 0x0669, 370, 3), // Arab Thaa Yezi
+    (0x0670, 0x0670, 184, 2), // Arab Syrc
+    (0x06D4, 0x06D4, 429, 2), // Arab Rohg
+    (0x0951, 0x0951, 76, 15), // Latn Deva Beng Guru Gujr Orya Taml Telu Knda Mlym Shrd Gran Newa Tirh Nand
+    (0x0952, 0x0952, 106, 13), // Latn Deva Beng Guru Gujr Orya Taml Telu Knda Mlym Gran Newa Tirh
+    (0x0964, 0x0964, 23, 21), // Deva Beng Guru Gujr Orya Taml Telu Knda Mlym Sinh Sylo Mahj Sind Gran Tirh Takr Dogr Nand Gonm Gong Onao
+    (0x0965, 0x0965, 0, 23), // Deva Beng Guru Gujr Orya Taml Telu Knda Mlym Sinh Limb Sylo Mahj Sind Gran Tirh Takr Dogr Nand Gonm Gong Gukh Onao
+    (0x0966, 0x096F, 329, 4), // Deva Kthi Mahj Dogr
+    (0x09E6, 0x09EF, 388, 3), // Beng Sylo Cakm
+    (0x0A66, 0x0A6F, 435, 2), // Guru Mult
+    (0x0AE6, 0x0AEF, 437, 2), // Gujr Khoj
+    (0x0BE6, 0x0BF3, 439, 2), // Taml Gran
+    (0x0CE6, 0x0CEF, 391, 3), // Knda Tutg Nand
+    (0x1040, 0x1049, 394, 3), // Mymr Tale Cakm
+    (0x10FB, 0x10FB, 355, 3), // Latn Geor Glag
+    (0x16EB, 0x16ED, 451, 1), // Runr
+    (0x1735, 0x1736, 333, 4), // Tglg Hano Buhd Tagb
+    (0x1802, 0x1803, 362, 2), // Mong Phag
+    (0x1805, 0x1805, 362, 2), // Mong Phag
+    (0x1CD0, 0x1CD0, 317, 4), // Deva Beng Knda Gran
+    (0x1CD1, 0x1CD1, 0, 1), // Deva
+    (0x1CD2, 0x1CD2, 317, 4), // Deva Beng Knda Gran
+    (0x1CD3, 0x1CD3, 325, 3), // Deva Knda Gran
+    (0x1CD4, 0x1CD4, 0, 1), // Deva
+    (0x1CD5, 0x1CD5, 292, 5), // Deva Beng Telu Newa Tirh
+    (0x1CD6, 0x1CD6, 292, 3), // Deva Beng Telu
+    (0x1CD7, 0x1CD7, 379, 3), // Deva Shrd Newa
+    (0x1CD8, 0x1CD8, 292, 4), // Deva Beng Telu Newa
+    (0x1CD9, 0x1CD9, 379, 2), // Deva Shrd
+    (0x1CDA, 0x1CDA, 265, 6), // Deva Orya Taml Telu Knda Mlym
+    (0x1CDB, 0x1CDB, 0, 1), // Deva
+    (0x1CDC, 0x1CDD, 379, 2), // Deva Shrd
+    (0x1CDE, 0x1CDF, 0, 1), // Deva
+    (0x1CE0, 0x1CE0, 379, 2), // Deva Shrd
+    (0x1CE1, 0x1CE1, 0, 2), // Deva Beng
+    (0x1CE2, 0x1CE2, 382, 3), // Deva Newa Tirh
+    (0x1CE3, 0x1CE8, 0, 1), // Deva
+    (0x1CE9, 0x1CE9, 385, 3), // Deva Newa Nand
+    (0x1CEA, 0x1CEA, 321, 3), // Deva Beng Shrd
+    (0x1CEB, 0x1CEB, 382, 2), // Deva Newa
+    (0x1CEC, 0x1CEC, 0, 1), // Deva
+    (0x1CED, 0x1CED, 321, 4), // Deva Beng Shrd Newa
+    (0x1CEE, 0x1CF1, 0, 1), // Deva
+    (0x1CF2, 0x1CF2, 153, 11), // Deva Beng Orya Telu Knda Mlym Sinh Gran Tutg Tirh Nand
+    (0x1CF3, 0x1CF3, 350, 2), // Deva Gran
+    (0x1CF4, 0x1CF4, 325, 4), // Deva Knda Gran Tutg
+    (0x1CF5, 0x1CF6, 0, 2), // Deva Beng
+    (0x1CF7, 0x1CF7, 1, 1), // Beng
+    (0x1CF8, 0x1CF9, 350, 2), // Deva Gran
+    (0x1CFA, 0x1CFA, 18, 1), // Nand
+    (0x1DC0, 0x1DC1, 45, 1), // Grek
+    (0x1DF8, 0x1DF8, 337, 3), // Latn Cyrl Syrc
+    (0x1DFA, 0x1DFA, 135, 1), // Syrc
+    (0x202F, 0x202F, 361, 3), // Latn Mong Phag
+    (0x204F, 0x204F, 431, 2), // Arab Adlm
+    (0x205A, 0x205A, 271, 6), // Geor Glag Lyci Cari Orkh Hung
+    (0x205D, 0x205D, 313, 4), // Grek Cari Mero Hung
+    (0x20F0, 0x20F0, 349, 3), // Latn Deva Gran
+    (0x2E17, 0x2E17, 175, 2), // Latn Copt
+    (0x2E30, 0x2E30, 447, 2), // Avst Orkh
+    (0x2E31, 0x2E31, 246, 7), // Samr Geor Cari Lydi Avst Hung Kthi
+    (0x2E3C, 0x2E3C, 59, 1), // Dupl
+    (0x2E41, 0x2E41, 373, 3), // Arab Hung Adlm
+    (0x2E43, 0x2E43, 423, 2), // Cyrl Glag
+    (0x2FF0, 0x2FFF, 443, 2), // Hani Tang
+    (0x3001, 0x3001, 239, 6), // Bopo Hang Mong Hani Hira/Kana Yiii
+    (0x3002, 0x3002, 239, 7), // Bopo Hang Mong Hani Hira/Kana Yiii Phag
+    (0x3003, 0x3003, 287, 4), // Bopo Hang Hani Hira/Kana
+    (0x3006, 0x3006, 49, 1), // Hani
+    (0x3008, 0x3009, 209, 7), // Bopo Tibt Hang Mong Hani Hira/Kana Yiii
+    (0x300A, 0x300B, 209, 8), // Bopo Tibt Hang Mong Hani Hira/Kana Yiii Lisu
+    (0x300C, 0x3011, 287, 5), // Bopo Hang Hani Hira/Kana Yiii
+    (0x3013, 0x3013, 287, 4), // Bopo Hang Hani Hira/Kana
+    (0x3014, 0x301B, 287, 5), // Bopo Hang Hani Hira/Kana Yiii
+    (0x301C, 0x301F, 287, 4), // Bopo Hang Hani Hira/Kana
+    (0x302A, 0x302D, 419, 2), // Bopo Hani
+    (0x3030, 0x3030, 287, 4), // Bopo Hang Hani Hira/Kana
+    (0x3031, 0x3035, 214, 1), // Hira/Kana
+    (0x3037, 0x3037, 287, 4), // Bopo Hang Hani Hira/Kana
+    (0x303C, 0x303D, 213, 2), // Hani Hira/Kana
+    (0x303E, 0x303F, 49, 1), // Hani
+    (0x3099, 0x309C, 214, 1), // Hira/Kana
+    (0x30A0, 0x30A0, 214, 1), // Hira/Kana
+    (0x30FB, 0x30FB, 287, 5), // Bopo Hang Hani Hira/Kana Yiii
+    (0x30FC, 0x30FC, 214, 1), // Hira/Kana
+    (0x3190, 0x319F, 49, 1), // Hani
+    (0x31C0, 0x31E5, 49, 1), // Hani
+    (0x31EF, 0x31EF, 443, 2), // Hani Tang
+    (0x3220, 0x3247, 49, 1), // Hani
+    (0x3280, 0x32B0, 49, 1), // Hani
+    (0x32C0, 0x32CB, 49, 1), // Hani
+    (0x32FF, 0x32FF, 49, 1), // Hani
+    (0x3358, 0x3370, 49, 1), // Hani
+    (0x337B, 0x337F, 49, 1), // Hani
+    (0x33E0, 0x33FE, 49, 1), // Hani
+    (0xA66F, 0xA66F, 423, 2), // Cyrl Glag
+    (0xA700, 0xA707, 411, 2), // Latn Hani
+    (0xA830, 0xA832, 60, 16), // Deva Guru Gujr Knda Mlym Kthi Mahj Shrd Khoj Sind Tutg Tirh Modi Takr Dogr Nand
+    (0xA833, 0xA835, 91, 15), // Deva Guru Gujr Knda Kthi Mahj Shrd Khoj Sind Tutg Tirh Modi Takr Dogr Nand
+    (0xA836, 0xA837, 164, 11), // Deva Guru Gujr Kthi Mahj Khoj Sind Tirh Modi Takr Dogr
+    (0xA838, 0xA838, 119, 12), // Deva Guru Gujr Kthi Mahj Shrd Khoj Sind Tirh Modi Takr Dogr
+    (0xA839, 0xA839, 164, 11), // Deva Guru Gujr Kthi Mahj Khoj Sind Tirh Modi Takr Dogr
+    (0xA8F1, 0xA8F1, 376, 3), // Deva Beng Tutg
+    (0xA8F3, 0xA8F3, 433, 2), // Deva Taml
+    (0xA92E, 0xA92E, 352, 3), // Latn Mymr Kali
+    (0xA9CF, 0xA9CF, 441, 2), // Bugi Java
+    (0xFD3E, 0xFD3F, 427, 2), // Arab Nkoo
+    (0xFDF2, 0xFDF2, 370, 2), // Arab Thaa
+    (0xFDFD, 0xFDFD, 370, 2), // Arab Thaa
+    (0xFE45, 0xFE46, 287, 4), // Bopo Hang Hani Hira/Kana
+    (0xFF61, 0xFF65, 287, 5), // Bopo Hang Hani Hira/Kana Yiii
+    (0xFF70, 0xFF70, 214, 1), // Hira/Kana
+    (0xFF9E, 0xFF9F, 214, 1), // Hira/Kana
+    (0x10100, 0x10101, 400, 3), // Linb Cprt Cpmn
+    (0x10102, 0x10102, 400, 2), // Linb Cprt
+    (0x10107, 0x10133, 397, 3), // Linb Lina Cprt
+    (0x10137, 0x1013F, 400, 2), // Linb Cprt
+    (0x102E0, 0x102FB, 421, 2), // Copt Arab
+    (0x10AF2, 0x10AF2, 445, 2), // Mani Ougr
+    (0x11301, 0x11301, 449, 2), // Gran Taml
+    (0x11303, 0x11303, 449, 2), // Gran Taml
+    (0x1133B, 0x1133B, 439, 2), // Taml Gran
+    (0x1133C, 0x1133C, 449, 2), // Gran Taml
+    (0x11FD0, 0x11FD1, 439, 2), // Taml Gran
+    (0x11FD3, 0x11FD3, 439, 2), // Taml Gran
+    (0x1BCA0, 0x1BCA3, 59, 1), // Dupl
+    (0x1D360, 0x1D371, 49, 1), // Hani
+    (0x1F250, 0x1F251, 49, 1), // Hani
+];
+
+/// Rows of `SCRIPT_TAGS`, sliced by `SCRIPT_EXT_RANGES`.
+///
+/// One set that appears verbatim inside another is stored once, so
+/// the pool is smaller than the sum of the sets in it.
+pub(crate) static SCRIPT_EXT_POOL: [u16; 452] = [
+    13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 40, 59, 117, 121, 122, 125,
+    128, 130, 133, 140, 141, 149, 167, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+    22, 59, 117, 121, 122, 125, 128, 130, 133, 140, 141, 167, 0, 2, 3, 27,
+    51, 53, 70, 72, 73, 77, 80, 91, 99, 117, 141, 161, 13, 15, 16, 20,
+    21, 114, 117, 118, 119, 121, 123, 125, 127, 128, 130, 133, 0, 13, 14, 15,
+    16, 17, 18, 19, 20, 21, 118, 122, 124, 125, 133, 13, 15, 16, 20, 114,
+    117, 118, 119, 121, 123, 125, 127, 128, 130, 133, 0, 13, 14, 15, 16, 17,
+    18, 19, 20, 21, 122, 124, 125, 13, 15, 16, 114, 117, 118, 119, 121, 125,
+    127, 128, 130, 0, 2, 3, 4, 8, 30, 52, 72, 79, 81, 83, 0, 2,
+    4, 5, 6, 8, 41, 52, 72, 73, 161, 13, 14, 17, 19, 20, 21, 22,
+    122, 123, 125, 133, 13, 15, 16, 114, 117, 119, 121, 125, 127, 128, 130, 0,
+    3, 6, 8, 41, 52, 73, 83, 161, 7, 8, 12, 98, 102, 105, 109, 110,
+    170, 0, 2, 3, 4, 30, 41, 73, 137, 0, 2, 4, 30, 41, 79, 83,
+    137, 1, 25, 28, 39, 53, 54, 55, 56, 7, 8, 9, 10, 105, 106, 107,
+    170, 0, 4, 13, 14, 23, 56, 164, 0, 8, 23, 30, 72, 81, 137, 1,
+    28, 39, 53, 54, 55, 60, 11, 27, 70, 91, 99, 104, 114, 0, 3, 51,
+    54, 72, 80, 0, 8, 30, 52, 54, 161, 13, 17, 18, 19, 20, 21, 27,
+    51, 69, 70, 103, 104, 0, 2, 4, 52, 73, 0, 8, 23, 51, 137, 1,
+    28, 53, 54, 55, 13, 14, 19, 124, 125, 0, 2, 73, 83, 0, 4, 30,
+    52, 0, 4, 30, 79, 0, 8, 30, 161, 2, 70, 93, 104, 13, 14, 20,
+    122, 13, 14, 118, 124, 13, 20, 122, 123, 13, 114, 117, 130, 34, 35, 36,
+    37, 0, 4, 8, 0, 4, 83, 0, 8, 137, 0, 8, 161, 0, 13, 122,
+    0, 26, 62, 0, 27, 51, 0, 30, 41, 0, 39, 60, 0, 81, 83, 5,
+    27, 51, 7, 9, 107, 7, 104, 170, 13, 14, 123, 13, 118, 124, 13, 124,
+    125, 13, 124, 133, 14, 59, 116, 20, 123, 133, 26, 41, 116, 68, 84, 85,
+    68, 85, 146, 0, 1, 0, 23, 0, 29, 0, 52, 0, 53, 0, 56, 0,
+    79, 0, 137, 1, 53, 3, 7, 4, 51, 4, 73, 7, 10, 7, 105, 7,
+    170, 13, 18, 15, 120, 16, 119, 18, 122, 43, 64, 53, 158, 98, 110, 99,
+    103, 122, 18, 33,
 ];

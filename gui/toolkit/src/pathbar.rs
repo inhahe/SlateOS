@@ -12,6 +12,7 @@ use crate::color::Color;
 use crate::event::{EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
+use crate::text::TextCursor;
 
 // ---------------------------------------------------------------------------
 // Catppuccin Mocha palette
@@ -53,21 +54,6 @@ const DROPDOWN_ITEM_HEIGHT: f32 = 24.0;
 const DROPDOWN_MAX_VISIBLE: usize = 8;
 const DROPDOWN_PADDING: f32 = 4.0;
 const CURSOR_WIDTH: f32 = 2.0;
-
-/// Width of the first `bytes` bytes of `text`, in pixels.
-///
-/// A caret and a selection rectangle have to land exactly where the
-/// corresponding characters are drawn, so both are placed by measuring the text
-/// before them. This used to be `chars * 8.0`, which was right only because the
-/// compositor drew a fixed 8px cell and ignored `font_size` — now that it draws
-/// a real proportional face, an estimate puts the caret between letters.
-///
-/// An out-of-range or non-boundary `bytes` measures the whole string rather
-/// than panicking: the caller derives it from a cursor index, and a stale
-/// cursor should misplace the caret, not take down the UI.
-fn width_before(text: &str, bytes: usize) -> f32 {
-    crate::text::width(text.get(..bytes).unwrap_or(text), FONT_SIZE)
-}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -114,8 +100,15 @@ pub struct PathBar {
     // --- Edit mode state ---
     /// The text being edited.
     edit_text: String,
-    /// Cursor position (byte offset into `edit_text`).
-    cursor: usize,
+    /// Cursor position: a byte offset into `edit_text`, plus which side of a
+    /// direction boundary the caret is drawn on.
+    ///
+    /// A plain byte offset was enough while every path ran left to right. It is
+    /// not enough for a path holding a Hebrew or Arabic directory name: the
+    /// offset where the two directions meet is drawn at two x coordinates, and
+    /// which one the caret goes to depends on how it got there. See
+    /// [`TextCursor`].
+    cursor: TextCursor,
     /// Selection anchor (byte offset), if any. Selection is anchor..cursor or cursor..anchor.
     selection_anchor: Option<usize>,
 
@@ -151,7 +144,7 @@ impl PathBar {
             segments,
             mode: Mode::Breadcrumb,
             edit_text: String::new(),
-            cursor: 0,
+            cursor: TextCursor::default(),
             selection_anchor: None,
             completions: Vec::new(),
             completion_index: None,
@@ -284,7 +277,7 @@ impl PathBar {
         }
         self.mode = Mode::Edit;
         self.edit_text = self.path.clone();
-        self.cursor = self.edit_text.len();
+        self.cursor = self.edit_text.len().into();
         self.selection_anchor = None;
         self.completions.clear();
         self.completion_index = None;
@@ -302,7 +295,7 @@ impl PathBar {
             // Path was already updated by the caller.
         }
         self.edit_text.clear();
-        self.cursor = 0;
+        self.cursor = TextCursor::default();
         self.selection_anchor = None;
         self.completions.clear();
         self.completion_index = None;
@@ -324,7 +317,7 @@ impl PathBar {
             // Insert the typed character.
             self.edit_text.clear();
             self.edit_text.push(ch);
-            self.cursor = self.edit_text.len();
+            self.cursor = self.edit_text.len().into();
             return EventResult::Consumed;
         }
         EventResult::Ignored
@@ -391,7 +384,7 @@ impl PathBar {
             Key::A if event.modifiers.ctrl => {
                 // Select all.
                 self.selection_anchor = Some(0);
-                self.cursor = self.edit_text.len();
+                self.cursor = self.edit_text.len().into();
                 EventResult::Consumed
             }
             _ => {
@@ -400,8 +393,8 @@ impl PathBar {
                     && !ch.is_control()
                 {
                     self.delete_selection();
-                    self.edit_text.insert(self.cursor, ch);
-                    self.cursor += ch.len_utf8();
+                    self.edit_text.insert(self.cursor.byte, ch);
+                    self.cursor = (self.cursor.byte + ch.len_utf8()).into();
                     self.selection_anchor = None;
                     self.on_text_changed();
                     return EventResult::Consumed;
@@ -419,19 +412,19 @@ impl PathBar {
         if !extend_selection {
             // If there's a selection, collapse to its start.
             if let Some(anchor) = self.selection_anchor {
-                self.cursor = self.cursor.min(anchor);
+                self.cursor = self.cursor.byte.min(anchor).into();
                 self.selection_anchor = None;
                 return;
             }
         } else if self.selection_anchor.is_none() {
-            self.selection_anchor = Some(self.cursor);
+            self.selection_anchor = Some(self.cursor.byte);
         }
 
-        if self.cursor > 0 {
+        if self.cursor.byte > 0 {
             // Move back one character (handle UTF-8).
-            let s = &self.edit_text[..self.cursor];
+            let s = &self.edit_text[..self.cursor.byte];
             if let Some(ch) = s.chars().next_back() {
-                self.cursor -= ch.len_utf8();
+                self.cursor = (self.cursor.byte - ch.len_utf8()).into();
             }
         }
     }
@@ -439,38 +432,38 @@ impl PathBar {
     fn move_cursor_right(&mut self, extend_selection: bool) {
         if !extend_selection {
             if let Some(anchor) = self.selection_anchor {
-                self.cursor = self.cursor.max(anchor);
+                self.cursor = self.cursor.byte.max(anchor).into();
                 self.selection_anchor = None;
                 return;
             }
         } else if self.selection_anchor.is_none() {
-            self.selection_anchor = Some(self.cursor);
+            self.selection_anchor = Some(self.cursor.byte);
         }
 
-        if self.cursor < self.edit_text.len() {
-            let s = &self.edit_text[self.cursor..];
+        if self.cursor.byte < self.edit_text.len() {
+            let s = &self.edit_text[self.cursor.byte..];
             if let Some(ch) = s.chars().next() {
-                self.cursor += ch.len_utf8();
+                self.cursor = (self.cursor.byte + ch.len_utf8()).into();
             }
         }
     }
 
     fn move_cursor_home(&mut self, extend_selection: bool) {
         if extend_selection && self.selection_anchor.is_none() {
-            self.selection_anchor = Some(self.cursor);
+            self.selection_anchor = Some(self.cursor.byte);
         } else if !extend_selection {
             self.selection_anchor = None;
         }
-        self.cursor = 0;
+        self.cursor = TextCursor::default();
     }
 
     fn move_cursor_end(&mut self, extend_selection: bool) {
         if extend_selection && self.selection_anchor.is_none() {
-            self.selection_anchor = Some(self.cursor);
+            self.selection_anchor = Some(self.cursor.byte);
         } else if !extend_selection {
             self.selection_anchor = None;
         }
-        self.cursor = self.edit_text.len();
+        self.cursor = self.edit_text.len().into();
     }
 
     fn handle_backspace(&mut self) {
@@ -478,12 +471,12 @@ impl PathBar {
             self.on_text_changed();
             return;
         }
-        if self.cursor > 0 {
-            let s = &self.edit_text[..self.cursor];
+        if self.cursor.byte > 0 {
+            let s = &self.edit_text[..self.cursor.byte];
             if let Some(ch) = s.chars().next_back() {
-                let new_cursor = self.cursor - ch.len_utf8();
+                let new_cursor = self.cursor.byte - ch.len_utf8();
                 self.edit_text.remove(new_cursor);
-                self.cursor = new_cursor;
+                self.cursor = new_cursor.into();
                 self.on_text_changed();
             }
         }
@@ -494,8 +487,8 @@ impl PathBar {
             self.on_text_changed();
             return;
         }
-        if self.cursor < self.edit_text.len() {
-            self.edit_text.remove(self.cursor);
+        if self.cursor.byte < self.edit_text.len() {
+            self.edit_text.remove(self.cursor.byte);
             self.on_text_changed();
         }
     }
@@ -503,11 +496,11 @@ impl PathBar {
     /// Delete the current selection, returning true if something was deleted.
     fn delete_selection(&mut self) -> bool {
         if let Some(anchor) = self.selection_anchor.take() {
-            let start = self.cursor.min(anchor);
-            let end = self.cursor.max(anchor);
+            let start = self.cursor.byte.min(anchor);
+            let end = self.cursor.byte.max(anchor);
             if start != end {
                 self.edit_text.drain(start..end);
-                self.cursor = start;
+                self.cursor = start.into();
                 return true;
             }
         }
@@ -517,7 +510,7 @@ impl PathBar {
     /// Called whenever edit text changes — requests autocomplete.
     fn on_text_changed(&mut self) {
         // Determine the prefix for autocomplete: everything up to and including the last '/'.
-        let prefix = autocomplete_prefix(&self.edit_text, self.cursor);
+        let prefix = autocomplete_prefix(&self.edit_text, self.cursor.byte);
         self.pending_events.push(PathBarEvent::RequestAutoComplete {
             prefix: prefix.to_string(),
         });
@@ -603,13 +596,13 @@ impl PathBar {
         let item = self.completions[idx].clone();
 
         // Replace the partial name after the last '/' with the completion.
-        let prefix_end = self.edit_text[..self.cursor]
+        let prefix_end = self.edit_text[..self.cursor.byte]
             .rfind('/')
             .map_or(0, |pos| pos + 1);
 
         // Remove everything after the prefix up to cursor.
-        self.edit_text.drain(prefix_end..self.cursor);
-        self.cursor = prefix_end;
+        self.edit_text.drain(prefix_end..self.cursor.byte);
+        self.cursor = prefix_end.into();
 
         // Insert the completion name.
         let insert = if item.is_directory {
@@ -617,8 +610,8 @@ impl PathBar {
         } else {
             item.name.clone()
         };
-        self.edit_text.insert_str(self.cursor, &insert);
-        self.cursor += insert.len();
+        self.edit_text.insert_str(self.cursor.byte, &insert);
+        self.cursor = (self.cursor.byte + insert.len()).into();
 
         self.selection_anchor = None;
         self.dropdown_visible = false;
@@ -655,15 +648,17 @@ impl PathBar {
                 let text_x = BAR_PADDING;
                 // Hit-tested against the drawn glyphs rather than a nominal
                 // cell, so a click lands on the character under the pointer
-                // instead of one several letters away.
-                let char_offset = crate::text::char_index_at(
+                // instead of one several letters away. The affinity the click
+                // carries is kept: clicking the left edge of a right-to-left
+                // word and clicking the right edge of the left-to-right word
+                // before it yield the same byte offset but different carets,
+                // and only the affinity tells them apart.
+                self.cursor = crate::text::cursor_at(
                     &self.edit_text,
                     x - text_x,
                     FONT_SIZE,
                     FontWeightHint::Regular,
                 );
-                let new_cursor = char_to_byte_offset(&self.edit_text, char_offset);
-                self.cursor = new_cursor;
                 self.selection_anchor = None;
                 EventResult::Consumed
             }
@@ -826,22 +821,30 @@ impl PathBar {
 
         // Selection highlight.
         if let Some(anchor) = self.selection_anchor {
-            let sel_start = self.cursor.min(anchor);
-            let sel_end = self.cursor.max(anchor);
-            // Both edges are measured so the highlight covers exactly the
-            // selected glyphs; a proportional face makes a char count useless
-            // here, since the same count spans a different width every time.
-            let sel_x = text_x + width_before(&self.edit_text, sel_start);
-            let sel_w =
-                width_before(&self.edit_text, sel_end) - width_before(&self.edit_text, sel_start);
-            cmds.push(RenderCommand::FillRect {
-                x: sel_x,
-                y: text_y - 2.0,
-                width: sel_w,
-                height: FONT_SIZE + 4.0,
-                color: Color::rgba(COLOR_LAVENDER.r, COLOR_LAVENDER.g, COLOR_LAVENDER.b, 60),
-                corner_radii: CornerRadii::all(2.0),
-            });
+            let sel_start = self.cursor.byte.min(anchor);
+            let sel_end = self.cursor.byte.max(anchor);
+            // A selection is a *set* of rectangles, not one rectangle. The
+            // selected bytes are contiguous in the string but need not be
+            // contiguous on screen: a range that starts in Latin text and ends
+            // inside a Hebrew directory name is drawn as two separated runs,
+            // and the gap between them holds characters the user did not
+            // select. Painting `x(end) - x(start)` would highlight those too.
+            for (sel_x, sel_w) in crate::text::selection_boxes(
+                &self.edit_text,
+                sel_start,
+                sel_end,
+                FONT_SIZE,
+                FontWeightHint::Regular,
+            ) {
+                cmds.push(RenderCommand::FillRect {
+                    x: text_x + sel_x,
+                    y: text_y - 2.0,
+                    width: sel_w,
+                    height: FONT_SIZE + 4.0,
+                    color: Color::rgba(COLOR_LAVENDER.r, COLOR_LAVENDER.g, COLOR_LAVENDER.b, 60),
+                    corner_radii: CornerRadii::all(2.0),
+                });
+            }
         }
 
         // Text.
@@ -856,8 +859,12 @@ impl PathBar {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Cursor.
-        let cursor_x = text_x + width_before(&self.edit_text, self.cursor);
+        // Cursor. Placed by the shaper rather than by measuring the logical
+        // prefix: at a direction boundary the caret does not sit at the
+        // prefix's width, and which of the two candidate positions is right
+        // depends on the affinity the cursor is carrying.
+        let cursor_x = text_x
+            + crate::text::caret_x(&self.edit_text, self.cursor, FONT_SIZE, FontWeightHint::Regular);
         cmds.push(RenderCommand::FillRect {
             x: cursor_x,
             y: text_y - 2.0,
@@ -1064,18 +1071,6 @@ fn autocomplete_prefix(text: &str, cursor: usize) -> &str {
         Some(pos) => &text[..=pos],
         None => "",
     }
-}
-
-/// Convert a byte offset in a string to a character offset.
-fn byte_to_char_offset(s: &str, byte_offset: usize) -> usize {
-    s[..byte_offset.min(s.len())].chars().count()
-}
-
-/// Convert a character offset to a byte offset.
-fn char_to_byte_offset(s: &str, char_offset: usize) -> usize {
-    s.char_indices()
-        .nth(char_offset)
-        .map_or(s.len(), |(byte_idx, _)| byte_idx)
 }
 
 // ---------------------------------------------------------------------------
@@ -1320,22 +1315,22 @@ mod tests {
         bar.drain_events();
 
         // Cursor at end (byte 3).
-        assert_eq!(bar.cursor, 3);
+        assert_eq!(bar.cursor.byte, 3);
 
         bar.handle_key_event(&key_press(Key::Left));
-        assert_eq!(bar.cursor, 2);
+        assert_eq!(bar.cursor.byte, 2);
 
         bar.handle_key_event(&key_press(Key::Left));
-        assert_eq!(bar.cursor, 1);
+        assert_eq!(bar.cursor.byte, 1);
 
         bar.handle_key_event(&key_press(Key::Right));
-        assert_eq!(bar.cursor, 2);
+        assert_eq!(bar.cursor.byte, 2);
 
         bar.handle_key_event(&key_press(Key::Home));
-        assert_eq!(bar.cursor, 0);
+        assert_eq!(bar.cursor.byte, 0);
 
         bar.handle_key_event(&key_press(Key::End));
-        assert_eq!(bar.cursor, 3);
+        assert_eq!(bar.cursor.byte, 3);
     }
 
     #[test]
@@ -1346,7 +1341,7 @@ mod tests {
 
         bar.handle_key_event(&key_press_ctrl(Key::A));
         assert_eq!(bar.selection_anchor, Some(0));
-        assert_eq!(bar.cursor, 5); // "/home" is 5 bytes.
+        assert_eq!(bar.cursor.byte, 5); // "/home" is 5 bytes.
     }
 
     // --- Autocomplete tests ---
@@ -1359,7 +1354,7 @@ mod tests {
 
         // Simulate typing "/home/" to trigger autocomplete.
         bar.edit_text = "/home/".to_string();
-        bar.cursor = 6;
+        bar.cursor = 6.into();
         bar.on_text_changed();
 
         let events = bar.drain_events();
@@ -1376,7 +1371,7 @@ mod tests {
         bar.drain_events();
 
         bar.edit_text = "/home/".to_string();
-        bar.cursor = 6;
+        bar.cursor = 6.into();
 
         bar.set_completions(vec![
             CompletionItem {
@@ -1413,7 +1408,7 @@ mod tests {
         bar.drain_events();
 
         bar.edit_text = "/home/".to_string();
-        bar.cursor = 6;
+        bar.cursor = 6.into();
 
         bar.set_completions(vec![CompletionItem {
             name: "file.txt".to_string(),
@@ -1432,7 +1427,7 @@ mod tests {
         bar.drain_events();
 
         bar.edit_text = "/".to_string();
-        bar.cursor = 1;
+        bar.cursor = 1.into();
         bar.set_completions(vec![
             CompletionItem {
                 name: "a".to_string(),
@@ -1462,7 +1457,7 @@ mod tests {
         bar.drain_events();
 
         bar.edit_text = "/usr/local/bin".to_string();
-        bar.cursor = bar.edit_text.len();
+        bar.cursor = bar.edit_text.len().into();
 
         bar.handle_key_event(&key_press(Key::Enter));
         let events = bar.drain_events();
@@ -1578,22 +1573,6 @@ mod tests {
     #[test]
     fn test_autocomplete_prefix_root() {
         assert_eq!(autocomplete_prefix("/", 1), "/");
-    }
-
-    // --- Byte/char offset conversion tests ---
-
-    #[test]
-    fn test_byte_to_char_offset_ascii() {
-        assert_eq!(byte_to_char_offset("hello", 0), 0);
-        assert_eq!(byte_to_char_offset("hello", 3), 3);
-        assert_eq!(byte_to_char_offset("hello", 5), 5);
-    }
-
-    #[test]
-    fn test_char_to_byte_offset_ascii() {
-        assert_eq!(char_to_byte_offset("hello", 0), 0);
-        assert_eq!(char_to_byte_offset("hello", 3), 3);
-        assert_eq!(char_to_byte_offset("hello", 5), 5);
     }
 
     // --- Set path updates segments ---

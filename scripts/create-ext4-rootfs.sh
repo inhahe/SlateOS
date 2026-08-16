@@ -1278,4 +1278,34 @@ debugfs -R 'ls -l /' "$OUT_IMG" 2>/dev/null | sed 's/^/  /'
 debugfs -R 'ls -l /bin' "$OUT_IMG" 2>/dev/null | sed 's/^/  /'
 echo "[rootfs] /tests (fastpy self-test fixtures):"
 debugfs -R 'ls -l /tests' "$OUT_IMG" 2>/dev/null | sed 's/^/  /'
+
+# --- record what went in, so a later boot can tell whether it still holds -----
+#
+# Every gate above compares one *source* against one *ELF*.  None of them can
+# notice that the ELFs were rebuilt AFTER the image was packed, because at that
+# point this script is not running.  On 2026-08-16 that gap produced its own
+# false green within hours of the two the gates above were written for: nine
+# fixtures were rebuilt with 38 new ctest-jobctl checks, a full boot test
+# reported PASS, and the fixture it had actually run was the previous image's.
+# Every guard was healthy at the time, which is exactly why a new one is needed
+# rather than a stricter old one.
+#
+# The manifest has to be written here: this is the only moment in the system
+# where anything knows what the image contains.  A missing python is fatal for
+# it — unlike the `check` gate above, which degrades to a warning because the
+# mtime gate still covers part of its ground; nothing else covers this at all,
+# and an image with no manifest is one `image-check` must reject.
+if [ -n "$STAMP_PY" ]; then
+    "$STAMP_PY" "$ROOT_DIR/scripts/ctest-fixtures.py" image-stamp || {
+        echo "[rootfs] ERROR: could not write the image manifest. The image exists"
+        echo "[rootfs]        but nothing can verify it against the tree, so a boot"
+        echo "[rootfs]        test on it would prove less than it appears to."
+        exit 1
+    }
+else
+    echo "[rootfs] ERROR: no python3/python — cannot write the image manifest."
+    echo "[rootfs]        scripts/boot-test.sh rejects an image without one, because"
+    echo "[rootfs]        an unverifiable image is how a stale fixture last got a PASS."
+    exit 1
+fi
 echo "[rootfs] DONE."

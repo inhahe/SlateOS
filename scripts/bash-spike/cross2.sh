@@ -35,9 +35,16 @@ slate_make_zig_wrappers || exit 1
 echo 'int main(void){return 0;}' > "$SLATE_TMP/t.c"
 "$SLATE_CC" "$SLATE_TMP/t.c" -o "$SLATE_TMP/t.out" && echo "WRAPPER_LINKS_OK" || { echo "WRAPPER_BROKEN"; exit 1; }
 
+# The source is provisioned the way the compiler is — pinned by version and
+# sha256, fetched from ftp.gnu.org when this machine has not got it. It used to
+# be read straight from "$SPIKE/bash-5.2.tar.gz", a gitignored path that nothing
+# in the tree ever wrote, so this script was unrunnable anywhere the tarball had
+# not been dropped in by hand. See slate_ensure_bash_src in scripts/lib/worktree.sh.
+slate_ensure_bash_src || exit 1
+
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
-tar xzf "$SPIKE/bash-5.2.tar.gz" -C "$BUILD" --strip-components=1 || exit 1
+tar xzf "$SLATE_BASH_TARBALL" -C "$BUILD" --strip-components=1 || exit 1
 cd "$BUILD" || exit 1
 
 export CC="$SLATE_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"

@@ -64,6 +64,28 @@ SLATE_ZIG_SHA256="d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230
 SLATE_ZIG_CACHE="${SLATE_ZIG_CACHE:-$HOME/.cache/slateos}"
 SLATE_ZIG="$SLATE_SPIKE/zig/zig"
 
+# The GNU bash source, pinned by version *and* hash for the same reason zig is:
+# it is the other half of the input to `bash-slateos.elf`, which §305 ships.
+#
+# It is pinned *here*, on 2026-08-16, because the zig pin earlier the same day
+# fixed only half the problem. `cross2.sh` untars `$SLATE_SPIKE/bash-5.2.tar.gz`
+# — a gitignored path — and nothing anywhere fetched it, so once zig
+# provisioned itself the recipe still could not run in a fresh checkout; the
+# failure had simply moved one line further down. It surfaced the first time
+# /tmp was cleared: `slatelink.sh` refused because bash's objects were gone,
+# `cross2.sh` could not rebuild them because the tarball it wanted was in no
+# tree and in no script, and meanwhile the rootfs build was refusing to stage a
+# stale `bash-slateos.elf`. That is the zig lesson a second time — a
+# prerequisite that merely happens to be *present* on the machine that last ran
+# the script is not a prerequisite the script has.
+#
+# Cached beside zig and shared between worktrees for the identical reason given
+# above: a hash-pinned third-party tarball has the same bytes for every lane,
+# so sharing it cannot make one lane's artifact depend on another lane's source.
+SLATE_BASH_VERSION="5.2"
+SLATE_BASH_SHA256="a139c166df7ff4471c5e0733051642ee5556c1cc8a4a78f145583c5c81ab32fb"
+SLATE_BASH_TARBALL="$SLATE_ZIG_CACHE/bash-$SLATE_BASH_VERSION.tar.gz"
+
 # Scratch, keyed by worktree. The hard-coded paths were only half the problem:
 # these scripts also wrote fixed names like /tmp/libc_syms.txt and
 # /tmp/bash_needs.txt, and they hand results to each other through those files
@@ -162,6 +184,54 @@ slate_ensure_zig() {
     fi
     SLATE_ZIG="$dir/zig"
     echo "worktree.sh: zig $SLATE_ZIG_VERSION ready at $SLATE_ZIG" >&2
+}
+
+# Resolve $SLATE_BASH_TARBALL, downloading the pinned GNU bash source if this
+# machine has not got it yet. Same shape as slate_ensure_zig, deliberately: a
+# per-worktree copy first (that is how the spike was originally provisioned, and
+# an existing checkout should not re-download), then the shared cache, then the
+# network — and the hash is checked before anything reads the archive, because
+# what comes out of it is compiled into a binary we ship.
+slate_ensure_bash_src() {
+    # A hand-placed copy in this worktree's build/spike/. Accepted only if it
+    # hashes to the pin: the zig branch learned that accepting a local copy
+    # unconditionally reintroduces the very hole the pin exists to close. There
+    # is no `--version` shortcut for a tarball, so the hash is the whole test.
+    local local_tar="$SLATE_SPIKE/bash-$SLATE_BASH_VERSION.tar.gz"
+    if [ -f "$local_tar" ]; then
+        local local_got
+        local_got="$(sha256sum "$local_tar" | cut -d' ' -f1)"
+        if [ "$local_got" = "$SLATE_BASH_SHA256" ]; then
+            SLATE_BASH_TARBALL="$local_tar"
+            return 0
+        fi
+        echo "worktree.sh: ignoring $local_tar — sha256 $local_got, pin is $SLATE_BASH_SHA256" >&2
+    fi
+
+    local tarball="$SLATE_ZIG_CACHE/bash-$SLATE_BASH_VERSION.tar.gz"
+    local url="https://ftp.gnu.org/gnu/bash/bash-$SLATE_BASH_VERSION.tar.gz"
+    mkdir -p "$SLATE_ZIG_CACHE" || return 1
+    if [ ! -f "$tarball" ]; then
+        echo "worktree.sh: bash $SLATE_BASH_VERSION source not found; fetching to $SLATE_ZIG_CACHE" >&2
+        curl -sSL --fail --max-time 900 -o "$tarball.part" "$url" || {
+            echo "worktree.sh: download failed: $url" >&2
+            rm -f "$tarball.part"
+            return 1
+        }
+        mv "$tarball.part" "$tarball"
+    fi
+
+    local got
+    got="$(sha256sum "$tarball" | cut -d' ' -f1)"
+    if [ "$got" != "$SLATE_BASH_SHA256" ]; then
+        echo "worktree.sh: bash tarball sha256 mismatch — refusing to extract." >&2
+        echo "             expected $SLATE_BASH_SHA256" >&2
+        echo "             got      $got" >&2
+        echo "             ($tarball — delete it to retry the download)" >&2
+        return 1
+    fi
+
+    SLATE_BASH_TARBALL="$tarball"
 }
 
 slate_make_zig_wrappers() {

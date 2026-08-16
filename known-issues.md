@@ -22785,3 +22785,92 @@ it by hand — see
 `B-TIMED-OUT-BOOT-TEST-STRANDS-THE-CROSS-WORKTREE-LOCK-FOR-20-MINUTES` and
 `requests/b-a-boot-lock-survives-its-dead-owner.md`. The two compound: a flaky
 hang costs the 1800s timeout *plus* up to 20 minutes of the next run's time.
+
+## B-A-BOOT-TEST-CAN-PASS-AGAINST-A-ROOTFS-IMAGE-OLDER-THAN-ITS-FIXTURES (lane B, 2026-08-16)
+
+**Status: half fixed — the checker exists and is verified; the boot test does
+not call it yet.** Filed to lane A as
+`requests/b-a-boot-test-boots-a-rootfs-image-that-may-predate-the-fixtures-in-it.md`.
+
+### What happens
+
+`scripts/boot-test.sh` builds the kernel from the tree and then boots it
+against `rootfs.ext4`, an image it does not build and does not inspect. The
+ring-3 C fixtures (`services/ctest-*`) are executed from **inside that image**
+(`load_test_elf()` reads `/mnt/tests/<name>.elf`), not from the tree. So if the
+fixtures are rebuilt and the image is not repacked, the boot runs the previous
+binaries and reports `=== Boot test PASSED ===`.
+
+Observed today, on the change it would have falsified: 38 new `ctest-jobctl`
+checks (150–187, the `WaitInfo` truncation and zero-fill coverage lane A asked
+for by name), all nine ELFs rebuilt and re-stamped, a full 817 s boot test, and
+a PASS in which none of the new checks executed. The tell was a single line —
+
+```
+[spawn] Running job control (ring 3, C, native ABI) integration test (2627416 bytes ELF)
+```
+
+— where 2 627 416 is the *committed* ELF and the tree's was 2 578 120. Without
+that byte count in `spawn.rs`'s log line there would have been no signal at all,
+and the merge to `main` would have carried a rung that had never run.
+
+### Why every existing guard stayed quiet
+
+This is the part that makes it worth an entry rather than a fix-and-forget.
+Three gates already exist against fixture staleness, and all three were green:
+
+| Guard | Compares | Verdict that day |
+|---|---|---|
+| `create-ext4-rootfs.sh` mtime gate | ELF vs `libc.a`; ELF vs `main.c`/`build.py` | pass — the ELF was the newest file involved |
+| `ctest-fixtures.py check` | ELF *content* vs its inputs' content | pass — the ELF genuinely matched its source |
+| `create-ext4-rootfs.sh` sysroot gate | `libc.a` vs `posix/src` | pass |
+
+All three answer "was this ELF built from that source". None answers "is this
+ELF the one in the image we are about to boot". A fourth question, unasked —
+and note that a *stricter* version of any of the three would not have caught
+it, because none of them can see the image at all.
+
+### The fix, and the half of it that is done
+
+`scripts/ctest-fixtures.py` gained `image-stamp` and `image-check`:
+
+- `image-stamp` runs at the end of `create-ext4-rootfs.sh` (wired up, and fatal
+  if it cannot run). It writes `rootfs.ext4.manifest` — gitignored, beside the
+  image — recording the sha256 of every locally built ELF staged into it:
+  `services/ctest-*/*.elf`, `services/fastpy-*/*.elf`, `build/spike/*.elf`
+  (74 files today, so it covers the ported binaries too, which have no content
+  stamp of their own).
+- `image-check` compares that manifest against the tree and names each ELF that
+  moved.
+
+**Content hashes, not mtimes**, for a reason peculiar to this artifact: QEMU
+writes to `rootfs.ext4` on every boot, so the image's mtime records when it was
+last *run*, not when it was packed — it is reliably *newer* than the fixtures
+it is stale with respect to. (The docstring's other reason applies as well: a
+fresh clone flattens every mtime.)
+
+What is missing is the call site. `scripts/boot-test.sh` is lane A's file, so
+the `image-check` call before QEMU launches is in the request above. **Until it
+lands the checker is inert** — it exists, it passes, and nothing invokes it, so
+a stale image still buys a green boot in all three lanes.
+
+### Reproducing
+
+```
+python scripts/ctest-fixtures.py image-check          # ok
+printf 'x' >> services/ctest-pgroup/ctest-pgroup.elf
+python scripts/ctest-fixtures.py image-check          # ERROR ... exits 1
+```
+
+### The adjacent gap this exposed
+
+`scripts/bash-spike/cross2.sh` untarred `build/spike/bash-5.2.tar.gz`, a
+gitignored path that **nothing in the tree ever wrote**. Repacking the image
+requires relinking `bash-slateos.elf` (the rootfs script refuses a stale one),
+relinking requires bash's objects, and rebuilding those requires the tarball —
+which was in no script and no document, exactly the defect the zig pin fixed
+earlier the same day, one line further down. Now pinned by version and sha256
+as `slate_ensure_bash_src` in `scripts/lib/worktree.sh`, verified against
+Chet Ramey's signature via GNU's own keyring before the hash was written down.
+`run.sh` extracts on demand from the same pinned tarball rather than assuming
+`build/spike/bash-5.2/` exists.

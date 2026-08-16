@@ -819,6 +819,18 @@ const CANARY_MIN_RESOLVABLE: u64 = 100u64.div_ceil(CANARY_TOLERANCE_PCT);
 /// get the accuracy, which is exactly where it was wanted.
 const CENTI: u64 = 100;
 
+/// Which build profile these numbers were measured on, for the serial log.
+///
+/// Several budgets below are per-profile, because the same healthy kernel is
+/// roughly 40x slower in debug than in release — measured, not estimated:
+/// `page_alloc_free` costs ~1330 cycles in release and ~52000 in debug across
+/// the recorded boots. A single budget spanning both is necessarily ~40x too
+/// loose for release, which is how two of them came to be unable to fire at
+/// all. Printing the profile beside the limit makes the branch taken visible,
+/// so a surprising verdict can be attributed to the wrong branch rather than
+/// to the code under test.
+const PROFILE_NAME: &str = if cfg!(debug_assertions) { "debug" } else { "release" };
+
 /// Split a centicycle count into `(whole_cycles, tenths)` for display.
 ///
 /// Every centicycle value that reaches a human goes through here, so no call
@@ -1031,20 +1043,31 @@ unsafe impl Sync for SyncUnsafeScatterBuf {}
 /// address, one softmmu TLB entry resolved once and replayed 1024 times, one
 /// host cache line. It reads ~5 cycles.
 ///
-/// The two budgets calibrated against it are not about that access. They are
-/// about the accesses an allocator makes: scattered across frames, each a
-/// distinct guest page, each its own softmmu lookup. Those cost one to two
-/// orders of magnitude more under TCG, which is why both budgets had to be
-/// hand-corrected upward -- `page_alloc_free_owner_ab` to 150 "accesses" for a
-/// 16-access operation, and `access_floor` itself to a hard `max(..., 100)`
-/// that silently overrode the 5-cycle measurement on **every** run. Two fudge
-/// factors, in opposite places, compensating for one wrong primitive. See
-/// known-issues.md
+/// The budgets that used to be calibrated against it were not about that
+/// access. They were about the accesses an allocator makes: scattered across
+/// frames, each a distinct guest page, each its own softmmu lookup. Those cost
+/// one to two orders of magnitude more under TCG, which is why both budgets had
+/// to be hand-corrected upward -- `page_alloc_free_owner_ab` to 150 "accesses"
+/// for a 16-access operation, and `access_floor` itself to a hard
+/// `max(..., 100)` that silently overrode the 5-cycle measurement on **every**
+/// run. Two fudge factors, in opposite places, compensating for one wrong
+/// primitive. See known-issues.md
 /// B-BENCH-THE-ACCESS-FLOOR-CLAMP-BINDS-ON-EVERY-RUN-AND-SAYS-IT-MEASURED-SOMETHING.
 ///
-/// Striding a page at a time through 512 KiB measures the access the budgets
-/// are actually counting, so the budgets can be stated in accesses and *mean*
-/// it. The A/B, the opaque trip count and the `Option` all work exactly as in
+/// SCOPE, since 2026-08-15: **no verdict depends on this any more.** Both
+/// budgets that did are now absolute per-profile cycle counts, because the
+/// deeper fault was that one constant cannot span the ~40x debug/release
+/// difference. What still consumes `access_floor` is the display-only "N
+/// accesses" figures, which restate a cycle delta in a unit a human can reason
+/// about. So a bad floor now costs readability, not correctness -- which is why
+/// the UNMEASURED message below no longer tells the reader to discard verdicts.
+/// It used to, and that was the mirror image of the bug it was written to fix:
+/// a warning that taints sound findings trains the reader to ignore the
+/// instrument just as surely as a budget that cannot fire does.
+///
+/// Striding a page at a time through 512 KiB measures the access those figures
+/// are actually counting, so "N accesses" can be stated and *mean* it. The A/B,
+/// the opaque trip count and the `Option` all work exactly as in
 /// [`measure_access_at`], and for the same reasons -- the nop arm here strides
 /// the identical index sequence without storing, so the address arithmetic
 /// cancels in the subtraction and only the store's softmmu cost is left.
@@ -1603,14 +1626,13 @@ pub fn run_all() {
         let scatter_scale_ok = scatter_scale_invariance_check();
         let (scattered, s_nop, s_store) = measure_scattered_access_cost();
         let scattered = if scatter_scale_ok { scattered } else { None };
-        // UNIT CHANGE: `scattered` is centicycles (see CENTI), but every consumer
-        // of `access_floor` multiplies it against a raw cycle delta
-        // (`access_floor * 4`, `access_floor * OWNER_TAG_BUDGET_ACCESSES`), so the
-        // floor must be *cycles*. Converting here rather than at those sites keeps
-        // exactly one place in the file where the two units meet. Getting this
-        // wrong would inflate both budget verdicts 100x while every printed number
-        // still looked plausible — the same silent-units failure as the debug/
-        // release profile mix-up that made P11 and P13 miss.
+        // UNIT CHANGE: `scattered` is centicycles (see CENTI), but its consumer
+        // divides a raw cycle delta by it (`accesses(delta, access_floor)`), so
+        // the floor must be *cycles*. Converting here rather than at that site
+        // keeps exactly one place in the file where the two units meet. Getting
+        // this wrong would misstate every "N accesses" figure by 100x while each
+        // printed number still looked plausible — the same silent-units failure
+        // as the debug/release profile mix-up that made P11 and P13 miss.
         let scattered_cycles = scattered.map(|c| c / CENTI);
         // The clamp survives only as a guard against the degenerate case its
         // comment always claimed it was for -- and now it announces itself
@@ -1623,36 +1645,42 @@ pub fn run_all() {
             Some(value) if !clamped => serial_println!(
                 "[bench]   memory_access_floor: {} cycles/scattered guest byte-store \
                  (measured={}.{} over {} stores at {} B stride: nop={} store={}, {} \
-                 interleaved rounds) — budgets below are multiples of this",
+                 interleaved rounds) — the \"N accesses\" figures below are in units \
+                 of this",
                 floor, centi_parts(value).0, centi_parts(value).1,
                 SCATTER_BYTES / SCATTER_STRIDE, SCATTER_STRIDE, s_nop, s_store,
                 CANARY_ROUNDS
             ),
             // Measured, believed, and then overridden anyway. This is NOT the
             // same as the UNMEASURED case below and must not print like it: the
-            // instrument worked, so the run is diagnostic, but the budgets are
-            // multiples of a constant rather than of the measurement and cannot
-            // be read as calibrated.
+            // instrument worked, so the run is diagnostic, and the only casualty
+            // is the unit the "N accesses" figures are quoted in.
             Some(value) => serial_println!(
                 "[bench]   memory_access_floor: CLAMPED — measured {}.{} cycles/scattered \
                  guest byte-store (over {} stores at {} B stride: nop={} store={}, {} \
                  interleaved rounds), which is under the {} cycle fallback, so the \
-                 fallback is what the budgets below use. They are therefore LOOSER than \
-                 this machine warrants: a PASS is weak evidence, a SLOW still counts.",
+                 fallback is the divisor for the \"N accesses\" figures below. Those \
+                 figures are therefore UNDERSTATED (a bigger divisor yields fewer \
+                 accesses); the PASS/SLOW verdicts are absolute per-profile cycle \
+                 counts and are unaffected.",
                 centi_parts(value).0, centi_parts(value).1,
                 SCATTER_BYTES / SCATTER_STRIDE, SCATTER_STRIDE, s_nop, s_store,
                 CANARY_ROUNDS, FLOOR_FALLBACK
             ),
             // The clamp used to absorb this silently, and did so on all nine
             // release-profile runs while its own comment said it should never
-            // bind. Say it out loud: every budget below is now a multiple of an
-            // arbitrary constant rather than of a measured cost, so a budget
-            // verdict in this run is not evidence about the code.
+            // bind. Say it out loud -- but say only what is true. This message
+            // used to void every budget verdict below it; since the budgets
+            // became absolute per-profile cycle counts that is over-claiming,
+            // and it was observed doing so on the 2026-08-15 release boot, where
+            // it told the reader to discard two verdicts that were in fact
+            // sound. Scope the warning to what the floor actually feeds.
             None => serial_println!(
                 "[bench]   memory_access_floor: UNMEASURED — {} (nop={} store={} over {} \
                  stores at {} B stride, {} interleaved rounds). Falling back to the \
-                 arbitrary clamp of {} cycles: budget-based verdicts below are NOT \
-                 calibrated to this machine and must not be read as findings.",
+                 arbitrary clamp of {} cycles: the \"N accesses\" figures below are not \
+                 physical and must not be read as findings. The PASS/SLOW verdicts are \
+                 absolute per-profile cycle counts and DO still hold.",
                 if scatter_scale_ok {
                     "the A/B arms did not separate; the store arm must be the dearer of the two"
                 } else {
@@ -1693,9 +1721,10 @@ pub fn run_all() {
         }
         (floor, measured)
     };
-    // `access_floor` is the SCATTERED cost from here down -- both the budgets
-    // and the "N accesses" figures, because both are talking about the accesses
-    // allocator code actually makes. `canary_start` keeps the HOT cost, because
+    // `access_floor` is the SCATTERED cost from here down -- now only the "N
+    // accesses" figures, since the budgets became absolute per-profile cycle
+    // counts, but still scattered because that is the access allocator code
+    // actually makes. `canary_start` keeps the HOT cost, because
     // the contamination canary re-measures that same quantity at the end of the
     // suite and compares the two. One variable was serving both roles, and that
     // is what hid the problem: the hot number is ~5 cycles, so every budget
@@ -1754,30 +1783,48 @@ pub fn run_all() {
         // sits clear of the noise while still being far under an MMIO
         // round-trip.
         //
-        // PENDING RE-DERIVATION: the `4` was chosen while `access_floor` was
-        // the *hot* access, which on every recorded run fell under the 100-cycle
-        // clamp — so "4 accesses" has always meant a flat 400 cycles, and the 4
-        // was absorbing the gap between a 5-cycle hot access and the ~few-
-        // hundred-cycle scattered one. Now that the floor is the scattered cost,
-        // the same observed-healthy 274-282 cycles is about *one* access, which
-        // is exactly what the paragraph above says it should be. The constant
-        // should come down accordingly once a boot has printed the measured
-        // floor; until then it is merely loose, which cannot manufacture a false
-        // alarm. Tracked in known-issues.md under
-        // B-BENCH-THE-ACCESS-FLOOR-CLAMP-BINDS-ON-EVERY-RUN.
-        let mmio_suspicion = access_floor.saturating_mul(4);
+        // RE-DERIVED 2026-08-15 from the recorded boot logs, and deliberately
+        // no longer a multiple of `access_floor`. Two things were wrong.
+        //
+        // First, the quantity being bounded is not a memory access cost. The
+        // check asks "did the lookup fall back to an APIC MMIO round-trip?" —
+        // a register read versus a device exit. Sizing that in units of a
+        // memory access was a category error, and it inherited the floor's
+        // 100-cycle clamp, so "4 accesses" has always meant a flat 400 cycles.
+        //
+        // Second, and the reason the number looked untouchable: **one budget
+        // cannot serve both build profiles.** Measured across the recorded
+        // boots, a healthy lookup costs 4-10 cycles in release (n=8) but
+        // 188-420 in debug, because the whole kernel is ~40x slower there. A
+        // budget loose enough for debug is ~40x too loose for release — which
+        // is exactly what 400 was, against a worst release observation of 10.
+        // In release this check could not fire at all, and a check that cannot
+        // fire is indistinguishable from a check that passes.
+        //
+        // Per-profile budgets, each sized against its own measured healthy
+        // range and sitting far under the fault being detected (an MMIO exit
+        // costs hundreds of cycles at minimum, in either profile):
+        //   release: 100 cycles = 10x the worst healthy observation (10)
+        //   debug:  2000 cycles = ~5x the worst healthy observation (420)
+        //
+        // `debug_assertions` rather than a bespoke feature flag because it
+        // already tracks the profile by Cargo default. If a profile is ever
+        // configured with `debug-assertions` decoupled from `opt-level`, this
+        // picks the wrong budget — hence the profile is named in the output
+        // below, so a surprising verdict can be traced to the branch taken.
+        let mmio_suspicion: u64 = if cfg!(debug_assertions) { 2000 } else { 100 };
         if cost <= mmio_suspicion {
             serial_println!(
                 "[bench]   fast_cpu_index: PASS ({} cycles over an empty closure, \
-                 limit {} = 4 accesses; nop={} idx={}, {} interleaved rounds)",
-                cost, mmio_suspicion, nop_cycles, idx_cycles, ROUNDS
+                 limit {} cycles [{} profile]; nop={} idx={}, {} interleaved rounds)",
+                cost, mmio_suspicion, PROFILE_NAME, nop_cycles, idx_cycles, ROUNDS
             );
         } else {
             serial_println!(
                 "[bench]   fast_cpu_index: SLOW ({} cycles over an empty closure, \
-                 limit {} = 4 accesses; nop={} idx={}) — suspect a fallback to the \
-                 APIC MMIO path",
-                cost, mmio_suspicion, nop_cycles, idx_cycles
+                 limit {} cycles [{} profile]; nop={} idx={}) — suspect a fallback \
+                 to the APIC MMIO path",
+                cost, mmio_suspicion, PROFILE_NAME, nop_cycles, idx_cycles
             );
         }
     }
@@ -1909,32 +1956,49 @@ pub fn run_all() {
         // cycles-each, against a budget sized for real hardware. The whole
         // investigation is written up in known-issues.md under
         // TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT.
-        // PENDING RE-DERIVATION, same cause as `mmio_suspicion` above: 150 was
-        // sized against a floor that was really the 100-cycle clamp, so it has
-        // always meant a flat 15000 cycles. The paragraph above already does the
-        // arithmetic that gives the honest answer — 7660-11288 observed is "~16
-        // accesses at TCG's few-hundred-cycles-each", i.e. it was reasoning in
-        // *scattered* accesses all along while the code divided by a hot one.
-        // Re-derive from a boot that prints the measured scattered floor.
-        const OWNER_TAG_BUDGET_ACCESSES: u64 = 150; // From baselines.toml
-        let budget = access_floor.saturating_mul(OWNER_TAG_BUDGET_ACCESSES);
+        // RE-DERIVED 2026-08-15, same cause and same fix as `mmio_suspicion`
+        // above. 150 was sized against a floor that was really the 100-cycle
+        // clamp, so it has always meant a flat 15000 cycles — and, decisively,
+        // **the 7660-11288 figures quoted just above are DEBUG boots.** The
+        // same tagging costs 42-246 cycles in release (n=9). So the old budget
+        // was 61x the worst release observation: in release it could not fire,
+        // while in debug it was correctly sized. One constant was being asked
+        // to cover a 40x profile difference, and release lost.
+        //
+        // Per-profile budgets from the measured healthy ranges:
+        //   release:  1500 cycles = ~6x the worst healthy observation (246)
+        //   debug:   40000 cycles = ~3x the worst healthy observation (12708)
+        //
+        // The release margin is deliberately wider than `mmio_suspicion`'s
+        // because the healthy release range is itself wide (42-246, a 5.9x
+        // spread) where the cpu-index one is tight (4-10). Both still sit an
+        // order of magnitude under the faults being detected — an MMIO, a
+        // contended lock, or a per-frame loop where a `write_bytes` belongs,
+        // each of which costs 10-100x a plain access.
+        const OWNER_TAG_BUDGET_RELEASE: u64 = 1_500;
+        const OWNER_TAG_BUDGET_DEBUG: u64 = 40_000;
+        let budget: u64 = if cfg!(debug_assertions) {
+            OWNER_TAG_BUDGET_DEBUG
+        } else {
+            OWNER_TAG_BUDGET_RELEASE
+        };
         let delta = min_on.saturating_sub(min_off);
         let (acc_whole, acc_tenth) = accesses(delta, access_floor);
         if delta <= budget {
             serial_println!(
                 "[bench]   page_alloc_free_owner_ab: PASS (tagging costs {} cycles/\
-                 alloc+free = {}.{} accesses, limit {} accesses; off={} on={}, {} \
-                 interleaved rounds)",
-                delta, acc_whole, acc_tenth, OWNER_TAG_BUDGET_ACCESSES,
+                 alloc+free = {}.{} accesses, limit {} cycles [{} profile]; \
+                 off={} on={}, {} interleaved rounds)",
+                delta, acc_whole, acc_tenth, budget, PROFILE_NAME,
                 min_off, min_on, ROUNDS
             );
         } else {
             serial_println!(
                 "[bench]   page_alloc_free_owner_ab: SLOW (tagging costs {} cycles/\
-                 alloc+free = {}.{} accesses, limit {} accesses; off={} on={}, {} \
-                 interleaved rounds) — suspect an MMIO, a lock, or a per-frame \
-                 loop that should be one write_bytes",
-                delta, acc_whole, acc_tenth, OWNER_TAG_BUDGET_ACCESSES,
+                 alloc+free = {}.{} accesses, limit {} cycles [{} profile]; \
+                 off={} on={}, {} interleaved rounds) — suspect an MMIO, a lock, \
+                 or a per-frame loop that should be one write_bytes",
+                delta, acc_whole, acc_tenth, budget, PROFILE_NAME,
                 min_off, min_on, ROUNDS
             );
         }

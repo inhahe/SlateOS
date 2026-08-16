@@ -71862,7 +71862,7 @@ delete.
 directory before it completes, and observe that a partial checkout looks
 identical to a failed one.
 
-### [A] B-BENCH-THE-ACCESS-FLOOR-CLAMP-BINDS-ON-EVERY-RUN-AND-SAYS-IT-MEASURED-SOMETHING — 2026-08-15 — 🔧 FIXED in `90457f629`, two constants pending re-derivation
+### [A] B-BENCH-THE-ACCESS-FLOOR-CLAMP-BINDS-ON-EVERY-RUN-AND-SAYS-IT-MEASURED-SOMETHING — 2026-08-15 — 🔧 FIXED in `90457f629`; both constants re-derived per build profile (see RESOLVED section at the end of this entry)
 
 **In short:** the benchmark suite calibrates two of its budgets against "how
 much does one memory access cost on this machine", measures that as **5
@@ -71986,3 +71986,63 @@ four; the owner-tag comment reasons in "~16 accesses at TCG's
 few-hundred-cycles-each" while the code divided by a 5-cycle one. Until they
 are re-derived both budgets are merely loose, which is the direction that
 cannot manufacture a false alarm.
+
+#### RESOLVED 2026-08-15 — both constants re-derived, and the cause was a *profile* split, not a floor
+
+The "pending re-derivation" above assumed the two budgets just needed
+restating in the corrected (scattered) unit. That was the wrong diagnosis.
+Re-deriving them from the recorded boots turned up something the unit story
+does not explain:
+
+| check | healthy **release** | healthy **debug** | old budget | old budget vs worst release |
+|---|---|---|---|---|
+| `fast_cpu_index` | 4-10 cycles (n=8) | 188-420 | 400 (`floor*4`) | **40x too loose** |
+| `page_alloc_free_owner_ab` | 42-246 cycles (n=9) | 7660-12708 | 15000 (`floor*150`) | **61x too loose** |
+
+The right-hand columns are the finding. **The 7660-11288 figures quoted in
+the source comment as the healthy range were DEBUG boots**, and the comment
+did not say so — the same kernel is ~40x slower in debug (`page_alloc_free`
+is ~1330 cycles in release and ~52000 in debug). One constant was being asked
+to span both profiles, so it was sized for debug and release lost: in release
+neither check could fire at all. A check that cannot fire is indistinguishable
+from a check that passes, which is why both had reported PASS forever.
+
+**Fix:** both budgets are now absolute per-profile cycle counts selected on
+`cfg!(debug_assertions)` — `mmio_suspicion` 100 release / 2000 debug,
+owner-tag 1500 release / 40000 debug — and are no longer multiples of
+`access_floor` at all. Each line also prints `[{} profile]` so a surprising
+verdict can be attributed to the branch taken rather than to the code under
+test. Verified on a release boot: `fast_cpu_index: PASS (8 cycles, limit 100
+cycles [release profile])`, `page_alloc_free_owner_ab: PASS (92 cycles, limit
+1500 cycles [release profile])`.
+
+Note the second-order consequence: `access_floor` no longer feeds **any**
+verdict. Its only remaining consumer is the display-only "N accesses" figures.
+
+#### B-BENCH-THE-UNMEASURED-WARNING-VOIDS-VERDICTS-IT-NO-LONGER-GOVERNS — found and fixed in the same session
+
+Caught by reading the verification boot's own log rather than its exit code.
+With the budgets now absolute, the floor's failure message was still saying:
+
+> Falling back to the arbitrary clamp of 100 cycles: budget-based verdicts
+> below are NOT calibrated to this machine and **must not be read as
+> findings**.
+
+On that boot the scale check legitimately rejected the measurement, so this
+printed — and the two lines immediately below it were sound absolute-cycle
+verdicts that the reader was being told to discard. This is the exact mirror
+image of the bug the entry above documents: **a warning that taints valid
+findings trains the reader to ignore the instrument just as effectively as a
+budget that cannot fire.** Both end in a verdict nobody acts on.
+
+**Fix:** all three `memory_access_floor` messages (measured / CLAMPED /
+UNMEASURED) now scope their claim to the "N accesses" figures, which are all
+the floor still feeds, and state explicitly that the PASS/SLOW verdicts are
+absolute per-profile cycle counts and still hold. The CLAMPED case also now
+names the *direction* of its error (figures understated, because a bigger
+divisor yields fewer accesses) instead of the previous vague "LOOSER than this
+machine warrants".
+
+**Generalisable:** when a consumer is removed from a shared calibration, the
+calibration's *error messages* are part of its interface and go stale with it.
+Grep the failure text, not just the call sites.

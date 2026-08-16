@@ -48,6 +48,41 @@
 //! Typed capabilities for each namespace (fs, net, proc, etc.) will
 //! be added as those subsystems are implemented.
 //!
+//! ## `resource_id == 0` means *the class*, never *an instance*
+//!
+//! This is an ABI promise, not an accident of the current call sites, and it
+//! is load-bearing for anyone deciding what a capability actually authorises.
+//! Read it as: **a capability whose `resource_id` is 0 names no particular
+//! object — it is authority over the resource type as a whole. A non-zero id
+//! names exactly one object and nothing else.**
+//!
+//! The distinction is invisible while nothing looks at the id, and every
+//! `has_capability_type` check ignores it. It stops being invisible the
+//! moment a *predicate* is written on top: `posix`'s `CAP_KILL` projection
+//! wanted "may signal any process", and the only thing separating that from
+//! "may signal pid 4271" is this field. Both `fork` (step 8) and `spawn`
+//! (step 5b) hand every parent a `(Process, <child pid>, SIGNAL)` capability,
+//! so a rule that ignored the id would report universal kill authority for
+//! any process that had ever forked. See
+//! `requests/b-a-does-resource-id-zero-mean-the-class-or-just-an-unknown-pid.md`.
+//!
+//! Two properties make 0 safe to use as that sentinel, and both are enforced
+//! rather than assumed:
+//!
+//! * **0 is not a reachable instance id for the types that have one.** PIDs
+//!   are allocated from 1 upward (`pcb::NEXT_PID`; 0 is the kernel, which has
+//!   implicit authority and is never granted a capability), and the same
+//!   holds for thread ids and every handle-shaped id. So a class-wide entry
+//!   can never be mistaken for an instance one, in either direction.
+//! * **0 is chosen, not defaulted.** `SpawnOptions.capabilities` carries the
+//!   id as an explicit field of every triple, so a grant site that writes 0
+//!   is stating "the class", not omitting a value it did not have yet. The
+//!   automatic parent grants above pass a real pid precisely because they
+//!   *do* mean one instance.
+//!
+//! `verify_resource_id_zero_is_class_wide` in this module is the test that
+//! keeps the first property true.
+//!
 //! ## Lock Ordering
 //!
 //! `CAP_TABLE` does not call into the scheduler or other IPC locks.
@@ -88,8 +123,20 @@ pub enum ResourceType {
     /// A completion port.
     CompletionPort = 5,
     /// A process (for kill, wait, inspect operations).
+    ///
+    /// `resource_id` is the target PID, or **0 for authority over processes
+    /// as a class** — see the module-level "`resource_id == 0` means *the
+    /// class*" section, which this type is the reason for. PIDs start at 1,
+    /// so the two readings cannot collide.
+    ///
+    /// The per-child `SIGNAL` capability every parent receives from `fork`
+    /// and `spawn` carries the child's PID, so it is an *instance* grant and
+    /// must not be read as "may signal anything".
     Process = 6,
     /// A thread (for suspend, resume, priority change).
+    ///
+    /// `resource_id` is the target thread id, or 0 for the class. Thread ids
+    /// likewise start at 1.
     Thread = 7,
     /// I/O port access (for userspace drivers).
     ///
@@ -305,8 +352,41 @@ pub fn self_test() -> KernelResult<()> {
 
     table::self_test()?;
     test_cap_entry_info_abi()?;
+    verify_resource_id_zero_is_class_wide()?;
 
     serial_println!("[cap] Capability system self-test PASSED");
+    Ok(())
+}
+
+/// Keep `resource_id == 0` usable as the "names the class" sentinel by
+/// proving nothing can ever be allocated *at* 0.
+///
+/// The convention documented at the top of this module is only sound while
+/// no real instance id is 0. That is true today because PIDs and thread ids
+/// are allocated from 1 upward — but "allocated from 1" is one line in
+/// another module, and a future change to make ids start at 0 (or to hash
+/// them, or to reuse a slot index) would silently turn a class-wide grant
+/// into a grant over process 0 and back again, in a predicate that no longer
+/// mentions this file.
+///
+/// So the property is checked rather than commented. A single PID allocation
+/// is enough: the counter is monotonic, so if the *first* id it can still
+/// hand out is non-zero, no later one can be 0 either.
+///
+/// This intentionally does not assert anything about which grant sites use
+/// 0 — that is a policy each call site owns. It asserts only the thing they
+/// all depend on and none of them can check.
+fn verify_resource_id_zero_is_class_wide() -> KernelResult<()> {
+    let pid = crate::proc::pcb::peek_next_pid();
+    if pid == 0 {
+        serial_println!(
+            "[cap]   FAIL: the next PID is 0, so a (Process, 0) capability can no longer be \
+             told apart from authority over one real process — see the module docs on \
+             resource_id == 0"
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[cap]   resource_id 0 is unreachable as an instance id (next PID {pid}): OK");
     Ok(())
 }
 

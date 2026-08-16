@@ -853,10 +853,21 @@ Roadmap:
   permutation: reversing a one-glyph right-to-left stretch is the identity, so
   the permutation alone would face a lone Hebrew letter the wrong way. The old
   logical prefix sum survives as `width_upto`, for truncation.
-  **Next: the paragraph direction the bidi work left open**
-  (`TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION` — `shape_with(text, base)`
-  beside `shape`, which keeps calling it with `Base::Auto`). Vello itself waits
-  on `[A]`'s GPU driver.
+  **And the paragraph direction, which was the last of them** (§443;
+  `TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION` closed).
+  `shape_with(text, lang, base)` is the full form and the other two entry
+  points are it with defaults — one method rather than a matrix, because
+  language and direction are orthogonal. The left-to-right fast path is now
+  gated on the base as well as the text: `is_trivially_ltr` asserts a property
+  of the *answer*, not of the string, and under `Base::Rtl` plain Latin
+  resolves to level 2 inside a level-1 paragraph. The issue's own `"(123)"`
+  example turned out not to demonstrate the bug — L4 and L2 cancel for a
+  balanced pair — so the test uses `"(a"`, which draws as `a)` right to left.
+  **Next: the widgets, which draw every caret by logical prefix width and so
+  do not benefit from any of the above**
+  (`TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL` — a
+  `TextCursor { byte, affinity }` in `guitk`, then `pathbar`, `textview`, and
+  disjoint selection rectangles). Vello itself waits on `[A]`'s GPU driver.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
   (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it

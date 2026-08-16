@@ -37,6 +37,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use osfont::bidi::Base;
 use osfont::gsub::SubGlyph;
 use osfont::raster::rasterize;
 use osfont::scaled::{ScaledFont, Target};
@@ -2453,4 +2454,117 @@ fn installed_fonts_reorder_right_to_left_text() {
         "no installed face has three Hebrew letters and two Latin ones \
          ({with_hebrew} matched the cmap check)"
     );
+}
+
+/// A caller that knows its container's direction can say so, and it changes
+/// the answer for text that rule P2 cannot decide for itself.
+///
+/// The string is `"(a"` — one neutral and one strong left-to-right character.
+/// Under `Base::Auto` the `a` decides and it lays out as typed. Under
+/// `Base::Rtl` the bracket takes the paragraph's direction instead, which
+/// does two things at once: rule L4 mirrors it, and rule L2 moves it to the
+/// other end. So a face that draws `(a` one way draws `a)` the other, from the
+/// same string and the same glyphs.
+#[test]
+#[ignore = "reads the host's installed fonts"]
+fn a_paragraph_direction_can_be_given_and_changes_the_answer() {
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    let mut checked = 0usize;
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data.clone()) else { continue };
+        if !"(a)".chars().all(|ch| face.glyph_index(ch).is_some()) {
+            continue;
+        }
+        let Ok(font) = ScaledFont::from_bytes(data, 16.0) else {
+            continue;
+        };
+
+        // Every glyph id below is read out of a *whole shaped string*, never
+        // out of a character shaped alone. On `Amiri-Bold.ttf` a lone `(` is
+        // scriptless and comes back as glyph 3, while the `(` in `"(a"` joins
+        // the Latin run and reaches a `latn` lookup that substitutes 6460 —
+        // so an oracle built from isolated characters tests the itemizer, not
+        // the direction.
+        let auto = font.shape_with("(a", None, Base::Auto);
+        let closed = font.shape_with(")a", None, Base::Auto);
+        let rtl = font.shape_with("(a", None, Base::Rtl);
+        if auto.len() != 2 || closed.len() != 2 || rtl.len() != 2 {
+            // A face that ligated a bracket to a letter has said something
+            // this oracle cannot read.
+            continue;
+        }
+        let logical = |r: &osfont::shape::ShapedRun, i: usize| r.glyphs()[i].key.raw();
+        if logical(&auto, 0) == logical(&closed, 0) {
+            // Both brackets drawn with one glyph: nothing to see.
+            continue;
+        }
+        checked += 1;
+
+        // The default is unchanged, and naming it explicitly is the same call.
+        let order: Vec<usize> = auto.draw_order().map(|g| g.cluster).collect();
+        assert_eq!(
+            order,
+            [0, 1],
+            "{}: Base::Auto reordered a left-to-right string",
+            path.display()
+        );
+        assert_eq!(
+            auto,
+            font.shape("(a"),
+            "{}: shape_with(.., Auto) is not shape()",
+            path.display()
+        );
+
+        // Told the container runs the other way, both bidi rules fire: L2
+        // moves the bracket to the far end...
+        let order: Vec<usize> = rtl.draw_order().map(|g| g.cluster).collect();
+        assert_eq!(
+            order,
+            [1, 0],
+            "{}: Base::Rtl left the bracket where it was",
+            path.display()
+        );
+        // ...and L4 draws it as the bracket that opens the other way.
+        assert_eq!(
+            logical(&rtl, 0),
+            logical(&closed, 0),
+            "{}: Base::Rtl did not mirror the bracket",
+            path.display()
+        );
+        assert_ne!(
+            logical(&rtl, 0),
+            logical(&auto, 0),
+            "{}: the mirrored bracket is the unmirrored one",
+            path.display()
+        );
+
+        // Same glyph count. Not necessarily the same *width*: rule L4 puts a
+        // different glyph in the run, and a face is free to give `)` a
+        // different advance from `(` — `Amiri-Bold.ttf` measures 11.904 px
+        // against 11.552 for exactly this reason. The direction decides which
+        // ink is drawn and where, and the caller must re-measure after
+        // changing it.
+        assert_eq!(rtl.len(), auto.len(), "{}: glyph count", path.display());
+        // Both are still self-consistent, which is the property that actually
+        // matters: what is drawn sums to what is measured.
+        for (what, r) in [("Auto", &auto), ("Rtl", &rtl)] {
+            let drawn: f32 = r.draw_order().map(|g| g.advance).sum();
+            assert!(
+                (drawn - r.width()).abs() <= 0.01,
+                "{}: {what} draws {drawn} px and measures {} px",
+                path.display(),
+                r.width()
+            );
+        }
+    }
+
+    println!("faces checked: {checked}");
+    assert!(checked >= 1, "no installed face has `(`, `)` and `a` distinctly");
 }

@@ -495,7 +495,8 @@ impl ScaledFont {
     ///
     /// Names no language, so every face answers with each script's default
     /// rules. [`shape_lang`](Self::shape_lang) is the same call for a caller
-    /// that knows one.
+    /// that knows one, and [`shape_with`](Self::shape_with) for one that also
+    /// knows which way its container runs.
     #[must_use]
     pub fn shape(&self, text: &str) -> ShapedRun {
         self.shape_lang(text, None)
@@ -522,8 +523,51 @@ impl ScaledFont {
     ///
     /// The language never changes which script a run is shaped as, nor which
     /// characters there are; see [`lang`](crate::lang).
+    ///
+    /// Resolves the bidi base direction from the text itself. A caller that
+    /// knows its container's direction should use
+    /// [`shape_with`](Self::shape_with) instead.
     #[must_use]
     pub fn shape_lang(&self, text: &str, lang: Option<Lang>) -> ShapedRun {
+        self.shape_with(text, lang, Base::Auto)
+    }
+
+    /// The full form: `text` in `lang`, laid out in a container that runs
+    /// `base`.
+    ///
+    /// The other two entry points are this one with defaults —
+    /// [`shape`](Self::shape) is `(text, None, Base::Auto)` and
+    /// [`shape_lang`](Self::shape_lang) is `(text, lang, Base::Auto)` — so a
+    /// caller only reaches for this when it has something to say that they
+    /// cannot express.
+    ///
+    /// # What the base direction decides
+    ///
+    /// [`Base::Auto`] is UAX #9 rule P2: the first strong character wins. That
+    /// is right for anything whose direction is a property of what it *says* —
+    /// a message in a chat window, a line in a text editor — and wrong for
+    /// anything whose direction is a property of where it *is*. Two cases,
+    /// both of which `Auto` gets wrong and neither of which is exotic:
+    ///
+    /// * **A string with no strong character at all.** `"(123)"` has none, so
+    ///   P2 falls back to left-to-right and the parentheses are drawn as
+    ///   typed. In a Hebrew paragraph they should be mirrored — the character
+    ///   means "the bracket that opens", and in right-to-left text the bracket
+    ///   that opens is the one shaped `)`. `Base::Rtl` is what says so.
+    /// * **A string whose first strong character runs against its
+    ///   container.** An `"OK"` button in a Hebrew interface, or a Hebrew file
+    ///   name in a left-to-right path bar: P2 reads the text and gets the
+    ///   label's own direction, not the layout's, so the surrounding
+    ///   punctuation and any trailing neutrals lay out the wrong way.
+    ///
+    /// The direction never changes which glyphs a face returns, only their
+    /// levels — so it changes the drawn order, the mirroring, and where a
+    /// caret goes, and nothing else. Passing `Base::Rtl` also costs the
+    /// left-to-right fast path: a string of plain Latin resolves to level 2
+    /// inside a level-1 paragraph rather than to nothing at all, which is
+    /// correct and is not free.
+    #[must_use]
+    pub fn shape_with(&self, text: &str, lang: Option<Lang>, base: Base) -> ShapedRun {
         // Six passes, because each one needs all of the previous one's
         // output. Bidi settles which characters are mirrored and where the
         // direction boundaries are, and it reads the string as typed;
@@ -540,7 +584,7 @@ impl ScaledFont {
         // starts at — which is what a glyph's cluster is, whatever
         // substitution did to the glyph count. Empty for text that needs no
         // bidi at all, which is every left-to-right string.
-        let levels = byte_levels(text);
+        let levels = byte_levels(text, base);
         let mut pieces = norm::pieces(text, |ch| self.face.glyph_index(ch).is_some());
         // Korean, which `norm::pieces` deliberately left spelled as the text
         // spelled it. Which spelling to draw is a question about the face —
@@ -1699,17 +1743,21 @@ impl ScaledFont {
 /// The whole of it is skipped for a string with no right-to-left character
 /// and no directional formatting in it, which is every string this crate is
 /// asked to draw on an English desktop. See [`bidi::is_trivially_ltr`].
-fn byte_levels(text: &str) -> Vec<Level> {
-    if bidi::is_trivially_ltr(text) {
+///
+/// That skip is a claim about the *answer*, not about the text — "every level
+/// comes out even" — so it holds only while the paragraph's own level is even.
+/// Under `Base::Rtl` the same string resolves to level 2 inside a level-1
+/// paragraph: an English word in a Hebrew sentence is still drawn left to
+/// right, but it sits inside a run that is not, and the neutrals around it
+/// take the paragraph's direction rather than the word's. Taking the fast path
+/// there would silently ignore the base the caller just asked for, which is
+/// the one thing this function must not do.
+fn byte_levels(text: &str, base: Base) -> Vec<Level> {
+    if base != Base::Rtl && bidi::is_trivially_ltr(text) {
         return Vec::new();
     }
     let chars: Vec<char> = text.chars().collect();
-    // `Base::Auto` — rule P2 — because the direction of a string is a
-    // property of what it says. A caller that knows better (a UI label in a
-    // left-to-right layout, say) cannot say so yet; that is a signature
-    // change, filed as `TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION` in
-    // `known-issues.md`.
-    let para = bidi::resolve(&chars, Base::Auto);
+    let para = bidi::resolve(&chars, base);
     let mut out: Vec<Level> = vec![0; text.len()];
     for ((at, _), level) in text.char_indices().zip(para.render_levels()) {
         if let Some(slot) = out.get_mut(at) {
@@ -2866,13 +2914,49 @@ mod tests {
 
     #[test]
     fn levels_are_not_resolved_for_text_that_cannot_need_them() {
-        assert!(byte_levels("The quick brown fox").is_empty());
-        assert!(byte_levels("").is_empty());
+        assert!(byte_levels("The quick brown fox", Base::Auto).is_empty());
+        assert!(byte_levels("", Base::Auto).is_empty());
+        // An explicit left-to-right base is the same answer as `Auto` here, so
+        // it keeps the fast path: the paragraph level is 0 either way.
+        assert!(byte_levels("The quick brown fox", Base::Ltr).is_empty());
         // Every byte of a two-byte character gets the level, so a lookup by
         // cluster start cannot miss.
-        let levels = byte_levels("a\u{5d0}");
+        let levels = byte_levels("a\u{5d0}", Base::Auto);
         assert_eq!(levels.len(), 3);
         assert_eq!(levels[0], 0);
         assert_eq!(levels[1], 1);
+    }
+
+    /// The fast path is about the answer, not the text. Latin in a
+    /// right-to-left paragraph still needs resolving: the letters go to level
+    /// 2 and the neutrals around them to the paragraph's own 1.
+    #[test]
+    fn a_right_to_left_base_does_not_take_the_left_to_right_fast_path() {
+        let levels = byte_levels("ab", Base::Rtl);
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0], 2);
+        assert_eq!(levels[1], 2);
+        // And the same string under `Auto` resolves to nothing at all, which
+        // is what makes this a real difference rather than a spelling of it.
+        assert!(byte_levels("ab", Base::Auto).is_empty());
+    }
+
+    /// The case the entry that asked for this named: `"(123)"` has no strong
+    /// character, so rule P2 cannot help and only the caller knows.
+    #[test]
+    fn a_string_with_no_strong_character_takes_the_base_it_is_given() {
+        // Under `Auto`, P2 finds nothing strong and falls back to
+        // left-to-right — every level even, so the fast path is right.
+        assert!(byte_levels("(123)", Base::Auto).is_empty());
+        // Told otherwise, the brackets are in a right-to-left run and rule L4
+        // will mirror them.
+        let levels = byte_levels("(123)", Base::Rtl);
+        assert_eq!(levels.len(), 5);
+        assert!(!levels[0].is_multiple_of(2), "the opening bracket is at {}", levels[0]);
+        assert!(!levels[4].is_multiple_of(2), "the closing bracket is at {}", levels[4]);
+        // The digits are `EN`, which rule I1 raises to an even level inside an
+        // odd-level run — they are drawn left to right inside a right-to-left
+        // paragraph, which is how numbers work in Hebrew and Arabic.
+        assert!(levels[1].is_multiple_of(2), "the digits are at {}", levels[1]);
     }
 }

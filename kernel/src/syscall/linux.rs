@@ -56500,7 +56500,34 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         //   - the 15-byte truncation the syscall applies (mirrored here);
         //   - an unknown task id is rejected (returns false).
         {
-            let cur = crate::sched::current_task_id();
+            // Task 0 (the BSP idle task) is deliberately not renameable — its
+            // name is a kernel-owned diagnostic label, not a thread's comm.
+            // Assert that first, because it is the invariant the rest of this
+            // block has to work around: these self-tests run in kernel context
+            // where `current_task_id()` is 0, so naming "the current task" is
+            // exactly the call that must be refused.  Before the refusal
+            // existed, a sibling prctl self-test permanently relabelled the
+            // idle task and its name then showed up as the running task in a
+            // liveness hang dump.  See `sched::set_task_name`.
+            assert!(!crate::sched::set_task_name(0, b"nope"));
+
+            // Round-trip the storage layer on a real, renameable task rather
+            // than on `current_task_id()`.  Picking the lowest non-zero id
+            // makes the choice deterministic across boots, so a failure here
+            // names the same task every time instead of whichever one happened
+            // to be scheduled.
+            let Some(cur) = crate::sched::task_list()
+                .iter()
+                .map(|t| t.id)
+                .filter(|&id| id != 0)
+                .min()
+            else {
+                serial_println!(
+                    "[syscall/linux]   FAIL: no non-idle task exists to exercise \
+                     the PR_SET/GET_NAME storage round-trip"
+                );
+                return Err(KernelError::InternalError);
+            };
 
             // Snapshot the live task's comm so we can restore it.
             let mut saved = [0u8; 32];
@@ -88051,9 +88078,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // Discriminator B: prctl(PR_SET_NAME, valid_stack_buf_with_name)
             //   acceptance: a well-formed call still succeeds (pre- and
             //   post-batch), confirming the new gate is restricted to
-            //   the NULL/unreadable case.  Kernel context has no PCB so
-            //   the name isn't actually stored, but the arm still
-            //   returns 0.
+            //   the NULL/unreadable case.
+            //
+            // This comment used to claim "kernel context has no PCB so the
+            // name isn't actually stored".  That was false and cost us a
+            // misleading hang dump: `current_task_id()` is 0 here, task 0 is
+            // the BSP idle task and it very much exists, so the store landed
+            // on it and the idle task wore the name below for the rest of the
+            // boot.  `sched::set_task_name` now refuses task 0 outright, which
+            // makes the original claim true — but by construction rather than
+            // by luck.  Keep the assertion on the *return value* only: the
+            // name is deliberately not stored, so there is nothing to read
+            // back.
             let name_buf: [u8; 16] = *b"prctl-batch269\0\0";
             let name_ptr = (&raw const name_buf[0]) as u64;
             core::hint::black_box(&name_buf);

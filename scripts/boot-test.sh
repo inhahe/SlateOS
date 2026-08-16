@@ -136,6 +136,42 @@ check_selftest_failures() {
     return 0
 }
 
+# Fail a boot whose liveness watchdog reported a hang, or admitted a false one.
+#
+# WHY THIS EXISTS: on 2026-08-15 a green boot (exit 0, BOOT_OK reached) contained
+# both a "[liveness] SYSTEM HANG" report at ~140s AND the watchdog's own
+# "that report was a FALSE POSITIVE" admission 600s later.  The harness said
+# nothing, because it only ever grepped for BOOT_OK.  BUG-LIVENESS-DEADLINE-
+# FALSE-FIRE's Verification section had *required* a boot log free of these
+# lines since 2026-07-27, but the requirement lived only in prose -- so a run
+# that violated both halves of it still exited 0.  A contract nothing checks is
+# a contract that is not enforced.
+#
+# The patterns are anchored to line start and matched against the kernel's exact
+# strings.  The "(self-test) " infix is what keeps this from firing on the
+# deliberate drills in test_liveness_watchdog, which prove the detectors still
+# work by driving them into firing on purpose:
+#   real:  "[liveness] SYSTEM HANG: ..."
+#   drill: "[liveness] (self-test) SYSTEM HANG: ..."
+# Matching on the real shape alone means the drills stay silent here without the
+# harness needing to know how many of them there are.
+#
+# Returns 0 if clean, 1 if any liveness failure marker is present.
+check_liveness_failures() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    # shellcheck disable=SC2016
+    local pat='^\[liveness\] (SYSTEM HANG|SUSPECTED LIVELOCK)|^\[liveness\].*BOOT DEADLINE EXCEEDED|^\[liveness\].*FALSE POSITIVE'
+    if grep -aEq "$pat" "$file" 2>/dev/null; then
+        echo "LIVENESS WATCHDOG failure detected in serial log:"
+        grep -aEn "$pat" "$file" || true
+        echo "  (a '(self-test)' infix marks a deliberate drill and is NOT matched above;"
+        echo "   these are real reports, or the watchdog's own false-positive admission)"
+        return 1
+    fi
+    return 0
+}
+
 # Detect a kernel that has already died, so the wait loop can stop waiting.
 #
 # WHY THIS EXISTS: the poll loop used to test only for the success marker, and
@@ -1309,6 +1345,10 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
         fi
+        if ! check_liveness_failures "$SERIAL_FILE"; then
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but the liveness watchdog reported) ==="
+            exit 1
+        fi
         finish_pass "$SERIAL_FILE"
     fi
 
@@ -1370,6 +1410,10 @@ if [ -f "$SERIAL_FILE" ]; then
         echo "$WAIT_MARKER found."
         if ! check_selftest_failures "$SERIAL_FILE"; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
+            exit 1
+        fi
+        if ! check_liveness_failures "$SERIAL_FILE"; then
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but the liveness watchdog reported) ==="
             exit 1
         fi
         finish_pass "$SERIAL_FILE"

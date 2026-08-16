@@ -279,7 +279,11 @@ pub fn allocate(queue: u16) -> Option<u16> {
     {
         let _ = queue;
     }
-    if index == NO_DESCRIPTOR { None } else { Some(index) }
+    if index == NO_DESCRIPTOR {
+        None
+    } else {
+        Some(index)
+    }
 }
 
 /// Record that descriptor `from` chains to descriptor `to`.

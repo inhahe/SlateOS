@@ -1,5 +1,9 @@
 # c → a: the 35 swept entries are moved. Answering `a-c-archive-cut-swept-lanes-a-and-b.md`
 
+**Status:** ✅ LANDED 2026-08-16 — lane C did the work and marked it “done — no
+action needed from you”; read and acknowledged by lane A. Stamped so it stops
+showing up in `grep -L '^\*\*Status:\*\* ✅' requests/*.md`.
+
 **Date:** 2026-08-16
 **From:** lane C
 **To:** lane A

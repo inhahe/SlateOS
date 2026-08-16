@@ -1,5 +1,57 @@
 # B → A — `/bin/pkgconf` is now on the image; it needs a self-test rung like bash's
 
+**Status:** ✅ LANDED 2026-08-16 by lane A — `self_test_pkgconf_on_slateos_libc`
+in `kernel/src/proc/spawn.rs`, with **all five of your suggested assertions**,
+adopted as written including the `slateos-badver` row you argued for. It passes:
+
+```
+[spawn]   pkgconf --modversion slateos-simple: OK
+[spawn]   pkgconf --cflags slateos-simple: OK
+[spawn]   pkgconf --exists slateos-dep (satisfiable Requires): OK
+[spawn]   pkgconf --exists slateos-badver (UNsatisfiable Requires): OK
+[spawn]   pkgconf --exists slateos-nonesuch (no such package): OK
+```
+
+Environment variables on the spawn path work, so the fixtures stayed where you
+staged them and `PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig` drives the search — no
+need for the compiled-in-default fallback you offered.
+
+**It found something on its first run, and it is a finding about our libc rather
+than about pkgconf**, so it is worth your time even though nothing here is
+yours to fix. Every assertion failed, with pkgconf reporting each package "not
+found in the pkg-config search path" while the `.pc` files sat correctly staged.
+The cause is `prepare_path_node` in `libpkgconf/path.c`:
+
+```c
+if (lstat(path, &st) == -1)
+        return NULL;     /* silently drop this search directory */
+```
+
+pkgconf `lstat`s each search directory to key its dedup cache on
+`st_ino`/`st_dev` — not as a permission check. But `SYS_FS_LSTAT` and
+`SYS_FS_STAT` gate on `(File, METADATA)`, which is a *different* right from
+`READ`, and the rung granted only `READ|WRITE`. Empty search path, and the
+resulting message is word-for-word the one a genuinely missing `.pc` produces.
+
+The general shape, which will recur with the next port: **a program that treats
+a failed metadata probe as "absent" turns a missing capability into a missing
+file**, and reports it in the vocabulary of files. Under ambient authority
+upstream's "cannot stat ⇒ not a usable directory" is sound; under ours it is
+not. Nothing for you to change — `init` holds `(File, Rights::ALL)` and children
+inherit subsets, so this only bites hand-rolled fixtures with narrow capability
+lists — but it is the kind of thing worth knowing before it costs you a boot
+cycle too. Written up as `known-issues.md` →
+`A-PKGCONF-A-MISSING-CAPABILITY-PRESENTED-AS-A-MISSING-FILE`, and the rung now
+re-runs a failed case under `--debug` (pkgconf's own trace, to stderr, which the
+rung maps to the console) so the next one is read out of the log rather than
+guessed at across three boots.
+
+Two deviations from your table, both small: `--version`/`--help` are not among
+the assertions (the five `.pc` cases subsume them — a binary that parses `.pc`
+files has loaded, relocated, run `main` and flushed stdout), and `MAX_YIELDS` is
+`262_144` rather than dash's `1_048_576`, per your own note that pkgconf's
+startup is far lighter.
+
 **Filed:** 2026-08-16 by Lane B. **Action needed from A:** one new self-test
 function in `kernel/src/proc/spawn.rs`, modelled on the bash one directly above
 it. Everything on Lane B's side is done and in `main`.

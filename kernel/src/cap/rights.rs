@@ -71,6 +71,50 @@ impl Rights {
     /// See design-decisions.md §24 (open-questions Q6).
     pub const DEBUG: Self = Self(1 << 17);
 
+    /// Authority to change a process's own uid/gid credentials.
+    ///
+    /// Required on a [`Process`](crate::cap::ResourceType::Process)
+    /// capability to be projected `CAP_SETUID`/`CAP_SETGID` in the
+    /// userspace POSIX capability view (`posix::sys_capability::
+    /// kernel_view::project`), which is what gates `setuid()`/`setgid()`
+    /// before they issue `SYS_PROCESS_SET_CREDENTIALS`.
+    ///
+    /// **Why this is its own bit and not [`METADATA`](Self::METADATA).**
+    /// "May become another user" is the single most escalation-prone
+    /// authority in the POSIX model, and `METADATA` is a *generic* bit
+    /// documented as "permissions, attributes, etc." — the bit the next
+    /// person wanting "may rename this process" or "may set this
+    /// process's nice value" will reach for. Because the grant sites are
+    /// in the kernel and the projection is in `posix`, such a grant would
+    /// silently confer root-capability with nothing in either file to say
+    /// so. A distinct bit makes that aliasing impossible; `Rights` is a
+    /// `u64` with 52 bits still free, so it costs nothing to be precise.
+    /// This mirrors why [`DEBUG`](Self::DEBUG) is not `READ | WRITE`.
+    /// See design-decisions.md §207.
+    pub const SET_CREDENTIALS: Self = Self(1 << 18);
+
+    /// Every distinct right, in declaration order.
+    ///
+    /// Exists so that [`the aliasing assertion below`](self) can be stated
+    /// once over the whole set rather than pairwise by hand. Convenience
+    /// *combinations* (`ALL`, `READ_ONLY`, …) are deliberately absent — they
+    /// are unions of these and would defeat the check.
+    const DISTINCT: [Self; 13] = [
+        Self::READ,
+        Self::WRITE,
+        Self::EXECUTE,
+        Self::CREATE,
+        Self::DELETE,
+        Self::METADATA,
+        Self::TRANSFER,
+        Self::DUPLICATE,
+        Self::WAIT,
+        Self::SIGNAL,
+        Self::IO_REALTIME,
+        Self::DEBUG,
+        Self::SET_CREDENTIALS,
+    ];
+
     // --- Convenience combinations ---
 
     /// All rights.
@@ -151,6 +195,42 @@ impl Rights {
     }
 }
 
+/// Two rights must never name the same bit — checked at **compile time**.
+///
+/// This is the guard for the failure mode `design-decisions.md` §207 is about.
+/// A right is a name for an *authority*, and two authorities sharing a bit
+/// means granting one silently grants the other. That is not a bug that shows
+/// up in a test run: the grant site and the check site are usually in
+/// different crates (often different lanes), so no single diff contains both
+/// halves, and the system behaves perfectly right up until someone is handed
+/// an authority nobody meant to give them.
+///
+/// A `const` block rather than a `self_test()` on purpose — the boot-time
+/// self-tests are the convention here, but a self-test can be skipped, run
+/// late, or (as `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT` found) silently not
+/// run at all. An aliasing mistake is decidable from the constants alone, so
+/// it should be impossible to *build*, not merely detected on boot.
+const _: () = {
+    let mut i = 0;
+    while i < Rights::DISTINCT.len() {
+        // Every right is exactly one bit.  A right that is a union has no
+        // single meaning to grant or revoke, so it does not belong here.
+        assert!(
+            Rights::DISTINCT[i].0.count_ones() == 1,
+            "each entry of Rights::DISTINCT must be a single bit"
+        );
+        let mut j = i + 1;
+        while j < Rights::DISTINCT.len() {
+            assert!(
+                Rights::DISTINCT[i].0 != Rights::DISTINCT[j].0,
+                "two Rights share a bit — granting one would silently grant the other"
+            );
+            j += 1;
+        }
+        i += 1;
+    }
+};
+
 impl core::ops::BitOr for Rights {
     type Output = Self;
     fn bitor(self, rhs: Self) -> Self {
@@ -181,6 +261,7 @@ impl core::fmt::Display for Rights {
             (Self::SIGNAL, "sig"),
             (Self::IO_REALTIME, "io_rt"),
             (Self::DEBUG, "debug"),
+            (Self::SET_CREDENTIALS, "setcred"),
         ];
 
         for (flag, name) in &flags {

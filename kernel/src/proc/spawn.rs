@@ -14832,8 +14832,12 @@ pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
 /// would leave the credentials at `(0, 0)`, so both the read-back `u1,g1` and
 /// the kernel cross-check would still be `0,0` — two independent failures.
 /// NEW_UID and NEW_GID are distinct non-zero values, ruling out a field-swap or
-/// single-field coincidence.  Granted `READ|WRITE` (for the `/tmp` output file);
-/// the credential syscalls need no capability token.
+/// single-field coincidence.  Granted `READ|WRITE` (for the `/tmp` output
+/// file) plus `(Process, SET_CREDENTIALS)`.  The *native* syscall still needs
+/// no capability token — the kernel's only invariant is that a process sets
+/// its own credentials — but the userspace `set{u,g}id()` wrapper's
+/// CAP_SETUID/CAP_SETGID check is projected from that capability under §312,
+/// so the fixture must hold it to survive step 3.
 pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
     let fastpy_setuid_elf = match load_test_elf("fastpy-setuid") {
         Some(v) => v,
@@ -14862,7 +14866,19 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
     };
     cleanup();
 
-    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    // `File` READ|WRITE is for the /tmp output file.  `(Process,
+    // SET_CREDENTIALS)` is the kernel-side preimage of CAP_SETUID/CAP_SETGID,
+    // which `posix`'s §312 projection consults before letting set{u,g}id()
+    // issue SYS_PROCESS_SET_CREDENTIALS.  The right is deliberately its own
+    // bit rather than a reuse of METADATA — see `cap::Rights::SET_CREDENTIALS`
+    // and design-decisions.md §207.  Today the projection is advisory, so this
+    // changes nothing observable; when §312 step 3 makes the gates binding it
+    // is what keeps this fixture from failing with EPERM.
+    // See requests/b-a-cap-grants-for-312-step3-fixtures.md.
+    let caps = [
+        (ResourceType::File, 0u64, Rights::READ | Rights::WRITE),
+        (ResourceType::Process, 0u64, Rights::SET_CREDENTIALS),
+    ];
 
     let argv: &[&[u8]] = &[b"fastpy-setuid"];
     let envp: &[&[u8]] = &[];
@@ -15068,9 +15084,10 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
 /// we kill the (sleeping) process.  The old stub would leave `pcb::get_nice` at
 /// 0 and the scheduler priority at the spawn default (16) — two independent
 /// failures.  nice -12 → priority 6 is distinct from the default 16, ruling out
-/// a coincidence.  Granted `READ|WRITE` for the `/tmp` output file; the raise
-/// is CAP_SYS_NICE-gated in the userspace posix wrapper (the kernel mutation
-/// syscall itself needs no capability token).
+/// a coincidence.  Granted `READ|WRITE` for the `/tmp` output file plus
+/// `(Thread, IO_REALTIME)`; the raise is CAP_SYS_NICE-gated in the userspace
+/// posix wrapper (the kernel mutation syscall itself needs no capability
+/// token), and IO_REALTIME on a Thread is what §312 projects that cap from.
 pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
     let fastpy_nice_elf = match load_test_elf("fastpy-nice") {
         Some(v) => v,
@@ -15100,7 +15117,22 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
     };
     cleanup();
 
-    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    // `File` READ|WRITE is for the /tmp output file.  `(Thread, IO_REALTIME)`
+    // is the kernel-side preimage of CAP_SYS_NICE: `posix`'s §312 projection
+    // (`sys_capability::kernel_view::project`) sets CAP_SYS_NICE iff the
+    // process holds a Thread capability carrying IO_REALTIME.  It is required
+    // because this fixture *raises* priority (setpriority(-7) then nice(-5)),
+    // and a raise is exactly what CAP_SYS_NICE gates.  Today the projection is
+    // advisory and `has_capability` still answers from the all-caps default,
+    // so this changes nothing observable; when §312 step 3 makes the gates
+    // binding it becomes the difference between the fixture working and
+    // `nice(-5)` returning EPERM.  Granting it now means step 3 is a one-line
+    // flip in `posix` rather than a flip plus a hunt for every fixture it
+    // broke.  See requests/b-a-cap-grants-for-312-step3-fixtures.md.
+    let caps = [
+        (ResourceType::File, 0u64, Rights::READ | Rights::WRITE),
+        (ResourceType::Thread, 0u64, Rights::IO_REALTIME),
+    ];
 
     let argv: &[&[u8]] = &[b"fastpy-nice"];
     let envp: &[&[u8]] = &[];
@@ -15115,8 +15147,12 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
         exe_path: None,
         cwd: None,
         // Spawn as root (default caps = all) so the tool has CAP_SYS_NICE
-        // available; the calls it makes only *lower* priority (need no cap),
-        // but a root spawn keeps parity with the other identity self-tests.
+        // available.  It genuinely needs it: setpriority(-7) then nice(-5) is
+        // a priority *raise*, which is the one direction CAP_SYS_NICE gates.
+        // (An earlier version of this comment claimed the calls "only lower
+        // priority (need no cap)" — that was simply wrong about the fixture's
+        // own literals, and it is why the missing `(Thread, IO_REALTIME)`
+        // grant above went unnoticed.)
         uid_gid: Some((0, 0)),
     };
 
@@ -23481,6 +23517,488 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
             Err(KernelError::InternalError)
         }
     }
+}
+
+/// Where the `.pc` fixtures live once staged into the root filesystem, and the
+/// value handed to pkgconf as `PKG_CONFIG_LIBDIR`.
+///
+/// `PKG_CONFIG_LIBDIR` *replaces* pkgconf's compiled-in search path, where
+/// `PKG_CONFIG_PATH` merely prepends to it.  Replacing is what we want: the
+/// compiled-in default comes from a `./configure` invocation we do not pass any
+/// prefix to and therefore do not control, so a rung that only prepended would
+/// pass or fail partly on the strength of whatever upstream's default happened
+/// to be.  See `requests/b-a-pkgconf-self-test-rung.md`.
+const PKGCONF_PC_DIR: &str = "/usr/lib/pkgconfig";
+
+/// The three `.pc` fixtures, as `(source on the image, destination)` pairs.
+///
+/// Staged into the root filesystem rather than read in place from `/mnt` so the
+/// child's environment names the path lane B's request specifies, independent of
+/// where the ext4 image happens to be mounted.
+const PKGCONF_FIXTURES: [(&str, &str); 3] = [
+    (
+        "/mnt/usr/lib/pkgconfig/slateos-simple.pc",
+        "/usr/lib/pkgconfig/slateos-simple.pc",
+    ),
+    (
+        "/mnt/usr/lib/pkgconfig/slateos-dep.pc",
+        "/usr/lib/pkgconfig/slateos-dep.pc",
+    ),
+    (
+        "/mnt/usr/lib/pkgconfig/slateos-badver.pc",
+        "/usr/lib/pkgconfig/slateos-badver.pc",
+    ),
+];
+
+/// Run `/bin/pkgconf` once with stdout captured to a file, and return
+/// `(exit code, what it wrote to stdout)`.
+///
+/// ## Why stdout is captured through `fd_map` rather than a shell redirect
+///
+/// The bash rung above lets bash perform its own `>` redirection, which is the
+/// right shape there because driving that redirection *is* part of what the
+/// rung tests.  pkgconf has no shell in it, so the capture has to come from the
+/// spawn.  Routing it through a `/bin/bash -c 'pkgconf … > f'` would work but
+/// would make a pkgconf failure indistinguishable from a bash failure and would
+/// make this rung skip whenever bash was absent.
+///
+/// So fd 1 is bound to a file handle via `fd_map`, which is the native
+/// inheritance path: the kernel dups the handle into the child's PCB and our
+/// libc's `crt` picks it up with `SYS_PROCESS_GET_INITIAL_FDS`.  This also gives
+/// the rung a second job — it is the first real-world program to take a
+/// file-backed fd 1 through that path and then do buffered `printf` through it,
+/// so it exercises our libc's startup fd install *and* its stdout flush at
+/// `exit`, neither of which the bash rung touches.
+///
+/// fds 0 and 2 are mapped explicitly to the console because `retrieve_initial_fds`
+/// in `posix/src/crt.rs` calls `fdtable::clear_all()` before installing the
+/// inherited set: an fd_map naming only fd 1 would leave the child with *no*
+/// stdin and *no* stderr, so pkgconf's own diagnostics — the thing we most want
+/// to see when an assertion fails — would vanish into `EBADF`.
+///
+/// # Errors
+///
+/// [`KernelError::TimedOut`] if pkgconf never reaches `Zombie`; propagates spawn
+/// and file-open failures.
+fn pkgconf_invoke(
+    label: &str,
+    exe_elf: &[u8],
+    args: &[&[u8]],
+    out_path: &str,
+) -> KernelResult<(Option<i32>, alloc::vec::Vec<u8>)> {
+    use crate::fs::handle;
+
+    // pkgconf's startup is far lighter than bash's — no locale tables, no
+    // builtin/variable tables, no allocator of its own — so dash's budget is
+    // ample.  Kept as a named constant rather than inlined so a future hang
+    // shows which limit was hit.
+    const MAX_YIELDS: usize = 262_144;
+
+    // A fresh, empty capture file per invocation: a read-back can then only
+    // succeed on bytes THIS run wrote, and cannot be satisfied by a previous
+    // assertion's output still sitting there.
+    let _ = crate::fs::Vfs::remove(out_path);
+    let out_handle = handle::open(
+        out_path,
+        handle::OpenFlags::WRITE
+            .union(handle::OpenFlags::CREATE)
+            .union(handle::OpenFlags::TRUNCATE),
+    )?;
+
+    // argv[0] is the path, then the caller's arguments.
+    let mut argv: alloc::vec::Vec<&[u8]> = alloc::vec::Vec::with_capacity(args.len() + 1);
+    argv.push(b"/bin/pkgconf".as_slice());
+    argv.extend_from_slice(args);
+
+    // Console handles are virtual and identified by the fd number itself, which
+    // is why 0 and 2 appear as their own handle values.
+    let fd_map = [
+        (0_i32, fd_handle_type::CONSOLE, 0_u64),
+        (1_i32, fd_handle_type::FILE, out_handle),
+        (2_i32, fd_handle_type::CONSOLE, 2_u64),
+    ];
+    let envp: &[&[u8]] = &[
+        b"PATH=/bin",
+        b"LANG=C",
+        b"PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig",
+    ];
+    // `METADATA` is not optional decoration here, and the reason is worth
+    // stating because the symptom of omitting it is *not* a permission error.
+    //
+    // pkgconf builds its search-path list with `pkgconf_path_add(…, filter=true)`,
+    // whose `prepare_path_node` (libpkgconf/path.c, pkgconf 2.3.0) begins — on
+    // any build where `<sys/stat.h>` exists and the host is not Windows, which
+    // is ours:
+    //
+    //     if (lstat(path, &st) == -1)
+    //             return NULL;     /* silently drop this directory */
+    //
+    // — the `lstat` is there to key pkgconf's dedup cache on `st_ino`/`st_dev`,
+    // not to check permissions.  `SYS_FS_LSTAT` and `SYS_FS_STAT` both gate on
+    // `(File, METADATA)`, which is a *different* right from READ.  So a pkgconf
+    // holding only READ|WRITE gets `-1` from every `lstat`, drops every search
+    // directory, and ends up with an **empty** search path — at which point it
+    // reports "Package … was not found in the pkg-config search path", exactly
+    // as it would if the `.pc` file were genuinely missing.  A capability
+    // failure thus wears the costume of a staging failure, and the first
+    // instinct is to go looking at the fixtures, which are fine.
+    //
+    // That is the general hazard: a program that treats a failed metadata probe
+    // as "absent" converts a missing capability into a missing *file*.  The
+    // `--debug` re-run in `self_test_pkgconf_on_slateos_libc` exists so the next
+    // one of these is diagnosed from the log instead of from a hypothesis.
+    let caps = [(
+        ResourceType::File,
+        1u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "spawn-test-pkgconf",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &fd_map,
+        argv: &argv,
+        envp,
+        exe_path: Some(b"/bin/pkgconf"),
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let spawned = spawn_process(exe_elf, &options);
+    // The child holds its own dup of the capture file, so ours is dead weight
+    // from here — and on the error path it is a leak if we return without it.
+    // Closed before the `?` for exactly that reason.
+    if let Err(e) = handle::close(out_handle) {
+        serial_println!(
+            "[spawn]   pkgconf {}: WARNING: closing the parent's capture handle failed: {:?}",
+            label,
+            e
+        );
+    }
+    let result = spawned?;
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let written = crate::fs::Vfs::read_file(out_path).unwrap_or_default();
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(out_path);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: pkgconf {} did not exit within {} yields (state={:?}) — it hung \
+             somewhere in our libc",
+            label,
+            MAX_YIELDS,
+            state
+        );
+        return Err(KernelError::TimedOut);
+    }
+
+    Ok((exit_code, written))
+}
+
+/// Re-run a failed pkgconf invocation with `--debug`, so the *log* says why.
+///
+/// pkgconf's normal diagnostic for a lookup miss ("not found in the pkg-config
+/// search path") is the same sentence whether the `.pc` file is absent, the
+/// directory holding it was dropped from the search path, or the search path is
+/// empty because every `lstat` on it failed.  Those have entirely different
+/// causes on this OS — a staging bug, a path bug, and a missing capability
+/// respectively — and none of them is distinguishable from the failure message.
+///
+/// `--debug` turns on pkgconf's own trace handler, which prints the search-path
+/// list it built and every `.pc` path it tried, to **stderr** — which this rung
+/// already maps to the console.  So one extra spawn on the failure path turns a
+/// hypothesis into a reading.  It costs nothing on a green boot because it only
+/// runs when an assertion has already failed, and the boot is going red anyway.
+///
+/// Deliberately best-effort: a failure *here* must not replace the real
+/// assertion failure with a less informative one, so its errors are reported
+/// and swallowed.
+fn pkgconf_diagnose(label: &str, exe_elf: &[u8], args: &[&[u8]], out_path: &str) {
+    serial_println!(
+        "[spawn]   pkgconf: re-running `{}` with --debug; pkgconf's own trace follows on stderr \
+         (search path it built, then every .pc path it tried) --------",
+        label
+    );
+
+    let mut dbg_args: alloc::vec::Vec<&[u8]> = alloc::vec::Vec::with_capacity(args.len() + 1);
+    dbg_args.push(b"--debug".as_slice());
+    dbg_args.extend_from_slice(args);
+
+    match pkgconf_invoke("--debug re-run", exe_elf, &dbg_args, out_path) {
+        Ok((code, out)) => serial_println!(
+            "[spawn]   pkgconf: --debug re-run exited {:?} (stdout {:?}) --------",
+            code,
+            out.as_slice()
+        ),
+        Err(e) => serial_println!(
+            "[spawn]   pkgconf: --debug re-run itself failed ({:?}); the assertion failure above \
+             is still the real one --------",
+            e
+        ),
+    }
+}
+
+/// Upstream **pkgconf 2.3.0**, cross-compiled for this OS and linked against
+/// **our own `libc.a`**, parses real `.pc` files and answers queries about them.
+///
+/// This is the second real-world C program built against `posix/src` (bash 5.2,
+/// above, was the first) and it leans on a different part of it: `getopt_long`,
+/// a lot of path and string handling, and — above all — opening and parsing
+/// files it discovers by searching a directory named in the environment.  bash
+/// exercises `fork`/`exec`/`wait`, signals and its own redirection; pkgconf
+/// exercises the file-and-string side.  The overlap is small enough that this is
+/// not redundant coverage.
+///
+/// ## What each assertion is for
+///
+/// | invocation | proves |
+/// |---|---|
+/// | `--modversion slateos-simple` | the search path from `PKG_CONFIG_LIBDIR` was honoured, the `.pc` was found, opened and parsed |
+/// | `--cflags slateos-simple` | **nested** variable expansion — `${includedir}` → `${prefix}/include` → `/opt/slateos/include`; a single token, so no dependence on flag ordering, which pkgconf does not promise |
+/// | `--exists slateos-dep` | dependency traversal with a version constraint that *is* satisfiable |
+/// | `--exists slateos-badver` | the same with a constraint that is **not** — without a case that must fail, every one of these passes even if version comparison is a no-op that always answers "satisfied" |
+/// | `--exists slateos-nonesuch` | a package that does not exist is reported absent rather than, say, treated as an empty success |
+///
+/// ## What it found on its first real run
+///
+/// Every one of those assertions failed, with pkgconf reporting each package
+/// "not found in the pkg-config search path" — and the fixtures were staged
+/// correctly the whole time.  pkgconf `lstat`s each search directory (to key its
+/// dedup cache on inode) and **silently drops any directory it cannot stat**;
+/// `SYS_FS_LSTAT` gates on `(File, METADATA)`, which the child was not granted,
+/// so its search path was empty.  A missing *capability* therefore presented as
+/// a missing *file*.  The grant is now in `pkgconf_invoke` with that reasoning
+/// beside it, and [`pkgconf_diagnose`] re-runs a failed case under `--debug` so
+/// the next instance of this shape is read out of the log rather than guessed
+/// at.  It is a fair advertisement for porting real programs: no test written
+/// against our own assumptions would have probed a search directory with
+/// `lstat` and then treated failure as absence.
+///
+/// Answers `requests/b-a-pkgconf-self-test-rung.md`.  Until this landed
+/// `/bin/pkgconf` was *shipped but unexercised* — on the image and run by
+/// nothing, which is the shape of problem this tree keeps rediscovering (see
+/// `known-issues.md` → `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`).
+///
+/// No-op (returns `Ok(())`) when `/mnt/bin/pkgconf` or any fixture is absent, so
+/// a checkout that has never run `scripts/pkgconf-spike/run.sh` still boots
+/// green — loudly, via `pathz_missing`.
+///
+/// # Errors
+///
+/// Returns [`KernelError::InternalError`] if any assertion above does not hold;
+/// [`KernelError::TimedOut`] if pkgconf never reaches `Zombie`; propagates spawn
+/// and staging failures.
+pub fn self_test_pkgconf_on_slateos_libc() -> KernelResult<()> {
+    const SRC_PKGCONF: &str = "/mnt/bin/pkgconf";
+    const DST_PKGCONF: &str = "/bin/pkgconf";
+    const OUT_PATH: &str = "/pkgconf-out.txt";
+    const RUNG: &str = "pkgconf 2.3.0 linked against OUR libc.a (ring 3)";
+
+    // The fixtures are a prerequisite exactly as much as the binary is: with the
+    // binary present and the fixtures absent, every assertion below would fail
+    // and the rung would report a pkgconf bug that is really a missing rootfs.
+    let mut required: alloc::vec::Vec<&str> = alloc::vec::Vec::with_capacity(4);
+    required.push(SRC_PKGCONF);
+    for (src, _) in &PKGCONF_FIXTURES {
+        required.push(src);
+    }
+    if pathz_missing(RUNG, &required) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running {} test...", RUNG);
+
+    // Stage the binary.  Statically linked, so — as with bash — there is no
+    // ld.so or libc.so to stage alongside it.
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    match crate::fs::Vfs::read_file(SRC_PKGCONF) {
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   pkgconf: staging {} bytes -> {}",
+                bytes.len(),
+                DST_PKGCONF
+            );
+            if let Err(e) = crate::fs::Vfs::write_file(DST_PKGCONF, &bytes) {
+                serial_println!(
+                    "[spawn]   pkgconf: SKIP (staging {} -> {} failed: {:?})",
+                    SRC_PKGCONF,
+                    DST_PKGCONF,
+                    e
+                );
+                return Ok(());
+            }
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   pkgconf: SKIP (reading {} failed: {:?})",
+                SRC_PKGCONF,
+                e
+            );
+            return Ok(());
+        }
+    }
+
+    // Stage the fixtures.
+    //
+    // Each staged file is announced with its byte count, and the search
+    // directory's own metadata is read back afterwards.  Neither line is
+    // decoration: pkgconf `lstat`s the search directory and silently drops it if
+    // that fails, and reports the resulting empty search path with the same
+    // sentence it uses for a genuinely missing `.pc` file.  So "the directory
+    // exists and stats as a directory" is a *precondition* of the assertions
+    // below, and a rung that does not record its preconditions makes the reader
+    // re-derive them from a failure message that does not mention them.
+    let _ = crate::fs::Vfs::mkdir_all(PKGCONF_PC_DIR);
+    for (src, dst) in &PKGCONF_FIXTURES {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                serial_println!(
+                    "[spawn]   pkgconf: staging {} bytes -> {}",
+                    bytes.len(),
+                    dst
+                );
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   pkgconf: SKIP (staging {} -> {} failed: {:?})",
+                        src,
+                        dst,
+                        e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!("[spawn]   pkgconf: SKIP (reading {} failed: {:?})", src, e);
+                return Ok(());
+            }
+        }
+    }
+
+    // The `lstat` precondition, recorded rather than assumed.  `lmetadata` is
+    // the kernel side of the very call pkgconf makes on this path.
+    match crate::fs::Vfs::lmetadata(PKGCONF_PC_DIR) {
+        Ok(m) => serial_println!(
+            "[spawn]   pkgconf: search dir {} lstats as {:?} (pkgconf drops any search dir it \
+             cannot lstat)",
+            PKGCONF_PC_DIR,
+            m.entry_type
+        ),
+        Err(e) => {
+            serial_println!(
+                "[spawn]   pkgconf: SKIP ({} does not lstat: {:?} — pkgconf would drop it and \
+                 report every package missing)",
+                PKGCONF_PC_DIR,
+                e
+            );
+            return Ok(());
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_PKGCONF) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   pkgconf: SKIP (re-read {} failed: {:?})",
+                DST_PKGCONF,
+                e
+            );
+            return Ok(());
+        }
+    };
+
+    // (label, args, expected stdout, expected "exit code is zero")
+    //
+    // The expectation is on the *sign* of the exit code, not its value: pkgconf
+    // documents `--exists` as "zero if the package is found", and does not
+    // promise which nonzero code a miss produces.  Asserting `!= 0` tests what
+    // is promised; asserting `== 1` would make the rung fail on an upstream
+    // bump that renumbered an error.
+    let cases: [(&str, &[&[u8]], &[u8], bool); 5] = [
+        (
+            "--modversion slateos-simple",
+            &[b"--modversion", b"slateos-simple"],
+            b"1.2.3\n",
+            true,
+        ),
+        (
+            "--cflags slateos-simple",
+            &[b"--cflags", b"slateos-simple"],
+            b"-I/opt/slateos/include\n",
+            true,
+        ),
+        (
+            "--exists slateos-dep (satisfiable Requires)",
+            &[b"--exists", b"slateos-dep"],
+            b"",
+            true,
+        ),
+        (
+            "--exists slateos-badver (UNsatisfiable Requires)",
+            &[b"--exists", b"slateos-badver"],
+            b"",
+            false,
+        ),
+        (
+            "--exists slateos-nonesuch (no such package)",
+            &[b"--exists", b"slateos-nonesuch"],
+            b"",
+            false,
+        ),
+    ];
+
+    for (label, args, expect_out, expect_zero) in cases {
+        let (exit_code, out) = pkgconf_invoke(label, &exe_elf, args, OUT_PATH)?;
+
+        let is_zero = exit_code == Some(0);
+        if is_zero != expect_zero {
+            serial_println!(
+                "[spawn]   FAIL: pkgconf {} exited {:?}, expected {} (stdout {:?})",
+                label,
+                exit_code,
+                if expect_zero { "0" } else { "nonzero" },
+                out.as_slice()
+            );
+            pkgconf_diagnose(label, &exe_elf, args, OUT_PATH);
+            return Err(KernelError::InternalError);
+        }
+
+        if out.as_slice() != expect_out {
+            serial_println!(
+                "[spawn]   FAIL: pkgconf {} wrote {} bytes {:?}, expected {:?}",
+                label,
+                out.len(),
+                out.as_slice(),
+                expect_out
+            );
+            pkgconf_diagnose(label, &exe_elf, args, OUT_PATH);
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!("[spawn]   pkgconf {}: OK", label);
+    }
+
+    serial_println!(
+        "[spawn]   pkgconf 2.3.0 on our own libc.a (ring 3: static ELF, no glibc and no \
+         ld.so; getopt_long, PKG_CONFIG_LIBDIR search, .pc parsing, nested ${{}} expansion, \
+         satisfiable AND unsatisfiable version constraints, and buffered stdout on an \
+         inherited file-backed fd 1 — all through posix/src; {} assertions): OK",
+        cases.len()
+    );
+    Ok(())
 }
 
 /// Path Z Part 10: run an **unmodified, prebuilt POSIX shell** (`dash`)

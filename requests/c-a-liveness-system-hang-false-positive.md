@@ -1,5 +1,12 @@
 # c → a: the liveness watchdog fired `SYSTEM HANG` on a healthy boot, and the false positive silenced hang detection for the remaining ~600 s
 
+**Status:** ✅ LANDED 2026-08-16 by lane A — fixed in `5dada74e2`; the reply is
+`requests/a-c-liveness-system-hang-false-positive-fixed.md`. Your suggestions 1, 2
+and 4 were taken and 3 deliberately skipped, with reasons. The disarm was indeed
+the real bug: `LIVENESS_ARMED.store(false, …)` is gone from the total-hang path,
+so a false positive can no longer silence hang detection for the rest of the boot.
+This file is cited by name from `kernel/src/sched/mod.rs:2322` and `:6546`.
+
 **Status:** request. The code is `kernel/src/sched/mod.rs`, which is lane A's.
 Lane C does not write there, so this is evidence and analysis, not a patch.
 

@@ -1285,6 +1285,9 @@ struct Cursor {
     scan: Scan,
     /// Character index the next search starts from.
     next: usize,
+    /// Where the previous match ended, so an empty match butted against it can
+    /// be recognised and dropped.
+    last_end: Option<usize>,
     done: bool,
 }
 
@@ -1293,46 +1296,65 @@ impl Cursor {
         Cursor {
             scan: Scan::new(text),
             next: 0,
+            last_end: None,
             done: false,
         }
     }
 
     /// Advance to the next match and return its capture slots.
     fn step(&mut self, re: &Regex) -> Option<Vec<Option<usize>>> {
-        if self.done {
-            return None;
-        }
-        let Some(slots) = re.run(&self.scan.chars, self.next) else {
-            self.done = true;
-            return None;
-        };
-        let (start, end) = match (
-            slots.first().copied().flatten(),
-            slots.get(1).copied().flatten(),
-        ) {
-            (Some(s), Some(e)) => (s, e),
-            // A match that did not record its own extent cannot be stepped
-            // past, so continuing would return it for ever. It is unreachable —
-            // every program is wrapped in the `Save(0) … Save(1)` pair — and
-            // ending the scan is the one answer that cannot hang the caller.
-            _ => {
-                self.done = true;
+        loop {
+            if self.done {
                 return None;
             }
-        };
-        // An empty match is at a position, not over one, so it would be found
-        // again at the same place. Stepping one character past it is what
-        // `sed 's/x*/-/g'` does: a replacement between every pair of
-        // characters, and then an end.
-        self.next = if end > start {
-            end
-        } else {
-            end.saturating_add(1)
-        };
-        if self.next > self.scan.chars.len() {
-            self.done = true;
+            let Some(slots) = re.run(&self.scan.chars, self.next) else {
+                self.done = true;
+                return None;
+            };
+            let (start, end) = match (
+                slots.first().copied().flatten(),
+                slots.get(1).copied().flatten(),
+            ) {
+                (Some(s), Some(e)) => (s, e),
+                // A match that did not record its own extent cannot be stepped
+                // past, so continuing would return it for ever. It is
+                // unreachable — every program is wrapped in the
+                // `Save(0) … Save(1)` pair — and ending the scan is the one
+                // answer that cannot hang the caller.
+                _ => {
+                    self.done = true;
+                    return None;
+                }
+            };
+            if end > start {
+                self.next = end;
+                self.last_end = Some(end);
+                if self.next > self.scan.chars.len() {
+                    self.done = true;
+                }
+                return Some(slots);
+            }
+            // An empty match is at a position, not over one, so it would be
+            // found again at the same place. Stepping one character past it is
+            // what `sed 's/x*/-/g'` does: a replacement between every pair of
+            // characters, and then an end.
+            //
+            // But an empty match *touching the end of the previous match* is
+            // not a second place; it is the same place, reachable because the
+            // pattern can also match nothing. `s/a*/-/g` on `aaa` is `-`, not
+            // `--`, and `grep -o` agrees. Dropping it here rather than in each
+            // caller is what keeps them agreeing.
+            let butts_previous = self.last_end == Some(start);
+            self.next = start.saturating_add(1);
+            if self.next > self.scan.chars.len() {
+                self.done = true;
+            }
+            if butts_previous {
+                continue;
+            }
+            self.last_end = Some(end);
+            return Some(slots);
         }
-        Some(slots)
     }
 }
 
@@ -1758,14 +1780,29 @@ mod tests {
 
     #[test]
     fn a_scan_of_a_pattern_that_can_match_nothing_terminates() {
-        // `sed 's/x*/-/g'` on "axb" is "-a-b-": a match at each position, plus
-        // the one at the end, and then a stop. A scan that did not step past an
-        // empty match would hang instead.
+        // `sed 's/x*/-/g'` on "axb" is "-a-b-": a match at each position the
+        // previous one did not already reach, and then a stop. A scan that did
+        // not step past an empty match would hang instead.
         let spans: Vec<_> = re("x*").find_iter(b"axb").collect();
-        assert_eq!(spans, vec![(0, 0), (1, 2), (2, 2), (3, 3)]);
+        assert_eq!(spans, vec![(0, 0), (1, 2), (3, 3)]);
         // (An *empty* pattern is a compile error here, as it is in glibc, so
         // the pattern that matches nothing has to be spelled with a `*`.)
         assert_eq!(re("z*").find_iter(b"ab").count(), 3);
+    }
+
+    #[test]
+    fn an_empty_match_touching_the_previous_one_is_not_a_second_match() {
+        // GNU agrees on both of these, and they are the same question:
+        //   $ echo aaa | sed 's/a*/-/g'   ->  -
+        //   $ echo aaa | grep -o 'a*'     ->  aaa
+        // After `a*` has consumed `aaa` there is an empty match available at
+        // offset 3, because `a*` also matches nothing. Reporting it would give
+        // `--` and a spurious second `grep -o` line.
+        assert_eq!(re("a*").find_iter(b"aaa").collect::<Vec<_>>(), vec![(0, 3)]);
+        // Only the *touching* empty match goes. `axa` reports the two runs and
+        // neither of the empty matches that sit against their ends — which is
+        // `sed 's/a*/-/g'` giving `-x-` and `grep -o 'a*'` giving two lines.
+        assert_eq!(re("a*").find_iter(b"axa").collect::<Vec<_>>(), vec![(0, 1), (2, 3)]);
     }
 
     #[test]

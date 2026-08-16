@@ -15196,3 +15196,133 @@ checks all 28 sub-ranges of a six-character bidi string);
 `gui/toolkit/src/pathbar.rs`, `gui/toolkit/src/textview.rs` — the callers.
 
 ---
+
+## §445 — Syntax state entering a line is memoized per line and invalidated from the first edited line
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** A block comment opened near the top of a file colours everything
+below it, so to draw the lines currently on screen the editor has to know
+whether the line above the screen was inside a comment — and that answer depends
+on every line above it, all the way to line 1. Scrolling to line 4000 of a file
+therefore costs re-reading 4000 lines, every frame, unless the answer is
+remembered. The editor now keeps one small "what was I in the middle of when
+this line started" value per line, and throws away everything from the first
+line an edit touched.
+
+**The three options.**
+
+| | Cost to draw a frame | Cost of an edit | Can it be wrong? |
+|---|---|---|---|
+| Recompute the prefix each frame | O(lines above the viewport) | free | no |
+| Memoize, invalidate on edit *(chosen)* | O(visible lines), amortised | O(lines below the edit), lazily | only if a new edit path forgets to invalidate |
+| Recompute the whole file on each edit | O(visible lines) | O(file) eagerly | no |
+
+Recomputing per frame is the honest one and it is what the editor would have
+done had highlighting simply been switched on. It is also the one that gets
+slower the further down a file the user scrolls, which is the wrong shape: the
+user's experience of a large file would degrade with position in it, for no
+reason they could see. At 4000 lines and 60 Hz it is a quarter of a million line
+tokenizations per second to draw fifty lines.
+
+Recomputing the whole file on each edit has the opposite shape — drawing is
+cheap, but every keystroke pays for the whole document, and the common case
+(typing at the top of a 50,000-line file) is the worst case.
+
+The memo pays only for what changed. `hl_entry[i]` is the highlighter state
+*entering* line `i`; `entry_state(line)` extends the vector lazily from the last
+known entry, and every mutating operation calls `invalidate_highlight(first_line)`,
+which truncates to `first_line + 1`. Typing on line 3 of a 50,000-line file
+discards 49,997 entries and recomputes only as far down as the viewport actually
+reaches. This is what Vim, VS Code, Sublime and Emacs all do, in the same shape.
+
+**The cost is the third column of that table, and it is real.** The memo is the
+only one of the three that can disagree with the buffer, and it does so
+silently: a forgotten `invalidate_highlight` in some future edit path shows up
+as stale colours in one region of one file, which is exactly the kind of bug
+that gets reported as "the highlighting is a bit flaky sometimes" and never
+reproduced. So the invalidation is not left to reviewer attention.
+`the_syntax_cache_agrees_with_a_recomputation_after_every_edit` walks all ten
+editing operations and asserts, after each, that the cached entry state for
+every line equals a from-scratch recomputation. Adding an edit path without
+invalidating fails that test, which is the property that makes the memo
+affordable.
+
+**Why `RefCell`.** `entry_state` is called from the render path, which has
+`&Document`, and it mutates the memo. The alternatives were to make rendering
+take `&mut Document` — which spreads a mutable borrow across the whole draw
+call for the sake of a cache — or to fill the memo eagerly on edit, which is the
+third row of the table. Interior mutability is the narrow answer: the memo is
+not part of the document's value, it is a derived fact about it, and
+`&Document` promising "I will not change the document" is still true.
+
+**Where it lives.** `apps/editor/src/main.rs` — `Document::hl_entry`,
+`entry_state`, `invalidate_highlight`, `EditorState::render_editor`, and
+`highlight_render_tests`.
+
+---
+
+## §446 — An undo entry records what the lines were, not what the edit was
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** The editor's undo used to store a description of each edit —
+"inserted this character at this column" — and work out how to reverse it. It
+now stores the affected lines as they were before the edit and as they are
+after, and undo simply puts the old ones back. This costs memory (two copies of
+each changed line) and buys the guarantee that undo cannot be wrong, which the
+old design failed at in four separate ways at once.
+
+**What was wrong.** The four-variant enum was `Insert`/`Delete` (line, column,
+text) and `InsertLine`/`DeleteLine` (line, text). Reversing a description
+requires the description to keep agreeing with what the code actually does, and
+nothing in the language or the tests enforced that agreement. It had drifted:
+pressing Enter recorded `Insert { text: "
+" }`, but by the time undo ran, no
+line contained a newline — the split had moved the tail into a new entry — so
+undo removed a byte that was not there and left the document split; Enter's
+auto-indent was not recorded at all; `InsertLine` was matched by both `undo` and
+`redo` and constructed by nothing; and only one of the three edit entry points
+cleared the redo stack.
+
+None of those are individually deep. That is the point: they are four instances
+of one failure mode, they accumulated silently, and a fifth would have followed
+the next time someone added an editing operation.
+
+**The trade.**
+
+| | Memory per entry | Can it disagree with the buffer? | Cost of a new editing operation |
+|---|---|---|---|
+| Describe the operation | O(text changed) | yes, and silently | write a variant, an undo arm and a redo arm, and get all three consistent |
+| Record the lines *(chosen)* | O(lines touched) | no | wrap the operation in `record_edit` |
+
+The memory difference is the whole argument against recording, and it is
+smaller than it looks. A single-character insert on an 80-column line stores
+two 80-byte strings rather than a one-byte one. Across the 1000-entry cap that
+is on the order of 100 KiB for a text editor — less than one screen of the
+font atlas it is already carrying. An operation that rewrites a thousand lines
+at once would store two thousand line copies, but such an operation is already
+touching that much text.
+
+Against that: undo becomes one `Vec::splice` in each direction and has no
+per-operation code at all, so a new editing operation cannot get its undo wrong
+by construction — there is nothing to get wrong. Call sites go through
+`record_edit(line, before_count, |doc| …)`, and even the one thing they do
+state — how many lines they are about to touch — is only used to size the
+"before" snapshot; the number of lines *afterwards* is derived from how the
+buffer's total length changed, so it is observed rather than claimed.
+
+**What was deliberately not done.** A hybrid — record for multi-line edits,
+describe for single-character ones — would recover most of the memory. It was
+rejected because it reintroduces the failure mode for exactly the operations
+that are most numerous, and because the memory it saves is not memory anyone
+was short of. Compression (storing a diff of the two line sets) is available
+later if a profile ever asks for it, and would not change the interface.
+
+**Where it lives.** `apps/editor/src/main.rs` — `EditAction`,
+`Document::record_edit`/`snapshot`/`splice_lines`/`undo`/`redo`/`clamp_cursor`,
+and the `undo_tests` module.
+
+---

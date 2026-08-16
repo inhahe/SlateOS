@@ -590,9 +590,10 @@ on an invariant maintained by four other methods. All three are now a single
 
 ## The same broken reduction is copy-pasted into 27 crates, and `randrange` now exists to replace it (lane C)
 
-**Status: OPEN 2026-08-16 — eight of 27 crates fixed** (`simon`, `battleship`,
-`sliding`, `asteroids`, `yahtzee`, `hearts`, `solitaire`, `freecell`); the
-shared crate that the rest should move to is written and green.
+**Status: OPEN 2026-08-16 — eleven of 27 crates fixed** (`simon`, `battleship`,
+`sliding`, `asteroids`, `yahtzee`, `hearts`, `solitaire`, `freecell`,
+`minesweeper`, `flood`, `snake`); the shared crate that the rest should move to
+is written and green.
 
 The defect above is not `simon`'s. A scan of the tree
 (`build/scratch/lcg_scan.py`) finds the same LCG constants in **~36 places** and
@@ -620,6 +621,9 @@ measured:
 | `apps/hearts` | 2..52 | the two of hearts reached seat 2 44.3% of deals and seat 0 9.5%; 40 of 52 cards misdealt by >2 points; seat 0 led 33.6% of hands | fixed `63066a45b` |
 | `apps/solitaire` | 2..52 | the two of hearts was the leftmost face-up card in 17.6% of deals, against 1.9% | fixed `ea4560541` |
 | `apps/freecell` | 2..52 | the ace of hearts was the deepest card on the board in 17.4% of deals; ace depth alternated 8.5 / 15.5 / 9.7 / 16.2% | fixed `e1fa03154` |
+| `apps/minesweeper` | 256 | an Intermediate board was a window into one 256-cell cycle: 5000 seeds gave 252 layouts, and the 257th new game replayed the first | fixed `3f28501a6` |
+| `apps/flood` | 6 | no two cells in a row ever shared a colour — zero matches in 61 200 pairs; each column used half the palette | fixed `15d7265d6` |
+| `apps/snake` | 20, 20 | the food could reach 50 of the 400 cells, in a fixed diagonal lattice | fixed `4d448a617` |
 
 **The three card games are one shape and worth reading together.** All three
 shuffle 52 cards with a correct downward Fisher–Yates and draw the partner with
@@ -645,9 +649,25 @@ so long: most call sites use an odd or non-power-of-two bound and look fine,
 and the ones that do not still pass every distribution test written against
 them.
 
-Still degenerate, not yet migrated: `breakout`, `dots`, `flood`, `hangman`,
-`life`, `lightsout`, `match3`, `maze`, `memory`, `minesweeper`, `pacman`,
-`pinball`, `snake`, `sudoku`, `tetris`, `wordle`, `wordsearch`.
+Still degenerate, not yet migrated: `breakout`, `dots`, `hangman`, `life`,
+`lightsout`, `match3`, `maze`, `memory`, `pacman`, `pinball`, `sudoku`,
+`tetris`, `wordle`, `wordsearch`.
+
+**Three bound shapes account for every symptom found so far**, and it is worth
+checking a call site against all three rather than only the first:
+
+1. **A power-of-two bound** makes the draw the low *n* bits, which are an LCG
+   of the same shape modulo 2^*n* — period 2^*n*, and a permutation of the
+   whole range. `simon` (4), `sliding` (4), `asteroids` (4), `minesweeper`
+   (256). This is the one that makes a *distribution* test pass perfectly
+   while the sequence is worthless.
+2. **Any even bound** preserves the parity of the state, so the draw's parity
+   alternates with the draw counter. `battleship` (10), `yahtzee` (6), `flood`
+   (6), the card games (the even half of `2..52`). Costs half the range when
+   two draws are compared to each other.
+3. **An even bound with a power-of-two factor** does both. `snake` (20 = 4×5)
+   lost half the board to the parity coupling and half of what was left to
+   `row % 4` having period four.
 
 The replacement is **`randrange/`**, a new top-level `no_std`,
 dependency-free crate on the same pattern as `textfind`, `byteread` and

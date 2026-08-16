@@ -21382,9 +21382,10 @@ gap is only visible where they meet.
 
 ## B-THE-TRACKED-FIXTURE-BINARIES-DRIFT-FROM-THEIR-SOURCES, AND THE STALENESS GATE CANNOT SEE IT
 
-**Status: PARTLY FIXED 2026-08-16** (the nine binaries are re-committed in
-`169d3a242`; the *gate* still cannot detect the condition, which is the part
-that matters and is still open)
+**Status: FIXED 2026-08-16** (binaries re-committed in `169d3a242`; the
+content-based gate — the part that actually matters — landed as
+`scripts/ctest-fixtures.py`, wired into `scripts/create-ext4-rootfs.sh`, and is
+verified in both directions. See "Fix as landed" at the end of this entry.)
 
 **In short:** nine test programs are checked into git twice — once as C source
 and once as the compiled binary built from it. Nothing verifies that the second
@@ -21471,3 +21472,46 @@ is timestamps, and timestamps are precisely the thing a checkout destroys. This
 is the third artifact family in one day to be stale for a slightly different
 reason; the common thread is that each gate was verifying something adjacent to
 the property actually wanted.
+
+**Fix as landed (2026-08-16).** `scripts/ctest-fixtures.py`, with three
+subcommands (`check`, `build`, `stamp`), called from `create-ext4-rootfs.sh`
+immediately after the existing mtime gate. It hashes `build.py`, `main.c` and
+the linked `libc.a` into a tracked `<fixture>.stamp`, plus the ELF itself, and
+on mismatch names *which* input moved — the diagnosis differs by input
+(`main.c` = a source edit committed without its rebuild; `libc.a` = needs a
+relink; the ELF alone = the binary was replaced behind the build's back).
+
+Three design points worth keeping if this is ever rewritten:
+
+- **`build.py` is hashed as a stand-in for the compile and link flags.** They
+  live nowhere else, so this means a change to `-O2`, the code model or the
+  entry symbol invalidates the fixture exactly as a source edit does, with no
+  second list of flags to keep in sync with the first.
+- **The fixture list is a glob over `services/ctest-*/`, not nine names,** so a
+  tenth fixture is covered the day it lands. This is deliberate: the sibling
+  defect in this same entry (`ctest-ctty`'s missing `.gitignore`) happened
+  precisely because a rule was replicated per directory and one directory never
+  got a copy.
+- **A missing stamp is a failure, not a skip.** An unstamped fixture is one we
+  can make no statement about, and "could not verify" must never render as
+  "fine" — that is `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT` all over again.
+
+**Verified in both directions, and the negative direction found a real bug in
+the fix itself.** Positive: all nine stamp and check clean, in Windows Python
+and again under WSL inside a full image build. Negative: editing
+`ctest-jobctl/main.c` and running the real `create-ext4-rootfs.sh` gave
+`ROOTFS_EXIT=1`, named `input main.c` specifically, produced **no** `DONE` line
+(so no image was written), and still checked the remaining eight rather than
+stopping at the first failure.
+
+The bug the negative pass caught: the gate was probing for `python`, and the
+rootfs script runs under **WSL Ubuntu, which ships `/usr/bin/python3` and no
+`python` at all** — so on its first real run the check silently skipped itself.
+The only thing that revealed it was the deliberately loud
+"skipped the content-stamp check" warning in the else-branch. That is the entire
+argument for writing that branch loudly rather than letting an absent
+interpreter fall through quietly, and it is the fourth instance today of "the
+check did not run" wearing the costume of "the check passed". Now probes
+`python3` before `python`, and the remediation hint it prints uses
+`sys.executable`, so a command printed inside WSL is a command that works
+inside WSL.

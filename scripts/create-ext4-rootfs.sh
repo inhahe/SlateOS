@@ -958,6 +958,58 @@ if [ "$BASH_STALE" -gt 0 ]; then
     fi
 fi
 
+# --- Content stamps: the check the mtime gate above structurally cannot make ---
+#
+# Everything above compares mtimes, which answers "was this rebuilt after the
+# library changed?".  That is the right question for a build directory and the
+# wrong one for a binary that is *checked into git* beside the source it was
+# built from, for two reasons (known-issues.md ->
+# B-THE-TRACKED-FIXTURE-BINARIES-DRIFT-FROM-THEIR-SOURCES):
+#
+#   1. mtime is satisfied by a local rebuild that nobody commits, so git can
+#      stay stale indefinitely while every local run reports green.  That is
+#      how commit 6c89903d0 shipped a main.c with 33 new checks alongside an
+#      ELF containing none of them, passing every boot test.
+#   2. A fresh checkout stamps every file with one time, leaving no ordering to
+#      compare -- so in a clean clone (CI, a new machine) the mtime gate is not
+#      weak, it is silent.
+#
+# scripts/ctest-fixtures.py compares SHA-256 of build.py (which *is* the compile
+# and link flags), main.c, and the linked libc.a against a tracked .stamp, and
+# names whichever one moved.  It needs no toolchain, so it runs everywhere the
+# image is built.  A fixture with no stamp fails rather than being skipped.
+#
+# Probe python3 *before* python: this script is normally run under WSL Ubuntu
+# (`wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh`), which ships
+# /usr/bin/python3 and no `python` at all.  Probing only `python` made the gate
+# skip itself on its very first real run -- caught only by the warning in the
+# else-branch below, which is precisely why that branch is loud rather than
+# silent.
+STAMP_PY=""
+for _cand in python3 python; do
+    if command -v "$_cand" >/dev/null 2>&1; then STAMP_PY="$_cand"; break; fi
+done
+if [ -n "$STAMP_PY" ]; then
+    if ! "$STAMP_PY" "$ROOT_DIR/scripts/ctest-fixtures.py" check; then
+        if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+            echo "[rootfs] WARNING: fixture content stamps do not match (see above);" \
+                 "continuing because ALLOW_STALE_FIXTURES=1"
+        else
+            echo "[rootfs] ERROR: a ctest fixture's ELF does not match the source it is"
+            echo "[rootfs]        committed beside. Rebuild it with the command printed"
+            echo "[rootfs]        above, or set ALLOW_STALE_FIXTURES=1 to build anyway."
+            exit 1
+        fi
+    fi
+else
+    # Not fatal: a host without python can still build an image, and the mtime
+    # gate above still runs.  But say so, because a check that did not execute
+    # must never be mistaken for a check that passed.
+    echo "[rootfs] WARNING: no python3/python found — skipped the fixture content-stamp check"
+    echo "[rootfs]          (mtime gate above still ran, but it cannot see a source/binary"
+    echo "[rootfs]          mismatch; see known-issues.md -> B-THE-TRACKED-FIXTURE-*)"
+fi
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find . -type f -printf '  %-52p %10s bytes\n' )
 

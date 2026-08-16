@@ -804,6 +804,391 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### [A] B-CONSOLE-LOCK-IS-TAKEN-FROM-A-HARD-IRQ-WITH-A-PLAIN-LOCK. The keyboard ISR echoes through `CONSOLE.lock()`, so any task interrupted while holding the console wedges the CPU forever, silently — 2026-08-14 — **FIXED** (`a18ea83a9`)
+
+> **Resolution.** The fix landed in the *same commit* that added this entry,
+> so everything below is written in the pre-fix voice ("Proper fix. Convert
+> …") and describes work that is **already done**. Re-verified 2026-08-14:
+> `kernel/src/console.rs` imports `crate::sync::Mutex` (line 71), all three
+> statics are `Mutex::named` (`COLOR_SCHEME` 134, `SCROLLBACK` 512,
+> `CONSOLE` 720), and the file now contains **45 `lock_irqsave()`
+> acquisitions (34 + 7 + 4) and zero plain `.lock()` calls and zero
+> `spin::` references**. The heading said `OPEN` until this correction —
+> see the process note at the end of this entry.
+
+**Symptom (predicted, not yet observed).** The machine stops dead with no
+output, no panic, no stall report. Nothing is printed because the CPU is
+spinning inside an interrupt handler on a lock whose holder is the very
+frame the interrupt suspended.
+
+**The chain.** All five links are `grep`-verifiable, no inference:
+
+| # | Site | Call |
+|---|---|---|
+| 1 | `kernel/src/ioapic.rs:730` | `pub extern "C" fn handle_device_irq(irq: u32)` — **hard IRQ context** |
+| 2 | `kernel/src/ioapic.rs:746` | → `keyboard::handle_scancode()` |
+| 3 | `kernel/src/keyboard.rs:282` | → `handle_normal()` |
+| 4 | `kernel/src/keyboard.rs:461` | → `push_char()` |
+| 5 | `kernel/src/keyboard.rs:489,490,491,497` | → `crate::console::putchar(ch)` |
+
+and `console::putchar` (`kernel/src/console.rs:850`) opens with
+`let mut con = CONSOLE.lock();` where `CONSOLE`
+(`kernel/src/console.rs:679`) is a **raw `spin::Mutex`** and `lock()` is
+the plain, interrupts-enabled acquire.
+
+So: task T calls any of the 45 `CONSOLE.lock()` sites. While T holds the
+lock, IRQ 1 fires **on the same CPU**. The ISR runs on T's stack, reaches
+`putchar`, and spins on a lock that only T can release — and T cannot run
+again until the ISR returns. Permanent, silent, single-CPU deadlock.
+`SCROLLBACK` (line 478) and `COLOR_SCHEME` (line 107) are raw the same
+way; they are reachable from the same ISR because `putchar` → `scroll_up_locked`
+→ `SCROLLBACK.lock()` (line 2271).
+
+**Why it is silent.** This is the distinguishing feature, and the reason
+it is worth writing down rather than just fixing. Both instrumented lock
+types route contention through a 30-second stall detector that fires from
+*inside* the spin loop (`kernel/src/sync.rs`, `STALL_SECONDS` at line 73).
+A raw `spin::Mutex` has no such detector: it spins forever and reports
+nothing. A wedge on this lock therefore produces exactly zero evidence.
+
+**Why it has not been hit constantly.** Exposure is reduced — but not
+eliminated — by two accidents:
+
+* kshell drives the keyboard with `ECHO_ENABLED` off, so the shell's own
+  key handling does not take the console lock from the ISR. The default
+  canonical-TTY echo-on path does.
+* The window is only as wide as a console critical section, and most of
+  the 45 are a few instructions. `write_str` over a long line, and any
+  call that scrolls (full-screen `memmove` plus a scrollback `Vec::push`
+  that can realloc), are the wide ones.
+
+Reduced exposure is not a defence. This is a "works until it doesn't"
+bug: the odds scale with typing during output, which is precisely what an
+interactive shell does.
+
+**Contrast: `serial.rs` already defends this exact case, three ways.**
+`serial::_print` (`kernel/src/serial.rs:204`) wraps the whole acquire in
+`crate::cpu::without_interrupts(...)`, claims a per-CPU `IN_PRINT` flag
+*before* taking the lock, and falls back to a lock-free
+`SerialPort::emergency()` on re-entry. Its doc comment (lines 190–198)
+describes the failure mode verbatim: "a garbled report can be read, a
+deadlock cannot." `console.rs` has none of the three. The two files
+diverged; only one of them was thought about.
+
+**Proper fix.** Convert `CONSOLE`, `SCROLLBACK` and `COLOR_SCHEME` from
+`spin::Mutex` to `crate::sync::Mutex` and change every acquisition to
+`lock_irqsave()`. That is the structural fix, not a mitigation: masking
+interrupts on the local CPU for the hold makes the reentrant arrival
+*impossible* rather than merely unlikely, and it is categorical — it
+protects against any future IRQ-context console user, not just the
+keyboard. It also lands the locks in the instrumented type, so a future
+wedge here reports itself instead of hanging mutely, and lockdep gets the
+`CONSOLE → SCROLLBACK` edge.
+
+This matches Q24's taxonomy (design-decisions.md §70): `CONSOLE` is a
+**non-leaf** lock — `scroll_up_locked` (line ~2255) takes
+`SCROLLBACK.lock()` at line 2271 while the caller holds `CONSOLE` — so it
+takes `crate::sync::Mutex`, not `PreemptSpinMutex`.
+
+**Invariant the fix relies on, recorded so it is not silently broken
+later.** `lock_irqsave` closes the *interrupt* window; it does not close
+an *exception* window, because `cli` does not mask faults. The fix is
+therefore complete only while no exception handler prints to the console.
+That holds today and was checked, not assumed: the only `console::` callers
+outside `console.rs` are `keyboard.rs`, `kshell.rs` and `ipc/io_ring.rs`,
+and the `#[panic_handler]` (`kernel/src/main.rs:5952`) executes `cli()` and
+then uses `serial_println!` exclusively. If a fault handler is ever taught
+to write to the console, it must first grow a per-CPU re-entrancy guard in
+the shape of `serial.rs`'s `IN_PRINT`.
+
+**Cost of the fix, stated honestly rather than glossed.** `lock_irqsave`
+masks interrupts for the whole hold, so the widest console critical section
+is now also the widest interrupts-off window on the system: `scroll_up_locked`
+(`kernel/src/console.rs:~2296`) does a ~3 MiB framebuffer `ptr::copy` plus a
+per-pixel clear of the bottom row while holding `CONSOLE`. That is hundreds
+of microseconds to low milliseconds. This is accepted, for three reasons:
+
+* It is task context, not ISR context, so it is not measured against the
+  10 µs ISR budget.
+* It cannot be narrowed while the lock is held — dropping `IF` mid-scroll
+  to shorten the window is precisely the reentrant arrival the fix exists
+  to prevent, so any "optimisation" here reintroduces the deadlock.
+* The alternative (leave the lock raw and hope the ISR never lands inside
+  a critical section) trades a bounded latency cost for an unbounded,
+  silent, permanent hang. That is not a trade.
+
+The console's other whole-screen loops were already written to drop the
+lock first (`clear_screen` at ~868, `apply_scheme` at ~312 both capture the
+geometry, `drop(con)`, then blit) — so the exposure really is limited to
+the scroll path.
+
+Usefully, the conversion also makes the cost *measurable*: `lock_irqsave`
+feeds `crate::cpu::irqoff_tracker`, so `irqoff` in kshell now reports the
+max interrupts-off duration this path actually produces, instead of it
+being invisible. That number is the evidence that should drive
+TD-CONSOLE-ECHO-RUNS-IN-HARD-IRQ-CONTEXT below.
+
+**Not related to B-FORKEXEC-BOOT-HANG.** Tempting, but no: the
+diagnostics that went missing in that hang were `serial_println!`, and
+serial is a wholly separate lock with its own (working) defence. Recording
+the non-link so a later session does not "solve" that hang by pointing at
+this fix.
+
+**Separate concern, deliberately not folded into this fix.** Rendering
+glyphs into the framebuffer from inside a hard IRQ handler blows CLAUDE.md's
+"total ISR latency < 10 µs" target by orders of magnitude, deadlock or no
+deadlock. The right shape is Linux's: the ISR queues the character and a
+bottom half does the echo, after which the console lock is task-context-only
+again. That is a different change with a different risk profile, so it is
+logged below as TD-CONSOLE-ECHO-RUNS-IN-HARD-IRQ-CONTEXT rather than
+smuggled into a deadlock fix.
+
+**Process note — why this entry said `OPEN` for a bug that was already
+fixed.** Both this entry and the RTL8139 one below were written *while
+investigating*, in the future tense ("**Proper fix.** Convert `CONSOLE` …"),
+and then committed **together with the fix that carried them out**. The prose
+was accurate when drafted and stale by the time it was committed, and the
+`— OPEN` in the heading — the only part anyone skimming the file actually
+reads — was never flipped. Both entries then sat mislabelled until a later
+session went looking for "open Lane A bugs to fix", picked these two off the
+`grep '— OPEN$'` list, and found the work already done.
+
+That is an expensive failure mode in both directions: it invites duplicate
+work, and worse, it corrodes trust in the file — if the `OPEN` list contains
+fixed bugs, the natural correction is to stop believing the file, which is the
+opposite of what a bug tracker is for. Note it is the same shape as the
+benchmark failures recorded later in this file
+(`B-BENCH-CANARY-CERTIFIES-CLEAN-RUNS…` and its three predecessors): **a
+status that is never re-checked degrades into a status that is merely
+asserted.** The heading is a claim about the world; committing it unchanged
+alongside a fix makes it a claim about nothing.
+
+The rule that prevents it: **when one commit both writes up a bug and fixes
+it, the heading must be written in its post-fix state in that same commit.**
+If the fix is not complete there, the write-up should say what remains rather
+than inheriting a blanket `OPEN`. The cheap standing check is
+`grep -n '— OPEN$' known-issues.md`, confirming each hit against the code
+before trusting it — which is how these were caught.
+
+**How widespread it was, measured rather than assumed.** Having found two, the
+obvious question was whether the rest of the `OPEN` list could be trusted, so
+all six Lane-A `— OPEN` headings were checked against the code. **Three of the
+six were stale** — this one, the RTL8139 entry below, and
+`TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE`, the last of which had
+even accumulated an internal `**Closed 2026-08-14 …**` paragraph while its
+heading still said `OPEN`. So the file's headline status was wrong for **half**
+the open list. That is the number worth remembering: this was not two
+oversights, it was the normal outcome of the workflow that produced them, and
+the only reason it looked like an exception is that nobody had counted.
+
+### [A] B-RTL8139-SEND-SPINS-FOR-THE-EVENT-WHOSE-HANDLER-WANTS-THE-LOCK-IT-HOLDS. `send()` polls 100 000 times for TX-complete while holding the lock `handle_irq` blocks on — 2026-08-14 — **FIXED** (`64f7d2fd9`)
+
+> **Resolution.** As with the console entry above, the fix landed in the same
+> commit that added the write-up, so the "**Proper fix.**" paragraph below
+> describes work already done. Re-verified 2026-08-14: all four `DEVICE`
+> acquisitions in `kernel/src/rtl8139.rs` are `lock_irqsave()` (lines 364,
+> 375, 573, 605) and none is a plain `lock()`. The *deadlock* is closed; the
+> 100 000-iteration busy-wait inside `send` is deliberately **still there**
+> and is still worth fixing — see the final paragraph of this entry for the
+> block-and-wake rewrite, which remains open work.
+
+**Found by auditing the bug *class* rather than the bug.** After fixing
+B-CONSOLE-LOCK-IS-TAKEN-FROM-A-HARD-IRQ above, the obvious question was
+whether the console was the only place a hard-IRQ handler blocks on a
+lock that task context also takes. `handle_device_irq`
+(`kernel/src/ioapic.rs:731`) is the sole hard-IRQ device dispatch, so the
+audit is bounded and can be made *complete* rather than sampled:
+
+| Callee in `handle_device_irq` | Verdict |
+|---|---|
+| `cputime::enter_irq` / `exit_irq` | lock-free (atomics) |
+| `ktrace::record` | lock-free |
+| `keyboard::handle_scancode` (irq 1) | was the console bug — now fixed |
+| `mouse::handle_irq` (irq 12) | lock-free |
+| `virtio::blk::handle_irq` | lock-free (atomics + port I/O) |
+| `virtio::net::handle_irq` | lock-free (its `DEVICE` is never touched from IRQ) |
+| `rtl8139::handle_irq` | **plain `DEVICE.lock()` — this entry** |
+| `irq_notify`, `irq_storm::record_irq` | lock-free |
+| `sched::try_wake` | `SCHED.try_lock()` — correct by design, returns false and raises a softirq |
+| `apic::eoi` | lock-free |
+| `softirq::process_pending` | re-enables interrupts first — different class, see below |
+
+One finding. `e1000` was checked too and is clean *for a different reason*:
+it has no `handle_irq` at all (it is polled), so its `DEVICE` is
+task-context-only.
+
+**The bug.** `rtl8139::handle_irq` (`kernel/src/rtl8139.rs:553`) does
+`let guard = DEVICE.lock();` in hard-IRQ context. The same `DEVICE`
+(line 181) is taken in task context by `with_device` (line 361), which is
+what `send` (366) and `recv` (372) go through — and `with_device` holds
+the lock across the whole closure.
+
+**Why this one is worse than the console.** Look at what `send` does while
+holding the lock (`kernel/src/rtl8139.rs:392`):
+
+```rust
+// Wait for the descriptor to become available (OWN bit clear
+// means hardware finished with it).
+for _ in 0..100_000u32 {
+    let status = unsafe { port::inl(self.io_base + status_reg) };
+    if status & TX_STATUS_OWN == 0 { break; }
+}
+```
+
+The OWN bit is cleared by the hardware finishing the previous transmit —
+**which is precisely the event that raises the TX-complete interrupt.** So
+the code spins, holding `DEVICE`, waiting for the exact hardware event
+whose interrupt handler will block on `DEVICE`. This is not a narrow race
+window that a busy system might hit; it is a loop that waits for the
+trigger while holding the trigger handler's lock. On any TX-active link
+the interrupt lands inside that loop essentially by construction.
+
+**Why it hasn't been seen.** The RTL8139 is not the NIC the QEMU boot test
+runs — virtio-net and e1000 are — so `handle_irq` never fires here. The
+driver is untested-in-anger, not correct.
+
+**One mitigating difference from the console bug:** `DEVICE` is already a
+`crate::sync::Mutex` (`use crate::sync::Mutex` at line 26), so the 30-second
+stall detector *will* fire and name the lock. This hangs loudly rather than
+silently. It still hangs.
+
+**Proper fix.** Change all `DEVICE` acquisitions in `rtl8139.rs` to
+`lock_irqsave()` — the same structural fix as the console, for the same
+reason. Note that on this driver `lock_irqsave` inside `send` is not merely
+protective: it is what makes the poll loop terminate, because with the
+interrupt masked the handler cannot run at all until `send` releases, and
+the OWN bit is observable by polling regardless of whether the interrupt
+was delivered.
+
+Separately, the 100 000-iteration poll while holding a lock is bad shape on
+its own merits (it is a busy-wait for a device with no bound in time). The
+right long-term structure is the one `virtio::blk` already uses: the ISR
+acknowledges at the device with atomics only and wakes a task, and the
+descriptor wait becomes a block-and-wake rather than a spin. That is a
+driver rewrite, so it is not folded into the deadlock fix.
+
+**The exception class was audited too, and is clean — by design, not by
+luck.** This matters because `cli` does not mask faults, so an exception
+handler that blocks on a task-held lock cannot be fixed by `lock_irqsave`
+at all; it has to use `try_lock`. Checked:
+
+* `idt.rs` itself takes **no** locks (0 acquisition sites in the file).
+* `mm::fault::resolve` (`kernel/src/mm/fault.rs:262`) uses
+  `KERNEL_AS.try_lock().ok_or(KernelError::PageFault)?`, with a comment
+  naming the exact hazard: *"if we faulted while holding this lock (e.g.,
+  during VMA manipulation), the fault is in critical code and cannot be
+  resolved."* `add_kernel_vma`/`remove_kernel_vma` (290, 299) keep the plain
+  `lock()`, correctly — they are task-context-only and the fault path never
+  blocks on them.
+* `proc::pcb::try_resolve_fault` (`kernel/src/proc/pcb.rs:5370`) uses
+  `PROCESS_TABLE.try_lock()`, and further drops the guard *before* CoW
+  resolution because that path allocates.
+
+**The pattern worth noticing.** The memory-management code was written with
+this hazard in mind throughout — `try_lock` plus a comment explaining the
+re-entrancy every time. The device and console code was not: plain `lock()`
+everywhere, no comment, no defence. The discipline exists in one half of the
+tree and is absent from the other, which is why both bugs found so far are
+in drivers/console and none are in `mm`. When auditing further, weight
+driver code accordingly.
+
+**Audit scope note, so the next session knows what was *not* covered.**
+Softirq handlers (`softirq::process_pending`, called after EOI with
+interrupts *re-enabled*) are a third class: they can be interrupted by a
+further device IRQ, so a lock shared between a softirq handler and a
+hard-IRQ handler has the same failure mode. That intersection is currently
+empty because the only hard-IRQ lock acquisition in the whole tree is the
+`rtl8139` one above — but it stops being empty the moment another ISR
+learns to take a lock, so the check has to be redone whenever one does.
+
+### [A] TD-CONSOLE-ECHO-RUNS-IN-HARD-IRQ-CONTEXT. Keyboard echo renders glyphs to the framebuffer from inside the IRQ 1 handler — 2026-08-14 — ✅ FIXED 2026-08-14 (`kernel/src/keyboard.rs`)
+
+**Fix.** The ISR no longer renders. `push_char` now hands the byte to
+`queue_echo`, which filters the non-echoing keys, pushes into a new 256-byte
+SPSC echo ring, and submits a single `drain_echo` work item to the kernel
+workqueue. `drain_echo` runs in the worker *task* context and does the
+`console::putchar` calls there.
+
+**Why a workqueue and not a softirq** — the mechanism that looks like the
+obvious choice is the wrong one, so this is worth stating. A softirq runs on
+the interrupted task's kernel stack with that task suspended mid-execution, so
+it must never block on a lock the interrupted task might hold;
+`softirq.rs`'s own contract requires handlers to use `try_lock`. Echo needs
+the console lock unconditionally, so routing it through a softirq would have
+converted the hard-IRQ deadlock into a softirq deadlock and looked like
+progress. The workqueue is explicitly "deferred work in process context …
+may sleep, take mutexes, allocate", which is what rendering needs. Linux
+reaches the same conclusion: `tty_flip_buffer_push` defers to `flush_to_ldisc`
+on a workqueue, not to a softirq.
+
+**Details worth keeping.**
+
+* *Submission is coalesced.* One work item per keystroke would exhaust the
+  workqueue's 64-item capacity during a key-repeat storm and start dropping
+  **other subsystems'** work — a much worse failure than slow echo. A
+  `ECHO_DRAIN_SCHEDULED` flag means a burst submits once.
+* *The flag is cleared before draining, not after.* A producer that pushes
+  after the clear sees it clear and submits a fresh drain; the worst case is
+  one redundant drain finding an empty ring. Clearing afterwards would leave
+  a byte stranded until the next keystroke.
+* *A failed submit un-latches the flag.* Otherwise a single full-queue moment
+  would latch `SCHEDULED` true with nothing scheduled to clear it, and echo
+  would be dead for the rest of the boot.
+* *Early boot falls back to inline rendering.* `keyboard::init` runs ~700
+  lines ahead of `workqueue::init`, so there is a real window with no worker
+  to defer to. Inline rendering there is harmless — no userspace, no latency
+  budget in force, no contention for the console lock — and `is_running()` is
+  monotonic, so the two paths cannot interleave and reorder output.
+* *Dropped bytes are counted, not ignored.* A silent drop shows up to the user
+  as randomly missing characters while the input ring still holds the byte —
+  i.e. the shell acts on input that was never displayed. `ECHO_DROPPED` makes
+  that visible.
+
+**Tested** by a new `echo_ring_self_test` (run from `keyboard::self_test`)
+covering FIFO order, exact capacity (`SIZE-1`, one slot sacrificed to
+distinguish full from empty), refusal past capacity, and drop accounting. It
+masks interrupts for the duration because the producer under test *is* the
+IRQ 1 handler — a keystroke arriving mid-test would push into the same ring
+and make the assertions describe something other than what they name.
+
+**Consequence for the earlier deadlock fix.** The console lock is now
+task-context-only on this path, so the `lock_irqsave` from
+B-CONSOLE-LOCK-IS-TAKEN-FROM-A-HARD-IRQ-WITH-A-PLAIN-LOCK is belt-and-braces
+rather than load-bearing. It stays: it is what makes the guarantee categorical
+for any future IRQ-context printer, and re-introducing the bug should require
+someone to actively remove a safeguard rather than merely forget one.
+
+---
+
+*Original entry:*
+
+**The debt.** `handle_device_irq` → `keyboard::handle_scancode` →
+`push_char` → `console::putchar` (chain tabulated in
+B-CONSOLE-LOCK-IS-TAKEN-FROM-A-HARD-IRQ-WITH-A-PLAIN-LOCK above) does the
+full console pipeline — escape-sequence state machine, glyph blit, and on
+the last column a whole-screen scroll (`memmove` of the framebuffer plus a
+scrollback `Vec::push` that can hit the heap allocator) — with the CPU
+inside a hard interrupt handler.
+
+**Why it matters.** CLAUDE.md's interrupt-dispatch budget is "total ISR
+latency < 10 µs, deferred work via softirq/tasklet equivalent". A
+full-screen scroll at 1024×768×32bpp is ~3 MiB of `memmove`; it is not
+within three orders of magnitude of 10 µs. Every keystroke that lands on
+the bottom line therefore stalls the timer tick and every other device.
+
+**Proper fix.** Split the echo out of the ISR the way Linux splits n_tty:
+the handler decodes the scancode and pushes the resulting byte(s) into the
+existing input ring, and a bottom half (the tty/console task) drains the
+ring and does the rendering in task context. Once the console lock is
+task-context-only, the `lock_irqsave` from the deadlock fix above becomes
+belt-and-braces rather than load-bearing — keep it anyway, since it is what
+makes the guarantee categorical for any *future* IRQ-context printer.
+
+**Why not done now.** It changes echo latency and ordering
+(character-visible-at-keystroke becomes character-visible-at-next-drain),
+which is a user-visible interactivity change and wants its own boot test
+and its own commit. The deadlock is the urgent half and is fixed
+independently.
 ### TD-POSIX-TIMES-FLAKE. `posix::sys_times::tests::test_times_increments_each_call` fails intermittently under a full-workspace run — 2026-08-15 — filed to lane B as `requests/c-b-flaky-sys-times-test.md`
 
 **Not lane C's tree** — logged here so the next lane to hit it does not re-triage
@@ -825,6 +1210,61 @@ merging, and costs that lane a triage cycle to prove otherwise.
 which is what the implementation actually guarantees. Serialising the
 `times()`-using tests behind a `Mutex` also works but is more fragile — it holds
 only as long as every future `times()` caller in the crate remembers the lock.
+
+**Superseded in part** — see `B-POSIX-SYS-TIMES-HOST-STUB-STATIC-MUT-DATA-RACE`
+directly below. The "correct fix" above is *not* sufficient: the counter is a
+racy `static mut`, so strict monotonicity does not hold either, and a second
+test that already asserts exactly `t > prev` fails for that reason.
+
+### B-POSIX-SYS-TIMES-HOST-STUB-STATIC-MUT-DATA-RACE. The host `times()` tick counter is an unsynchronised `static mut` — it goes *backwards* under `cargo test`, so it is not even monotonic — 2026-08-15 — filed to lane B as `requests/a-b-sys-times-host-stub-static-mut-data-race.md`
+
+**Not lane A's tree** — logged here so this is not re-triaged from scratch, and
+because it changes the recommended fix for `TD-POSIX-TIMES-FLAKE` above.
+
+**What it is.** `posix/src/sys_times.rs:85` declares
+`static mut TICK_COUNTER: i64 = 0`, and lines 195-200 do an unsynchronised
+read-modify-write on it under the comment `// SAFETY: single-threaded access.`
+That comment is false: `cargo test` runs tests in parallel threads within one
+binary, so this is a data race on a `static mut` — undefined behaviour, not
+merely a lost update.
+
+**Symptom.** Lane A's pre-merge `cargo test --workspace --target
+x86_64-pc-windows-gnu` (906 s) came back `20288 passed; 1 failed`:
+
+```
+thread 'sys_times::tests::test_times_null_buffer_loop_phase154' (31140)
+panicked at posix\src\sys_times.rs:468:13:
+iteration 106: tick count must advance (prev=172, cur=161)
+```
+
+The counter went **backwards**, 172 → 161 — the exact signature of a lost
+update (T1 read 172 and wrote 173; T2, holding a stale 160, wrote 161; T1 then
+read 161).
+
+**Why this matters beyond one test.** `TD-POSIX-TIMES-FLAKE` recommends
+replacing the exact-delta assertion with a strict-monotonicity one, "which is
+what the implementation actually guarantees." It does not guarantee that.
+`test_times_null_buffer_loop_phase154` *already* asserts precisely
+`assert!(cur > prev)` — and that is the test that failed. Adopting the
+recommended fix would turn a test that fails often into a test that fails less
+often while leaving the UB in place.
+
+**Correct fix** (lane B's to make): replace the `static mut` with
+`AtomicI64` and return `fetch_add(1, Relaxed) + 1`. That removes the UB, makes
+strict monotonicity a real per-location property rather than a scheduling
+accident, and needs no `unsafe` — so the false SAFETY comment disappears with
+it. Lane C's fix to `test_times_increments_each_call` is still needed
+*separately*, because the counter stays process-wide and the exact-delta premise
+stays wrong even once it is atomic. Two independent changes, both required.
+
+**Generalisable lesson.** A `// SAFETY:` comment that asserts a *whole-program*
+property ("single-threaded access") rather than a local invariant is a claim
+about code that does not exist yet — here, about every future caller and about
+the test harness's threading model, neither of which the author controls. Two
+different tests, filed by two different lanes on the same day, each blamed the
+test rather than the counter, because the SAFETY comment read as settled. When
+triaging a flake, check whether the thing being measured is itself sound before
+concluding the assertion is too strong.
 
 ### TD-FONT-NO-CFF-OUTLINES. `osfont` cannot draw any `.otf` whose outlines are PostScript/CFF rather than TrueType — 2026-08-13 — ✅ FIXED 2026-08-14 (`gui/font/src/cff.rs`, `gui/font/src/sfnt.rs`, `gui/font/src/raster.rs`)
 
@@ -1013,7 +1453,7 @@ APIs that take a path and validate only its syntax.
 
 ---
 
-### [A] TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE. The whole performance suite — baselines, targets, scorecard — is spawned and then killed mid-run on every boot test — 2026-08-14 — OPEN
+### [A] TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE. The whole performance suite — baselines, targets, scorecard — is spawned and then killed mid-run on every boot test — 2026-08-14 — **FIXED** (all three options landed; see "Closed 2026-08-14" below)
 
 **Where:** `kernel/src/main.rs` (`deferred_bench_task`, spawn site ~5505),
 `kernel/src/bench.rs` (`run_all`, `score`, `SCORECARD`),
@@ -41015,6 +41455,64 @@ idle-reschedule bug). Given the Q24 lineage, the highest-value proactive step is
 the kernel-wide raw-spin holder-preemption audit already queued as **Q24** in
 `open-questions.md`; this hang is another data point for doing that audit.
 
+**[A] Static audit 2026-08-14c — the silence itself is evidence, and it rules
+out both instrumented lock types.** Two facts about the lock implementations
+turn "no output" from a dead end into a filter:
+
+1. **`crate::sync::Mutex::lock()` disables preemption for the whole hold**
+   (`sync.rs:432`) *and* routes contention through `lock_contended()`, whose
+   stall detector fires after `STALL_SECONDS = 30` of wall-clock spinning,
+   naming the lock, the wedged CPU/task and the locks that CPU already holds.
+2. **`PreemptSpinMutex::lock()` does the same** — `preempt_disable()` then
+   `spin_with_stall()` (`sync.rs:924-931`).
+
+Both detectors fire from *inside* the spin loop, so per their own
+documentation they work "regardless of IF state", and 30 s is far inside the
+480 s timeout this hang consumed. **Therefore a >400 s silent wedge cannot
+have been spinning on a `crate::sync::Mutex` or a `PreemptSpinMutex`** — one
+of them would have announced itself. What remains:
+
+- a **raw `spin::Mutex`** (no preempt-disable *and* no stall detector — the
+  un-converted Q24 remainder), or
+- a non-lock infinite loop / failure to reschedule, or
+- a wedge whose own diagnostic cannot escape (see the console note below).
+
+This is a genuine prune, and it doubles as a **prioritisation criterion for
+the Q24 sweep**: converting a raw lock buys not only holder-preemption safety
+but self-reporting, so each conversion permanently shrinks the set of places a
+future silent hang can hide. Progress on Q24 is therefore measurable, not just
+hygienic.
+
+**Hypotheses checked and RULED OUT (do not re-derive these):**
+
+- *Both registered exit hooks are clean.* `notify_exit_hooks`
+  (`sched/mod.rs:1085`) runs only two real hooks — `pacct::on_task_exit`,
+  which is lock-free (atomics + a static ring; its one call into
+  `sched::task_info` is deliberately the single-task variant, chosen to avoid
+  a long SCHED hold), and `sched::supervisor::on_task_exit`, which uses
+  `crate::sync::Mutex` (`SUPERV`) and so is both preempt-safe and
+  stall-instrumented. The supervisor's restart path is also correctly
+  deferred: it copies the restart info out, `drop(table)`s, and schedules via
+  ktimer *specifically* to avoid spawning in the dying task's context.
+- *"An IRQ handler self-deadlocks on the raw `SERIAL` lock."* Plausible on
+  paper — `serial.rs:147` really is a raw `spin::Mutex` — but `_print`
+  (`serial.rs:204`) already defends it three ways: the whole body runs under
+  `cpu::without_interrupts`, a **per-CPU `IN_PRINT` flag** is claimed *before*
+  the lock is taken (deliberately before, so a nested exception during the
+  *wait* also takes the safe path), and any re-entry falls back to
+  `SerialPort::emergency()`, which does not lock at all. So a nested print
+  cannot wedge on `SERIAL`.
+
+**Remaining lead — `kernel/src/console.rs` is entirely raw.** `CONSOLE`,
+`SCROLLBACK` and `COLOR_SCHEME` (`console.rs:107/478/679`) are `spin::Mutex`
+via `use spin::Mutex`, i.e. no preempt-disable and no stall detector, and
+`console.rs` has no equivalent of serial's `IN_PRINT` re-entrancy guard. It is
+a strong Q24 conversion candidate on its own merits, and it is the one place
+where the silence argument above is *not* evidence of innocence: a wedge on an
+output lock cannot report itself. Note this does **not** by itself explain
+this hang's silence, because the diagnostics that went missing were
+`serial_println!`, and serial is independent of console.
+
 ### D-SHM-MAP-NOCAP. `SYS_SHM_MAP`/`SYS_SHM_SIZE`/`SYS_SHM_CLOSE` do not verify the caller owns the handle — RESOLVED 2026-07-14
 
 **RESOLVED 2026-07-14 (option (b) — IPC provider-PID + `shm::authorize` grant).**
@@ -44500,6 +44998,36 @@ an unresolvable access returns `-EFAULT` instead of halting.
 
 **Discovered:** 2026-06-30 (page-cache §36 sub-task 4 review).
 
+**[A] 2026-08-14 — made self-identifying (diagnostic only, not a fix).**
+The fix stays blocked on a repro, but *recognising* a recurrence did not
+have to be. `kernel/src/idt.rs` (fatal-#PF path, just after the
+`CS/RFLAGS/RSP/SS` line) now tests the exact signature — `error & 4 == 0`
+(ring-0) && `error & 2 != 0` (write) && `error & 1 != 0` (present) &&
+`cr2 < USER_SPACE_END` — and on a match prints
+`*** MATCHES known-issues.md W-KERNEL-COW-WRITE ***` followed by the
+faulting PTE's flags via `page_table::translate_flags()`.
+
+The PTE dump is what makes this decisive rather than suggestive, because
+`PageFlags::COW` is an explicit software bit (bit 9) with the documented
+invariant "only meaningful when PRESENT is set and WRITABLE is cleared".
+So the three outcomes are distinguishable without further inference:
+- `USER_ACCESSIBLE && !WRITABLE && COW` → **CONFIRMED** unbroken CoW page;
+  the printed RIP names the kernel write path that must call
+  `mm::user::validate_user_write()` (the fix above).
+- `USER_ACCESSIBLE && !WRITABLE && !COW` → not CoW at all; a kernel write
+  to a genuinely read-only mapping — a different bug, and the diagnostic
+  says so rather than mislabelling it.
+- writable and/or not user-accessible → the error code matched but the PTE
+  disagrees, i.e. a stale TLB entry or a concurrent unmap.
+
+Deliberately *not* done: routing ring-0 user-address faults into
+`try_resolve_fault`. That remains rejected for the lock-re-entrancy reason
+in the paragraph above; this change cannot deadlock because it only reads
+page tables on a path already committed to `halt_loop()` with interrupts
+disabled. Same tactic as the bytes-at-RIP dump added for
+`B-PTHREAD-TEARDOWN-PF`: when a bug is rare and unreproducible, the
+actionable work is to guarantee the *next* occurrence is self-explaining.
+
 ### B-COMPACT1. Memory-compaction self-test (`collect_private_frames`) panicked non-deterministically across boots — FIXED 2026-06-16
 
 **Where:** `kernel/src/mm/compact.rs` — `self_test()` Test 5; the API under test is
@@ -46452,6 +46980,44 @@ String` (`208`), which is the ~270-call-site figure this entry quotes. History
 (`entries: Vec<String>`, `2629`) has to move to `Vec<Vec<u8>>` as well, or
 recalling a byte-bearing command re-corrupts it.
 
+**Correction 3 (2026-08-14): 270 is the `resolve_path` count, not the size of
+the job — and quoting it here has been under-selling this task by ~6×.** The
+conversion is bounded by every *`str`-only method* reachable from
+`execute()`, not by one function's callers. Measured over the 84,845 lines of
+`kernel/src/kshell.rs`:
+
+| method | sites | on `[u8]`? |
+|---|---:|---|
+| `.parse::<…>` | 1153 | no — parse at the numeric leaf via `from_utf8` |
+| `.split_whitespace` | 552 | **no equivalent — must be written** |
+| `.trim*` | 292 | free (`trim_ascii`, already stable; used in `oci.rs:683`) |
+| `.push_str` | 160 | free (`extend_from_slice`) |
+| `.starts_with` | 138 | free (`slice::starts_with`) |
+| `.as_str` | 109 | free (`&v[..]`) |
+| `.strip_prefix` | 89 | free (`slice::strip_prefix`) |
+| `.to_lowercase` | 63 | `to_ascii_lowercase` (already byte-correct here) |
+| `.ends_with` | 53 | free (`slice::ends_with`) |
+| `.splitn` | 51 | signature differs (`slice::splitn` takes a predicate) |
+| `.split_once` | 15 | **no equivalent — must be written** |
+
+So ~**1520 `str`-method sites** plus ~**1150 `parse::<>` sites**, against the
+~270 this entry advertised. The useful split is that **631** of them
+(`trim`/`starts_with`/`ends_with`/`strip_prefix`) need *no* new code at all —
+`[u8]` already has them — so the extension trait only has to supply
+`split_ascii_whitespace`, `split_once` and a `splitn` shim. That is a small
+trait carrying a very large mechanical diff, which is the opposite shape from
+what this entry originally implied ("a self-contained rewrite of the cursor
+arithmetic").
+
+**Representation decisions (settled, so the next session need not re-litigate):**
+reuse the existing `Path`/`PathBuf` (`kernel/src/fs/path.rs`) for path leaves
+rather than inventing a second byte-string type; make the parser helpers an
+**extension trait on `[u8]`**, *not* a newtype — a newtype forces wrap/unwrap
+noise across all ~1500 sites for no invariant that `[u8]` doesn't already
+give; and write it in-house rather than adding `bstr` (the kernel is `no_std`
+on a custom target, `bstr` is only ever a host-side transitive dependency
+here, and `fs/path.rs` already proves the in-house pattern carries its weight).
+
 **Consequence for sequencing.** A partial conversion is worse than none: if the
 editor becomes byte-clean but `execute()` still takes `&str`, the lossy step
 just moves from the keyboard to the parser entry, where it is *less* visible.
@@ -46462,6 +47028,87 @@ real reason it is a big task — not the cursor arithmetic.
 **Status:** unblocked and in-lane; not started, because the conversion wants a
 free build machine to iterate against (a boot test was occupying QEMU during
 this scoping pass).
+
+**[A] Update 2026-08-14 — stage (a) has LANDED: `kernel/src/bytestr.rs`.**
+
+The scoping pass above reduced the ~1520 `str`-method call sites to three
+missing operations; those now exist. `ByteStrExt` is an extension trait on
+`[u8]` supplying `split_ascii_whitespace` (552 sites), `splitn_byte` (51),
+`split_once_byte`/`split_once_str` (15), plus `split_byte`,
+`rsplit_once_byte`, `find_str` and `find_byte`. The other 631 sites
+(`trim*`, `starts_with`, `ends_with`, `strip_prefix`) need no new code —
+`[u8]` already has them.
+
+An extension trait rather than a newtype: a newtype buys no invariant that
+`[u8]` lacks (there *is* no invariant — any byte sequence is legal) while
+forcing wrap/unwrap noise across all ~1500 sites. `split_ascii_whitespace`
+deliberately keeps `str`'s exact spelling so those 552 sites need **no edit
+at all** once the buffer type changes; the delimiter-taking ones are suffixed
+`_byte`/`_str` so a bare `split_once` cannot silently resolve to a future
+inherent slice method, which would win over the trait and change behaviour
+with no compile error.
+
+**How the equivalence was verified, and why that mattered.** The module
+claims each method matches its `str` counterpart *exactly*. A ~1500-site
+mechanical diff is only safe while that holds — a helper differing in one
+edge case plants a bug at whichever site hits it, with nothing in the diff to
+show for it. Checking that claim against a *reading* of the documentation was
+not good enough, because the awkward edges are exactly where a confident
+misreading is likely. So `scripts/bytestr-oracle.rs` runs the self-test's
+exact cases through real `std::str` on the host and prints what std actually
+does. All cases matched, including `splitn(0, …)` → nothing, `"a,".splitn(2)`
+→ `["a", ""]`, `"".split(',')` → one empty field, and `find("")` → `Some(0)`.
+The oracle lives on the host because the kernel is `no_std` and cannot link
+std — which is precisely why the equivalence cannot be asserted in-tree.
+
+`bytestr::self_test()` is wired into the boot battery (the kernel binary sets
+`test = false`, so `self_test()` is the only place these run). Boot test
+PASSED, and the serial log carries all five subtest lines plus
+`bytestr::self_test PASSED` — confirmed present rather than merely
+not-failing, since a self-test that never executes is indistinguishable from
+one that passes.
+
+**Remaining, unchanged in substance:** stages (b) and (c) still must land
+together per the paragraph above. Stage (b) is `line_buf` (kshell.rs:2872),
+`History.entries` (2631) and four functions (`replace_line` 2921,
+`redraw_from_cursor` 2955, `reverse_search_mode` 3061, `read_line` 3191).
+Note the landmine at kshell.rs:3583: `buf.insert(cursor, ch as char)` takes a
+*byte* index, so widening the `ch >= 0x20 && ch < 0x7F` guard at 3580 to
+accept 0x80..=0xFF **without** changing the buffer type would encode each such
+byte as two UTF-8 bytes while `cursor += 1` advances by one, desynchronising
+the cursor from the buffer. The type change and the guard widening must be in
+the same commit.
+
+**[A] Correction 4 (2026-08-14) — this entry's scope estimate is ~40× low, and
+stages (b)+(c) are now gated on operator decision `open-questions.md` Q45.**
+
+The "~1520 call sites" figure counted *method calls*. Measured against the
+file: `kshell.rs` is **84,845 lines** and **879 of its 1,024 functions** take
+or return `&str`/`String`. `execute_single` is a full bash-like parser (alias
+expansion, array syntax, `(( ))` arithmetic, `eval`, pipes, redirects,
+heredocs) whose logic is text-oriented throughout. So "one coherent change
+over the editor **and** the statement executors" means rewriting essentially
+the whole shell in a single unreviewable commit, against a shell that
+currently works — for a defect this entry itself classifies as *not* data loss.
+
+Also measured, and cutting the other way: only **6** `from_utf8_lossy` sites
+exist in the whole file, and all six are file-*content* formatting (`column`,
+`diff`), not path handling. The byte-purity problem is confined to the path
+pipeline, which is a small part of those 879 signatures.
+
+That suggests a decomposition this entry did not consider: make the *expanded
+word* byte-clean rather than the command line — convert word expansion,
+`resolve_path`, completion and the path-consuming commands, and let the user
+reach arbitrary bytes through the `$'\xff'` escape the shell **already parses**
+(7 sites). That is how bash itself works (source is text, expanded argument is
+a byte string), it fixes the user-visible bug, and it does *not* fall to this
+entry's "partial conversion is worse than none" objection — that objection
+targets a **layer** split (editor byte-clean, parser not), whereas this
+converts one **data path** end-to-end and so introduces no lossy step.
+
+A-vs-B is an architectural fork on a large, costly-to-reverse change, and B
+knowingly departs from the plan written above, so it is the operator's call:
+see `open-questions.md` **Q45**. Stage (a) is independently useful either way.
 
 ### TD-OILS-AN-UPPERCASE-G-WAS-READ-BY-THE-HALF-OF-THE-COMMAND-THAT-ONLY-EVER-READS-THE-LOWERCASE-ONE. `declare -Ga g=(1 2)` bound the array globally where bash keeps it in the frame — 2026-08-12 — FIXED 2026-08-12
 
@@ -65925,6 +66572,3459 @@ accident of who happens to call the function is not enforced at all. When the
 cheap tiers of a tiered fast path are unavailable, the "always works" fallback
 is the one that runs — so it is the one that has to actually always work.
 
+### [A] B-BENCH-COMPARATOR-CALLS-SUITE-WIDE-HOST-NOISE-A-REGRESSION. The run-over-run diff named six regressions in code that had not changed — FIXED 2026-08-14
+
+**Where:** `scripts/bench-history.py`, `diff()` / `report()`.
+
+**Symptom.** The first post-merge `--bench` run (commit `17dbde179`, host
+`Logoplex3`, BOOT_OK, exit 0) reported:
+
+```
+  REGRESSED (>25% slower):
+    firewall_check: 270ns -> 482ns (+79%)
+    shm_create_close: 58556ns -> 84996ns (+45%)
+    ipc_semaphore: 11676ns -> 16112ns (+38%)
+    net_veth_roundtrip: 47097ns -> 60102ns (+28%)
+    net_veth_send: 23240ns -> 29552ns (+27%)
+    io_ring_nop: 1948ns -> 2460ns (+26%)
+```
+
+**Why it was wrong.** `git diff bf26aabdb 17dbde179` over the perf-critical
+paths is **two files, +54/-8**: `kernel/src/syscall/number.rs` (doc comments)
+and `kernel/src/syscall/handlers.rs` (`sys_thread_join` moving its exit value
+to an out-pointer). Nothing under firewall, veth, shm, semaphore or io_uring
+changed at all, so not one of the six flagged benchmarks executes a line that
+differs between the two commits.
+
+The actual distribution over all 63 benchmarks: **median +6.1%, mean +9.4%,
+48 slower vs. 15 faster** — and the sorted tail is a smooth continuum,
+`24.4, 24.5, 24.6, 24.9, 26.3, 27.2, 27.6`. There is no gap anywhere near the
+threshold. A real regression is a few outliers standing clear of a ~0% median;
+what this was is a fixed 25% line drawn through the middle of a shifted
+distribution.
+
+**Root cause.** The module docstring claims run-over-run comparison "cancels
+the emulation constant". That holds across *hosts*, not across *runs on one
+host*: TCG is pure emulation and therefore CPU-bound, so whatever else the
+machine was doing scales the whole suite by a common factor. Shift a
+distribution whose own per-benchmark wobble already reaches ~20% by a further
+6% and its tail crosses 25%. The `diff()` docstring even anticipated the noise
+("a 10-20% wobble carries no information") but chose the wrong remedy — a
+coarser *absolute* threshold cannot subtract a *global* shift, it can only
+trade false positives for false negatives.
+
+**Fix.** Added `global_drift()`: the **median** of every benchmark's
+run-over-run ratio, used to normalise each ratio before thresholding, so the
+threshold applies to how a benchmark moved *relative to its peers on the same
+run*. The median (not the mean) is the estimator precisely because it is
+unaffected by a genuine regression in a minority of benchmarks — the signal
+that must not be subtracted away. Skipped below `MIN_SAMPLES_FOR_DRIFT = 8`,
+where the median means nothing and a handful of benchmarks can legitimately
+all move together. The report now prints the drift itself (information in its
+own right — it says the machine was busy), shouts if it exceeds 15%, and shows
+both numbers per entry (`+68% vs suite, +79% raw`) so no one has to trust the
+correction blindly.
+
+Replayed against the real data, the four pure-drift entries drop out and the
+report goes from six regressions to three.
+
+**Why this mattered enough to fix immediately.** It is the same class of defect
+as the bug that produced this harness in the first place
+(`TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE`): a report you cannot
+act on. A silent skip trains you not to notice; a comparator that cries wolf on
+every run trains you to skim past the one time it is right. Six false
+regressions on the *very first* run it was used in anger would have retired the
+feature within a week.
+
+**Related precedent:** `TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT`
+burned five boots on "ownership tagging costs 8500 cycles" that was also the
+emulator rather than the code. Same underlying trap, one level up.
+
+### [A] W-BENCH-THREE-BENCHMARKS-ABOVE-SUITE-DRIFT-WITH-NO-MATCHING-CODE-CHANGE. firewall_check / shm_create_close / ipc_semaphore — ✅ RESOLVED 2026-08-14: all three were noise
+
+**RESOLUTION (2026-08-14, third run `a18ea83a9`).** All three were noise, and
+the third run says so about as loudly as data can. They came back not merely
+to the suite median but to *below* their first-run values — and they are the
+**top three entries in the IMPROVED list**, in the same order they had
+occupied in REGRESSED:
+
+| benchmark | run 1 `bf26aabdb` | run 2 `17dbde179` | run 3 `a18ea83a9` | verdict |
+|---|---|---|---|---|
+| `firewall_check` | 270 ns | 482 ns | **228 ns** | run 2 is the outlier |
+| `shm_create_close` | 58 556 ns | 84 996 ns | **56 734 ns** | run 2 is the outlier |
+| `ipc_semaphore` | 11 676 ns | 16 112 ns | **11 219 ns** | run 2 is the outlier |
+
+Runs 1 and 3 agree to within 3–16 % in every case; run 2 stands alone. A real
+regression does not un-regress with no code change, so the correct reading is
+that run 2 was the anomaly, not run 3 — i.e. these were never regressions at
+all, and the flat 25 % threshold flagged them purely because their intrinsic
+spread exceeds it. The prediction recorded below — that `firewall_check` at
+270 ns would prove the noisiest by construction — held: its spread is 111 %,
+the second-widest in the suite.
+
+**Measured per-benchmark spread (max/min across the three runs), which is the
+number the comparator has been missing all along:**
+
+* median across all 63 benchmarks: **13 %**
+* but the tail is long: `crypto_ed25519_verify` 416 %, `firewall_check` 111 %,
+  `tcp_checksum_v6` 56 %, `shm_create_close` 50 %, `sched_pick_next` 49 %,
+  `syscall_dispatch` 44 %, `ipc_semaphore` 44 %.
+
+So a flat 25 % threshold is below the natural spread of at least seven
+benchmarks and far above that of the median one — it is simultaneously too
+tight and too loose, which is exactly the failure mode observed. **This
+promotes the "proper fix" named below from a suggestion to the next task:
+give the comparator a per-benchmark variance estimate.** Logged as
+TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE below.
+
+**Caveat recorded honestly: run 3 is partially contaminated, by me.** I ran
+greps, `git`, and `python` in the same window as the benchmark suite, having
+explicitly noted beforehand that the machine should be idle. Median drift
+correction removes a *uniform* slowdown; it cannot remove contention that
+lands on whichever benchmark happens to be running at the time. That is the
+most likely explanation for run 3's own new outliers —
+`crypto_ed25519_verify` (30.7M → 31.4M → **158.6M**, i.e. two tight samples
+then 5.1×) is the longest-running benchmark in the suite and therefore the
+most exposed to a contention window. Do **not** treat that as a regression on
+this evidence; see TD-BENCH-RUNS-ARE-CONTAMINATED-BY-THE-AGENTS-OWN-COMMANDS
+below.
+
+The original WATCH text follows unchanged.
+
+---
+
+### [A] W-BENCH-THREE-BENCHMARKS-ABOVE-SUITE-DRIFT-WITH-NO-MATCHING-CODE-CHANGE (original entry). firewall_check / shm_create_close / ipc_semaphore — WATCH, needs a third data point
+
+**Where:** benchmarks `firewall_check`, `shm_create_close`, `ipc_semaphore`;
+history in `bench/history.jsonl` (host `Logoplex3`).
+
+**What.** After the drift correction above, three benchmarks still sit clear of
+the suite: `firewall_check +68%` (270→482ns), `shm_create_close +37%`
+(58556→84996ns), `ipc_semaphore +30%` (11676→16112ns). As established above,
+none of their source changed between `bf26aabdb` and `17dbde179`.
+
+**Why it is a WATCH and not a bug (yet).** `bench/history.jsonl` holds exactly
+**two** runs on this host, so there is no per-benchmark variance estimate — the
+drift correction removes the *common* factor but says nothing about how noisy
+an individual benchmark is around it. `firewall_check` at 270ns is the prime
+suspect for being intrinsically noisy: it is the shortest benchmark in the
+suite, and at TCG timer granularity a couple of hundred nanoseconds is very
+few ticks, so its relative variance should be the largest by construction.
+
+**How to resolve.** Take a third `--bench` run on an otherwise-idle machine and
+compare. If these three land back at the suite median they were noise, and the
+proper fix is to give the comparator a per-benchmark variance estimate (flag on
+deviation from a benchmark's own historical spread, not a flat percentage)
+rather than to keep hand-adjudicating. If they stay high, they are real, and
+the next question is whether the `handlers.rs` change shifted code layout
+(icache/alignment) — cheap to test by benchmarking `bf26aabdb` again.
+
+**Do not** act on either theory from the current two runs; that is exactly the
+inference-from-insufficient-samples mistake the entry above documents.
+
+### [A] TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE. A flat 25% threshold is below the natural spread of seven benchmarks and far above the median one's — 2026-08-14 — OPEN
+
+**Where:** `scripts/bench-history.py`, `diff()` / `THRESHOLD_PCT`.
+
+**What.** The comparator flags a benchmark when its drift-corrected change
+exceeds a fixed ±25 %. Three runs of history now show that a single flat
+threshold cannot work, because the suite's per-benchmark spread (max/min
+across runs, *with no code change explaining it*) ranges over an order of
+magnitude:
+
+* median benchmark: 13 % spread → 25 % is far too loose; a genuine 20 %
+  regression here would pass unnoticed.
+* `crypto_ed25519_verify` 416 %, `firewall_check` 111 %, `tcp_checksum_v6`
+  56 %, `shm_create_close` 50 %, `sched_pick_next` 49 %, `syscall_dispatch`
+  44 %, `ipc_semaphore` 44 % → 25 % is far too tight; these produce false
+  positives every single run.
+
+Two investigation cycles have now been spent hand-adjudicating false
+positives thrown by this threshold (see the RESOLVED entry above and
+B-BENCH-COMPARATOR-CALLS-SUITE-WIDE-HOST-NOISE-A-REGRESSION). That is the
+signal to fix the estimator rather than keep adjudicating its output.
+
+**Proper fix.** Give each benchmark its own noise band derived from its own
+history, and flag only moves outside it. Concretely: keep the existing
+whole-suite median drift correction (it removes the common factor correctly
+and is not in question), then compare the drift-corrected change against a
+robust per-benchmark dispersion — median absolute deviation of the log-ratios
+across the recorded runs — rather than a constant. Retain a flat *floor* so
+that a benchmark with an implausibly tight history cannot be flagged on a
+sub-noise move, and require a minimum number of runs (the existing
+`MIN_SAMPLES_FOR_DRIFT` precedent) before the per-benchmark band is trusted,
+falling back to the flat threshold until then.
+
+**Test it the same way the drift fix was tested:** replay the estimator
+against the recorded `bench/history.jsonl` and confirm it drops the three
+now-known-noise entries while still flagging a deliberately injected
+regression. Do not ship it on reasoning alone — that is the mistake this
+whole thread of entries keeps documenting.
+
+**Update 2026-08-14 — the fix above is DATA-BLOCKED; the unblocking step has
+landed.** Attempting the implementation established that it cannot be built
+*or* validated yet, which is worth recording so the next attempt does not
+rediscover it:
+
+* The MAD-of-log-ratios estimator needs the spread of each benchmark across
+  runs. `bench/history.jsonl` holds **3** records, all from one host — which
+  yields **2** consecutive run-over-run residuals per benchmark. A median
+  absolute deviation over 2 points is not an estimate of anything; with
+  residuals of `{+2 %, +406 %}` it returns ~204 %, a band so wide it would
+  flag nothing, and one more run could as easily make it 2 %, a band so tight
+  it flags everything. A minimum-runs gate (the fix's own proposal) would
+  simply keep it disabled.
+* The test requirement above is therefore *also* unsatisfiable today: with 3
+  records there is no held-out data to replay against. Shipping it anyway
+  would be exactly the "on reasoning alone" failure the entry warns about, so
+  it was not shipped.
+
+**What landed instead** (commit alongside this update): the harness now emits
+and records a per-benchmark **dispersion** figure, which supplies the missing
+noise scale *from a single run* rather than requiring history to accumulate.
+`kernel/src/bench.rs::print_scorecard` extends the machine-readable line to
+
+```text
+[bench] SCORE <name> <min_ns> <target_ns> <PASS|OVER> <mean_ns> <iters>
+```
+
+and `bench-history.py` stores `mean_ns` / `iterations` as sibling maps in each
+record. The trailing pair is optional in the parser, so the 3 existing records
+still load — `scripts/test-bench-history.py` pins that down against the real
+history file, because those records are ~9-minute boots on commits that are
+now in the past and cannot be regenerated.
+
+`mean/min` is a genuine per-benchmark noise scale and not a proxy for one: the
+scorecard reports `min` because it is the least-contaminated estimate, but a
+benchmark whose mean sits at 1.05× its min took a clean measurement on nearly
+every iteration, while `dashboard_api_status` at 6.6× (160.4 ms mean vs 24.4 ms
+min) was interrupted on most of them — so its reported min is whichever
+iteration happened to dodge the interference, and is correspondingly fragile
+run-to-run. That is precisely the property the band needs to size itself by,
+and the two entries plainly should not share one threshold.
+
+**Remaining work, in order.** (1) Accumulate ≥6 same-host records — this is a
+by-product of ordinary benchmarked boots, not a task. (2) Validate the
+`mean/min` → run-over-run-sigma mapping *empirically* against those records
+before using it; the causal story above is plausible but the coefficient is
+not known, and inventing one would just build a new false-positive generator
+with more decimal places. (3) Then implement the band, preferring the
+historical MAD where enough runs exist and falling back to the dispersion
+prior where they do not. Do **not** skip step (2).
+
+### [A] TD-BENCH-RUNS-ARE-CONTAMINATED-BY-THE-AGENTS-OWN-COMMANDS. I ran greps and git during a benchmark suite after noting the machine had to be idle — 2026-08-14 — OPEN
+
+**What.** The benchmark suite runs under QEMU TCG, which is pure emulation and
+entirely CPU-bound, so any other load on the host scales the measurements.
+During run 3 (`a18ea83a9`) I ran roughly a dozen `grep`, `git`, `python` and
+file-read commands in the same window, despite having stated at the start of
+the run that the machine needed to stay idle for the numbers to mean anything.
+
+**Why the existing drift correction does not save it.** The median-ratio
+correction removes a *uniform* whole-suite factor — a machine that is
+consistently 6 % slower for the whole run. Contention from a handful of short
+commands is not uniform: it lands on whichever benchmark is executing at that
+moment and leaves the rest untouched. It therefore shows up as exactly what a
+real regression looks like — one or two benchmarks clear of an unchanged
+median. `crypto_ed25519_verify` is the canary: 30.7M → 31.4M → 158.6M ns,
+i.e. two runs agreeing within 2 % and then a 5.1× jump, on a benchmark whose
+source did not change and which is the longest-running in the suite (so the
+most likely to overlap a command).
+
+**Proper fix — structural, not a discipline reminder.** "Remember to stay
+idle" is not a fix; it already failed once, the same day it was written down.
+Make contamination *detectable* instead: have the bench harness re-run one
+cheap, low-variance reference benchmark at the start and again at the end of
+the suite, and record both. If the two disagree by more than a few percent,
+the host load changed mid-run and the whole run should be marked contaminated
+in `history.jsonl` and excluded from comparison (or at minimum reported as
+such). This turns "the operator/agent must behave" into a property the data
+itself can verify — the same principle as the stall detectors: a check that
+cannot fire is indistinguishable from a check that passes.
+
+**Interim mitigation until that exists:** when a `--bench` run is in flight,
+do read-only work only if it is genuinely necessary, and prefer to simply
+wait. Treat any single-benchmark outlier in a run that overlapped agent
+activity as unproven.
+
+**[A] ✅ FIXED 2026-08-14 — and the first version of the fix was itself blind
+to the case it was built for.** Worth reading for the second half.
+
+*Stage 1 (commit `be167dd90`).* The reference memory-access cost that already
+calibrates every budget in `bench.rs` is now measured a second time at the end
+of the suite, emitted as `[bench] CANARY <start> <end> <pct>`, recorded by
+`bench-history.py` as a sibling key with a `contaminated` flag, and covered by
+11 checks in `test-bench-history.py`. The measurement was factored into one
+parameterless function used by both ends, because the comparison means nothing
+unless both ends measure precisely the same thing.
+
+*What the first real run showed (commit `be167dd90`, host Logoplex3).* Two
+things, one confirming the entry and one refuting the fix.
+
+Confirming: `crypto_ed25519_verify` came back at **30.0M ns**, against 30.7M
+and 31.4M in the two runs before the spike and 158.6M during it. Three runs
+now agree within 4% and the spike stands alone, so run `a18ea83a9` **was**
+contaminated, exactly as this entry argued. Whole-suite drift for the new run
+was −0.1%.
+
+Refuting: the canary reported the host stable to within **3%** (283 → 275
+cycles) — while in that same run `shm_rw_64bytes` (298 → 771), `tcp_checksum_v4`
+(20714 → 35410), `net_ipv4_parse` (933 → 1645) and `net_ethernet_parse`
+(873 → 1216) all sat 40–160% above their established values. So the run was
+contaminated and the canary passed it.
+
+*Why.* Endpoint sampling detects a **sustained** load change. The
+contamination described at the top of this entry is a **transient burst** that
+"lands on whichever benchmark is executing at that moment and leaves the rest
+untouched" — which by construction is invisible to a check that only looks at
+the two ends. The first fix was therefore a check that could not fire on its
+own motivating case: the failure mode this project keeps rediscovering, arrived
+at from the opposite direction.
+
+*Stage 2 (this commit).* The reference is now sampled **throughout** the suite
+— every 8th scored benchmark, giving ~8 samples across the 63 — and the verdict
+uses the min-to-max spread rather than the endpoint ratio. Sampling is hooked
+into `score()`, the one function every benchmark already calls, so it spreads
+automatically and stays correct as benchmarks are added or reordered; a
+hand-placed list of sample points in `run_all` would rot. The line gains four
+append-only fields, `[bench] CANARY <start> <end> <pct> <min> <max> <spread>
+<samples>`, so the single record written by stage 1 still reads back and is
+still judged by the endpoint rule it was written under.
+
+*Tolerance status.* Still 25%, still a placeholder. One clean-endpoint
+observation (3%) is not a distribution, and the mid-suite spread has now to be
+observed over several runs before the bound is tightened — the same discipline
+applied to `TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE`. The raw min/max
+are recorded on every run precisely so the bound can be retuned later against
+real data instead of being invented; a stored verdict alone could never be
+re-judged.
+
+*Consequence for the four elevated benchmarks above:* unproven, not regressions.
+They are diffed against `a18ea83a9`, a run this entry now shows was itself
+contaminated, so the comparison is contaminated at both ends. They need a clean
+run-over-clean-run comparison before anyone reads them as real.
+
+**[A] Update 2026-08-14 — stage 2 verified, and all four elevated benchmarks
+were indeed contamination.** Run `5a2002bac` reported `spread 2%` over **10**
+mid-suite samples (267–275 cycles), so the sampling works end to end. Against
+that clean run every one of the four returned to its established value:
+`shm_rw_64bytes` 771 → **414**, `tcp_checksum_v4` 35410 → **20182**,
+`net_ipv4_parse` 1645 → **952**, `net_ethernet_parse` 1216 → **829**. None was
+a regression, which is what the refusal to report them was protecting.
+
+**Honest limitation — the production check has not yet been observed firing.**
+The unit tests prove the *logic* fires (a 173% mid-suite spread with quiet
+endpoints reads as contaminated), and both real runs so far were clean, so the
+mid-suite path has only ever been seen returning "OK". Host contamination
+cannot be summoned on demand, so this is a check believed-good rather than
+demonstrated-good in production — the precise distinction this entry exists to
+insist on. It should not be described as proven until a real run trips it.
+Whole-suite drift for `5a2002bac` was +3.1%.
+
+**RECURRENCE 2026-08-14, run `fcd066231` — I did it again, and this time it
+landed on a number I then acted on.** During the ~58 s QEMU bench run I ran
+`grep` over the 60 000-line `known-issues.md`, `git log`, `git show`, and
+several `Read`s. The dispersion report for that run flagged five benchmarks at
+≥5x `mean/min`, and **`vfs_stat_root` was one of them at 12x**. I then took
+that run's `vfs_stat_root` = 5920 ns, called it "8.5x over its 700 ns target",
+committed that claim, and opened an investigation into the VFS dcache on the
+strength of it.
+
+The number may well still be broadly right — `score()` records `min_ns`, and a
+burst inflates the mean far more than the min. But "broadly right" is not the
+standard, and the specific escape hatch does not close here: this benchmark is
+**500 iterations at ~6 µs ≈ 3 ms of wall time**. A host load episode lasting
+longer than 3 ms — which is to say, essentially any of them — covers the
+*entire* benchmark and inflates min and mean together, leaving `mean/min`
+looking normal while every sample is uniformly slow. The 12x ratio says a
+burst happened *inside* those 3 ms; it says nothing about whether a slower,
+broader episode also raised the floor. So the honest status of 5920 ns is
+**unverified**, not "confirmed 8.5x over".
+
+Two things follow, and both were done rather than noted:
+
+1. The re-measurement (the `vfs_stat_breakdown` run) is executed with **no
+   agent commands issued while QEMU is running** — the read-only work is done
+   before the run starts or after it finishes, never during.
+2. The dcache finding is not being justified by the 5920 ns figure at all. It
+   rests on reading the code: `VfsDcache::lookup` is a linear scan over 1024
+   slots with a full `PathBuf` compare per slot, which is a design defect
+   under CLAUDE.md's "linear scans … must be O(1) or O(log n)" rule
+   independently of what any timer says. A contaminated benchmark can motivate
+   a code review; it must not be the evidence.
+
+**The pattern, stated plainly, because this is the second occurrence.** The
+first time, the contamination hit numbers I merely recorded. This time it hit
+a number I *reasoned from* within minutes of producing it. The entry above
+correctly predicted the mechanism and even built the detector that caught it —
+and the detector working did not stop me, because I read the dispersion list
+*after* I had already drawn the conclusion. A check that fires after the
+decision is documentation, not a gate. The ordering is the fix: read the
+dispersion report **before** quoting any number from a run, not after.
+
+### [A] B-BENCH-WATCHLIST-WATCHED-LESS-THAN-HALF-THE-SUITE-IT-GUARDS. `BENCH_CRITICAL_PATHS` omitted idt.rs, fs/, net/ and crypto.rs — FIXED 2026-08-14
+
+**Where:** `scripts/boot-test.sh`, `BENCH_CRITICAL_PATHS` (feeds
+`report_bench_absence`).
+
+**What.** The list added earlier the same day to close
+`TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE` held five entries —
+`kernel/src/{mm,sched,ipc,syscall,smp.rs}` — because it was derived from
+CLAUDE.md's perf-critical *table*, read as directory names. The suite it is
+supposed to guard measures far more than that. Against the 63 recorded
+benchmark names:
+
+- `isr_latency`, `page_fault` → **`kernel/src/idt.rs`**. CLAUDE.md's table
+  names both "interrupt dispatch" and "page fault handling", but the handlers
+  live in `idt.rs`, not under `mm/` — so the two benchmarks that measure them
+  were unwatched.
+- 8 × `vfs_*` (`read_256`, `write_256`, `readdir`, `stat_{root,3comp,deep}`,
+  `throughput_16k_{read,write}`) → **`kernel/src/fs`**. CLAUDE.md lists "VFS
+  path lookup" and "filesystem read/write" as critical.
+- ~20 × `net_*`, `tcp_checksum_*`, `dns_build_query`, `firewall_check`,
+  `http_*`, `dashboard_api_*` → **`kernel/src/net`** (`http.rs`,
+  `dashboard.rs` live under it).
+- 9 × `crypto_*` → **`kernel/src/crypto.rs`**.
+
+So **30+ of 63 benchmarks measured code the watch list did not watch**, and a
+change to any of them printed "No perf-critical changes since the last
+benchmarked commit, so skipping the suite is reasonable here." Confidently,
+and wrongly.
+
+**How it surfaced.** The `W-KERNEL-COW-WRITE` diagnostic commit edits
+`kernel/src/idt.rs`. The following boot reported no perf-critical changes —
+while the suite contains `isr_latency` and `page_fault`, both measured by code
+in that exact file. (No real regression: that diagnostic sits on the fatal
+path, which is not hot. The harness had no way to know that, and did not
+reason about it — it simply never looked.)
+
+**Fix.** Widened the list to the four missing paths and annotated **every**
+entry with the benchmarks it guards, so the mapping is auditable instead of
+implicit. Verified: `git diff --name-only 17dbde179 HEAD` over the new list
+now returns `kernel/src/idt.rs`, which the old list missed.
+
+**Lesson (the recurring one this week).** This is the third instance in a row
+of the same shape: `TD-BENCHMARKS-...` (the suite silently never ran),
+`B-BENCH-COMPARATOR-CALLS-SUITE-WIDE-HOST-NOISE-A-REGRESSION` (the diff
+confidently named innocent benchmarks), and now a watch list that confidently
+reported "nothing to see" about a file it had never been told to look at. A
+check that cannot fire is indistinguishable from a check that passes — and
+every one of these was *my own* freshly-written tooling, reporting success.
+When adding a guard, the first test should be "does it fire on a case I know
+is positive?", not "does it run cleanly?".
+
+### [A] B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x. A hot loop that straddles a 4 KiB guest page costs ~1.7x under TCG, deterministically per build — ROOT-CAUSED 2026-08-14, fix pending
+
+**Where:** `kernel/src/bench.rs`, `bench_net_tcp_checksum_v4` (3281) /
+`bench_net_tcp_checksum_v6` (3340) and their bench-local kernels
+`tcp_checksum_bench` (3309) / `tcp_checksum_v6_bench` (3366).
+
+**What.** In 3 of the 5 recorded runs on host `Logoplex3`, one member of the
+pair sits near ~35000 ns while the other sits near ~20000 ns; in the other 2
+runs both sit in the 20000–26000 band. Which member is the elevated one
+varies:
+
+| commit | `tcp_checksum_v4` | `tcp_checksum_v6` |
+|---|---|---|
+| `bf26aabdb` | 20667 | 23021 |
+| `17dbde179` | 25279 | 25751 |
+| `a18ea83a9` | 20714 | **35899** |
+| `be167dd90` | **35410** | 20953 |
+| `5a2002bac` | 20182 | **35039** |
+
+The two kernels are near-identical byte-at-a-time fold loops over the same
+1460-byte segment; v6 does 36 more pseudo-header bytes than v4, i.e. ~2.5%
+more work. A 1.7x gap between them — in either direction — is not explicable
+by the work they do.
+
+**What the dispersion data does and does not show.** The recorded figure is
+`result.min_ns`, the **minimum** over 2000 iterations, and since the
+append-only `mean_ns` extension landed we also record the mean, so `mean/min`
+is available as a within-run dispersion measure:
+
+| commit | benchmark | min | mean/min |
+|---|---|---|---|
+| `be167dd90` | `tcp_checksum_v4` (elevated) | 35410 | 1.16 |
+| `be167dd90` | `tcp_checksum_v6` | 20953 | 1.20 |
+| `5a2002bac` | `tcp_checksum_v4` | 20182 | 1.21 |
+| `5a2002bac` | `tcp_checksum_v6` (elevated) | 35039 | 1.33 |
+
+In both runs the elevated member's dispersion is indistinguishable from the
+other member's. Compare the visibly burst-hit numbers in the same records:
+`net_ethernet_parse` at 2.86 and `context_switch` at 10.62 in `be167dd90`.
+So the elevated member is uniformly ~1.7x slower across all 2000 iterations
+with normal spread.
+
+**This rules out a sub-benchmark burst, and nothing more — do not read it as
+"not contamination".** A first draft of this entry concluded that a normal
+`mean/min` proved the slowdown was a steady-state property of the build. That
+does not follow. 2000 iterations at ~20 µs is only ~40 ms of wall time, and a
+host load episode that spans the *entire* 40 ms window inflates the min and
+the mean by the same factor, leaving `mean/min` untouched. Such an episode is
+entirely ordinary on a desktop. So the dispersion data distinguishes "a spike
+during part of the benchmark" from "uniformly slower", and is silent on
+*why* it was uniformly slower. Both a build property and a benchmark-length
+contamination episode predict exactly what is in the table above.
+
+**Two live hypotheses, and the test that separates them.**
+
+1. *Code-layout sensitivity under QEMU TCG.* The two loops are compiled
+   separately (deliberately duplicated "to avoid depending on tcp module
+   internals"), so their alignment and translation-block boundaries shift with
+   every unrelated code change; whichever lands unluckily pays a fixed
+   per-iteration penalty.
+2. *A contamination episode long enough to cover one whole benchmark.* The
+   mid-suite canary samples every 8 scored benchmarks, so an episode lasting
+   one benchmark can slip between two samples and be reported as a quiet run —
+   which is what `5a2002bac` reported.
+
+**These are separated by re-running the bench on the *same commit*.** Hypothesis
+1 is a property of the binary and must reproduce: same member elevated, same
+factor. Hypothesis 2 re-rolls: the elevated member moves, or neither is
+elevated. This needs no new code, just a second `--bench` boot on an unchanged
+tree.
+
+**RESOLVED 2026-08-14 — hypothesis 1, decisively.** That run was done on a
+byte-identical binary (only markdown had changed since `5a2002bac`):
+
+| | `5a2002bac` | re-run, same binary | agreement |
+|---|---|---|---|
+| `tcp_checksum_v4` | 20182 | 20687 | 2.5% |
+| `tcp_checksum_v6` | **35039** | **35048** | **0.03%** |
+
+The same member is elevated, at the same value — and the host was *noisier*
+this run, not quieter (canary spread 16% over 10 samples, against 2% before),
+which rules out the contamination reading rather than merely failing to
+support it. It is a deterministic property of the binary.
+
+**Mechanism: the elevated member's hot loop straddles a 4 KiB guest page.**
+Disassembling the staged binary and locating the backward branch in each fold
+loop:
+
+| | fold loop | span | pages |
+|---|---|---|---|
+| `tcp_checksum_bench` (v4, fast) | `ffffffff805d7202` → `ffffffff805d73f7` | 501 B | `…805d7` → `…805d7`, **one page** |
+| `tcp_checksum_v6_bench` (v6, elevated) | `ffffffff805d9ea9` → `ffffffff805da086` | 477 B | `…805d9` → `…805da`, **straddles** |
+
+Under TCG a translation block is bounded by the guest page — a loop that
+crosses a page boundary cannot stay a single directly-chained TB, so every
+iteration pays a dispatcher round-trip instead of a direct jump. That predicts
+exactly what is observed: a *uniform* per-iteration penalty (so `mean/min` is
+untouched), perfectly reproducible on the same binary, and re-rolled whenever
+unrelated code shifts the function's address — which is why runs 1 and 2 show
+neither member elevated (in those builds neither loop straddled).
+
+**Falsifiable prediction, to be checked on the next bench run:** disassemble
+first, and whichever of the two fold loops straddles a page is the one that
+will come back elevated — with neither elevated if neither straddles. This
+entry should be treated as provisional until that prediction has been made
+*before* a run and held.
+
+**This generalises to the whole suite, and that is the real finding.** Nothing
+about the mechanism is specific to `tcp_checksum`. Any benchmark whose hot loop
+happens to straddle a 4 KiB page pays the same penalty, and which benchmarks do
+re-rolls at every build. So commit-to-commit comparison under TCG carries an
+irreducible per-benchmark noise floor of up to ~1.7x that is *deterministic
+within a run* — meaning neither the canary nor `mean/min` can ever detect it,
+because both look for variation and there is none. Every noise-suppression
+mechanism built for this suite so far is structurally blind to it.
+
+**It is also mostly the same bug as
+`B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL`, and mostly the same
+fix.** The straddle probability scales with the byte length of the hot loop. At
+`opt-level = 0` this fold loop is 117 instructions / ~500 bytes, giving it
+roughly a 1-in-8 chance of crossing any given page; optimised it would be a
+few dozen bytes, closer to 1-in-100. Building the bench kernel `--release`
+therefore shrinks this noise source by about an order of magnitude as a side
+effect. Do that first and re-measure before considering anything more invasive
+(forced function alignment via `-Z align-functions` costs padding across the
+whole kernel and would only paper over the loop-length problem).
+
+**Why it matters.** Both are on the `over_target` list (targets 2000/2200 ns,
+measured 20000–35000), so the absolute numbers are already known-bad under TCG
+and nobody is being misled about pass/fail. The damage is to the *comparator*:
+a 1.7x swing that re-rolls every build is pure noise in any commit-to-commit
+diff, and `TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE` will size its
+band from exactly this history. If the band is fitted without knowing this
+pair is bimodal, it will either be stretched wide enough to hide real
+regressions everywhere else, or it will keep flagging these two forever.
+
+**Remaining plan.** Steps 1 and 2 are done (above). What is left:
+
+1. Build the bench kernel `--release` (see
+   `B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL`) and re-measure.
+2. Make the straddle prediction *before* that run and record it, so the
+   mechanism is confirmed prospectively rather than fitted after the fact.
+3. If page straddling still moves benchmarks materially at `opt-level = 3`,
+   teach the comparator about it: the check is mechanical (disassemble, locate
+   the backward branch, compare `addr >> 12` at both ends) and could be emitted
+   alongside each score, which would turn an invisible deterministic bias into
+   a recorded per-benchmark flag.
+
+**Reproducing the disassembly.** `llvm-nm` / `llvm-objdump` ship with the
+rustup toolchain — no binutils install needed:
+`~/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/`.
+The two kernels are `_ZN6kernel5bench18tcp_checksum_bench…` at
+`ffffffff805d7130` and `_ZN6kernel5bench21tcp_checksum_v6_bench…` at
+`ffffffff805d9df0`. Note the symbol hash differs per build, so match on the
+demangled prefix rather than pasting a mangled name.
+
+**Incidental finding from the disassembly: the benchmarked kernel is built
+without optimisation.** `tcp_checksum_bench` spills every intermediate to the
+stack (`movl %eax, -0x64(%rbp)` after each add). That is consistent with the
+whole suite sitting ~10x over targets that were set from optimised reference
+implementations, and it means the absolute numbers measure debug codegen under
+TCG, not the code that would ship. Worth confirming against the boot-test
+build flags and recording separately — it is a much larger effect than the
+1.7x this entry is about, and it is not this entry's subject.
+
+**Related observation — `mean/min` sees contamination the canary missed.** The
+canary called run `5a2002bac` clean (spread 2% over 10 samples). In that same
+run `crypto_ed25519_verify` had mean 323487129 against min 31875588, a
+**10.15x** ratio; `context_switch` had 10.62x in the run before it. The canary
+samples the host *between* benchmarks; `mean/min` measures dispersion *inside*
+the benchmark that was running, so it catches a burst that fell between two
+canary samples. The data is already recorded per benchmark and needs no
+cross-record history to interpret, so a per-benchmark "this number is suspect"
+flag is implementable now.
+
+Neither measure dominates the other, and the reason is exactly the failure
+above: `mean/min` is blind to any slowdown that covers a whole benchmark
+uniformly — including a sustained load change, which is what the canary
+endpoints exist to catch — while the canary is blind to bursts shorter than
+its sampling interval. The comparator should consult both, and should treat
+"canary quiet **and** `mean/min` normal" as the only combination that
+licenses reading a number as real.
+
+**PROSPECTIVE PREDICTION, recorded 2026-08-14 BEFORE the first release-profile
+bench run.** This entry says above that the page-straddle mechanism "should be
+treated as provisional until that prediction has been made *before* a run and
+held." This section is that prediction. It was written from the disassembly of
+`target/x86_64-unknown-none/release/kernel` (built clean, 0 warnings, 9m25s)
+with **no release-profile measurement in existence yet** — the first such run
+has not been performed. Whatever the numbers turn out to be, this text is not
+to be edited afterwards; the result goes in a separate section below it.
+
+Structural facts read out of the release binary:
+
+| | v4 | v6 |
+|---|---|---|
+| closure inlined into the timed loop? | **yes** | **no** — `callq`+`ret` per iteration |
+| hot fold loop | `ffffffff80985cc2`–`…985cf7` | `ffffffff80976ba0`–`…976bc7` |
+| straddles a 4 KiB page? | **no** (all in `…985000`) | **no** (all in `…976000`) |
+| timed outer loop | `…985caa`–`…985d51` (page `…985`) | `…9864a5`–`…9864fd` (page `…986`) |
+| per-iteration indirect branch | none | one `ret` |
+| bytes consumed per loop iteration | 4 (2x unrolled) | 4 (2x unrolled) |
+
+So in the release build the *specific* mechanism this entry root-caused — a
+hot loop split across a guest page boundary — is **not active for either
+benchmark**. Both fold loops are comfortably interior to a page. If the 1.7x
+bimodal swing were caused by anything else, it should survive the profile
+change; if it was the straddle, it should vanish.
+
+Predictions, in falsifiable form:
+
+1. **The 1.7x v6/v4 gap collapses.** Predicted release ratio **1.00–1.20**.
+   A ratio still ≥1.5 falsifies the straddle explanation outright.
+2. **A residual v6 penalty is still expected, but small.** v6 pays one
+   out-of-line call and — the part that actually costs under TCG — one `ret`,
+   which is an *indirect* branch and cannot be direct-chained between
+   translation blocks; it takes a jump-cache lookup every iteration. But that
+   is one dispatch amortised over ~365 fold-loop iterations of real work, so
+   it should be a low-single-digit percentage, not a multiple. v6 also has the
+   genuinely larger 40-byte pseudo-header (the straight-line preamble at
+   `…976aa3`–`…976b8e`), which is real work and legitimately makes v6 slower.
+3. **Both numbers drop by roughly an order of magnitude** from the debug
+   figures (v4 ~20200–20700 ns, v6 ~35000 ns). The debug loop spilled every
+   intermediate to the stack and consumed 2 bytes per iteration; the release
+   loop is 10 instructions, register-only, 4 bytes per iteration. Predicted
+   release: **v4 ~2000–3000 ns, v6 ~2200–3500 ns** — i.e. at or near the
+   2000/2200 ns targets, which were set from optimised reference
+   implementations and have been failed by ~10x for the whole life of the
+   suite for exactly that reason.
+4. **The run is scored against no baseline.** `bench-history.py --profile
+   release` should report that no same-profile record exists and decline to
+   diff against the five debug records, rather than reporting a fabricated
+   ~10x "improvement". This is the profile-isolation change under test.
+
+If (1) holds and (3) holds, the mechanism is confirmed prospectively and the
+entry can be closed. If (1) fails while (3) holds, the optimisation level was
+a confound and the straddle explanation is wrong — in that case the same-binary
+re-run table above (v6 35048 vs 35039, 0.03%) still stands as proof the effect
+is deterministic per build, and a different per-build mechanism must be found.
+
+**RESULT of the prediction above — run `fcd066231`, release profile,
+2026-08-14T15:57:59.** Scored against the four predictions as written, with no
+edits to them:
+
+| | Predicted | Measured | Verdict |
+|---|---|---|---|
+| 1. v6/v4 ratio | 1.00–1.20 (≥1.5 falsifies) | **0.93** | central claim **holds**, band missed |
+| 2. v6 slightly slower than v4 | yes, low single-digit % | v6 **6.6% faster** | **WRONG** |
+| 3. both drop ~10x | v4 2000–3000 ns, v6 2200–3500 ns | v4 **1716**, v6 **1602** | order right, **both beat the band** |
+| 4. no cross-profile baseline diff | refuses to compare | refused, verbatim | **holds exactly** |
+
+Raw: `v4 min 1716 ns (6366 cyc), mean 1772` and `v6 min 1602 ns (5946 cyc),
+mean 1663`. Dispersion 1.03 and 1.04 — both clean, so neither number is a
+contaminated read. Against the debug records (v4 20182–35410, v6 20953–35899)
+that is **11.8x and 21.9x faster**, and both now pass their 2000/2200 ns
+targets — the first time either has, ever.
+
+The bimodality is gone outright. Across the six debug records the ~35000 band
+was occupied by v6, v6, v4, v6, v6 and neither (a middle run at 25279/25751);
+in release both members sit in a 1602–1716 band with no elevated member. So
+the entry's *central* claim is confirmed: **the 1.7x swing was an artefact of
+the build, not a property of the checksum code.**
+
+**But this run does not isolate the page-straddle mechanism, and it would be
+dishonest to close the entry as if it had.** Going from `opt-level = 0` to `3`
+rewrote the code completely — new instruction sequences, 2x unrolling, new
+addresses, new inlining decisions. The straddle hypothesis predicted the gap
+would vanish and it vanished; but so would *any* hypothesis of the form "this
+is a build artefact", which is a much weaker and much easier claim. I changed
+two variables at once and can only credit the one they share. The experiment
+confirms the **class**, not the **mechanism**.
+
+**Prediction 2 failing matters more than prediction 1 succeeding.** v6 does
+strictly more work than v4 — a 40-byte pseudo-header instead of 12 — *and* in
+this build pays an out-of-line `callq` plus a `ret` (an indirect branch, not
+direct-chainable between TCG translation blocks) on every one of its 2000
+iterations. It came out faster anyway. That is the same fine-grained "what
+costs what under TCG" reasoning the straddle story rests on, applied to a case
+where the answer was checkable, and it got the *sign* wrong. Confidence in the
+straddle attribution should be downgraded accordingly, not raised by
+prediction 1.
+
+**The experiment that would actually isolate it** (not yet done): stay within
+one profile and move a function's address deliberately — insert padding, or a
+`#[repr(align)]`/`.balign` on the hot loop — so that a loop which currently
+sits interior to a page is pushed across a boundary, with nothing else
+changed. Same optimisation level, same instructions, same trip count, one
+variable. Until that is run, "TCG translation blocks are page-bounded" remains
+a plausible and well-documented QEMU property that *fits* the data rather than
+a mechanism this project has demonstrated.
+
+**Much larger incidental result: the profile switch moved the whole suite.**
+`over_target` went **58–59 of 63 on every debug record to 15 of 63 on
+release** — scorecard `48/63 within hardware target`. The suite had been
+reporting a near-total failure that was overwhelmingly an artefact of
+measuring unoptimised codegen, exactly as
+`B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL` predicted. The 15
+remaining over-target entries (`syscall_dispatch` 661 ns vs 200,
+`futex_wake_empty` 944 vs 500, `futex_wait_mismatch` 1507 vs 500,
+`vfs_stat_root` 5920 vs 700, `vfs_stat_deep_2comp` 31046 vs 1400,
+`isr_latency` 164652 cyc vs 37000, …) are now the first *credible* performance
+findings this suite has produced, because they are the first measured on the
+code that would ship. They should be triaged on their own merits — `vfs_stat`
+at 22x and 8x target is the standout — and are not this entry's subject.
+
+**Caveat on those 15, added after the fact.** This run's dispersion report
+flagged five benchmarks at ≥5x `mean/min`, and `vfs_stat_root` — the one
+singled out as "the standout" above — was among them at **12x**. I ran greps
+and git commands during the QEMU boot, which is exactly the mistake recorded
+in `TD-BENCH-RUNS-ARE-CONTAMINATED-BY-THE-AGENTS-OWN-COMMANDS`. The
+over-target *set* is unlikely to be an artefact (a 22x miss does not come from
+host noise), but the individual magnitudes from this run should be treated as
+provisional until re-measured on an idle host. See the RECURRENCE note in that
+entry for why `min_ns` does not fully rescue a 3 ms benchmark.
+
+### [A] B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL. Every recorded benchmark ran at `opt-level = 0` and was scored against optimised-reference targets — **FIXED 2026-08-14, confirmed by measurement**
+
+> **Resolution.** `scripts/boot-test.sh` now builds `--release` and stages from
+> `target/x86_64-unknown-none/release/kernel` when `--bench` is passed, and
+> `bench-history.py` records/compares a `profile` field so release and debug
+> records are never diffed against each other. Confirmed end-to-end by run
+> `fcd066231`: the release kernel built clean (0 warnings, 9m25s), booted, and
+> **`over_target` fell from 58–59 of 63 on every debug record to 15 of 63** —
+> scorecard `48/63 within hardware target`. The comparator correctly refused
+> to diff against the six debug records. Quantified per-benchmark evidence is
+> in the RESULT section of
+> `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x` above (e.g. `tcp_checksum_v4`
+> 20667 → 1716 ns, `v6` 35048 → 1602 ns).
+>
+> Two things this did **not** settle, both tracked elsewhere and neither a
+> reason to keep this entry open: (a) whether the *non-bench* boot test should
+> also build release — that is **Q46**, still with the operator, and the
+> default deliberately stays debug meanwhile; (b) the 15 benchmarks still over
+> target, which are now genuine findings rather than codegen artefacts and
+> need triage on their own merits.
+
+**Where:** `scripts/boot-test.sh:602` (`"$CARGO" build`) and `:218`
+(`KERNEL_BIN=".../target/x86_64-unknown-none/debug/kernel"`); `Cargo.toml`
+`[profile.dev]` (357–365) vs `[profile.release.package.kernel]` (370–373).
+
+**What.** The boot test builds with a bare `cargo build` — no `--release` — and
+stages the artefact out of `target/x86_64-unknown-none/**debug**/kernel`. The
+benchmark suite is compiled into the kernel unconditionally; `--bench` only
+changes which serial marker the script waits for (`BENCH_OK` instead of
+`BOOT_OK`), it does not change the build. `[profile.dev]` sets only
+`panic = "abort"`, and there is no `[profile.dev.package.kernel]`, so the
+kernel is built at **`opt-level = 0`**.
+
+So every number in `bench/history.jsonl` — all 5 records, all 63 benchmarks —
+measures unoptimised codegen, and every one of them is scored against
+`baselines.toml` targets taken from *optimised* Linux / Fuchsia / L4 / jemalloc
+implementations.
+
+**Evidence.** Disassembling the staged binary shows textbook `opt-level = 0`
+output. `tcp_checksum_bench` reloads and re-spills the accumulator to the stack
+around every single add:
+
+```
+805d7181:  addl  %ecx, %eax
+805d7183:  movl  %eax, -0x64(%rbp)
+805d7186:  movl  -0x64(%rbp), %eax     # reload of the value just stored
+```
+
+That is one store + one load per accumulation in a loop whose entire body is
+one accumulation. (`llvm-objdump` ships with the rustup toolchain — see the
+path in `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x` — so this needs no binutils
+install.)
+
+**The irony.** `[profile.release.package.kernel]` already exists and is
+deliberately tuned for exactly this — `opt-level = 3`, `codegen-units = 1`,
+`strip = "none"` — with a comment explaining the per-package override. The
+benchmark path has simply never used it.
+
+**Why it matters.** This invalidates the *absolute* verdicts wholesale, and
+they are the ones CLAUDE.md's benchmarking protocol is built on:
+
+- The `over_target` list is not a list of subsystems that are too slow. It is
+  mostly a list of subsystems compiled without optimisation. `tcp_checksum_v4`
+  at 20000 ns against a 2000 ns target is a 10x miss that says nothing about
+  the shipped code.
+- "If a change regresses a benchmark by more than 10%, investigate before
+  merging" cannot be applied to numbers whose baseline is debug codegen.
+- The scale is wrong in the direction that matters: `opt-level = 0` → `3` on
+  byte-loop code of this shape is routinely 5–20x. That dwarfs both the ~1.7x
+  swing in `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x` and the 25% canary
+  tolerance, which means the noise work done so far has been tuning the
+  measurement of the wrong binary.
+
+*Relative* commit-to-commit comparisons are not destroyed — both sides are
+debug — but they are still measuring optimisation-sensitive code paths whose
+debug/release ratio is not uniform, so a debug-visible change need not be a
+release-visible one.
+
+**Same family as the three before it.** `TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN`
+(the suite never ran), `B-BENCH-WATCHLIST-...` (the watch list never looked),
+`B-BENCH-COMPARATOR-CALLS-SUITE-WIDE-HOST-NOISE-A-REGRESSION` (the diff named
+innocents) — and now a suite that ran, reported, and was compared against
+targets, while measuring a binary nobody intends to ship. A check that measures
+the wrong thing is indistinguishable from a check that passes.
+
+**Proposed fix.** Build the kernel `--release` for `--bench` runs, staging from
+`target/x86_64-unknown-none/release/kernel`, and add an append-only `profile`
+field to each `bench/history.jsonl` record so the comparator only ever compares
+like with like. The 5 existing records must keep their meaning: absent
+`profile` reads as `"debug"`, and a release record must never be diffed against
+a debug one. This is a real cost — a second full kernel build, and a bench
+history that restarts from zero same-profile records, which also resets the
+≥6-record threshold that `TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE`
+is waiting on. It is still the only honest option: a benchmark that does not
+measure the shipped build is not a benchmark.
+
+**Open sub-question:** whether the *non*-bench boot test should stay debug.
+Keeping it debug preserves fast iteration and readable panics, at the cost of
+two kernel builds in the tree and the risk that release-only miscompiles or
+UB-dependent behaviour are only ever exercised on bench runs. Leaning toward
+keeping the default boot test debug and making release the `--bench` path, but
+this is worth the operator's view — see `open-questions.md`.
+
+### [A] AUDIT 2026-08-14 — the softirq × hard-IRQ shared-lock class is clean. No action needed; recorded so it is not re-audited
+
+**Why it was worth checking.** `softirq::process_pending` re-enables interrupts
+(`kernel/src/softirq.rs`, module docs 51–56), so any lock held by a softirq
+handler can be observed by a hard-IRQ handler that preempts it. That is
+structurally the same failure mode as the rtl8139 deadlock and as
+`B-COMPLETION-TIMER-IRQ-DEADLOCK`: the hard IRQ spins on a lock whose holder
+cannot run until the IRQ returns. The intersection was believed empty only
+because rtl8139 was the tree's single hard-IRQ lock acquisition — "empty by
+accident" is not a property that stays true, so it needed enumerating rather
+than assuming.
+
+**What was audited.** Every callee reachable from the three softirq handlers
+(`handle_timer` 355, `handle_sched` 434, `handle_irq_poll` 445):
+
+| Callee | Lock discipline | Verdict |
+|---|---|---|
+| `sched::process_sleep_wakeups` (sched/mod.rs 5248) | atomic scan of `SLEEP_QUEUE`, no lock | clean |
+| `sched::process_deferred_wakes` (sched/mod.rs 4897) | non-blocking wake path | clean |
+| `ipc::timer::process_timer_expirations` (ipc/timer.rs 211) | explicitly non-blocking on `CP_TABLE`/`SCHED`, leaves the timer un-advanced on contention so the next tick retries | clean, and documented against `B-COMPLETION-TIMER-IRQ-DEADLOCK` |
+| `ktimer::process_expirations` (ktimer.rs 323) | atomic scan of `TIMERS` | clean |
+| `fs::cache::try_flush_expired` (fs/cache.rs 906) | `try_lock`, result deliberately discarded — retries in ~5 s | clean |
+| `watchdog`, `kstat`, `loadavg`, `irq_storm`, `irqbalance`, `cpufreq`, `thermal` | zero `.lock()` calls; atomics only | clean |
+| `rcu::tick` → `process_callbacks` (rcu.rs 483) | all three `CALLBACKS.lock()` sites (403, 486, 547) wrapped in `cpu::without_interrupts`, popping one callback per critical section and invoking it with the lock released | clean, and the comment at 393–401 records the observed 2/10 boot hang that motivated it |
+
+`rcu` is the only softirq callee that takes a blocking lock at all, and it is
+the one already hardened — the fix predates this audit and cites the boot hang
+it was found by.
+
+**Result: the intersection is empty, and empty by construction rather than by
+luck.** Each site either uses atomics, uses `try_lock`, or masks interrupts for
+the lock-hold window. No change was made.
+
+**What would break it.** Adding a `.lock()` (not `try_lock`, not
+`without_interrupts`-wrapped) to any callee of `handle_timer` — which is a wide
+and growing list: it already fans out to 12 subsystems — while that same lock is
+reachable from a hard-IRQ handler. The `handle_timer` fan-out is the risk
+surface to re-check when a subsystem is added to it, not the whole kernel.
+
+### [A] B-BENCH-CANARY-CERTIFIES-CLEAN-RUNS-THAT-CONTAIN-MULTI-X-STALLS. All three runs it passed had 5–8 benchmarks stalled ≥5x — MITIGATED 2026-08-14
+
+**Where:** `kernel/src/bench.rs` (`maybe_canary_sample`, `CANARY_SAMPLE_EVERY = 8`)
+and `scripts/bench-history.py` (the `Canary OK` verdict).
+
+**What.** The mid-suite canary has never once fired. That was read as "the host
+has been quiet"; it is not what the data says. Cross-checking each run's canary
+verdict against the per-benchmark `mean/min` recorded in the same run:
+
+| run | canary verdict | benchmarks with `mean/min` ≥ 5x |
+|---|---|---|
+| `be167dd90` | clean (endpoints 97%) | **8** — `ipc_channel` 23x, `page_alloc_free` 19x, `syscall_dispatch` 16x, `pick_next` 16x, `context_switch` 11x, `crypto_ed25519_sign` 8x, `dashboard_api_status` 8x, `ipc_channel_sync` 6x |
+| `5a2002bac` | clean (spread 2%) | **5** — `page_alloc_free` 24x, `vfs_stat_deep` 15x, `vfs_stat_3comp` 12x, `crypto_ed25519_verify` 10x, `vfs_throughput_16k_write` 5x |
+| `f74f97b6d` | clean (spread 16%) | **6** — `context_switch` 21x, `vfs_stat_deep` 16x, `vfs_stat_3comp` 14x, `vfs_throughput_16k_write` 8x, `dashboard_api_health` 7x, `crypto_ed25519_verify` 7x |
+
+The run reported as the *cleanest* of the three — `5a2002bac`, spread 2%, the
+one used to certify that four earlier benchmarks had merely been contaminated —
+contained a benchmark whose mean was **24x its own minimum**.
+
+**Why the canary cannot see this.** It samples the host *between* benchmarks,
+once per 8 scored entries — 10 samples across 63 benchmarks. A stall confined
+to one benchmark falls between two samples and leaves no trace in it. The
+canary measures the gaps; the stalls are in the benchmarks.
+
+**Why `mean/min` can.** It is computed from the benchmark's own iterations, so
+it sees precisely the interval the canary skips. And the data was already being
+recorded — the append-only `mean_ns` extension landed for a different reason
+(the variance band) and turns out to answer this too.
+
+**These are not intrinsically noisy benchmarks.** That was the obvious
+alternative reading, and it is wrong. Across the three runs only
+`ipc_channel_sync` is *persistently* elevated (6.0 / 3.9 / 4.6). Every other
+high reading is spiky — `pick_next` 15.8 then 1.1 then 1.2; `syscall_dispatch`
+16.1 then 1.2 then 1.2; `page_alloc_free` 19.3, 24.4, then 1.3. A benchmark
+that is 16x dispersed in one run and 1.2x in the next is being disturbed, not
+behaving that way.
+
+**Nor is it one cold first iteration.** `vfs_stat_3comp` in `f74f97b6d`: min
+1334082, mean 18349532, max 758926475 over 500 iterations. The single worst
+iteration accounts for only ~8% of the total time, so the elevation is broad —
+many slow iterations, not one outlier. Same shape for `crypto_ed25519_verify`
+(max is ~7% of total over 50 iterations).
+
+**Mitigation applied.** `scripts/bench-history.py` now reports per-benchmark
+dispersion (`suspect_dispersion` / `report_dispersion`,
+`DISPERSION_SUSPECT_RATIO = 5.0`) and the canary's verdict line no longer
+claims "host load stable" — it now says only that the reference access cost was
+steady *between* benchmarks, and points at the dispersion line. 6 new tests
+(48 total, all passing), including the real `page_alloc_free` 24x shape from the
+run the canary called clean.
+
+**The threshold is deliberately unfitted.** Measured across the three records:
+median benchmark 1.26–1.59, the large majority under 2, excursions at 5–25x,
+and little in between. 5.0 sits in that empty band. It wants retuning once
+release-profile records exist, since optimised benchmarks run for less wall
+time and so present a smaller target to a burst.
+
+**Not yet done — this reports, it does not correct.** A flagged benchmark's
+recorded figure is still its *minimum*, which may well be sound; the flag says
+"do not read movement here as signal", not "this number is wrong". Deciding
+which is which needs a per-benchmark dispersion *baseline*, i.e.
+`TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE`, whose record count has just
+been reset to zero by the debug→release profile switch.
+
+**Lesson, the fourth of this shape.** After `TD-BENCHMARKS-...` (the suite never
+ran), `B-BENCH-WATCHLIST-...` (the watch list never looked), and
+`B-BENCH-COMPARATOR-...` (the diff named innocents): a canary that never fired,
+read as evidence of quiet. Its own motivating case had already refuted the
+first version of it, and the second version was written specifically to catch
+per-benchmark bursts — yet it was still reporting "host load stable" over runs
+containing 24x stalls. "It has never fired" is a claim about the check, never
+about the world.
+
+---
+
+### B-VFS-STAT-ROOT-IS-12x-OVER-TARGET-AND-THE-DCACHE-IS-NOT-WHY — 2026-08-14 — OPEN (`kernel/src/fs/vfs.rs`, `kernel/src/ipc/namespace.rs`)
+
+`vfs_stat_root` — `Vfs::stat("/")`, the single cheapest path operation the VFS
+can perform — costs **6151 ns** on the release-profile run (`min` of 500
+iterations, and *not* flagged by the dispersion check in that run, so the number
+is clean). The CLAUDE.md target for a cached lookup is 200–500 ns per component.
+For a zero-component path that is roughly **12–30x over**.
+
+**The hypothesis I started with was wrong, and measurement is what killed it.**
+`VfsDcache::lookup` (`kernel/src/fs/vfs.rs:1189`) is an O(n) linear scan over
+`VFS_DCACHE_SIZE = 1024` slots, and CLAUDE.md explicitly forbids linear scans in
+VFS path lookup. It was the obvious culprit and I was one step from rewriting it
+as a hash table. Instrumenting first (`bench_vfs_stat_breakdown`, this commit)
+showed:
+
+```
+vfs_stat_breakdown: dcache 25 valid entries (of 1024), +550 hits +0 misses
+```
+
+**25 live entries, filled from index 0, 100% hit rate.** A hit-scan terminates
+in ~25 iterations, not 1024 — the cost of a linear scan is a function of
+*occupancy*, not capacity. The scan cannot account for microseconds. The
+1024-slot scan remains a latent defect (it degrades as occupancy grows, and it
+is the *miss* path that walks all 1024) and is tracked as such below — but it is
+**not** this bug's cause. Had I "fixed" it I would have burned a refactor and
+moved the number by nothing.
+
+**Where the time actually goes.** Splitting `Vfs::stat` at its own seam —
+`resolve_follow(path)` then `stat_resolved(&path)`:
+
+```
+vfs_stat_breakdown_full:      6191 ns
+vfs_stat_breakdown_resolved:  2442 ns
+  => resolve_follow ~3749 ns (61%) + stat_resolved 2442 ns (39%)
+```
+
+So path *resolution* is the larger half, and both halves are individually over
+target.
+
+**Prime suspect for the 3749 ns, not yet confirmed.** `resolve_follow`
+(`vfs.rs:1553`) calls `namespace::resolve_path` (`ipc/namespace.rs:721`), which
+via `resolve_path_for` (`:735`) takes **`PROCESS_NS.lock()`**, then
+**`PROCESS_ROOT.lock()`**, then conditionally **`PROCESS_MOUNTS.lock()`** — three
+global spinlocks — and performs `path.to_path_buf()`, a heap allocation, *even
+in the trivial `ROOT_NAMESPACE` pass-through case where the answer is the input
+unchanged*. That is a fixed per-resolution cost paid by every single VFS
+operation in the system. `validate_path`, `normalize_path` (another alloc), the
+`VFS_DCACHE.lock()`, and `entry.resolved.clone()` (another alloc) are the other
+candidates in that 3749 ns.
+
+**Explicitly not yet attributed.** The above is a reading of the code, not a
+measurement, and the last time I reasoned this way about a hot path
+(`B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x`, prediction 2) I got the *sign*
+wrong. The next step is to split `resolve_follow` the same way this commit split
+`stat` — `namespace::resolve_path` vs `validate_path`+`normalize_path` vs the
+dcache lock+clone — and let the numbers pick the target. Do not optimise any of
+the four candidates before that split exists.
+
+**Related, same shape, worse:** `vfs_stat_deep_2comp` = 33573 ns, ~16786 ns per
+component against a 200–500 ns/component target. If the fixed per-resolution
+prologue is the cause of `vfs_stat_root`, it does not explain this one — 2
+components cost 5.4x one component, so there is a *per-component* cost here too.
+Both need the same treatment.
+
+#### PROSPECTIVE PREDICTION (written and committed before the stage-split run)
+
+Same protocol as `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x`: the prediction is
+committed before the measurement exists, so it can be graded rather than
+rationalised. Last time this protocol caught me getting a *sign* wrong; the
+point is to let it do that again.
+
+**Primitive costs from the same release run** (`bench/history.jsonl`, commit
+`040049442`) — these are the anchors, not guesses:
+
+| primitive | measured | what it bounds |
+|---|---|---|
+| `heap_alloc_free_64` | 184 ns | one alloc+free pair ⇒ a single alloc ≲ 180 ns |
+| `sched_pick_next` | 40 ns | takes the run-queue lock ⇒ an uncontended spinlock is *cheap*, ≲ 20 ns |
+| `context_switch` | 1275 ns | nothing here should approach this |
+
+**What each stage actually does** (from the code, and this is the weak part —
+inspection is exactly what was wrong about the dcache):
+
+* `ns_translate` = `current_task_id()` + `owner_process()` (a `THREAD_OWNERS.lock()` + `BTreeMap::get`) + `PROCESS_NS.lock()` + get + `path.to_path_buf()` (**1 alloc**, of a 1-byte path) + `PROCESS_ROOT.lock()` + get → `None`. So **3 spinlocks + 3 map lookups + 1 alloc**.
+* `validate_normalize` = a byte scan of `"/"` + `normalize_path` (**1 alloc**).
+* `dcache_hit` = `VFS_DCACHE.lock()` + ~25 path compares + `entry.resolved.clone()` (**1 alloc**).
+
+**Predictions, falsifiable:**
+
+1. `ns_translate` < 400 ns.
+2. `validate_normalize` < 400 ns.
+3. `dcache_hit` < 500 ns.
+4. **Therefore the three stages sum to well under the 3749 ns that subtraction
+   attributed to `resolve_follow` — I predict the sum is < 1500 ns.** Three
+   allocations at ≤180 ns and six-ish uncontended spinlocks at ≤20 ns simply
+   do not reach 3.7 µs.
+5. **If (4) holds, the subtraction is what was wrong.** The specific mechanism I
+   expect: `Vfs::stat` feeds `stat_resolved` the *resolved* path, while the
+   isolated `vfs_stat_breakdown_resolved` benchmark feeds it the literal `"/"`.
+   If `resolve_path("/")` returns something longer than `"/"`, then the
+   `stat_resolved` inside `stat` is doing strictly more work than the isolated
+   measurement of it, and subtraction charges that surplus to `resolve_follow`.
+   **In that case the real culprit is `stat_resolved` — `resolve_mount`'s
+   `VFS.lock()` + linear mount scan + `to_path_buf()` + `Arc::clone`, then
+   `fs.lock().stat()` — and I will have misattributed the cost twice in a row
+   on this one benchmark.**
+
+This run therefore carries a direct measurement of `resolve_follow`
+(`Vfs::resolve_path` is a public alias for it) *alongside* the subtraction, plus
+a print of what `resolve_path("/")` actually returns. Prediction 5 is decided by
+those two lines and needs no further argument.
+
+**Standing caution, restated:** predictions 1–3 lean on the same
+fine-grained cost reasoning that got the tcp_checksum sign wrong. Treat a hit as
+weak confirmation and a miss as strong disconfirmation.
+
+#### RESULT — 2026-08-14, release profile, commit `f9807f73a` (`build/stage-split.log`)
+
+```
+vfs_stat_breakdown: full 6423ns = resolve_follow ~3843ns + stat_resolved 2580ns
+vfs_stat_breakdown: resolve_follow measured directly 3504ns (vs 3843ns by subtraction)
+vfs_stat_breakdown: resolve_follow 3504ns = ns_translate 1948ns + validate_normalize 318ns + dcache_hit ~1238ns
+vfs_stat_breakdown: resolve_path("/") -> "/" (1 bytes)
+vfs_stat_breakdown: dcache 25 valid entries (of 1024), +1100 hits +0 misses over the run
+```
+
+| # | prediction | actual | verdict |
+|---|---|---|---|
+| 1 | `ns_translate` < 400 ns | **1948 ns** | **MISS, 4.9x** |
+| 2 | `validate_normalize` < 400 ns | 318 ns | hit |
+| 3 | `dcache_hit` < 500 ns | **~1238 ns** | **MISS, 2.5x** |
+| 4 | three stages sum < 1500 ns | **3504 ns** | **MISS, 2.3x** |
+| 5 | "the subtraction is what was wrong" | subtraction was **right** | **disconfirmed** |
+
+**Prediction 5 was wrong in the way that matters most: it was an escape
+hatch.** It said that if the stages came out cheap, the *subtraction* must be
+the error and the real culprit would be `stat_resolved`. Both halves are
+refuted outright by the two lines this run was built to print:
+`resolve_path("/")` returns `"/"` unchanged (1 byte), so the different-inputs
+hazard that would have made subtraction unsound never existed on this path; and
+the direct measurement (3504 ns) agrees with the subtraction (3843 ns) to within
+9.7%. `resolve_follow` really is ~55% of the whole stat, exactly where
+subtraction put it. I did **not** misattribute the cost twice — I misattributed
+it once, to the dcache, and then predicted I had misattributed it again in the
+opposite direction. The second guess was as wrong as the first.
+
+**Why 1 and 3 missed: a bad anchor, and it was bad by misreading the code.**
+The prediction leaned on "`sched_pick_next` = 40 ns, and it takes the run-queue
+lock, therefore an uncontended spinlock is ≲ 20 ns." That premise is simply
+false about the benchmark. `bench_sched_pick_next` builds a **local**
+`PriorityRoundRobin::new()` on the stack and calls `rq.pick_next()` directly —
+it never touches `SCHED.lock()`. **It takes no lock at all.** So the one number
+in the anchor table that was supposed to bound lock cost was measuring a
+lock-free path, and the 20 ns figure was manufactured from nothing. This is the
+same failure as the dcache: a claim about what the code does, asserted from
+reading rather than from measuring, load-bearing for the conclusion.
+
+**The cost model the measurement actually supports.** Solving the three stages
+against their contents (3 locks + 3 map lookups + 1 alloc = 1948; 1 lock + ~25
+path compares + 1 alloc = 1238; a byte scan + 1 alloc = 318) gives a consistent
+fit at roughly:
+
+| primitive | implied cost under QEMU-TCG |
+|---|---|
+| uncontended **global spinlock** acquire+release | **~500 ns** |
+| heap alloc (small) | ~180 ns (matches `heap_alloc_free_64`) |
+| one dcache path compare | ~21 ns |
+
+A lock is ~3x an allocation here, and the whole path is **lock-dominated**: 4
+global spinlocks across `resolve_follow` alone, ~2000 ns of its 3504. Every
+optimisation instinct I had was aimed at allocations and at scan length, and
+both are minor terms.
+
+**But that model is derived, not measured, and deriving is what just failed
+twice.** So the next run adds `bench_spinlock_uncontended` to measure the
+primitive directly. The suite has anchors for allocation, context switch and
+syscall dispatch but none for the single most common operation in the kernel,
+which is precisely why a fabricated 20 ns figure went unchallenged.
+
+**Consequences (tracked as `B-NAMESPACE-RESOLVE-TAKES-3-GLOBAL-LOCKS-TO-RETURN-ITS-INPUT` below).**
+`ns_translate` is 1948 ns — 56% of `resolve_follow`, 30% of the entire stat —
+and for a process in the root namespace with no chroot and no volume mounts
+(i.e. every process on a normal desktop) it does all of that work to **return
+its input unchanged**.
+
+---
+
+### B-NAMESPACE-RESOLVE-TAKES-3-GLOBAL-LOCKS-TO-RETURN-ITS-INPUT — 2026-08-14 (`kernel/src/ipc/namespace.rs`)
+
+**Measured, not inferred:** `ns_translate` = **1948 ns**, which is 56% of
+`resolve_follow` and **30% of an entire `stat("/")`**. See the RESULT section of
+`B-VFS-STAT-ROOT-IS-12x-OVER-TARGET-AND-THE-DCACHE-IS-NOT-WHY` above.
+
+`namespace::resolve_path` is called before **every** path operation in the VFS —
+read, write, stat, open, mkdir, unlink, all of it. For a process in the root
+namespace with no chroot and no volume mounts — which is every process on a
+normal desktop, and every process in this kernel today — the entire function
+body is:
+
+1. `current_task_id()` — cheap, an atomic load.
+2. `owner_process(task_id)` → **`THREAD_OWNERS.lock()`** + map get.
+3. **`PROCESS_NS.lock()`** + map get → `ROOT_NAMESPACE`.
+4. `path.to_path_buf()` — a heap allocation.
+5. **`PROCESS_ROOT.lock()`** + map get → `None`.
+6. Return the path, byte-for-byte identical to the input.
+
+**Three global spinlock acquisitions and one heap allocation, to return the
+argument unchanged.** At the measured ~500 ns per uncontended global spinlock
+under TCG, the locks alone are ~1500 of the 1948 ns.
+
+This is not a micro-optimisation target, it is a missing fast path. The
+structure charges every path operation in the system for a feature (containers)
+that is not in use, and the charge is paid in the most expensive primitive
+available.
+
+**The fix** — a global "namespace features are in use" flag, checked with one
+relaxed atomic load before any lock is taken:
+
+* An `AtomicBool` (`NS_FEATURES_ACTIVE`) set with `Release` ordering at the
+  three sites that can make namespace state non-trivial: inserting into
+  `PROCESS_NS`, into `PROCESS_ROOT`, and into `PROCESS_MOUNTS`.
+* `resolve_path_for` loads it with `Acquire`; if clear, it returns immediately.
+* **The flag is never cleared.** Clearing it on the last teardown would
+  introduce a race with a resolve already in flight, and the cost of staying on
+  the slow path after containers have been used once is exactly the cost we have
+  today. Monotonic is the sound choice and it is deliberate, not an oversight.
+
+This is the standard rarely-used-feature pattern (Linux's static keys). It does
+not change behaviour for any process: with the flag clear, no process has a
+namespace, a root, or a volume, so every branch the slow path could take is the
+identity branch — which is what makes the fast path a refactor rather than a
+semantic change.
+
+**The allocation in step 4 survives this fix** and is the correct next target:
+`resolve_path` returns `PathBuf`, so the pass-through allocates a copy that
+`resolve_prologue` immediately re-allocates in `normalize_path`. Returning
+`Cow<'_, Path>` would remove one of the two. Deferred until the lock fix is
+measured, because at ~180 ns it is a third of a single lock and chasing it first
+would have been another instance of optimising the minor term.
+
+#### PROSPECTIVE PREDICTION (recorded before the fix is built)
+
+Same protocol, and this time with a directly measured anchor rather than a
+fabricated one — the next run also adds `bench_spinlock_uncontended`.
+
+1. `bench_spinlock_uncontended` comes out in **300–700 ns**. This is the load-
+   bearing one: the whole cost model above stands or falls on it. If it lands
+   below ~150 ns, the lock attribution is wrong and something else in
+   `ns_translate` is the real cost.
+2. `ns_translate` drops from 1948 ns to **< 150 ns** (one atomic load, one
+   allocation removed only if the `Cow` change lands too — so expect ~180 ns if
+   the allocation stays; I predict the allocation is skipped entirely on the
+   fast path, hence < 150).
+3. `resolve_follow` drops from 3504 ns to **1700–2000 ns**, now dominated by
+   `dcache_hit`.
+4. Full `vfs_stat_root` drops from ~6151 ns to **~4400–4700 ns**, a ~28%
+   improvement on a benchmark I twice tried to fix by looking at the wrong
+   subsystem.
+
+**If (1) holds but (2) does not**, the fast path is not being taken — most
+likely because some process really did set one of the three maps during boot,
+which would itself be worth knowing and is why the benchmark prints the flag.
+
+#### RESULT — 2026-08-14, two post-fix release boots ✅ FIXED
+
+The first post-fix boot reported `namespace fast path DISABLED
+(NS_FEATURES_ACTIVE=true)` — the pre-registered fallback clause above, firing
+verbatim. The cause was not "some process set one of the maps during boot" but
+something better: **the namespace self-tests themselves**.
+`test_process_attach_detach`, `test_process_root` and `test_volume_mounts` call
+`attach`/`set_root`/`add_volume`, which arm the monotonic flag, and nothing
+disarmed it. So the self-tests were permanently degrading the VFS of the kernel
+they had just finished validating — every path operation for the rest of the
+boot paid three global spinlocks to exercise a feature that no longer had a
+user. Fixed by asserting `reset_ns_features_if_trivial()` at the end of
+`self_test()`, which doubles as a leak check: it can only succeed if every
+namespace test cleaned up its process state.
+
+Two boots after that fix (the first aborted on an unrelated flake — see
+`B-FASTPY-SLEEP-SELF-TEST-IS-FLAKY` — so both are reported):
+
+| # | prediction | pre-fix | run A | run B | grade |
+|---|---|---|---|---|---|
+| 1 | uncontended tracked lock **300–700 ns** | 628 | 448 | 632 | **HIT** (all three in band) |
+| 2 | `ns_translate` **< 150 ns** | 1670 | 347 | 264 | **MISS** (1.8x over) |
+| 3 | `resolve_follow` **1700–2000 ns** | 3138 | 2488 | 1627 | **UNPROVEN** (band narrower than the noise) |
+| 4 | `vfs_stat_root` **4400–4700 ns** | 5930 | 2971 | 4394 | **HIT** (run B lands 0.14% under the band) |
+
+**(1) HIT, and it was the load-bearing one.** The previous prediction on this
+benchmark failed because its lock cost came from a *fabricated* anchor; this one
+was measured first, and everything built on it held.
+
+**(2) MISS, and the miss was avoidable by reading a type signature.** The
+prediction said "I predict the allocation is skipped entirely on the fast path,
+hence < 150". It cannot be: `resolve_path` returns `PathBuf`, so *every* return
+allocates, fast path or not. The residual ~264 ns is one atomic load plus that
+allocation. This is not a measurement surprise — it is a claim contradicted by
+the function's own declaration, which was there to be read. It also promotes the
+deferred `Cow<'_, Path>` change from "the correct next target" to "the only
+remaining term".
+
+**(3) UNPROVEN, and that is the more useful result.** 1627 and 2488 straddle the
+band. The two runs differ by 1.53x while the band spans 1.18x — the prediction
+was finer-grained than the instrument meant to grade it. Predicting to a
+precision the measurement cannot resolve yields a verdict that is noise wearing
+a grade's clothes, which is worse than no verdict. See
+`TD-BENCH-STAGE-SPLIT-HAS-NO-COHERENCE-CHECK` below, where the same two runs
+disagree by 1.67x on two byte-identical benchmarks.
+
+**(4) HIT.** Predicted "~28% improvement"; measured −26% (5930 → 4394). This is
+the benchmark twice attacked in the wrong subsystem (first the dcache, then the
+subtraction). The third attempt — measure the anchor, then follow the
+measurement — worked on the first try.
+
+---
+
+### B-LOCKDEP-CLASS-LOOKUP-IS-A-LINEAR-SCAN-ON-EVERY-LOCK — 2026-08-14 (`kernel/src/lockdep.rs`)
+
+**Measured, and it is the largest single overhead found this session.** The lock
+microbenchmark added to grade the namespace fix answered a question nobody had
+asked it:
+
+```
+lock acquire+release: raw 30ns, tracked 632ns, no-lockdep 232ns, no-stats 656ns
+lock overhead: total +602ns = lockdep 400ns + preempt 29ns + rdtsc 57ns + unexplained 116ns
+```
+
+`raw` is `spin::Mutex`; `tracked` is `crate::sync::Mutex`, the type every global
+in the kernel uses. **The tracked mutex costs 21x the raw one, and two thirds of
+the difference is lockdep.** Confirmed across both post-fix boots: 400/602 ns
+(66%) and 281/430 ns (65%).
+
+The cause is not that validation is expensive. It is that the *lookup* is
+`O(classes)`:
+
+```rust
+fn find_or_register_class(lock_addr: usize, name: &[u8]) -> Option<u16> {
+    let count = CLASS_COUNT.load(Ordering::Relaxed) as usize;
+    for i in 0..count.min(MAX_CLASSES) {          // <-- up to 128 iterations
+        if unsafe { CLASSES[i].id } == lock_addr { return Some(i as u16); }
+    }
+    ...
+```
+
+and `find_class` — called from `lock_release` — is the same scan again. So every
+lock operation in the kernel walks the class table **twice**, and `MAX_CLASSES`
+is 128. This is exactly the "linear scan on a hot path" CLAUDE.md's performance
+section forbids, hiding inside the *debugging* infrastructure rather than the
+code being debugged, which is why no amount of reading the subsystem under
+investigation would ever have found it.
+
+Two further consequences worth stating because they distort the whole benchmark
+suite:
+
+* **The cost is positional.** A lock class registered early is found in a few
+  iterations; one registered late pays the full scan. So the same lockdep call
+  is cheap or expensive depending on *boot order*, and a benchmark's own lock —
+  registered last, at benchmark time — pays the worst case. The 400 ns figure is
+  therefore an upper bound on the average, not the average.
+* **Every benchmark in this suite that takes a lock is partly measuring this.**
+  `syscall_dispatch` (653–699 ns), `futex_wake_empty` (953 ns) and the VFS
+  numbers all include it.
+
+**The fix** (implemented in the same change as this entry): an open-addressed
+hash index from lock address to class slot, Fibonacci-hashed and linearly
+probed, 512 buckets for 128 classes so the load factor stays at 25%. This is
+what Linux does (`classhash_table`, `kernel/locking/lockdep.c`). Entries are
+append-only, so a probe run is contiguous and stopping at the first empty bucket
+is correct.
+
+**This fix is what makes the tempting question go away.** The obvious reaction to
+"lockdep costs 400 ns per lock" is to gate it to debug builds, as Linux does with
+`CONFIG_PROVE_LOCKING` — trading deadlock detection in production for lock speed.
+That would have been a real architectural fork worth escalating. It is moot: the
+validator was never inherently expensive, its index was. Keep both.
+
+**The optimisation is guarded by a test that can actually fail.** A hash that
+silently *misses* a registered class is the dangerous failure: `find_or_register_class`
+would then register a second class for the same lock, that lock's dependency
+edges would split across two graph nodes, no cycle would ever be found through
+it, and lockdep would go quiet — looking exactly as healthy as a kernel with no
+deadlocks. So the linear scan is not deleted, it is demoted to an oracle:
+`test_class_hash_index()` asserts the hash and the scan agree on every registered
+class, agree on absence, that double registration yields one class, and — using
+a colliding address it *searches for* rather than hopes for — that the probe
+sequence survives a bucket collision.
+
+#### PROSPECTIVE PREDICTION (recorded before the fix is booted)
+
+1. `lock_tracked` drops from ~632 ns to **250–330 ns**, i.e. close to the
+   measured `no-lockdep` figure (232 ns) plus a hash lookup and probe (~2 memory
+   references, call it 20–80 ns under TCG). If it lands *below* 232 ns something
+   is wrong — the index cannot be cheaper than not running at all.
+2. `lockdep` in the overhead split drops from ~400 ns to **< 100 ns**.
+3. The knock-on: `syscall_dispatch` (653–699 ns across four boots, target 200)
+   improves by **at least 15%**, because it takes tracked locks. This is the
+   riskiest of the three — if syscall dispatch does *not* move, then either it
+   takes no tracked lock or the lock is registered early enough to have been
+   cheap already, and the "every benchmark is partly measuring lockdep" claim
+   above is overstated and must be narrowed.
+4. `lockdep classes registered` (newly printed) comes out **> 40**. If it is in
+   single digits, the scan was never long and the 400 ns has some *other* cause
+   inside `lock_acquire` — most likely `smp::current_cpu_index()` or the
+   re-entrancy guard — and this whole diagnosis is wrong.
+
+#### RESULT — 2026-08-14, release boot ✅ FIXED
+
+```
+[lockdep]   class hash: OK (3 classes verified vs scan, bucket collision handled)
+[bench]   lock acquire+release: raw 25ns, tracked 274ns, no-lockdep 223ns, no-stats 301ns
+[bench]   lock context: 43 lockdep classes registered
+[bench]   lock overhead: total +249ns = lockdep 51ns + preempt 29ns + rdtsc 56ns + unexplained 113ns
+[bench] SCORE lock_uncontended 274 500 PASS
+```
+
+| # | prediction | before | after | grade |
+|---|---|---|---|---|
+| 1 | `lock_tracked` **250–330 ns** | 632 | **274** | **HIT** |
+| 2 | lockdep's share **< 100 ns** | 400 | **51** | **HIT** (7.8x) |
+| 3 | `syscall_dispatch` improves **≥ 15%** | 653–699 | **699** | **MISS** (0%) |
+| 4 | **> 40** classes registered | — | **43** | **HIT** |
+
+**The tracked mutex went from 21x the raw spinlock to 11x, and
+`lock_uncontended` moved from OVER to PASS** (274 vs the 500 ns target). Knock-on
+in the same boot: `vfs_stat_root` 4394 → **3344 ns**, so with the namespace fast
+path the total on that benchmark is **5930 → 3344, −44%**.
+
+**(3) MISS, and the pre-registered consequence is honoured rather than
+explained away.** The prediction said: *"if syscall dispatch does not move, then
+the 'every benchmark is partly measuring lockdep' claim is overstated and must be
+narrowed."* It did not move — 699 ns, identical to the best of the four pre-fix
+boots. **Narrowing it: the claim was overstated.** Lockdep taxed benchmarks that
+take `crate::sync::Mutex` *specifically*, which is the VFS/namespace path, not
+"every benchmark that takes a lock". `syscall_dispatch` evidently takes none, or
+takes a different lock type (`PreemptSpinMutex`, which is a distinct type with
+distinct overhead — a distinction this session already had to write a comment
+about in `bench.rs`). `syscall_dispatch` at 3.5x its 200 ns target is therefore
+still unexplained and remains open.
+
+**The coherence gates from `TD-BENCH-STAGE-SPLIT-HAS-NO-COHERENCE-CHECK` shipped
+in the same boot and reported a clean run:** drift 3331 → 3353 ns (0%),
+parts/whole 96%. That is the *quiet* outcome, so it proves only that the gates do
+not fire spuriously — **it does not prove they fire.** They have not yet been
+observed rejecting a run, and until they have, they carry exactly the weakness
+this file keeps documenting. The two incoherent runs that motivated them are
+recorded above, so the next drifting boot is the test.
+
+**Weak spot in the new test, recorded rather than glossed:** `test_class_hash_index()`
+runs from `lockdep::self_test()`, which executes early in boot when only **3**
+classes are registered — but the pathology it guards against (a probe run
+walking into a collision) needs a *populated* table, and by benchmark time there
+are 43. The synthetic collision case is what carries the test today; the
+verify-every-registered-class part is checking 3 of the eventual 43. It should be
+re-run late in boot as well. Tracked as
+`TD-LOCKDEP-HASH-TEST-RUNS-BEFORE-THE-TABLE-IS-POPULATED`.
+
+---
+
+### TD-LOCKDEP-HASH-TEST-RUNS-BEFORE-THE-TABLE-IS-POPULATED — 2026-08-14 — ✅ FIXED 2026-08-14 (`kernel/src/lockdep.rs`, `kernel/src/main.rs`)
+
+`test_class_hash_index()` verifies the O(1) class index against a linear-scan
+oracle, but it is called from `lockdep::self_test()` during early boot, when the
+class table holds **3** entries. By the time the kernel is doing real work it
+holds **43**. So the "every registered class is found at the index the scan
+reports" assertion — the one that would catch a probe-sequence bug — is
+exercised at 7% of the table size it needs to defend.
+
+The synthetic part of the test (register a fresh address, then register a
+deliberately colliding one and check both resolve) does not depend on table size
+and is doing the real work today. That is why this is tech debt and not a hole:
+the collision path *is* covered, just not at realistic occupancy.
+
+**Proper fix:** expose it as `pub fn verify_class_index()` and call it a second
+time late in boot — after driver/subsystem init, when the table is full — so the
+oracle comparison runs against all 43 classes. It must run on every boot, not
+only `--bench` boots, or it inherits the "check that only runs when you're
+already looking" problem.
+
+> **Resolution.** Done as described; the call takes a `when` label so the two
+> runs are distinguishable in the log and the vacuous early pass cannot be
+> misread as the meaningful one:
+>
+> ```
+> [lockdep]   class hash (early): OK (3 classes verified vs scan, bucket collision handled)
+> [lockdep]   class hash (populated): OK (31 classes verified vs scan, bucket collision handled)
+> ```
+>
+> **The placement was itself the interesting part, and got it wrong on the first
+> attempt.** The late call went in next to the deferred-benchmark spawn, which
+> reads as "late in boot" — but that sits *after* `BOOT_OK`, and
+> `boot-test.sh` kills QEMU at `BOOT_OK` unless `--bench` is given. So the first
+> version printed nothing on a normal boot test: a check that would have run only
+> on benchmark boots, i.e. only when someone was already looking, which is the
+> precise failure mode it was added to prevent. Moved above the `BOOT_OK` marker,
+> with a comment at the site saying why it must stay there. Verified by the
+> absence-then-presence of the line across two boots, not by reading the code.
+
+**Residual, not worth a separate entry:** 31 classes at `BOOT_OK` versus 43 by
+benchmark time — the last dozen register during post-boot activity. Coverage is
+now 72% of the eventual table rather than 7%, and the synthetic collision case
+covers the probe path independently of occupancy.
+
+---
+
+### TD-BENCH-STAGE-SPLIT-HAS-NO-COHERENCE-CHECK — 2026-08-14 (`kernel/src/bench.rs`)
+
+Two byte-identical benchmarks, in the same boot, disagreed by 1.67x:
+
+```
+SCORE vfs_stat_root 2971 ...
+[bench] vfs_stat_breakdown_full: min=25808 cycles (4976ns) ...
+```
+
+Both are `run(..., 500, || black_box(Vfs::stat("/")))`. Nothing distinguishes
+them but *when in the boot they ran*. In the next boot the same pair came out
+4394 and 4306 — coherent. So the harness's min-of-500 is sometimes accurate and
+sometimes 1.7x off, and **nothing in the output says which kind of run you are
+reading.**
+
+The consequences are not hypothetical; they are the two runs above:
+
+* Run A attributed `stat_resolved` 2531 → 4109 ns, a 62% "regression" caused by
+  a change that cannot touch it.
+* Run B printed `full 4306ns = resolve_follow ~0ns + stat_resolved 5762ns` — the
+  subtraction saturated at zero because a *part* measured larger than the
+  *whole*. That is arithmetically impossible and it was printed without comment.
+* Run A's parts summed to 133% of its whole. Also printed without comment.
+
+This is the project's recurring defect class in its purest form: the check was
+*there* — the code deliberately measures `resolve_follow` both directly and by
+subtraction, with a comment explaining that a disagreement would indict the
+subtraction — and then prints both numbers side by side and says nothing when
+they disagree by 2.9x. **A check whose failure is not distinguishable from its
+success is not a check, it is a decoration.**
+
+> **Resolution (same change).** Two gates, both of which say the word WARNING:
+>
+> * **Drift gate.** The first measurement (`vfs_stat_breakdown_full`) is repeated
+>   verbatim at the *end* of the block as `..._full2`. The two are the same code
+>   over the same input, so any difference is pure measurement drift across the
+>   width of the block, and it bounds how much of every stage difference is real.
+>   Over 25% and the run is declared not internally coherent and unusable for
+>   attribution.
+> * **Parts/whole gate.** `resolve_direct + stat_resolved` must land within
+>   75–125% of `full`, or the stage attribution is declared "not arithmetic, it
+>   is noise".
+>
+> The same discipline is applied to the new lock benchmark, which prints
+> `unexplained` as an explicit residual and warns when the components exceed the
+> total they were subtracted from.
+
+**Not fixed:** the harness still reports a single `min` with no confidence
+interval, so a *single* benchmark with no in-block replicate (i.e. all the
+others) remains ungraded for coherence. The proper fix is for `run()` itself to
+take two interleaved sample sets and report their disagreement, making every
+benchmark self-checking rather than just this one. Tracked here; not blocking.
+
+---
+
+### B-FASTPY-SLEEP-SELF-TEST-IS-FLAKY — 2026-08-14 (`kernel/src/proc/spawn.rs:15508`)
+
+`self_test_fastpy_slateos_sleep()` failed one release boot and passed the next
+with no relevant code change in between:
+
+```
+[spawn]   FAIL: fastpy-sleep (ring 3) — reached Zombie but exit code was Some(3),
+          expected 0 (3 = a clock read was 0 or the observed sleep delta was < 40000000 ns)
+```
+
+The tool printed its measured delta: **36 818 000 ns for a `time.sleep(0.05)`**,
+i.e. the sleep returned **26% early**, against a 40 ms lower bound. The kernel's
+own `[sched] sleep_ns` test in the same boot passed (`slept 20.459ms for 20ms
+request`), so whatever is short is not the scheduler's `sleep_ns` at a 20 ms
+scale.
+
+Two candidate causes, not yet separated:
+
+1. **The sleep genuinely returns early at 50 ms** — a wakeup-deadline rounding or
+   timer-phase bug that a 20 ms request happens not to expose.
+2. **`clock_realtime()` advances more slowly than real time** during the sleep,
+   so a correct 50 ms sleep *reads* as 36.8 ms. Ratio 50/36.818 = 1.358, which is
+   suspiciously close to nothing in particular, but the two clocks the test
+   compares (the scheduler's timer and `clock_realtime`) are different sources
+   and their agreement is exactly what the test implicitly assumes and never
+   checks.
+
+Distinguishing them is cheap and should be done before touching anything: have
+the harness log its own `clock_realtime()` delta across the child's lifetime
+next to the child's measured delta. It already reads both — guard #2 in the
+doc comment — but only compares each against the bound, never against each
+other. If the kernel-side delta is ~50 ms while the child's is ~37 ms, it is
+cause (2) and the bug is in the userspace clock path, not the sleep.
+
+Impact today: an intermittently red boot test, which is corrosive — a suite that
+cries wolf gets its failures ignored, and this is the only ring-3 test of the
+blocking-sleep path. Not lane-A-exclusive (the tool is fastpy/userspace), but
+the timekeeping and `SYS_SLEEP` sides are, and the harness is in
+`kernel/src/proc/spawn.rs`.
+
+#### CORRECTION 2026-08-14 — the proposed discriminator cannot discriminate
+
+The plan above ("have the harness log its own `clock_realtime()` delta next to
+the child's") **would not have separated the two causes**, because the two
+numbers it compares come from *the same clock*. `SYS_CLOCK_REALTIME` returns
+`timekeeping::clock_realtime()`; the harness calls
+`timekeeping::clock_realtime()`. Under cause (2) — that clock running slow —
+both readings compress by the same factor and the comparison shows nothing.
+The test would have been "instrumented" and still blind: one more instance of
+this file's recurring defect, *a check that cannot fire is indistinguishable
+from a check that passes.*
+
+The real discriminator was already in the tree, unread. Reading the call chain:
+
+| stage | clock |
+|---|---|
+| `sleep_ns` computes and enforces its deadline | `hrtimer::now_ns()` → **HPET** (`kernel/src/hrtimer.rs:147`) |
+| the child, and the harness, measure the elapsed time | `timekeeping::clock_realtime()` → **TSC**, via `clock_monotonic()` (`kernel/src/timekeeping.rs:154`) |
+
+So the sleep is *enforced* against one oscillator and *measured* against
+another, and the test silently assumes the two agree. That assumption is the
+untested one, and it is the whole bug surface:
+
+- If HPET and TSC agree across the window, the sleep really did return early —
+  **cause (1)**, a deadline/timer-phase bug in `sleep_ns`.
+- If HPET says ~50 ms while TSC says ~37 ms, the sleep was correct and the
+  **TSC calibration** (`bench::tsc_freq()`) is off by that ratio — cause (2),
+  and then it is not a userspace clock bug at all but a kernel calibration one,
+  which would also skew every `clock_realtime()` consumer and every
+  wall-clock-derived figure in the tree.
+
+Note the observed ratio: 50 / 36.818 = **1.358**. The entry above called that
+"suspiciously close to nothing in particular" — but as a *TSC calibration*
+error it needs no numerological explanation; a mis-measured `tsc_freq` can land
+anywhere, and under TCG the calibration loop is exactly the kind of thing a
+busy host perturbs. That reading also explains the flakiness the entry opens
+with: a calibration performed once per boot, on a host whose load varies, gives
+a different scale factor on each boot — so the same correct sleep reads 50 ms
+on a quiet boot and 37 ms on a busy one. **The intermittency is evidence for
+cause (2), and the original framing had no account of it at all.**
+
+The instrument therefore is: sample **both** `hrtimer::now_ns()` and
+`timekeeping::clock_realtime()` either side of the child's lifetime, print both
+deltas and their ratio, and print them on the *failure* path too — today
+`kernel_elapsed` is computed at `spawn.rs:15623`, *after* the guard-#1 early
+return at 15611, so on the exact runs that fail, the one number that would
+explain the failure is never printed.
+
+**Prediction P16** (registered before the measurement exists): on a boot where
+the child reports < 40 ms, the HPET delta will exceed the TSC delta by >= 1.2x
+— cause (2). MISS if the two agree within 5%, which puts it back on `sleep_ns`.
+
+---
+
+### TD-BASELINES-TOML-IS-INVALID-TOML-AND-NOTHING-READS-IT — 2026-08-14 — ✅ FIXED 2026-08-14 (`bench/baselines.toml`, `scripts/test-bench-history.py`)
+
+`bench/baselines.toml` — the file CLAUDE.md names as the place performance
+baselines live, and which ~30 comments across `kernel/src/bench.rs` cite as
+their source — **did not parse as TOML.** It carried two `[compositor_frame_4k]`
+tables, at lines 296 and 389, which is a hard error in every conforming parser:
+
+```
+tomllib.TOMLDecodeError: Cannot declare ('compositor_frame_4k',) twice
+                         (at line 389, column 21)
+```
+
+The two disagreed about the **unit**: `target_ns = 2000000` in one,
+`target_ms = 2.0` in the other. Only one carried the measured figure and the
+optimisation history (48.6 ms → 21.4 → 15.8 → 11.9 → 10.6 ms). So the file had
+been carrying two contradictory records of the same benchmark, and a parser
+that tolerated duplicates would have silently taken whichever came last.
+
+**Why it survived: nothing reads the file.** Every reference to it in the tree
+is a *comment*. `kernel/src/bench.rs` hard-codes each target as a literal with
+`// Target from baselines.toml: < 200 ns` beside it; `scripts/bench-history.py`
+never opens the file. So the file *looked* like the authority while the real
+authority was ~60 scattered literals in Rust, and no parser was ever pointed at
+the thing that was supposed to be the source of truth.
+
+**This is the fifth instance of the same defect class**, after
+`TD-BENCHMARKS-...` (the suite never ran), `B-BENCH-WATCHLIST-...` (the watch
+list never looked), `B-BENCH-COMPARATOR-...` (the diff named innocents) and
+`TD-BENCH-CANARY-...` (the canary never fired). The invariant keeps holding: *a
+check that cannot fire is indistinguishable from a check that passes.* Here it
+went one step further — the artefact could not even be **loaded**, and that too
+was indistinguishable from health, because loading was never attempted.
+
+> **Resolution.** The duplicate table is merged (the poorer one removed, with a
+> comment at the site recording why). `scripts/test-bench-history.py` gained
+> `test_baselines_is_valid_toml()`, which `tomllib.load`s the real file — so the
+> file is now machine-read for the first time and a duplicate or syntax error
+> fails the suite. The test also asserts every table names a target in some
+> unit, matched by `target*` **prefix** rather than an enumerated list (the
+> units are open-ended by design: `target_accesses_over_nop` and
+> `target_accesses_delta` exist because TCG harness overhead swamps the
+> absolute number, and an enumerated list would silently under-report the day
+> it wasn't extended). Calibration constants and host metadata opt out via a
+> declarative `not_a_target = true` in the data rather than a name list in the
+> test. Writing that assertion immediately found four more tables to classify.
+> 16 checks pass.
+
+**Not fixed — the duplication itself.** Targets still live in two places: this
+file and the literals in `bench.rs`, with nothing keeping them in sync, so they
+can drift silently and at least one (`vfs_stat_root`: 700 ns in the file) should
+be re-derived anyway. The proper fix is for the kernel's scorecard to be checked
+against the parsed file by `bench-history.py`, so the file becomes the authority
+it already claims to be. Blocked on nothing but effort; tracked here.
+
+#### FOLLOW-UP 2026-08-14: with the file finally parseable, the drift is measurable — and it is near-total
+
+Making `baselines.toml` load was worth doing for its own sake, but the first
+thing a working parser bought was a number for the damage. Matching the 63
+benchmark names the kernel prints against the 57 baseline tables:
+
+| | count |
+|---|---|
+| benchmarks measured by the kernel | 63 |
+| baseline tables in the file | 57 |
+| **matched by name** | **30** |
+| measured with no baseline at all | 33 |
+| baselines naming a benchmark never measured | 27 |
+
+**Less than half of what runs has a baseline it can be compared to.** And the
+two lists are not describing different work — they are largely the *same*
+benchmarks under two names, drifted apart because nothing ever had to reconcile
+them:
+
+| kernel prints | baselines.toml calls it |
+|---|---|
+| `syscall_dispatch` | `syscall_trivial` |
+| `page_fault` | `page_fault_anon` |
+| `tcp_checksum_v4` | `net_tcp_checksum_v4_1460b` |
+| `tcp_checksum_v6` | `net_tcp_checksum_v6_1460b` |
+| `vfs_stat_deep` | `vfs_stat_deep_2comp` |
+| `vfs_throughput_16k_read`/`_write` | `vfs_throughput_16k` |
+| `heap_alloc_free_64` | `heap_alloc_small` |
+| `ipc_channel` | `ipc_channel_roundtrip` |
+| `ipc_pipe` | `ipc_pipe_roundtrip` |
+| `ipc_eventfd` | `eventfd_signal_read` |
+| `ipc_semaphore` | `semaphore_signal_wait` |
+| `firewall_check` | `net_firewall_inbound_check` |
+| `dns_build_query` | `net_dns_build_a_query` |
+| `io_ring_nop` | `iouring_sqe_submit` |
+| `isr_latency` | `interrupt_dispatch` |
+| `service_connect` | `service_connect_accept` |
+| `cp_notify_wait_rt` | `cp_notify_wait_roundtrip` |
+| `net_tcp_conn_lookup` | `net_tcp_conn_table_scan` |
+
+That is 18 of the 33 unmatched accounted for as pure renames. The remainder
+split into benchmarks genuinely lacking a baseline (`vfs_stat_root`,
+`vfs_read_256`, `vfs_write_256`, `vfs_readdir`, `vfs_stat_3comp`,
+`http_gzip_*`, `ipc_channel_sync`, `net_arp_lookup`, `net_checksum`,
+`net_ethernet_parse`, `net_ipv4_parse`, `pick_next`, `sched_pick_next`) and
+baselines for work that is not benchmarked at all (`futex_uncontended`,
+`futex_contended_wake`, `futex_wait_mismatch`, `compositor_frame_4k` — the last
+is Lane C's and is measured by a host-side `cargo test`, not by this suite).
+
+**Note what this does to the headline number.** The `over_target` count the
+kernel reports (15 of 63 on the release run) is computed from the literals in
+`bench.rs`, not from this file — so it is not wrong, but it is also not
+*checkable* against the stated baselines for the 33 unmatched. Ranking the
+release run against the parsed file yields only 7 over-target entries, and that
+smaller number is an artefact of the missing half, not good news. Notably
+`vfs_stat_root` — the benchmark currently under investigation at 8.5x over — has
+**no** table here at all; its 700 ns target exists only as a comment in
+`bench.rs` citing a file that does not mention it.
+
+**Proper fix, unchanged but now specified.** `bench-history.py` should parse
+this file and check each recorded entry against it, reporting unmatched names
+in both directions as a failure rather than silence. That requires first
+reconciling the names — one canonical name per benchmark, used by both the
+`run()` call in `bench.rs` and the table here. The rename table above is the
+work list. Until then the parse test added today guarantees only that the file
+is *loadable*, not that it is *true*.
+
+
+#### FOLLOW-UP 2026-08-14 (2): the file is now *checked*, and 11 targets disagree
+
+`bench-history.py` gained `load_baselines()` + `report_baselines()`, which
+compare the target the kernel prints on each `SCORE` line — the literal in
+`bench.rs` — against the target this file states. The very first run of that
+check, against `build/serial-test.txt` (63 benchmarks):
+
+```
+Baselines: 11 disagree, 15 unbaselined, 7 unused
+  context_switch:      kernel says   5000ns, file says  10000ns
+  crypto_aead_1KiB:    kernel says 100000ns, file says  70000ns
+  crypto_sha256_1KiB:  kernel says  50000ns, file says  40000ns
+  dns_build_query:     kernel says  40000ns, file says   2000ns   (20x)
+  firewall_check:      kernel says   2000ns, file says   1000ns
+  heap_alloc_free_64:  kernel says    400ns, file says    200ns
+  http_mime_type:      kernel says   2000ns, file says    500ns   (4x)
+  io_ring_nop:         kernel says    200ns, file says    300ns
+  ipc_channel:         kernel says   2000ns, file says   3000ns
+  page_fault:          kernel says  10000ns, file says   8000ns
+  syscall_dispatch:    kernel says    200ns, file says   1200ns   (6x)
+```
+
+**Every PASS/OVER verdict for those 11 has been graded against a number its own
+documentation contradicts.** The direction matters case by case: `syscall_dispatch`
+measured 653 ns is *OVER* against the kernel's 200 ns and would *PASS* against
+the file's 1200 ns. Which is correct is not obvious — 200 ns is the CLAUDE.md
+hardware figure (Linux getpid ~100 ns, "within 2x"), while 1200 ns looks like a
+TCG-adjusted budget. That is exactly why the check **reports and does not
+reconcile**: picking a side automatically is how the two drifted apart.
+
+The check distinguishes three failure modes deliberately, because they are
+different problems: *disagree* (one side edited without the other), *unbaselined*
+(the Rust literal is the only record of the target — 15 benchmarks, including
+`vfs_stat_root`), and *unused* (the file claims coverage that does not exist — 7).
+It also refuses to conflate an unparseable file with an agreeing one, printing
+`UNVERIFIED`; that distinction is the entire lesson of this entry and is pinned
+by a test.
+
+Table renames brought name-matching from 30/63 to 48/63 (the tables moved, not
+the benchmarks — `history.jsonl` is append-only and its names cannot change
+without orphaning every historical record). 23 checks pass, up from 13.
+
+**Still open:** the 11 disagreements need adjudicating one at a time, and the 15
+unbaselined benchmarks need tables with real provenance. Both are now *visible on
+every bench run* rather than invisible, which is the change that matters.
+
+#### FOLLOW-UP 2026-08-14 (3): the 11 disagreements were mostly ONE bug — two kinds of target merged into one number
+
+Adjudicating the 11 turned up a structural cause rather than eleven clerical
+errors. `bench.rs` says it plainly in its own comments:
+
+```rust
+// OpenSSL SHA-256 1KiB: ~1500ns.  QEMU target: 50000ns.
+score("crypto_sha256_1KiB", &result, 50000);
+
+// DNS query build includes a heap allocation (Vec::with_capacity) which
+// is expensive under QEMU (~35us).  Target set to 40us to track regressions
+// without false-failing on the allocation overhead.
+score("dns_build_query", &result, 40000);
+```
+
+**Those are TCG budgets, not hardware references** — and `baselines.toml` was
+storing the hardware reference under the same key. Comparing them reported a
+20x "disagreement" where in truth the two files were each right about a
+different quantity. Two more (`heap_alloc_free_64`, `http_mime_type`) were the
+same shape one level down: a *scope* difference, where the benchmark measures a
+fixed multiple of the per-operation target (alloc+free is 2x an alloc; the MIME
+benchmark does 4 lookups).
+
+Worse, `bench-history.py` printed this on every run:
+
+> *(The 'target' column in the scorecard above is a **hardware** reference and
+> cannot be met under TCG — see bench/baselines.toml.)*
+
+which is **false for at least six benchmarks**, whose targets are explicit QEMU
+budgets. The line explaining the number misdescribed it, and so did the
+scorecard headline: "48/63 within hardware target" counts passes that were
+scored against TCG budgets.
+
+**Fix: make the two kinds separate keys.** `target_ns` stays the hardware
+reference; `tcg_target_ns` is the budget the suite is graded against under
+emulation, and the cross-check prefers it when present. The explanatory line now
+says the column is a mix and points at which key records which.
+
+**Three were real disagreements.** Two are settled by CLAUDE.md's performance
+table, which outranks the file:
+
+* `context_switch`: file said 10 µs, spec says *"Target: < 5 µs"* → file corrected.
+* `page_fault`: file said 8 µs, spec says *"Target: < 10 µs"* → file corrected.
+* `ipc_channel`: file said 3 µs, spec says *"Target: < 2 µs round-trip"* → file corrected.
+* `syscall_dispatch`: file said 1200 ns, derived by doubling a **638 ns WSL2
+  measurement of a full syscall including spectre mitigations** — not the same
+  quantity as dispatch. Spec says *"Linux: ~100 ns for getpid. Target: within 2x"*
+  → 200 ns. **This one changes a verdict:** the measured 653 ns is OVER at
+  200 ns and would have PASSed at 1200 ns. The 638 ns figure is kept as context,
+  not as a derivation.
+* `io_ring_nop`: file said 300 ns (2x a 150 ns measurement), spec says
+  *"~100-200 ns per SQE; same order"* → 200 ns.
+
+Result: **11 disagreements → 1.**
+
+**The last one is instructive and is deliberately still open.** `firewall_check`
+carries the comment `// Target from baselines.toml: 2000ns` in `bench.rs` while
+the file says 1000 ns — a citation that is simply false, and the direction
+(2x looser) means the kernel silently relaxed its own target at some point.
+Both pass comfortably (measured 55 ns), so nothing is hidden by it; it is left
+for the next `bench.rs` change rather than fixed now, because a kernel edit
+during an in-flight release build would produce a binary that does not
+correspond to any commit. Recorded here so it is not lost.
+
+---
+
+## B-SCFILTER-CHECK-SCANS-128-SLOTS-UNDER-A-LOCK-ON-EVERY-SYSCALL
+
+**Status:** 🔬 PREDICTION REGISTERED (measurement not yet taken)
+**Where:** `kernel/src/scfilter.rs:253` (`check`), called from
+`kernel/src/syscall/dispatch.rs:700` on every syscall.
+
+### Why this was looked at
+
+`syscall_dispatch` has been OVER its 200 ns target on every boot on record —
+699 ns, 3.5x — and the lockdep O(1) fix moved it by **exactly 0 ns**, while it
+cut `crate::sync::Mutex` acquire+release 632 → 274 ns and `vfs_stat_root` by
+44%. That null result was pre-registered as meaningful: *"if syscall dispatch
+does not move, then the 'every benchmark is partly measuring lockdep' claim is
+overstated and must be narrowed."* It was narrowed. The follow-up question it
+left open — *then where does 699 ns go?* — is this entry.
+
+### What the code says (used to choose what to measure, not how much it costs)
+
+`dispatch()` runs five things around the handler: `sclatency::enter`,
+`ktrace::record`, `sched::current_task_id`, `scfilter::check`, a second
+`ktrace::record`, and `sclatency::exit`. Of these, `scfilter::check` is the
+one that reads wrong:
+
+```rust
+let mut guard = TABLE.lock();                    // PreemptSpinMutex
+let Some(table) = guard.as_mut() else { return true };
+for entry in &mut table.filters {                // MAX_FILTERS == 128
+    if entry.active && entry.pid == task_id { ... }
+}
+true                                             // no filter -> full 128-slot walk
+```
+
+With **zero filters installed** — the state the kernel boots in and stays in —
+the loop never matches, so it walks all 128 slots of a ~19 KiB table, under a
+lock, on every syscall. This is the same shape as the lockdep bug fixed
+immediately before it: **a linear scan hiding in infrastructure that everything
+else pays for.**
+
+Two aggravating details:
+
+1. **The doc comment contradicts itself.** It claims *"If no filter is
+   installed for this task, returns `true` (O(1))"* and, five lines later,
+   *"No filter installed: ~5 ns (atomic load + **linear scan miss**)"*. Both
+   cannot be true. An O(1) claim and a linear-scan claim in the same comment
+   means nobody has measured it — the `~5 ns` is an estimate presented in the
+   typography of a measurement.
+2. **It explains the lockdep null result.** `TABLE` is a
+   `PreemptSpinMutex`, which by construction carries *no* lockdep and *no*
+   contention tracking. So the lockdep fix could not have moved
+   `syscall_dispatch` no matter how large scfilter's cost is — which is
+   consistent with the observed 0 ns, and is why "no change" was not evidence
+   that dispatch is cheap.
+
+### Prospective predictions — registered BEFORE the measurement exists
+
+A decomposition benchmark (`bench_syscall_dispatch_breakdown`) now measures each
+stage **directly and in isolation**, never by subtraction, and prints an explicit
+`unexplained` residual plus a drift gate. It has not been run yet. Graded on the
+next `--bench` boot:
+
+1. **`sd_scfilter_check` is the largest non-handler stage, and is > 150 ns.**
+   *If it is under 150 ns, or is not the largest, the "linear scan under a lock
+   on every syscall" story is wrong and the 699 ns lives somewhere else — and I
+   must go look at the indirect call through the handler table before touching
+   scfilter.*
+2. **`sd_handler` < 60 ns** — i.e. the work the caller actually asked for is
+   under 10% of dispatch, and dispatch is overwhelmingly overhead.
+3. **The four overhead stages together account for ≥ 60% of the 699 ns**
+   (`unexplained` ≤ 40%). *If `unexplained` dominates, the decomposition missed
+   the real cost, and the finding is that isolated per-stage measurement does
+   not reconstruct this path — which matters more than this bug.*
+4. **Consequence clause.** If (1) holds, giving `check` a genuine O(1) zero-filter
+   fast path (one relaxed atomic load, no lock, no scan) must drop
+   `syscall_dispatch` by **at least 100 ns**. *If it does not, then
+   `sd_scfilter_check` measured in isolation is not what dispatch actually pays,
+   and the whole direct-component-measurement method used here and in the VFS
+   breakdown is unreliable in this kernel. That would be a much more important
+   result than the bug, and would be recorded as such rather than explained away.*
+
+### Deliberately NOT predicted
+
+A per-stage nanosecond figure for `ktrace_pair` or `sclatency_pair`. Both are
+dominated by `rdtsc`, whose measured pair cost (56 ns) already carries more
+run-to-run spread than any band worth stating. Predicting finer than the
+instrument resolves produces noise wearing a grade's clothes.
+
+### RESULT — measured 2026-08-14, predictions 1–3 graded
+
+```
+[bench] sd_handler:          min=  92 cycles (19ns)
+[bench] sd_current_task_id:  min=  84 cycles (17ns)
+[bench] sd_scfilter_check:   min=1438 cycles (299ns)
+[bench] sd_ktrace_pair:      min= 410 cycles (85ns)
+[bench] sd_sclatency_pair:   min= 370 cycles (77ns)
+[bench]   syscall_dispatch breakdown: total 525ns = handler 19ns + task_id 17ns
+          + scfilter 299ns + ktrace_pair 85ns + sclatency_pair 77ns + unexplained 28ns
+[bench]   syscall_dispatch breakdown: scfilter has 0 filter(s) installed of 128 slots
+[bench]   syscall_dispatch breakdown: drift check — dispatch twice: 525ns then 511ns (2%)
+```
+
+| # | Prediction | Actual | Verdict |
+|---|---|---|---|
+| 1 | `sd_scfilter_check` is the largest non-handler stage and > 150 ns | **299 ns**, 3.5x the next stage | **HIT** |
+| 2 | `sd_handler` < 60 ns (real work < 10% of dispatch) | **19 ns**, 3.6% of 525 ns | **HIT** |
+| 3 | four overhead stages ≥ 60% of total (`unexplained` ≤ 40%) | stages = **94.7%**, unexplained **5.3%** | **HIT** |
+| 4 | consequence clause — fixing (1) drops `syscall_dispatch` ≥ 100 ns | pending the next boot | — |
+
+**The headline: 57% of kernel-side syscall dispatch was a linear scan over an
+empty table.** The work the caller actually asked for — `sys_task_id`, which
+reads one per-CPU word — is 19 ns of 525. Dispatch was 96% overhead, and more
+than half of the overhead was one function whose doc comment said `O(1)`.
+
+**A caveat that the coherence gate is the only reason I can state.** The total
+here is 525 ns, not the 699 ns quoted when this investigation started, with no
+relevant code change between them: the whole suite drifted −22.3% this run.
+Quoting "699 ns" as a property of `syscall_dispatch` would have been wrong.
+What survives drift is the *ratio*, and the drift gate (2%) plus the residual
+(5.3%) are what license reading the split at all. This is the first time one of
+these gates has been load-bearing rather than decorative.
+
+**Prediction 3 is the one worth noting.** It was the hedge — "if `unexplained`
+dominates, my decomposition missed the real cost and the method is unreliable
+here". At 5.3% it did not just pass, it says the five measured stages *are*
+dispatch: there is no meaningful hidden cost in the call, the bounds check, the
+table indirect call, or the return. That is a stronger result than the bug, and
+it is what makes the fix's target unambiguous.
+
+### Fix
+
+`scfilter::check` now:
+
+1. **Range-checks first** (a compare against a constant), *then* consults a new
+   `ACTIVE_FILTERS: AtomicUsize`. Zero — i.e. no process anywhere is sandboxed,
+   which is the state the kernel boots in — returns `true` immediately: no lock,
+   no table access, one atomic load. The ordering matters and is deliberate:
+   putting the range check *after* the fast path would have made
+   `check(pid, 1000)` return `true` or `false` depending on whether some
+   unrelated process happened to be sandboxed, and `dispatch` range-checks
+   before calling this, so nothing would have caught it.
+2. **When something is filtered**, uses a Fibonacci-hashed open-addressed
+   `pid → slot` index (256 buckets, < 50% load, const-asserted) instead of
+   walking 128 slots. So installing one filter no longer taxes every syscall of
+   every *other* process — which the "just add a zero-filter fast path" version
+   of this fix would have left in place, as a cliff waiting for the first
+   sandbox.
+3. High bits of the multiply, not low — pids are a dense ascending sequence, so
+   low bits would map the first 128 processes onto 128 consecutive buckets and
+   turn every miss into a long probe run: the same linear scan, wearing a hash's
+   clothes.
+
+**The index is rebuilt wholesale after every mutation** rather than maintained
+incrementally. Incremental deletion from a linear-probe table needs tombstones
+(which accumulate across install/remove cycles until it degrades back to a scan)
+or backward-shift deletion (easy to get subtly wrong). Mutations happen at
+process create/exit; lookups happen on every syscall. Paying a 256-byte memset
+on the rare path to keep the hot path both O(1) and obviously correct is the
+right side of that trade.
+
+**This bug fails OPEN, which is why it gets an oracle.** In lockdep, a hash that
+silently missed a class made the validator go quiet — bad, but it fails safe.
+Here, a hash that silently misses a pid means *a filtered process runs
+unfiltered*: a sandbox escape with no log line. So the deleted linear scan
+survives as `FilterTable::lookup_by_scan`, and `verify_index()` asserts on every
+boot and inside the self-test that hash and scan agree for every active pid,
+that a never-installed pid resolves to `None` through both, and that the cached
+`ACTIVE_FILTERS` equals a linear count of active slots. That last one is the
+dangerous direction: a counter that reads *too low* switches syscall filtering
+off entirely and silently.
+
+**Two tests, because a test on an empty table proves nothing about lookup.**
+`self_test` now verifies with filters installed *and* searches 200k candidate
+pids for one that genuinely collides with an installed pid's bucket, so the
+probe path is exercised rather than hoped for — and prints `UNTESTED` rather
+than passing if it finds none. It also asserts the filters it installed were
+all drained, so the suite cannot leave the syscall fast path switched off for
+the rest of the boot the way the namespace self-tests once left
+`NS_FEATURES_ACTIVE` armed.
+
+**Also removed: a kill switch that switched nothing.** `ENABLED: AtomicBool` was
+set once by `init` and read only by `check`. Once `check` stopped reading it, it
+was write-only — worse than absent, because it reads like a way to disable
+syscall filtering and a later `disable()` built on it would have disabled
+nothing while appearing to work.
+
+---
+
+## B-SCFILTER-DENIES-EVERY-SYSCALL-1000-TO-1100-SYSTEM-WIDE
+
+**Severity: HIGH — live, shipped, silent.** Found 2026-08-14 as a side effect of
+the `scfilter::check` hot-path rewrite above.
+
+`scfilter::MAX_SYSCALL_NR` was a hand-written `1000`, under a doc comment
+reading *"Matches `syscall::number::MAX_SYSCALL_NR`."* It did not.
+`syscall::number::MAX_SYSCALL_NR` is **1100**. Nothing checked, because a
+comment asserting two numbers are equal is not a check — it is a wish.
+
+The gap is not a slow path or a missed filter. `check` **denies** any
+`nr >= MAX_SYSCALL_NR` (correctly: a bitmap that cannot represent a syscall
+must not claim to allow it). So from the moment `scfilter::init()` ran at
+`main.rs:4969`, every syscall in `1000..1100` returned `PermissionDenied` to
+**every process on the system, filtered or not**. That range is:
+
+- `SYS_DRM_OPEN` (1000) through `SYS_DRM_ATOMIC_COMMIT` (1060) — the *entire*
+  DRM/graphics syscall interface, i.e. everything the compositor needs;
+- `SYS_PROCESS_SET_EXEC_FDS` (1061), `SYS_SIGNAL_STOP_SELF` (1062),
+  `SYS_PROCESS_WAIT_STATUS` (1063).
+
+### Why every existing test missed it
+
+Two independent blind spots, and it needed both:
+
+1. **The dispatch self-test runs in a configuration the system never runs in.**
+   `syscall::self_test()` is at `main.rs:759`; `scfilter::init()` is at 4969.
+   All ~90 dispatch cases — including
+   `test_dispatch_signal_stop_self_rejects_non_stop_signals`, which dispatches
+   syscall **1062** — execute with the filter subsystem off, where `check`
+   returned `true` from its first line. A dispatch↔filter interaction bug was
+   invisible to the suite by construction.
+2. **The scfilter self-test encoded the bug as its expected value.** Test 12
+   read `assert!(!check(200, 1000)); // >= MAX_SYSCALL_NR — always denied`.
+   That assertion *passed only because the constant was wrong*. Written as a
+   literal instead of against the constant, it pinned the boundary to the
+   wrong place and defended it.
+
+The hot-path rewrite exposed it by accident: hoisting the range check ahead of
+the new no-filters fast path made the branch reachable before `init()`, turning
+a silent post-boot denial into an immediate boot failure —
+`FAIL: signal_stop_self(0) returned -400, expected InvalidArgument`. `-400` is
+`PermissionDenied`, which `dispatch` returns on exactly one path: `!check(..)`.
+
+### Fix
+
+- `scfilter::MAX_SYSCALL_NR` is now **derived** —
+  `= crate::syscall::number::MAX_SYSCALL_NR` — not copied. Derivation makes the
+  two impossible to drift apart; a `const assert!(a == b)` would only *detect*
+  drift after someone reintroduced it. `BITMAP_WORDS` follows automatically
+  (18 words / 144 bytes at 1100).
+- Test 12 is phrased against the constant, so it tests the boundary wherever
+  the boundary actually is, and gains a **12b** asserting the last
+  *representable* number is still allowed — the off-by-one in the other
+  direction, which would deny the top syscall to every process.
+- New `syscall::dispatch::verify_dispatch_under_filtering()`, called from
+  `main.rs` immediately after `scfilter::init()`, dispatches
+  `SYS_SIGNAL_STOP_SELF` (the highest-numbered syscall whose rejection path is
+  safe to call from the boot thread) and fails the boot if the answer is
+  `PermissionDenied` rather than `InvalidArgument`. This closes blind spot (1)
+  generally: there is now at least one dispatch assertion that runs *in the
+  live configuration*.
+
+### Prospective predictions (registered before the boot that tests them)
+
+5. The boot now passes `signal_stop_self` and reaches `BOOT_OK`. If it does
+   not, the `-400` had a second cause beyond the constant mismatch and the
+   diagnosis above is incomplete.
+6. `verify_dispatch_under_filtering()` **passes** on this boot. It is
+   deliberately written so that it would have **failed** on the pre-fix tree —
+   if it passes on both, it is not testing what its doc comment claims and is
+   worthless as a regression guard.
+
+### RESULT — measured 2026-08-14, predictions 4–6 graded
+
+Boot green, `BOOT_OK` reached. Serial evidence:
+
+```
+[scfilter]   Out-of-range denied: OK
+[scfilter]   Top-of-range allowed: OK                     <- new test 12b
+[scfilter] Self-test PASSED (16 tests)
+[syscall] Top-of-range dispatch under live filtering (nr 1062 of 1100): OK
+```
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 4 | Fixing the scan drops `syscall_dispatch` by ≥ 100 ns, else isolated component measurement is unreliable here | **HIT** — 525 → 393 ns raw (−132), −220 ns drift-adjusted |
+| 5 | Boot passes `signal_stop_self` and reaches `BOOT_OK` | **HIT** |
+| 6 | `verify_dispatch_under_filtering()` passes, and would have failed pre-fix | **HIT** — passes; pre-fix it dispatches nr 1062 ≥ scfilter's 1000 and gets `PermissionDenied`, which is exactly the `-400` that failed the earlier boot |
+
+Post-fix breakdown, internally coherent (drift gate: 393 ns then 393 ns, 0%):
+
+```
+total 393ns = handler 24 + task_id 23 + scfilter 44 + ktrace_pair 111
+            + sclatency_pair 142 + unexplained 49 (12.5%)
+```
+
+**Read the share, not the nanoseconds.** The whole suite drifted **+29%**
+between these two boots (median ratio 1.290 over 64 common benchmarks), so this
+boot's machine is ~29% slower and the raw −132 ns *understates* the fix:
+
+- `scfilter` share of dispatch: **57% → 11%**.
+- `syscall_dispatch` raw ×0.749; drift-adjusted **×0.580** — i.e. ~304 ns in the
+  previous boot's units, a **−220 ns** corrected drop.
+- It is the **3rd-largest drop of 64 benchmarks** in a boot where the median
+  went the *other* way, and it is the one benchmark whose code changed.
+
+Prediction 4's consequence clause is therefore satisfied: the component measured
+in isolation (299 ns) is close to what dispatch actually paid, so direct
+component measurement is validated as a method for this kernel — which is what
+licenses trusting the same technique on the two remaining terms below.
+
+### Follow-on: dispatch is now 64% observability infrastructure
+
+With scfilter down to 44 ns, the two biggest terms are both tracing:
+`sclatency_pair` 142 ns + `ktrace_pair` 111 ns = **253 ns of a 393 ns dispatch**,
+and both default to enabled. Two concrete causes already identified by reading:
+
+- `sclatency::exit` calls `bench::cycles_to_ns` on every syscall **purely to
+  pick a histogram bucket**, and that does two 64-bit divisions. Every other
+  statistic it keeps (`TOTAL_CYCLES`, `MIN/MAX_CYCLES`, `PER_SYSCALL_CYCLES`) is
+  already in cycles. Fix: convert the 12 thresholds to cycles once at
+  calibration and bucket in cycles — no division on the hot path.
+- `ktrace::record` calls `sched::current_task_id()` itself (23 ns measured),
+  twice per dispatch — and `dispatch` has already computed that exact value.
+  Fix: a `record_with_task(...)` taking the caller's `task_id`, with `record`
+  as the wrapper that looks it up.
+
+Latent, same file: if `tsc_freq()` is 0, `cycles_to_ns` returns 0, so **every**
+sample lands in bucket 0 and the histogram reports "100% of syscalls under 1 µs"
+when it simply cannot measure. Cycle-bucketing must not inherit that.
+
+### Unrelated movements worth watching (this boot vs previous)
+
+Both far exceed the +29% suite drift, so they are not explained by it:
+
+- `isr_latency` 19065 → 44619 ns (**×2.34**) — already over its 10000 ns target.
+- `pick_next` 443 → 781 ns (**×1.76**).
+
+Not investigated yet; logged so a later "it was always like that" is checkable.
+
+---
+
+## B-DISPATCH-OBSERVABILITY-COSTS-64-PERCENT-OF-SYSCALL-DISPATCH
+
+With `scfilter` down to 44 ns, syscall dispatch is dominated by its own
+instrumentation: `sclatency_pair` 142 ns + `ktrace_pair` 111 ns = **253 ns of a
+393 ns dispatch (64%)**, both enabled by default. Two independent causes, both
+of which do work whose result is discarded:
+
+1. **`sclatency::exit` converted units on every syscall to pick a bucket.**
+   It called `bench::cycles_to_ns` — two 64-bit divisions — to produce a
+   nanosecond value that was compared against 12 constants and thrown away.
+   Every other statistic in the module (`TOTAL_CYCLES`, `MIN_CYCLES`,
+   `MAX_CYCLES`, `PER_SYSCALL_CYCLES`) was already kept in cycles and converted
+   only at readout. Fix: convert the 12 *thresholds* to cycles once in a new
+   `sclatency::calibrate()`, called right after `bench::calibrate_tsc()`, and
+   compare in cycles. This moves a division off a path every syscall takes onto
+   one taken once per boot.
+
+2. **`ktrace::record` looked up the task id that dispatch already had.**
+   `sched::current_task_id()` measures ~23 ns, and dispatch called it three
+   times per syscall: once explicitly for the filter, and once inside each of
+   the two `record` calls, for a value that cannot change across one dispatch.
+   Fix: `ktrace::record_with_task(...)` takes the caller's id; `record` remains
+   as the wrapper that looks it up (and checks `ENABLED` *before* looking it
+   up, so a disabled tracer does not pay for the lookup either).
+
+### Also fixed: a histogram that was most confident when it knew least
+
+`cycles_to_ns` returns 0 when the TSC frequency is unknown. 0 is below the
+first threshold, so **every** such sample landed in bucket 0 and the histogram
+reported *"100% of syscalls under 1 µs"* — the most flattering possible
+answer — precisely when it could not measure at all. Bucketing in cycles must
+not inherit that, so `find_bucket_cycles` returns `Option` and uncalibrated
+samples are counted in a separate `UNCALIBRATED_SAMPLES`, surfaced by `stats()`
+(`uncalibrated`, `calibrated`), disclosed by the kshell histogram, and exported
+as the `syscall/latency_unbucketed` counter. The kshell percentage column now
+divides by *bucketed* calls so it still reaches 100%.
+
+`sclatency::self_test` holds the new cycle path against the old ns path at
+`threshold-1`, `threshold` and `threshold+1` for all 12 boundaries, plus
+`u64::MAX` (must saturate into the last bucket, not wrap to the first) and 0.
+It **skips loudly** rather than passing if the TSC is uncalibrated, because
+every assertion in it would then be vacuous.
+
+### Prospective predictions (registered before the boot that tests them)
+
+7. `sd_sclatency_pair` falls by **≥ 40%** (142 ns → ≤ 85 ns). If it does not,
+   the two divisions were not the cost — the remaining work is ~6 relaxed
+   atomics, 2 `rdtsc` and 2 CAS loops — and the "divisions are expensive under
+   TCG" premise is wrong.
+8. `sd_ktrace_pair` falls by **≥ 25 ns**, i.e. at least one `current_task_id`
+   (23 ns) of the two removed. If it falls by *much more* than ~46 ns, the
+   saving is not just the redundant lookups and my model of `record` is
+   incomplete — that would be as much a miss as no change.
+9. `syscall_dispatch` total falls by **≥ 100 ns drift-adjusted** (median suite
+   ratio, as used for prediction 4). Note predictions 7+8 removing ~80 ns of
+   *stage* cost should also remove ~46 ns of the separately-counted
+   `sd_current_task_id`-equivalent work, so ≥ 100 ns is the honest bar.
+10. `sclatency::self_test` **passes**, with a non-zero probe count. A SKIP is
+    not a pass: it means the boot could not verify the rescaling at all.
+
+### RESULT — measured 2026-08-14, predictions 7–10 graded
+
+Boot green, `BOOT_OK`. This time the suite drift was **×1.000** (median over 64
+benchmarks), so the two boots are directly comparable — corroborated
+independently by the three stages I did not touch: `scfilter` 44→45,
+`handler` 24→25, `task_id` 23→23.
+
+```
+total 303ns = handler 25 + task_id 23 + scfilter 45 + ktrace_pair 86
+            + sclatency_pair 79 + unexplained 45      (drift gate: 303 then 302, 0%)
+```
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 7 | `sd_sclatency_pair` falls ≥ 40% | **HIT** — 142 → 79 ns (×0.56, −44%) |
+| 8 | `sd_ktrace_pair` falls ≥ 25 ns, but not "much more" than ~46 | **HIT** — 111 → 86 ns (−25 ns), at the lower bound and inside the window |
+| 9 | `syscall_dispatch` falls ≥ 100 ns | **MISS** — 393 → 303 ns, −90 ns |
+| 10 | `sclatency::self_test` passes with a non-zero probe count | **HIT** — 36 probes, TSC 3.715 GHz |
+
+**Prediction 9 missed because the prediction was miscomputed, not because the
+fix underperformed** — and the shape of the miss is itself the strongest
+evidence yet for the component model. I set the bar at 100 ns by reasoning that
+predictions 7+8 would remove ~88 ns of stage cost *plus* ~46 ns of
+"separately-counted `current_task_id` work". That second term does not exist:
+the two redundant lookups lived *inside* `ktrace::record`, hence inside
+`sd_ktrace_pair`, so they were already the whole of the −25 ns in prediction 8.
+`sd_current_task_id` is a distinct stage measuring the *one* explicit lookup
+dispatch still performs, which this change did not remove. I double-counted.
+
+Without the double-count the model predicts −88 ns; measured −90 ns. The stage
+deltas reconcile the total exactly:
+
+```
+sclatency −63, ktrace −25, scfilter +1, handler +1, task_id 0, unexplained −4  =  −90
+393 − 303 = 90                                                                      ✓
+```
+
+So the decomposition is now accurate to ~2% on a *predicted* delta, not merely
+self-consistent after the fact. That is a stronger result than prediction 9
+passing would have been.
+
+**One genuine caveat the miss exposes.** Removing two `current_task_id` calls
+saved 25 ns, but `sd_current_task_id` measures 23 ns *each* in isolation. So an
+isolated micro-measurement overstates a small stage's in-situ cost by ~2×,
+presumably because in isolation it cannot overlap with surrounding work. Direct
+component measurement is reliable for *large* stages (the 299 ns scfilter scan
+predicted its own removal within noise) and only order-of-magnitude for stages
+of a few tens of ns. Do not use it to justify shaving a 20 ns term.
+
+### Where dispatch stands
+
+525 → 393 → 303 ns across three boots, against a 200 ns target (152%).
+Instrumentation is still the majority: `ktrace_pair` 86 + `sclatency_pair` 79 =
+**165 ns, 54% of dispatch**, both on by default. Remaining terms are now small
+and close to the ~2× measurement floor above, so further work here should
+target *whether* both tracers run on every syscall by default rather than
+shaving either one.
+
+### CORRECTION — `isr_latency` and `pick_next` were never regressions
+
+I flagged `isr_latency` ×2.34 and `pick_next` ×1.76 above as movements "far
+exceeding the +29% suite drift, so not explained by it". **That was wrong, and
+the error was mine: I treated a two-boot comparison as if one of the two boots
+were a baseline.** Normalising the last six boots against their own median
+shows one boot was globally, anomalously *fast*:
+
+| boot | whole-suite factor (64 benchmarks) | `syscall_dispatch` |
+|---|---|---|
+| −6 | ×1.040 | 691 |
+| −5 | ×1.026 | 697 |
+| −4 | ×0.990 | 699 |
+| **−3** | **×0.775** | **525** |
+| −2 | ×1.000 | 393 |
+| −1 | ×1.000 | 303 |
+
+Boot −3 ran ~23% faster than every other boot *across the board* — host-side,
+not ours. Per-benchmark, `isr_latency` reads 45493, 44683, 35843, **19065**,
+44619, 44413 and `pick_next` reads 955, 1037, 684, **443**, 781, 749. Neither
+regressed; both returned to normal from an outlier. The flag is withdrawn, and
+`sched_pick_next` (40, 41, 40, **31**, 40, 41) shows the same signature.
+
+**Two consequences, both worth keeping.**
+
+*The drift adjustment was right for the right reason.* Boot −3's ×0.775 is the
+reciprocal of the ×1.290 median I measured going −3 → −2, and 525 ÷ 0.775 ≈ 677
+lands squarely in the 691–699 band the three preceding boots recorded for
+`syscall_dispatch`. Median-of-suite normalisation recovered the true baseline
+from a boot that was uniformly wrong by 23%.
+
+*The headline number is bigger than any single step suggested.* Measured in
+comparable units, `syscall_dispatch` has gone from a stable ~695 ns (three
+consecutive boots: 691, 697, 699) to **303 ns — a 2.3× speedup, −392 ns** —
+across the scfilter and instrumentation fixes together. Against the 200 ns
+target that is 348% → **152%**. The per-change figures reported above (−132,
+−90) are each correct within their own boot pair; they simply do not add up to
+the total because one of the pairs was measured against the fast boot.
+
+**Rule going forward: never baseline against a single boot.** Normalise the
+candidate boot against the median of the recent history before calling anything
+a regression or an improvement. A single boot on this host can be off by ±25%
+uniformly, which is larger than most of the effects being chased.
+
+---
+
+## B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST
+
+**Status:** open, fix in progress.
+**Where:** `kernel/src/bench.rs` — `measure_access_cost`, `report_canary`,
+`maybe_canary_sample`, and the `access_floor` calibration in `run_all`.
+`scripts/bench-history.py` — `canary_is_contaminated`.
+
+### The symptom
+
+Every release-profile boot emits:
+
+```
+[bench]   memory_access_floor: 100 cycles/guest byte-store (measured=0 over 64
+          stores/window: nop=400 store=244, 500 interleaved rounds)
+[bench] CANARY 0 0 0 0 0 0 10
+[bench] CONTAMINATED: the reference access cost spread 0% across 10 samples
+        during the suite (0-0 cycles, ...). Host load changed mid-run ...
+```
+
+Read that carefully: the **nop** arm (400 cycles) is *more expensive* than the
+**store** arm (244), and the message blames host load for a spread of **0%**.
+
+### Root cause
+
+`measure_access_cost` times two loops that differ only by a
+`CALIBRATION_BYTE.store(black_box(1u8), Relaxed)`, and returns
+`(store - nop) / n`. A relaxed atomic store is LLVM `monotonic`, and dead-store
+elimination is permitted to drop all but the last of a run of monotonic stores
+to the same address. With optimisation on, the 64 stores per window collapse to
+roughly one, so the "store" arm ends up doing *less* work than the "nop" arm —
+whose `black_box(i)` per iteration is not removable. `saturating_sub` then
+turns the negative delta into 0.
+
+`black_box` is a *hint*; the elimination it is asked to prevent is exactly what
+happened once the optimiser was turned on.
+
+### Blast radius: the check has never once fired in the profile it now runs in
+
+| record | profile | canary min-max | spread |
+|---|---|---|---|
+| 15:19 | debug | 267-275 | 2% |
+| 15:35 | debug | 266-309 | 16% |
+| 15:57 | release | 1-2 | 100% |
+| 16:16 | release | 1-2 | 100% |
+| 16:48 -> 20:30 (7 runs) | release | 0-0 | 0% |
+
+The canary worked in debug and died the moment the harness moved to the release
+profile. **All nine release records have a dead canary** — including the
+2026-08-14T19:05 boot that ran 24% fast across all 64 benchmarks and cost two
+bogus regression write-ups. The contamination detector could not fire on the
+single run it most existed for. That is the third instance in this file of the
+same failure: *a check that cannot fire is indistinguishable from a check that
+passes.*
+
+Two further consequences:
+
+* `access_floor` silently fell back to its `max(measured, 100)` clamp, so every
+  budget-based verdict in the release runs is a multiple of an arbitrary
+  constant, not of a measured cost. The clamp's own comment says "this should
+  never bind" — it has bound on every release run.
+* The kernel and the script both report the failure as *contamination*
+  (`start <= 0` -> `return True` in `canary_is_contaminated`). "The instrument
+  failed" and "the instrument detected a problem" are different findings, and
+  printing the second when the first is true sends the reader hunting for host
+  load that was never there.
+
+### The fix
+
+1. Make the store un-eliminable by *guarantee* rather than by hint: a
+   `write_volatile` of one byte, which the compiler is not permitted to elide.
+   Keep the two arms symmetric so the delta is still exactly one guest store.
+2. Make the measurement able to say "invalid": return `Option<u64>`, `None`
+   when the arms fail to separate by at least one cycle per access. A failed
+   A/B is not a measurement of zero.
+3. Report the three states distinctly — measured-and-clean,
+   measured-and-contaminated, and could-not-measure — in both the kernel line
+   and `bench-history.py`.
+4. Assert it at boot, so a future optimiser that kills the store again says so
+   on the serial line instead of quietly reporting 0.
+
+### Prospective predictions (registered before the fix is built)
+
+* **P11.** With the volatile store, the release-profile per-access cost comes
+  out non-zero and in the same order as the debug figure of 267-275
+  cycles/store: **within [134, 550]**. HIT if it lands in that band, MISS
+  otherwise.
+* **P12.** The store arm exceeds the nop arm by at least one cycle per access
+  in every one of the ~10 samples, so zero samples are reported invalid.
+* **P13.** `access_floor` stops binding at its clamp of 100 — i.e. the printed
+  `floor` equals the printed `measured` rather than 100.
+
+### Follow-up: the kernel's validity bound is looser than the script's
+
+The script now rejects a per-access figure below
+`CANARY_MIN_RESOLVABLE = ceil(100 / CANARY_TOLERANCE_PCT) = 4` cycles, because
+below that one cycle of integer quantisation outweighs the tolerance the spread
+is judged against. The kernel's `measure_access_cost` only requires the arms to
+separate by one cycle per access (`delta >= n`).
+
+So there is a window — a measured cost of 1-3 cycles — in which the kernel
+would print `Canary OK` while `bench-history.py`, replaying the same line,
+returns `broken`. Neither verdict is wrong by its own rule; having two rules is
+the defect. The two must agree, or a log means one thing live and another thing
+later, which is precisely the drift that
+`B-SCFILTER-DENIES-EVERY-SYSCALL-1000-TO-1100` was.
+
+**Fix:** derive the kernel's bound the same way — require
+`delta >= n * (100 / CANARY_TOLERANCE_PCT)` rather than `delta >= n` — and
+state in both places that the two are the same rule. Deferred only because the
+kernel was mid-build when the script-side bound was derived; batched with the
+`saturating_add` cleanup in `report_canary` for the next boot cycle. This
+window cannot be reached on a healthy host (the honest measurement is 266-309
+cycles), so nothing observable depends on it today.
+
+### RESULT — the canary is alive, and two of three predictions missed
+
+Boot `2026-08-14T21:xx`, release profile, PASSED. The line that had read
+`nop=400 store=244` for nine runs now reads:
+
+```
+[bench]   memory_access_floor: 100 cycles/guest byte-store (measured=16 over 64
+          stores/window: nop=224 store=1288, 500 interleaved rounds)
+[bench] CANARY 16 43 268 16 43 168 10 0
+[bench] CONTAMINATED: ... spread 168% across 10 samples (16-43 cycles) ...
+```
+
+The store arm is now the dearer of the two by 1064 cycles, so `write_volatile`
+did what `black_box` could not. **The canary fired on its first honest run**,
+and the verdict is corroborated from two independent directions: five
+benchmarks show 6-109x in-run dispersion, and `crypto_sha256_1KiB` "improved"
+4.5x in a run that touched no crypto code. Non-uniform contamination is exactly
+what this detects and what the drift correction (a flat +0.0% this run) cannot.
+
+**P12 — HIT.** `invalid=0`: every one of the ten measurements separated its
+arms.
+
+**P11 — MISS, and badly.** Predicted 134-550 cycles; measured **16**.
+
+**P13 — MISS.** Predicted the `max(measured, 100)` clamp would stop binding.
+It still binds, because 16 < 100.
+
+### Why P11 missed: the number I anchored on measured something else
+
+I predicted the release figure would land near the debug-profile figure of
+266-309 cycles, on the assumption that both measure the same quantity. They do
+not. In an unoptimised build *both* arms are scaffolding — `black_box` and the
+atomic store each become real call sequences with stack traffic — so the debug
+delta was mostly loop overhead that happened not to cancel, and only
+incidentally contained a store. The optimised delta is the store and almost
+nothing else. **16 cycles is the first honest measurement of this quantity**,
+and it is entirely plausible: a TCG softmmu store with a TLB hit is a handful
+of host cycles.
+
+So the error was not in the fix; it was in treating a number produced by a
+different build configuration as a baseline for this one. That is the same
+mistake as baselining against a single boot, one level up: I baselined against
+a single *profile*.
+
+### What that invalidates
+
+`CANARY_STORES_PER_WINDOW`'s own comment says: "at N=64 a ~200-cycle access
+shows up as ~13k cycles — an order of magnitude clear of the few-hundred-cycle
+harness wander." That reasoning was built on the artefact. With the measured
+16 cycles the window delta is ~1064 cycles against a 224-cycle nop arm — a
+factor of ~5, not an order of magnitude. **The amplification the design
+depends on is no longer there**, so part of this run's 168% spread may be the
+measurement's own instability rather than host load.
+
+`access_floor` is likewise affected: the clamp of 100 was chosen as "well below
+normal, will never bind" when normal was believed to be ~200. Normal is 16, so
+the clamp now binds always, and every budget is ~6x looser than intended. That
+errs toward false negatives, which is the safe direction, but it means no
+release-run budget verdict has been calibrated to this machine.
+
+### Next, and it is a measurement rather than a guess
+
+Restore the stated design margin using the measured cost: N such that the
+window delta is ~10x the few-hundred-cycle wander is 13000/16 ~= 812, so
+`CANARY_STORES_PER_WINDOW = 1024`. The cost is negligible (12 samples x 2 arms
+x 500 rounds x 1024 iterations ~= 6M loop iterations, well under a second).
+
+* **P14.** At N=1024 the spread across mid-suite samples drops below the 25%
+  tolerance *if* the 168% was amplification noise. HIT if spread < 25% on an
+  otherwise-quiet host.
+* **P15.** The per-access figure stays near 16 cycles (within 12-24), since
+  amplification should change the precision of the estimate and not its value.
+  This is the control: if the mean moves with N, the measurement is
+  scale-dependent and the whole approach needs rethinking rather than retuning.
+
+---
+
+### RESULT — the control fired: the A/B arms were never symmetric — 2026-08-14 (`kernel/src/bench.rs`)
+
+Boot of 2026-08-14T21:5x, N raised 64 → 1024. Both predictions MISS, and the
+one that matters is P15, which was written specifically to catch the case where
+retuning is the wrong response.
+
+| N | nop arm | store arm | delta / N |
+|---|---|---|---|
+| 64 | 224 (**3.50** cyc/iter) | 1288 (20.12 cyc/iter) | **16.62** |
+| 1024 | 14148 (**13.82** cyc/iter) | 19438 (18.98 cyc/iter) | **5.17** |
+
+* **P14 MISS** (directionally right): spread fell 168% → **40%**, a 4x
+  improvement, but still over the 25% tolerance. Given P15, this number is not
+  worth interpreting anyway — see below.
+* **P15 MISS, decisively.** Predicted 12–24 cycles; measured **5**. The mean
+  moved with N, which by the prediction's own terms means the approach needs
+  rethinking, not retuning.
+
+**The mechanism is fully determined by the table.** The store arm is *stable*
+across a 16x change in N — 20.12 vs 18.98 cyc/iter, 6% apart. The nop arm moved
+**4x**, 3.50 → 13.82. So the entire scale-dependence lives in the arm that is
+supposed to be the *control*.
+
+An empty loop with a compile-time-constant trip count and a body the optimiser
+can discard is fully unrollable; a loop of `write_volatile` is not, because
+every store must execute. At N=64 LLVM collapsed the nop arm's loop overhead
+and could not collapse the store arm's. At N=1024 the nop arm is too big to
+unroll, so both arms pay real loop overhead and it cancels.
+
+Which makes the arithmetic check out exactly:
+
+```
+N=1024 (both looped):   18.98 - 13.82 = 5.17   <- the store alone
+N=64   (nop unrolled):  20.12 -  3.50 = 16.62  = 5.2 (store) + ~11.4 (loop
+                                                  overhead the nop arm
+                                                  was not paying)
+```
+
+**So `measure_access_cost`'s own doc comment was false.** It claims: *"The arms
+are kept symmetric — same loop, same `black_box` on the value — so the delta is
+the store instruction and nothing else."* Symmetric *in source* is not
+symmetric *after optimisation*, and the delta was the store instruction **plus
+whatever asymmetry the optimiser introduced between the two loops**. That
+second term is N-dependent, which is precisely what P15 measured.
+
+Note this is the *same root cause class* as the original bug, one level along.
+That bug was "the optimiser removed the thing I was measuring." This one is
+"the optimiser removed the thing I was measuring it *against*." Both come from
+writing a benchmark whose validity depends on the optimiser declining to do
+something it is entitled to do, and then not checking.
+
+**16 was never the honest figure either.** The previous entry called 16 "the
+first honest measurement" of the store, and it was not — it was 5 cycles of
+store plus 11 cycles of scaffolding asymmetry. The honest figure is ~5. Every
+conclusion drawn from 16 must be re-derived, including the N=1024 sizing in the
+entry above, which used 13000/16 and should have used 13000/5.
+
+**The fix is two parts, and only the second is durable:**
+
+1. Make the trip count **opaque** — `let n = black_box(CANARY_STORES_PER_WINDOW)`
+   — so neither arm can be unrolled or const-folded, and the arms are symmetric
+   *by construction* rather than by hope.
+2. Make the instrument **check its own scale-invariance**, once per boot at
+   calibration: measure at N and at 2N and require the two per-access figures
+   to agree. If they disagree, the verdict is BROKEN (scale-dependent), not a
+   number. This is the durable half, because P15 only fired because I happened
+   to register it by hand — and a property that is only checked when someone
+   remembers to check it is, by this file's standing maxim, not checked at all.
+
+**Prediction P17** (registered before the measurement exists): with an opaque
+trip count, the nop arm's per-iteration cost becomes ~13-14 cyc/iter at *both*
+N=64 and N=1024 (i.e. the unrolling stops), and the per-access delta agrees
+within 25% across the two scales, landing near 5. MISS if the delta still moves
+more than 25% between N and 2N — which would mean the asymmetry is not
+unrolling and the A/B subtraction is unsound for a reason not yet identified.
+
+#### CORRECTION — the clamp's blast radius is 2 verdicts, not "~60 budgets"
+
+Commit `535652cbd` and the earlier `access_floor` write-ups say a rejected
+calibration would otherwise "silently calibrate ~60 budgets". **That number is
+wrong.** Counting the actual consumers of `access_floor` in `bench.rs`:
+
+| site | use | is it a verdict? |
+|---|---|---|
+| `mmio_suspicion = access_floor * 4` (`fast_cpu_index`) | PASS/FAIL limit | **yes** |
+| `budget = access_floor * 150` (`page_alloc_free_owner_ab`) | PASS/FAIL limit | **yes** |
+| `accesses(delta, access_floor)` in `page_alloc_free_owner_ab` | prints "N.n accesses" | no |
+| `accesses(call_floor/real_work, ...)` in `frame_owner_set_split` | prints "N.n accesses" | no |
+
+So **two** verdicts depend on the calibration; the rest are display units. The
+"~60" figure came from conflating `access_floor`'s consumers with the ~60
+benchmarks that carry a `// Target from baselines.toml` literal — those are
+independent hard-coded targets and the clamp never touched them.
+
+This matters in both directions, and the second is the uncomfortable one:
+
+- **The urgency was overstated.** Removing the clamp is a 2-verdict change, not
+  a suite-wide one.
+- **The reassurance in the earlier entry was also overstated**, the same way.
+  It said the clamp binding meant "no release-run budget verdict has been
+  calibrated to this machine" — true, but that was only ever 2 verdicts, so it
+  was never the sweeping invalidation it was written up as.
+
+The lesson is the one this file keeps recording about *measuring before
+asserting*: I described a blast radius from memory instead of counting the call
+sites, in an entry whose entire subject is a number that was believed rather
+than measured. Counting took one grep.
+
+**The clamp change itself still stands and is still correct.** With
+`access_floor = max(measured, 100)` and a measured 5, both budgets are **20x
+looser than the cost they claim to be multiples of** — `mmio_suspicion` is 400
+cycles where it means 20, and the owner-tag budget is 15000 where it means 750.
+A budget expressed as "150 accesses" that is really 150 x an arbitrary constant
+is not a budget in accesses. Now that failure is expressible as `None` and
+scale-dependence is rejected outright, the clamp's original job ("do not let
+the budgets collapse to 0") is fully done by those two paths, and a *valid*
+measurement should be used as measured. Deferred only until P17 grades: if the
+measurement is still not scale-invariant, tightening budgets onto it would be
+building on the same sand.
+
+### The 40% "CONTAMINATED" verdict was rounding, not host load — 2026-08-14 (`kernel/src/bench.rs`)
+
+Grading P17 produced a clean scale-invariance result (`0% apart`) and, in the
+same output, exposed the next defect in the same instrument. It is not a new
+kind of mistake — it is the *fourth* consecutive one, and they rhyme.
+
+**The arithmetic.** The reference store costs **5 cycles**. `measure_access_at`
+returned `delta / n` as a whole number, so the smallest representable change is
+one cycle — **20% of the quantity being measured**. A spread is taken across two
+samples, so it can carry *two* roundings: **40%**. The tolerance is **25%**.
+
+> At a 5-cycle reference cost, a whole-cycle instrument reports a perfectly
+> quiet host as 40% contaminated. The threshold cannot be satisfied by any
+> machine, however idle.
+
+That is not hypothetical. The N=1024 run reported exactly `CONTAMINATED: ... 40%
+... (5-7 cycles)`. I read it at the time as leftover host load. It was two
+rounding steps.
+
+**Why `CANARY_MIN_RESOLVABLE` did not catch it.** That bound (`ceil(100/25) = 4`
+cycles/access) was introduced for precisely this failure mode and is *still
+correct* — but it bounds a **one**-cycle error at the tolerance. A spread spans
+two samples and so can be twice that. The guard was off by exactly a factor of
+two, in the direction that lets the bad case through.
+
+**Why raising the tolerance would have been the wrong fix.** The obvious repair
+is to widen `CANARY_TOLERANCE_PCT` past 40. That would have silenced the symptom
+while destroying the check: a canary that tolerates 40% cannot detect the host
+load it exists to detect. The store genuinely costs ~5 cycles and **no threshold
+can legislate the hardware slower**. The defect was never in the threshold.
+
+**The precision was measured and then thrown away.** The raw delta is ~5290
+cycles over 1024 stores. That is *three significant figures that the hardware
+actually produced*, and `delta / n` discarded all but one. The fix is not to
+measure harder; it is to stop deleting the measurement:
+
+- `measure_access_at` now returns **centicycles** (`delta * 100 / n`), putting
+  the quantisation step at 0.01 cycle (~0.2%) — two orders of magnitude *under*
+  the tolerance instead of comfortably over it.
+- `spread` and `pct` are computed from the centicycle values, so the verdicts
+  get the accuracy. This is the only place it was ever wanted.
+- The `[bench] CANARY` wire format still prints **whole cycles**, so all ten
+  historical records and `scripts/bench-history.py` keep meaning exactly what
+  they meant. Human-readable lines gained a tenths digit.
+- `const fn centi_parts(c) -> (whole, tenths)` is the single display conversion,
+  so no call site can print a centicycle count as if it were a cycle count.
+
+**The unit change had one genuinely dangerous consequence**, and it is worth
+recording because it is the same failure as the debug/release profile mix-up
+that made P11 and P13 miss. `access_floor` feeds two PASS/FAIL budgets as a
+plain multiplier (`access_floor * 4`, `access_floor * 150`). Had `measured`
+flowed into it unconverted, both budgets would have silently inflated **100x**
+while every printed number still looked entirely plausible. The conversion is
+therefore done at exactly one site, next to a comment saying why, rather than at
+the two consumers.
+
+**The pattern across all four defects in this one instrument:**
+
+| # | The instrument reported | The truth | Root cause |
+|---|---|---|---|
+| 1 | `0%` spread — clean | nothing was measured | relaxed store dead-store-eliminated |
+| 2 | `168%` spread | scaffolding, not the store | control arm unrolled, store arm not |
+| 3 | `40%` — contaminated | a quiet host | one-cycle quantisation on a 5-cycle quantity |
+| 4 | `0%` spread — clean | *pending: see P18* | possibly quantisation again, hiding real variation |
+
+Every one of the first three was a **false verdict about the host**, and every
+one was found by grading a registered prediction rather than by reading the
+output. Rows 1 and 3 are the same failure in opposite directions: an instrument
+that cannot resolve its own quantity will report either "perfectly clean" or
+"badly contaminated" — and both readings are the *absence* of a measurement
+wearing the costume of one.
+
+#### PREDICTION P18 — registered before the boot that tests it
+
+The previous run's `spread 0%` is **not yet evidence of a quiet host**: with
+whole-cycle output, 0% is also what you get when real variation is smaller than
+one cycle and rounds away. The centicycle build can distinguish these, so:
+
+- **P18(a)** — the reported `spread` will be **non-zero**, because the 0% was
+  quantisation collapsing real sub-cycle variation, not genuine exactness.
+  *Falsified if it comes back exactly 0%*, which would mean the samples really
+  are identical to 0.01 cycle and the previous 0% was honest.
+- **P18(b)** — it will be **under 25%**, i.e. `Canary OK`, because 40% was two
+  roundings and both are now gone.
+- **P18(c)** — `access_floor` will still print **100** (the clamp still binds at
+  a measured ~5 cycles), and *not* 500. A 500 would mean the unit conversion was
+  missed and both budget verdicts are 100x wrong.
+- **P18(d)** — the scale check will print a **tenths digit** (`5.x cycles/store`),
+  not a bare `500`.
+
+P18(c) is the one that matters: it is a direct test that I did not repeat the
+profile/unit confusion while writing the fix for a defect caused by discarding
+precision.
+
+#### SELF-CAUGHT — the CENTI fix makes each record contradict itself
+
+Found by replaying all 18 history records through `canary_verdict` rather than
+by re-reading the diff, and it is a defect **I introduced in this change**.
+
+The `[bench] CANARY` wire format was deliberately left in whole cycles so the
+existing records and the Python parser keep their meaning. But `spread` is now
+computed from *centicycles*, while `min` and `max` on the same line are still
+rounded to whole cycles. Those are two statements about one measurement, and
+they can now disagree outright:
+
+    CANARY 5 5 100 5 5 6 12 0
+                   ^^^ ^      min == max ("the extremes were identical")
+                       ^      spread = 6%  ("they differed by 6%")
+
+A future reader — or a future me writing a regression post-mortem — would have
+to pick which half of the record to believe. That is precisely the kind of
+self-inconsistent artefact that produced the two bogus regression write-ups this
+whole thread exists to undo.
+
+**Why the earlier reasoning missed it.** "Keep the wire format unchanged so
+history stays comparable" is a good instinct, and I applied it to the *fields*
+without noticing that it silently split the record's precision in two: the
+derived field got the accuracy and the fields it is derived *from* did not. The
+compatibility argument is sound for `start`/`end`/`pct` — which are used only as
+magnitudes — and unsound for `min`/`max`, which are the inputs to a verdict.
+
+**The fix** (deferred until P18 is graded, so the format the prediction was
+registered against is the format that gets tested): append `min_centi` and
+`max_centi` as new trailing fields — append-only, so `CANARY_RE`'s optional
+trailing groups and all 18 existing records are unaffected — and have
+`canary_verdict` prefer them when present. That also gives the Python side the
+discriminator it currently lacks: a record carrying centicycle extremes has a
+trustworthy `spread`, and one without it is a whole-cycle record whose spread may
+be two roundings wide. Right now the script cannot tell those apart, so it must
+keep reporting the 21:37 record as `contaminated` even though that verdict is
+known to be false.
+
+**Deliberately not done:** retroactively rewriting the 21:37 record's verdict.
+The measurement really did happen and really did read 40%; the record is honest
+about what the instrument said. What was wrong was the instrument, and that is
+documented here. Editing history to match a later understanding would destroy
+the only evidence that this failure mode occurred.
+
+### RESULT P18 — the finer instrument refuted the reason I built it — 2026-08-14
+
+Boot PASSED. Serial output:
+
+    canary scale check: OK — 5.1 cycles/store at N=1024, 5.1 at N=2048 (0% apart)
+    memory_access_floor: 100 cycles/guest byte-store (measured=5.1 ...
+                         nop=14154 store=19442, 500 interleaved rounds)
+    CANARY 5 5 100 5 7 47 10 0
+    CONTAMINATED: ... spread 47% across 10 samples (5.1-7.5 cycles) ...
+
+| | predicted | measured | grade |
+|---|---|---|---|
+| P18(a) | spread non-zero | 47% | **HIT** |
+| P18(b) | under 25%, `Canary OK` | 47%, CONTAMINATED | **MISS** |
+| P18(c) | `access_floor` prints 100, not 500 | `100`, `measured=5.1` | **HIT** |
+| P18(d) | tenths digit in the scale check | `5.1 cycles/store` | **HIT** |
+
+**P18(b) is the one that matters, and it destroys the premise of the entry above
+it.** I claimed the 40% CONTAMINATED verdict was two cycles of rounding on a
+5-cycle quantity. At 0.01-cycle resolution the spread is **5.1 to 7.5 cycles**.
+That is a real 2.4-cycle difference — 240 times the quantisation step. Rounding
+cannot produce it.
+
+> **RETRACTED:** "the 40% CONTAMINATED verdict was rounding, not host load."
+> The variation is real. The whole-cycle instrument read 5→7 (40%); the
+> centicycle instrument reads 5.1→7.5 (47%). Those are the *same measurement*,
+> and the coarse one was not lying about it.
+
+**The fix was still right; my reason for it was wrong.** Carrying hundredths was
+worth doing — it is precisely what settled the question, and quantisation *was*
+a genuine confound that made the verdict unreadable. But I sold it as removing a
+false alarm, and it did the opposite: it confirmed the alarm and took away my
+excuse for ignoring it. Had P18(b) not been registered as a falsifiable claim, I
+would very likely have read "47%, still contaminated" as the fix not working yet
+and gone looking for more precision to add.
+
+**This is the fifth defect in this instrument, and the first one where the
+instrument was right and I was wrong.** Row 3 of the table above is hereby
+corrected: the 40% was not quantisation. Which re-opens the question the whole
+thread was trying to close — *what is actually moving the reference cost by 47%
+mid-suite?*
+
+**The evidence narrows it considerably**, and points away from the thing the
+message blames:
+
+- The two calibration measurements, taken back-to-back at suite start, agree to
+  **0%** (5.1 and 5.1 at N=1024 and N=2048).
+- The two *endpoints* agree exactly: `5 -> 5`, `pct = 100`.
+- Yet the 10 samples taken **between benchmarks** span 5.1–7.5.
+
+Host load that arrives and departs would have to miss both endpoints and both
+calibration runs while hitting the middle. Possible, but the simpler reading is
+that the canary is measuring **the suite's own after-effects** — cache and TLB
+residency, and TCG translation-block pressure, left behind by whichever
+benchmark just ran. If so, `CONTAMINATED: Host load changed mid-run` is a **third
+kind of false attribution**: the number is real, the cause named is not.
+
+#### PREDICTION P19 — registered before the discriminating run exists
+
+Attribute the variation before acting on it. The canary currently records only
+the extremes, which cannot distinguish "a burst hit sample 4" from "samples
+following heavy-footprint benchmarks are systematically dearer."
+
+- **P19(a)** — the high samples are **not** randomly placed: recording each
+  sample's position in the suite will show the dear ones clustering after the
+  same benchmarks across two consecutive runs. *Falsified if the positions of
+  the top samples differ between runs*, which would indicate genuine host load.
+- **P19(b)** — the spread will **stay above the 25% tolerance** on a machine
+  that is otherwise idle, because the cause is internal to the suite. Falsified
+  by a quiet-machine run reading under 25%.
+
+If P19(a) holds, the tolerance is not the thing to tune (item 7 in the backlog):
+a suite-induced offset is not contamination, and the canary must either sample
+from a fixed cache state or report position-correlated variation as a distinct,
+correctly-named verdict.
+
+**Note the record wrote `min=5 max=7 spread=47`** — `(7-5)/5 = 40%`, not 47%.
+That is exactly the self-contradiction predicted in the SELF-CAUGHT entry above,
+now demonstrated on real data rather than argued from the diff. It raises the
+priority of appending `min_centi`/`max_centi`: the two halves of this record
+disagree, and the *rounded* half is the one a future reader would reach for.
+
+### RESULT P19 — refuted, and the canary was right the whole time — 2026-08-14
+
+Boot PASSED. The positional trace, first run:
+
+    CANARY 5 5 99 5 5 0 10 0 516 517
+    CANARY-TRACE 0:5.1 8:5.1 16:5.1 24:5.1 32:5.1 40:5.1 48:5.1 56:5.1 end:5.1 end:5.1
+    Canary OK: reference access cost stable across 10 samples (5.1-5.1 cycles, spread 0%)
+
+| | predicted | measured | grade |
+|---|---|---|---|
+| P19(a) | dear samples cluster at the same suite positions | **no dear samples at all**; every one of the 8 mid-suite positions read 5.1 | **MISS** |
+| P19(b) | spread stays above 25% on an idle machine | **0%** (516 vs 517 centicycles) | **MISS** |
+
+Both wrong, and the manner of the failure is conclusive. I hypothesised the 47%
+was the suite's own cache/TLB residue. A suite-induced effect is **reproducible
+by construction** — the same benchmarks run in the same order, so the same
+positions would be dear every time. Positions 0–56 were dear last run and are
+flat to 0.01 cycle this run. Cache residue cannot switch itself off.
+
+> **RETRACTED:** "`CONTAMINATED: Host load changed mid-run` is a third kind of
+> false attribution." It is not. The message was correct. The reference cost
+> really did move 47%, and the cause really was host load.
+
+**What the load was: me.** The two runs differ in one respect I can check
+directly from this session's own transcript rather than infer:
+
+| run | spread | what I was doing during its QEMU window |
+|---|---|---|
+| 22:22 | **47%** | editing `known-issues.md`, running `test-bench-history.py`, running a Python replay over all 18 records |
+| 22:41 | **0%** | nothing — asleep on a 900 s scheduled wakeup |
+
+The canary detected my own tooling competing with QEMU for the host CPU. Under
+TCG the guest is pure emulation and entirely CPU-bound, so this is precisely the
+interference it was built to catch. Its first two live firings were both real,
+and both were my fault.
+
+**Operational consequence — this is the actionable part:** *do not run anything
+during a `--bench` boot.* Grep, a Python script, a file read: each is enough to
+move the reference cost by tens of percent and to inflate whichever benchmarks
+happen to be executing. Several of the "regressions" written up earlier in this
+thread were produced exactly this way. The build phase is safe; the QEMU window
+is not.
+
+#### The bias worth naming
+
+P18(b) and P19 are the same mistake twice: **I assumed the instrument was broken
+and it was reporting the truth.**
+
+- P18(b): assumed 40% was rounding. It was a real 2.4-cycle spread.
+- P19: assumed 47% was a suite artefact. It was real host load.
+
+This is the exact inverse of the failure that opened this thread, where nine
+consecutive runs were certified clean by a canary that measured nothing. Both
+are the same underlying error — *deciding what the instrument must be saying
+instead of establishing what it can say* — and the correction is not to trust it
+more or less, but to make each reading falsifiable before acting on it. Every
+one of these five defects was caught that way and none by reading output.
+
+#### PREDICTION P20 — the positive control this instrument has never had
+
+The canary is now believed to detect host load on the strength of two
+*uncontrolled* observations. That is circumstantial: I did not set the load, I
+reconstructed it afterwards. By this file's own maxim, a detector that has never
+been shown to fire on a known stimulus is not yet a detector.
+
+- **P20(a)** — a `--bench` boot run with deliberate CPU load during the QEMU
+  window will report `CONTAMINATED` with a spread above 25%. *Falsified if it
+  reports `Canary OK`*, which would mean the two dirty runs had some other
+  cause and the attribution above is wrong.
+- **P20(b)** — the `CANARY-TRACE` positions of the dear samples will differ from
+  those in any other loaded run, since applied load is not synchronised to the
+  suite. This is the negative half of P19(a) and distinguishes load from a
+  suite artefact directly.
+
+Until P20 grades, "the canary detects host load" is a well-supported hypothesis,
+not an established property.
+
+### RESULT P20 — the detector fires, and firing exposed a defect no idle run could
+
+**Graded 2026-08-14.** `scripts/canary-load-test.sh 6` — six pure-Python CPU
+spinners started only after `Booting QEMU` appears in the log, so the load lands
+on the measurement window and not on the build. Two trials, plus the idle run
+immediately before them as a control.
+
+| trial | wire record | spread | reference cost |
+|---|---|---|---|
+| idle (control) | `CANARY 5 5 99 5 5 0 10 0 516 517` | **0%** | 5.16 → 5.17 cycles |
+| loaded #1 | `CANARY 0 10 0 8 12 53 9 1 826 1269` | **53%** | 8.26 – 12.69 cycles |
+| loaded #2 | `CANARY 0 6 0 5 12 117 9 1 580 1259` | **117%** | 5.80 – 12.59 cycles |
+
+**P20(a) — HIT on the measurement, MISS on the verdict.** The spread went over
+tolerance exactly as predicted (53% and 117% against 25%), and the reference cost
+roughly doubled. But the run did *not* print `CONTAMINATED`; it printed
+`CANARY BROKEN: 1 of 10 reference measurements could not separate their two
+arms ... so contamination is UNKNOWN for this run`. The prediction named the
+verdict and the verdict was wrong, so this half is a miss — and it is the more
+useful half, because an idle machine could never have produced it. **The
+instrument measured the contamination and then declined to report it.**
+
+**P20(b) — HIT.** The traces:
+
+```
+#1  0:8.4  8:9.8  16:12.6  24:9.2  32:10.8  40:8.2  48:8.8  56:11.4  end:10.7
+#2  0:12.5 8:9.2  16:10.5  24:7.2  32:5.8   40:7.5  48:7.4  56:7.7   end:6.8
+```
+
+Spearman ρ between the two loaded traces is **0.048** — no rank agreement at
+all. #1 peaks at position 16 and is cheapest at 40; #2 peaks at position 0 and is
+cheapest at 32. A suite-induced effect (cache/TLB residue from the preceding
+benchmarks) is reproducible *by construction* — same benchmarks, same order,
+same positions — so ρ≈0 rules it out and leaves the applied load as the cause.
+This is the discriminator P19 lacked.
+
+**Conclusion: "the canary detects host load" is now an established property**,
+not an inference from two uncontrolled observations. The stimulus was set
+deliberately and the detector fired on it.
+
+#### The two defects P20 exposed, and the fix
+
+1. **`invalid > 0` outranked the spread check**, in both `report_canary` and
+   `scripts/bench-history.py`'s `canary_verdict`. One failed arm-separation out
+   of ten suppressed a 53% finding from the other nine. The verdicts are now
+   ordered by what can actually be concluded: `samples == 0` is BROKEN (nothing
+   was measured); an over-tolerance spread is CONTAMINATED *even with failures
+   present*, because noise big enough to invert a 5-cycle A/B split is itself
+   load and so corroborates the verdict; only a within-tolerance spread
+   alongside failures is BROKEN, since a failed sample is not a quiet one and
+   could have hidden the excursion.
+
+2. **The BROKEN message named one cause for a symptom with two.** It said "the
+   optimiser has removed it again" — true the first time, and written from that
+   single instance. P20 produced the identical symptom from the opposite cause
+   on a binary whose store the scale-invariance check had proven intact *in the
+   same run*. A reader trusting that wording would go disassemble a correct
+   function. `report_arm_failure_causes` now names both, quotes the
+   demonstrated failure count under load, and points at the scale-check line as
+   the discriminator between them.
+
+This is the fourth false attribution recorded in this thread and the second one
+found by building the instrument that could refute it rather than by reasoning
+about what the instrument must be saying.
+
+#### Confirmation run, and what it did *not* confirm
+
+A third loaded run (`./scripts/canary-load-test.sh 6`, commit `557517b7f`, the
+fixed binary) reported:
+
+```
+[bench] CANARY 8 5 72 5 13 128 10 0 597 1364
+[bench] CANARY-TRACE 0:9.1 8:7.5 16:6.8 24:12.9 32:10.8 40:6.8 48:13.6 56:6.9 end:8.2 end:5.9
+[bench] CONTAMINATED: the reference access cost spread 128% across 10 samples
+        during the suite (5.9-13.6 cycles, endpoints 8.2 -> 5.9 = 72%, ...)
+```
+
+So the detector fires a third time under the same stimulus — 53%, 117%, now
+128%, against 0% idle — and the restructured verdict block still prints
+CONTAMINATED correctly.
+
+But **this run did not exercise the branch the fix changed.** `invalid` is `0`
+here: no sample failed arm separation, so the old `invalid > 0 || samples == 0`
+guard would not have fired either and would have printed the same verdict. The
+run is evidence for the detector's reproducibility, *not* for the precedence
+fix. Claiming otherwise would be the exact error this section exists to record —
+reading a result as confirming the hypothesis it happens to sit next to.
+
+The precedence branch is covered instead by
+`scripts/test-bench-history.py::test_canary_verdict_precedence`, which feeds the
+verdict function the *real* wire lines from the two earlier loaded runs
+(`invalid=1, spread=53` and `invalid=1, spread=117`) and asserts CONTAMINATED,
+plus the two complementary cases (a quiet spread with a failure → BROKEN, and
+`samples == 0` → BROKEN whatever the spread claims). That is a stronger test
+than a re-run anyway: reproducing `invalid > 0` on demand needs load tuned
+finely enough to invert a 5-cycle split without also blowing the spread past
+tolerance, which is not a stimulus this harness can aim at.
+
+#### PREDICTION P21 — the no-op path translation should stop allocating
+
+`namespace::resolve_path`/`resolve_path_for` ran before every path operation in
+the VFS and returned `PathBuf`. In the overwhelmingly common case — no process
+has ever created a namespace, a root or a volume — the answer is *the input,
+unchanged*, and the `PathBuf` return type forced an allocation and a byte copy
+to express that. `NS_FEATURES_ACTIVE` had already removed the two lock
+acquisitions from that path; the allocation was what remained.
+
+They now return `Cow<'_, Path>`, borrowing on every pass-through branch (fast
+path, root namespace, destroyed namespace, no jail root) and allocating only
+where a path is genuinely rewritten. This needed `impl ToOwned for Path` in
+`kernel/src/fs/path.rs`, which was missing — `Path` is unsized, so the blanket
+impl does not apply and `Cow<'_, Path>` was not expressible at all.
+
+- **P21(a)** — `vfs_stat_breakdown_ns` (500 iterations of `resolve_path("/")`
+  and nothing else) drops by **≥20%** against an idle release baseline measured
+  on the immediately preceding commit. *Falsified if the drop is under 20%*,
+  which would mean the kernel heap's fast path is cheap enough that the
+  allocation was not the cost here and the `Cow` bought nothing measurable.
+- **P21(b)** — `vfs_stat_breakdown_prologue` drops by **less** than
+  `vfs_stat_breakdown_ns` does in absolute cycles, because the prologue's own
+  `normalize_path` still allocates and is untouched. *Falsified if the prologue
+  drops by as much or more*, which would mean the two benchmarks are not
+  measuring the nested quantities the breakdown claims they are — and the
+  subtraction printed under `vfs_stat_breakdown` would be wrong.
+
+Both halves are measured against a baseline taken from a *fresh idle run of the
+parent commit*, not from the stale 17:17 log (263 ns), because that log predates
+several unrelated changes and its comparability is exactly the sort of
+assumption this file keeps recording as a miss.
+
+**Noticed while writing this: the breakdown benchmarks are not in
+`history.jsonl` at all.** `vfs_stat_breakdown_full/_resolved/_resolve/_ns/
+_prologue` are printed to serial and then discarded — the recorded 64 entries
+do not include them — so a regression in the decomposition of the hottest path
+in the VFS is invisible run-to-run and can only ever be caught by someone
+reading one log by eye. Logged as **B-BENCH-BREAKDOWN-PHASES-ARE-NOT-RECORDED**
+below.
+
+### B-BENCH-BREAKDOWN-PHASES-ARE-NOT-RECORDED
+
+**Status:** FIXED 2026-08-14. **Found:** 2026-08-14, while establishing a
+baseline for P21.
+
+`bench.rs`'s `vfs_stat_breakdown_*` phases are computed, printed, and dropped.
+`bench/history.jsonl` records 64 benchmarks per run and none of them are these,
+so there is no longitudinal record of the phase decomposition and no way to
+answer "when did namespace translation get slower?" without hand-diffing serial
+logs. The comparison tooling (`scripts/bench-history.py`) therefore cannot flag
+a regression in any of them.
+
+Verified rather than inferred: `parse_serial('build/serial-test.txt')` returns
+64 entries and not one of them matches `vfs_stat_breakdown_*`.
+
+The proper fix is to record them like every other benchmark rather than to keep
+reading them by eye.
+
+**A correction to my own first draft of this entry, kept because it is the same
+mistake this thread keeps recording.** I first wrote that the gap was probably
+wider than these five, on the evidence that the log prints 84 `min=` lines while
+the recorder writes 64 records — "20 unrecorded". That inference was worthless:
+the two numbers count different things. `parse_serial` reads the **scorecard**,
+which carries its own shorter names (`context_switch`, `ipc_channel`,
+`vfs_throughput_16k_write`), while the `min=` lines carry the raw `run()` names
+(`context_switch_rt`, `ipc_channel_roundtrip`, `vfs_write_16k`). Diffing the two
+name sets gives 54 on one side and 38 on the other and means nothing at all. I
+had subtracted two counts without establishing what either was counting — the
+same error as deciding what the canary must be reporting instead of establishing
+what it can report, committed while writing up that very error. The
+breakdown-phase gap above is real and was confirmed directly; the "wider gap"
+was not, and no such bug is being logged.
+
+#### The fix, and the cause that was one level below the symptom
+
+The symptom reads like an oversight — five benchmarks nobody remembered to
+record. It was not. `score(name, result, target_ns)` was the *only* way onto the
+scorecard, and it fused two independent jobs: entering a benchmark into the
+longitudinal record, and grading it against a published hardware figure. A
+benchmark with nothing to grade against therefore could not be recorded at all
+without inventing a target, and an invented target of 0 grades as a permanent
+failure and skews the pass/fail summary.
+
+That reasoning was already written down, at the `ipc_channel_roundtrip_64k`
+call site:
+
+> Deliberately NOT added to the scorecard — a target of 0 would always register
+> as a failure and skew the pass/fail summary. Report min/mean for regression
+> tracking instead.
+
+The first sentence is correct. The second is false, and is the actual bug: a
+`serial_println!` is not regression tracking. That benchmark was absent from
+`bench/history.jsonl` for its entire life, so the future zero-copy improvement
+the comment anticipates would have had nothing to be compared against. Six
+benchmarks were lost this way, not five — the five `vfs_stat_breakdown_*` phases
+and this one — and any future untargeted benchmark would have been lost too,
+because the API left no other option.
+
+The fix splits the two jobs. `score()` files a measurement with a target;
+`track()` files one without. A tracked benchmark is recorded in
+`history.jsonl` and diffed run-over-run exactly like a scored one, and simply
+never appears in the pass/fail summary or the over-target list. On the wire it
+is a second `SCORE` form with `-` in the target column and `TRACK` as the
+verdict:
+
+```text
+[bench] SCORE vfs_stat_breakdown_ns 263 - TRACK 310 500
+```
+
+`-` rather than `0` because "has no target" must not be confusable with "has a
+target of zero and failed it" — the exact ambiguity that made the original
+workaround necessary.
+
+Three consumers had to move with it, and each would have failed silently:
+
+* **`scripts/bench-history.py`'s `SCORE_RE`** rejects any line it does not
+  match, and a rejected line is indistinguishable from a benchmark the kernel
+  never measured. Widened to accept `(\d+|-)` and `TRACK`, with the target
+  parsing to `None`.
+* **`report_baselines`** would have listed every tracked benchmark as
+  *unbaselined* on every run, growing that list until the genuinely unbaselined
+  entries were lost in it. Tracked names are now counted and named separately,
+  and `unused` is differenced against the *graded* names so a baseline naming a
+  tracked benchmark stays reportable.
+* **`/api/bench`** counted `passed`/`failed` over every entry. `target_ns` and
+  `passed` are now `null` for a tracked entry rather than `0`/`false`, so a
+  consumer that does not know about tracked benchmarks gets a value it must
+  handle instead of a plausible-looking zero target it would render as a
+  benchmark failing by an infinite margin.
+
+`test_tracked_benchmarks_round_trip` pins all of it: the line parses, the target
+is `None` and not `0`, the measurement and dispersion survive, `over_target`
+does not count it, and the cross-check neither reports it as unbaselined nor
+omits it from the summary.
+
+### B-CANARY-TOLERANCE-CANNOT-BE-FITTED-THE-CONTROLS-ARE-DISCARDED
+
+**Status:** open (blocks the `CANARY_TOLERANCE_PCT` retuning). **Found:**
+2026-08-14, on trying to retune the tolerance from real data.
+
+`CANARY_TOLERANCE_PCT = 25` is a placeholder chosen before there was any data on
+what an uncontaminated run's spread looks like, and the standing task is to
+retune it from measurements. Attempting that surfaced why it cannot be done yet.
+
+`scripts/canary-spread-survey.py` classifies every release record in
+`bench/history.jsonl` by whether the host's load state at measurement time is
+*established*. The result:
+
+```
+known-loaded:  0 release runs
+unknown:      14 release runs   (spreads 0,0,0,0,0,0,0,40,47,100,100,168 ...)
+              -> 5 of 14 exceed the 25% tolerance
+```
+
+**Zero known-loaded records — and that is not an accident of sampling.** The
+three demonstrated positive controls (spreads 53%, 117%, 128%, produced by
+`scripts/canary-load-test.sh` with six CPU spinners) are absent because that
+harness restores `history.jsonl` from its `EXIT` trap. Which is correct on its
+own terms: leaving a knowingly-contaminated run in place would make it the
+baseline the *next* real run is diffed against. The consequence, though, is that
+the only runs whose provenance is established are precisely the ones excluded
+from the machine-readable record, and the 14 that remain are all "unknown".
+
+So the data needed to fit a threshold does not exist:
+
+* The 5 unknown-provenance runs above 25% cannot be used to argue the tolerance
+  is too tight. A high spread in a run of unknown provenance is equally
+  consistent with the run having been genuinely contaminated — i.e. with the
+  detector working. Fitting to them would widen the tolerance until the detector
+  stopped firing and then read the silence as a clean bill of health, which is
+  the same failure the canary exists to prevent.
+* The runs at 0% cannot be used to argue it is too loose either, for the mirror
+  reason: nothing records that they were idle.
+
+Retuning honestly requires the record to carry the load state, and it must be
+*recorded at measurement time*, not inferred afterwards from the number itself —
+inferring it from the number is circular, since the number is what the threshold
+is being fitted to.
+
+**Proper fix:** `bench-history.py` gains an explicit `--host-load
+<idle|loaded|unknown>` recorded as a field on the record, defaulting to
+`unknown` and never to `idle` — an unmarked run must not be silently promoted to
+evidence. `canary-load-test.sh` passes `loaded` and writes to a sibling
+`bench/history-loaded.jsonl` instead of restoring and discarding, so the positive
+controls are preserved as data without entering the baseline chain that the
+run-over-run comparator walks. Once both classes have several members, the
+threshold can be fitted to the gap between them.
+
+Until then `CANARY_TOLERANCE_PCT` stays at 25 and stays labelled a placeholder.
+Changing it now would be a guess dressed as a measurement.
+
+---
+
+### B-BENCH-RECORDER-CRASHED-FOR-FOUR-COMMITS-AND-THE-BOOT-GATE-PRINTED-PASSED — 2026-08-14 — ✅ FIXED 2026-08-14 (`scripts/bench-history.py`, `scripts/boot-test.sh`, `scripts/test-bench-history.py`)
+
+**Symptom.** Every `--bench` boot from `368c128fd` onward wrote **no history
+record at all**. The kernel measured correctly, the serial log was complete, the
+tool printed its full comparison and a correct canary summary — and then died:
+
+```
+Traceback (most recent call last):
+  File "scripts\bench-history.py", line 1233, in <module>
+    sys.exit(main())
+  File "scripts\bench-history.py", line 1222, in main
+    record["canary_verdict"] = verdict
+                               ^^^^^^^
+NameError: name 'verdict' is not defined
+=== Boot test PASSED ===
+```
+
+Note the last line. That is the whole bug.
+
+**Cause 1 — the extraction took a binding with it.** `368c128fd` moved 55 lines
+of canary-summary printing out of `main()` into `print_canary_summary()`, to make
+the wording assertable from the test suite. The moved block began
+`verdict = canary_verdict(canary)`, so the binding left with it — while `main()`
+went on referencing `verdict` 250 lines further down. Python does not diagnose
+this until the line runs.
+
+**Why the refactor's own evidence could not see it.** That commit justified
+itself with a measured behaviour-preservation check: assertions went 106 → 117,
+none lost. That check was sound and remains true. It simply could not cover this,
+because it can only cover functions that *have* tests, and `main()` had none —
+the only code path in the tool that actually writes to `history.jsonl` was the
+one path with no test. Extracting code out of an untested caller moves the
+tested part and leaves the untested part holding a dangling reference; a test
+suite that grows in the extracted half reports success either way.
+
+**Cause 2, and the worse one — the boot gate discarded the exit status.**
+`boot-test.sh` invoked the recorder as `python bench-history.py … || true`,
+reasoning in a comment that "a missing python or a write failure must not turn a
+healthy boot into a failed one". Both of those are true and both are already
+handled elsewhere: python's absence by the `command -v` branch, a write failure
+by the tool reporting it without exiting non-zero. What `|| true` actually
+suppressed was the case nobody had in mind — the recorder *crashing*. So the
+traceback scrolled past and `=== Boot test PASSED ===` was printed directly over
+it, four commits running.
+
+This is the project's recurring shape, one level up from where it usually
+appears: **a check that cannot fail is indistinguishable from a check that
+passes.** Here the check was the tool's own exit status, and it had been
+explicitly disarmed.
+
+**Cause 3, found by the new test on its first run.** `main()` finished by
+printing `os.path.relpath(args.history, REPO_ROOT)`. On Windows `relpath` raises
+`ValueError` when the two paths are on different drives, so any `--history`
+outside the checkout's volume aborted the tool *after* the record had already
+been appended — a traceback and a non-zero exit on a run that had in fact
+succeeded. Cosmetic path-prettifying must not be able to fail the run it reports
+on.
+
+**Fix.**
+
+* `print_canary_summary` returns its verdict on all four paths, and `main()`
+  takes the value from it rather than recomputing `canary_verdict(canary)`. The
+  coupling is now explicit: there is no way to use the printer's output without
+  receiving the value `main()` needs, and no second call site where the printed
+  prose and the stored verdict could drift apart.
+* `display_path()` falls back to the path as given when no relative form exists.
+* `boot-test.sh` captures the recorder's status into `BENCH_RECORDER_STATUS`.
+  This invocation passes no `--fail-on-regression`, so the tool has no legitimate
+  non-zero exit here — any non-zero status is a fault in the tooling.
+* New `finish_pass()` is the **only** place that prints the PASSED banner. The
+  two success paths (the poll loop spotting the marker; the post-loop check
+  finding it after QEMU exited) each carried their own verbatim copy of the
+  pass sequence, so a condition added to one would silently not apply to the
+  other. A run whose recorder failed now ends `=== Boot test INCOMPLETE ===`
+  with **exit 3** — distinct from 1 (kernel/self-test failure) and 2 (wedge),
+  because conflating "the kernel is broken" with "our tooling is broken" sends
+  the reader to the wrong tree.
+* `boot-test.sh`'s header now documents exit codes 2 and 3. 2 has existed since
+  the stall detector landed while the header still claimed only 0 and 1 were
+  possible; a status a caller cannot know about is a status the caller cannot
+  handle.
+* `test_main_records_end_to_end` drives `main()` to an appended record and
+  asserts the record's contents, both canary paths, and all four of the
+  printer's return values.
+
+**Positive controls, because a regression test that cannot fail is the same bug
+again.** Re-deleting the `verdict =` assignment reproduces the identical
+`NameError` through the new test. Driving the real `finish_pass()` text with a
+recorder stubbed to crash yields exit 3 and no PASSED banner; with a healthy
+stub it yields exit 0 and PASSED. One further control was needed on the test
+itself: the four return-path assertions were originally written *inside* the
+`redirect_stdout` block that silences the printer, which posted their own
+PASS/FAIL lines into the discarded buffer — four assertions running and
+reporting nothing. They now collect under the redirect and assert outside it.
+
+**Cost.** Four commits of `--bench` boots produced no data: roughly 9 minutes of
+QEMU each, and — more expensively — the P21 baseline measured during this thread
+had to be re-measured, because the run that produced it recorded nothing.
+
+---
+
+#### CORRECTION to P21(b), written BEFORE the measurement — the clause is not gradeable
+
+Registered wording:
+
+> **P21(b)** — `vfs_stat_breakdown_prologue` drops by **less** than
+> `vfs_stat_breakdown_ns` does in absolute cycles, because the prologue's own
+> `normalize_path` still allocates and is untouched. *Falsified if the prologue
+> drops by as much or more*, which would mean the two benchmarks are not
+> measuring the nested quantities the breakdown claims they are.
+
+Reading the code the two benchmarks actually call (`kernel/src/fs/vfs.rs:1555`):
+
+```rust
+pub(crate) fn resolve_prologue(path: &Path) -> KernelResult<PathBuf> {
+    let ns_path = crate::ipc::namespace::resolve_path(path)?;   // == the _ns benchmark
+    let path = ns_path.as_path();
+    validate_path(path)?;
+    Ok(normalize_path(path))
+}
+```
+
+`prologue` **strictly contains** `ns`: it is `ns` plus `validate_path` plus
+`normalize_path`. So if the `Cow` removes one allocation from inside
+`namespace::resolve_path`, and A2 is untouched, both benchmarks lose *the same
+absolute amount*. Equal absolute drops are what correct nesting **predicts**.
+
+The registered clause has this exactly backwards. It calls the equal-drop case a
+falsification and names "the two benchmarks are not measuring the nested
+quantities" as the thing that case would demonstrate — when in fact an equal drop
+is the *signature* of the nesting being right, and a prologue drop substantially
+**smaller** than the `ns` drop would be the anomaly needing explanation.
+
+What the wording was probably reaching for is the *percentage*: the same absolute
+saving is a smaller fraction of the prologue's ~580 ns than of the `ns` phase's
+~261 ns. That claim is true, but it is arithmetic, not a prediction — it follows
+from the two baselines alone and cannot fail.
+
+So P21(b) does not separate any outcomes. "Less" and "equal" are divided by a
+boundary that run-to-run noise straddles, and both readings are consistent with
+the code being correct. **It will be graded UNGRADEABLE, not confirmed and not
+falsified** — and that grade is recorded here *before* the measuring boot
+finishes, because a prediction rewritten after its number is known is worth
+nothing.
+
+The replacement, for the next time this decomposition is touched: the prologue's
+absolute drop should land **within measurement noise of the `ns` phase's**
+(baselines: 261/262 ns across two idle runs, so noise is well under 5 ns on that
+phase). A prologue drop materially *smaller* than the `ns` drop would mean the
+saving is being partly re-absorbed inside A2 — plausibly by allocator ordering,
+since removing one allocation changes what state the next one meets — and that is
+a real, falsifiable claim about a real mechanism.
+
+**The lesson, which is the point of registering these at all:** P21(a) was
+derived from a mechanism (an allocation on a no-op path) and is gradeable.
+P21(b) was derived from a *feeling* that the nested benchmark ought to move
+less, and the "because" clause attached to it was never checked against the four
+lines of code it describes. A prediction whose stated falsification condition is
+its own confirmation is the same defect this file keeps recording one level down:
+**a check that cannot fire is indistinguishable from a check that passes.**
+
+---
+
+#### P16 instrument landed — first reading, and why it does NOT grade P16
+
+`59d7cfc61` added the HPET-vs-TSC discriminator. Its first output, from the
+release boot at `24a3407cc`:
+
+```
+[spawn]   sleep clocks: HPET 84338300 ns vs TSC/clock_realtime 84001888 ns across
+          the child's lifetime (HPET/TSC = 1.00x)
+[spawn]   -> AGREE within 5%: both oscillators saw the same interval ...
+[spawn]   fastpy-on-SlateOS `sleep` ... : OK
+```
+
+**This run passed.** P16 is registered against "a boot where the child reports
+< 40 ms", and this child reported well over it. So the reading is *not* evidence
+for cause (1) and the "AGREE" line it printed must not be read as a verdict on
+the bug — on a passing run the clocks agreeing is unremarkable, because nothing
+was anomalous for them to disagree about. Banking it as a confirmation would be
+the identical error recorded a few sections up for the P20 load run: reading a
+result as confirming the hypothesis it happens to sit next to.
+
+What it *does* establish is the **control arm**, which the instrument previously
+had none of: on a healthy boot the two oscillators agree to within 0.4%
+(84 338 300 vs 84 001 888 ns). That matters, because it rules out the boring
+explanation in advance — the two clocks are not chronically skewed on this host,
+so if a *failing* boot shows them diverging, the divergence is specific to the
+failure rather than a standing property of the machine. Without this reading, a
+1.36x ratio on a failing boot could not have been distinguished from a machine
+where the ratio is always 1.36x.
+
+P16 therefore remains **unresolved and awaiting a failing boot**. The test is
+intermittent, so this is a matter of accumulating boots, not of doing anything
+further to the instrument. Both branches are now reachable and both say which
+subsystem to open.
+
+Baselines for P21(a) now stand at three idle release runs — `vfs_stat_breakdown_ns`
+= 262, 261, 262 ns — putting run-to-run noise on that phase under 0.5% and the
+20% threshold far outside it. `vfs_stat_breakdown_prologue` = 580, 568 ns across
+the two runs that recorded it (noise ~2%).
 ---
 
 ### [B] B-INIT-READS-A-KERNEL-ERROR-AS-A-CHILD-EXIT-CODE-AND-RESTARTS-ON-IT — ✅ FIXED 2026-08-14
@@ -67056,6 +71156,1243 @@ Either make the command under test the **last** command in the chain, or chain
 with `&&` so a failure propagates. Do not put a diagnostic after it and then
 believe the notification.
 
+### P21 GRADED — (a) CONFIRMED at −79%; (b) ungradeable as registered, its replacement clause CONFIRMED to ~1%
+
+**Date:** 2026-08-15. **Measured on:** an idle release `--bench` boot, 160 s,
+canary clean (12 % spread over 11 samples). **Baseline:** the two idle release
+runs at `8135d1491` (261 ns) and `24a3407cc` (262 ns).
+
+#### P21(a) — CONFIRMED
+
+> *"`vfs_stat_breakdown_ns` (500 iterations of `resolve_path("/")` and nothing
+> else) drops by **≥20%** against an idle release baseline measured on the
+> immediately preceding commit. Falsified if the drop is under 20%."*
+
+**262 ns → 55 ns**: −79 % raw, −78 % after drift correction (whole-suite drift
+this run was −3.0 %). The threshold was 20 %; the result clears it by a factor
+of four. `vfs_stat_breakdown_prologue` moved 568 → 363 ns in the same run.
+
+So the allocation *was* the cost. The falsification branch — "the kernel heap's
+fast path is cheap enough that the allocation was not the cost here and the
+`Cow` bought nothing measurable" — is rejected on a margin no plausible noise
+band reaches.
+
+#### The attribution was verified, not assumed — and it nearly wasn't
+
+This measurement was taken **after merging 315 commits of `origin/main`** into
+`lane-a`, which breaks P21's own stated method: the baseline is supposed to come
+from *the immediately preceding commit*, and 315 commits is not that. A −79 %
+result is exciting enough to publish without noticing that the ground moved
+underneath it, which is exactly how a wrong attribution gets written down as a
+fact.
+
+So it was checked rather than argued:
+
+```
+git diff --stat 24a3407cc HEAD -- kernel/   →   (empty)
+git diff --name-only 24a3407cc HEAD -- kernel/ | wc -l   →   0
+```
+
+**Zero kernel files changed across the entire merge.** That is not luck, it is
+the lane split working as designed: `kernel/**` is Lane A's exclusive tree, so
+315 commits of Lane B and Lane C work cannot reach it. The only kernel delta in
+the measured boot is the `Cow<'_, Path>` refactor itself, and the attribution
+therefore holds despite the method deviation. Recorded because the *next* time
+this happens the answer may be different, and the check costs one command.
+
+#### P21(b) — UNGRADEABLE, as recorded in advance; the replacement clause CONFIRMED
+
+P21(b) was graded **UNGRADEABLE** in this file *before its number existed*,
+because its falsification condition ("falsified if the prologue drops by as much
+or more") is precisely what correct nesting predicts — `resolve_prologue` is
+`namespace::resolve_path` **plus** `validate_path` + `normalize_path`, so it
+strictly contains the `ns` phase, and removing an allocation from the contained
+part must remove the same absolute cost from the container. That grade stands
+and is not revisited now that the number is favourable.
+
+The replacement clause offered at the time was: *the prologue's absolute drop
+should land within measurement noise of the `ns` phase's.* It did:
+
+| phase | before | after | absolute drop |
+|---|---|---|---|
+| `vfs_stat_breakdown_ns` | 262 ns | 55 ns | **207 ns** |
+| `vfs_stat_breakdown_prologue` | 568 ns | 363 ns | **205 ns** |
+
+207 vs 205 ns — agreement to ~1 %, well inside the ~2 % run-to-run noise the
+prologue baseline itself showed (580, 568). This is the outcome that would have
+been mislabelled a *falsification* under the clause as originally written.
+
+#### Three benchmarks moved that this change cannot explain — NOT yet attributed
+
+The same run reported four "regressions". They are not all the same thing, and
+none of them is yet explained:
+
+| benchmark | this run | historical release range (16 runs) | verdict |
+|---|---|---|---|
+| `page_alloc_free` | 752 ns | 276–526, typically ~355 | **above historical max** |
+| `http_percent_decode` | 785 ns | 398–761, typically ~510 | **above historical max** |
+| `net_ipv6_parse` | 113 ns | 62–96, typically ~80 | **above historical max** |
+| `ipc_channel` | 688 ns | 420–1475, highly volatile | **not a regression** — well inside range |
+
+**`ipc_channel` is a tooling artefact, and worth fixing.** `bench-history.py`
+diffs against *the single previous run*, not against the distribution, so an
+ordinary excursion of a volatile benchmark is reported as a regression. 688 ns
+is unremarkable for a benchmark that has legitimately read 420 and 1475. A
+comparison that cannot tell "moved" from "is noisy" will keep manufacturing
+regressions and training the reader to ignore the section. Logged as
+**B-BENCH-COMPARES-TO-ONE-PRIOR-RUN-NOT-THE-DISTRIBUTION** below.
+
+**The other three are genuinely unexplained.** Physical page allocation,
+percent-decoding and IPv6 address parsing have no mechanical relationship to
+path resolution, and the kernel is byte-identical apart from the `Cow`
+refactor — so "the refactor did it" is not available as an explanation without a
+mechanism. Three unrelated benchmarks simultaneously exceeding their historical
+maxima, while the whole-suite drift is only −3 %, is the signature of *something
+about this run* rather than of three independent regressions.
+
+Two candidate explanations, neither yet tested:
+
+1. **Host load during part of the QEMU window.** The canary reported clean, but
+   it samples ~1 per 8 benchmarks and therefore cannot exclude a disturbance
+   that covered only part of the run — the dispersion line in the same output
+   already flags 3 *other* benchmarks as having stalled during their own run.
+   This is the same blind spot `B-CANARY-TOLERANCE-CANNOT-BE-FITTED` is about.
+2. **Code layout.** The refactor changes codegen in `namespace.rs`, shifting
+   addresses kernel-wide. Under TCG this is a weaker effect than on hardware
+   (no real cache hierarchy) but translation-block boundaries are not immune.
+
+**The deciding experiment is cheap and is the next action:** a boot is 160 s, so
+re-run the identical binary on an idle host and see whether the three reproduce.
+Reproducing → real, and (2) becomes the hypothesis to chase. Vanishing → (1),
+and the run was contaminated in a way the canary could not see, which is itself
+evidence for the `--host-load` work. **Until that is done, these three are
+recorded as unexplained, not as regressions** — and specifically not as
+regressions *caused by the Cow refactor*, which is the conclusion the adjacency
+of the two facts invites.
+
+### B-BENCH-COMPARES-TO-ONE-PRIOR-RUN-NOT-THE-DISTRIBUTION
+
+**Status:** FIXED 2026-08-15 (see the subsection at the end of this entry).
+Found the same day while grading P21.
+
+`scripts/bench-history.py` computes its REGRESSED/IMPROVED verdicts against the
+**immediately preceding run** on the host. For a benchmark with a tight
+distribution that is correct and sensitive. For a volatile one it is neither: it
+reports the *difference between two samples of the same noise* as a change in
+the code.
+
+Demonstrated, not assumed: in the P21 run, `ipc_channel` was reported as
+`+31 % vs suite` on a move from 542 → 688 ns, while its own 16-run release
+history spans **420–1475 ns**. 688 is close to its median. Nothing regressed.
+
+**Proper fix.** Compare against a robust summary of the recent distribution
+(e.g. median and MAD, or an inter-quartile band, over the last N runs on the
+same host and profile) rather than against `runs[-1]`, and report a benchmark
+only when it moves outside that band. The machinery is already present — the
+tool computes a `x0.976 whole-suite vs the median of the last 8 run(s)` line, so
+it has the window and the median; the per-benchmark verdicts simply do not use
+them. Keep the raw one-run delta in the output as context, but stop making the
+verdict from it.
+
+**Why it matters beyond tidiness.** The regression list is the only automated
+guard on 70 benchmarks. Every false positive spends reader attention and makes
+the next real regression likelier to be waved through as "probably noise again"
+— and this file's standing lesson is that a check nobody trusts is worth about
+as much as a check nobody runs.
+
+#### FIXED 2026-08-15, and the choice of estimator was decided by the data
+
+`scripts/bench-history.py` now consults each benchmark's **own** recent range
+before calling a movement a regression. The run-over-run threshold still
+selects what is worth looking at; the band decides what may be *called*
+something. Three outcomes, and the middle one is what keeps the check honest:
+
+| outcome | meaning | heading | fails `--fail-on-regression` |
+|---|---|---|---|
+| outside its range | a real finding | `REGRESSED` / `IMPROVED` | yes |
+| too few prior runs | cannot judge | `REGRESSED, UNCONFIRMED` | **yes** |
+| inside its range | not a finding either way | `WITHIN ITS OWN RANGE` | no |
+
+Withholding the *word* "regressed" for want of history is not the same as
+clearing the change, so an unjudgeable movement is still reported and still
+fails the build. A new benchmark's first real regression must not be silenced
+by the fact that it is new.
+
+The band is consulted **only after** the threshold has been crossed, so it can
+demote a report and can never invent one. That asymmetry is what makes it safe:
+a bug in the band costs sensitivity, not correctness.
+
+**Deviation from the prescription above — Tukey's fence, not median/MAD.** The
+entry offered either; consistency with the rest of the file argued for MAD, and
+the data overruled it. These per-benchmark distributions are **clustered, not
+unimodal**: `ipc_channel` alternates between a ~545 ns and a ~650 ns cluster
+across builds. Over the eight runs preceding the motivating one its median is
+648.5 with a MAD of 7.5, so a 3-MAD band is **626–671 ns** — narrower than the
+gap between that benchmark's own two clusters, on a benchmark whose observed
+span is 420–1475. **It flags 688: it would have reproduced the exact false
+positive this fix exists to remove.** Quartiles do not have that failure mode —
+a bimodal core widens the box instead of shrinking it. The same window gives a
+fence of **505–746 ns**, which declines 688 and still catches the next run's
+953 ns (+40 %).
+
+Neither constant was tuned; `k = 1.5` is the textbook boxplot rule, chosen
+before it was evaluated. Evaluated afterwards by replaying the ten most recent
+release comparisons in `bench/history.jsonl`: **47** movements cross the 25 %
+threshold, of which MAD confirms 35 and this rule confirms 29. The six they
+disagree on include the written-up `ipc_channel` non-event.
+
+`scripts/test-bench-history.py` pins this with a positive control that replays
+the real 542 → 688 → 953 sequence out of `bench/history.jsonl` and asserts the
+first is declined and the second caught. A silent revert to MAD fails it.
+
+**What this does not fix.** The window is the same eight comparable records
+everything else here uses, so a genuine, permanent speed-up reads as IMPROVED
+for a run or two and is then absorbed into the band — correct, but it means the
+band must not be read as "the code's true value". And a wholly contaminated run
+still produces confirmed movements (the last recorded run has 9 threshold
+crossings, 8 of them outside their own ranges); separating those is the **run
+verdict's** job, not this one's.
+
+### B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING — it read 0% (its cleanest possible verdict) on the most contaminated run yet measured
+
+**Status:** OPEN, found 2026-08-15 by the repeat boot run for P21. **Severity:
+high** — this is the run-level gate that decides whether *any* benchmark result
+is admissible, and it does not fire on the dominant contamination mode.
+
+#### The observation
+
+Two boots of the **identical binary**, launched the same way, minutes apart:
+
+| | run 2 (`f79aec561`) | run 3 (`c893184fa`) |
+|---|---|---|
+| wall time | 160 s | **365 s (2.3×)** |
+| benchmarks flagged REGRESSED | 4 | **9** |
+| `isr_latency` | 24 360 ns | **49 999 ns (2.05×)** |
+| `page_fault` | 2 215 ns | **4 292 ns (1.94×)** |
+| dispersion stalls (mean/min ≥ 5×) | 3 | **8** |
+| **canary spread** | 12 % | **0 %** |
+
+Run 3 took more than twice as long, doubled two unrelated kernel benchmarks, and
+scattered regressions across nine subsystems with no common mechanism. The
+canary — the instrument whose entire job is to answer *"was this run
+disturbed?"* — reported **0 % spread over 11 samples**, which is the cleanest
+reading it is capable of emitting. It is not merely insensitive here; on this
+pair it is **anti-correlated** with the disturbance.
+
+The dispersion detector, by contrast, tracked it correctly: 3 → 8 stalls.
+
+#### Why it is structurally blind (the mechanism, not a guess)
+
+The canary measures the cost of a **reference memory access** in **guest
+cycles**, sampled between benchmarks. Host descheduling of the QEMU process
+cannot inflate that number: TCG executes the sampling loop as a translated
+block, and the guest's cycle counter advances by the *emulated* amount
+regardless of how long the host took to get round to executing it. The wall-clock
+time the host stole lands **between** guest instructions, where a short
+guest-cycle measurement cannot see it.
+
+So the canary can only detect something that changes the cost of the reference
+access *within the guest* — cache pressure from the guest's own workload, say.
+It is constitutionally incapable of detecting the host stealing the CPU, which
+on this machine is the *dominant* contamination mode and the exact scenario
+`boot-test.sh`'s own header warns about at length.
+
+Benchmarks with a longer span do see it, as a wall-clock excursion inflating
+their **mean** while their **min** survives — which is precisely what the
+mean/min dispersion ratio measures. That is why dispersion moved and the canary
+did not.
+
+#### What this invalidates
+
+**P19's conclusion needs a one-sided reading.** The `--bench` header says *"The
+canary reports it as CONTAMINATED — believe it."* That remains true in the
+direction it was demonstrated: when the canary **fires**, it is right. The
+converse — which is how it has been used ever since, including by me earlier
+today when I called the P21 run "canary clean, 12 % spread" as though that
+certified the run — does not follow. **A clean canary is not evidence of an
+undisturbed run.** Every "canary OK" in this file's history should be read as
+"the canary found nothing", not "nothing was there".
+
+It also explains `B-CANARY-TOLERANCE-CANNOT-BE-FITTED-THE-CONTROLS-ARE-DISCARDED`
+from the other end: the tolerance could not be fitted from the controls because
+the quantity being thresholded largely does not respond to the contamination the
+threshold is meant to catch. Tuning `CANARY_TOLERANCE_PCT` was never going to
+work.
+
+#### Proper fix
+
+The run-level verdict must stop resting on the canary alone. Three signals
+exist, and two of them are already computed and thrown away:
+
+1. **Dispersion count** — already computed and printed; not part of any verdict.
+   It responded correctly here (3 → 8). Promote it: a run with a materially
+   elevated stall count is CONTAMINATED regardless of the canary.
+2. **Wall time** — the single most sensitive signal in this whole episode
+   (160 s vs 365 s, unmissable) and it is not recorded in `history.jsonl` at
+   all. Record it per run; it is free.
+3. **Host load at measurement time** — still unrecorded, which is why run 3's
+   cause cannot be established retroactively. This is the `--host-load` work
+   already queued.
+
+Then the canary keeps its job as a *positive* detector (it fires → contaminated)
+and loses its implied role as a *negative* certificate.
+
+#### What is still unexplained, and must not be quietly attributed
+
+`net_ipv6_parse` reads **80 → 113 → 169 ns** across the pre-Cow baseline and the
+two post-Cow runs. Both post-refactor readings exceed the 16-run historical
+maximum of 96 ns, so unlike `page_alloc_free` (752 → 503, back in range) and
+`http_percent_decode` (785 → 536, back in range) it did **not** revert. That is
+suggestive of a real effect — plausibly code layout, since the refactor shifts
+addresses kernel-wide — but run 3 is now known to be contaminated, so it cannot
+carry the weight of the second data point. **Left explicitly unattributed**
+pending a re-measurement on a host whose load is actually recorded. It is
+logged here rather than in the P21 entry so that a −79 % headline does not end
+up sitting on top of an unexamined +2× on an unrelated benchmark.
+#### FIXED 2026-08-15 (instrument), with one correction to the prescription above
+
+The run-level verdict no longer rests on the canary. `scripts/bench-history.py`
+now computes a **three-axis** verdict — canary, dispersion, wall clock — and
+takes the **worst** of them, so any one axis can condemn a run and none can
+absolve it alone. The three run-level values are:
+
+| verdict | meaning |
+|---|---|
+| `contaminated` | at least one instrument *measured* interference |
+| `unknown` | nothing fired, but not every instrument could measure |
+| `clean` | every axis actively said clean |
+
+The important half is `unknown`. An axis with no measurement, or with too
+little history to have a band, returns `unknown` — never `clean` — so "clean"
+has to be earned by all three. Replaying the committed history through it, **no
+record in the entire 24-run history grades `clean`**, which is the correct
+answer: none of those runs was ever shown to be quiet, and one of them
+demonstrably was not.
+
+Wall clock is now measured (`QEMU_START_EPOCH`/`QEMU_END_EPOCH` around the QEMU
+window only, stamped at the first `kill_qemu` so the harness's own log
+processing is not counted as guest time) and stored as `wall_seconds`.
+`--host-load=idle|loaded|unknown` is recorded as `host_load`, defaulting to
+`unknown` — and `loaded` runs are excluded from every baseline and band by
+`comparable_records()`, because a deliberately-poisoned control that silently
+becomes a baseline would make the next honest run report its own recovery as a
+suite-wide improvement.
+
+**Deviation from the fix as written above, item 3:** the plan called for a
+separate `bench/history-loaded.jsonl`. One labelled file was implemented
+instead. A second file means every reader has to open two and any that forgets
+silently drops the controls; a label in the one append-only file cannot be
+missed, and `previous_for_host`/`report_run_position` now share a single filter
+so the exclusion cannot be applied to one and not the other.
+
+**CORRECTION to item 1 of the prescription above.** It said "a run with a
+materially elevated stall count is CONTAMINATED regardless of the canary", on
+the strength of the 3 → 8 move across the two boots. Implementing it against
+the full history showed that does not hold. The 18 release records carry stall
+counts of 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 5, 7, 7, 8, 9, 9, 13, 13, 15 — median
+5, MAD 2 — so **8 sits at roughly the 75th percentile and is not
+distinguishable from this host's ordinary behaviour**. A `median + 3·MAD` band
+fires on the 13-, 13- and 15-stall runs and would *not* have fired on the run
+that motivated the axis.
+
+The band was left where the standard robust-outlier rule puts it rather than
+lowered until the motivating run fires. Fitting a threshold to a single
+observation is the mistake this file has had to undo three times
+(`CANARY_TOLERANCE_PCT`, `DISPERSION_SUSPECT_RATIO`, the absolute A/B cycle
+budget). The honest reading of the data is that dispersion is a *graded* and
+rather noisy signal on this host — its floor is ~3 stalls, never 0 — and that
+**the axis which actually separates that pair of boots is wall clock (160 s vs
+365 s), not dispersion.** That is now recorded, which it was not, and it is why
+recording it mattered more than tightening the dispersion band.
+
+Consequences worth carrying forward:
+
+- The wall-clock band cannot fire yet: no stored record carries `wall_seconds`,
+  so the axis correctly reports `unknown` and will stay there until
+  `MIN_WINDOW_FOR_BAND` (6) comparable runs have one. This is a check that
+  *cannot* fire today — the condition this file treats as equivalent to a check
+  that passes — so it is called out rather than left to be discovered: until
+  six timed runs exist, the wall axis is a recorder, not a detector.
+- The dispersion band *can* fire and provably does: `test-bench-history.py`
+  exercises it against the real `bench/history.jsonl` and asserts both that it
+  fires on at least one genuine run and that it does not fire on the majority.
+  That positive control is the fourth time in this project a freshly-written
+  check has needed proof it can fire at all.
+- The `--bench` header's "The canary reports it as CONTAMINATED — believe it"
+  now carries the one-sided reading in `boot-test.sh` itself, and the clean-
+  canary line in the tool states the structural blindness rather than only the
+  weaker sampling caveat. Stating the sampling limit alone implies the canary
+  would catch host load if it sampled more often; it would not, at any rate.
+
+---
+
+### [A] TOOLING-A-FULL-DISK-TRUNCATES-THE-FILE-YOU-WERE-EDITING-TO-ZERO-BYTES — ⚠️ RECOVERED 2026-08-15, HAZARD STANDS
+
+**Status:** the one damaged file was restored from git the same minute; the
+underlying hazard is not fixed and cannot be fixed from inside this repo.
+
+**What happened.** Mid-edit of `kernel/src/cap/table.rs`, the edit failed with
+`ENOSPC: no space left on device, write`. `D:` was at **100% full, 0 bytes
+free**. The failure was not atomic: the editor had already opened the file for
+truncation, so the write that could not proceed left **`table.rs` at 0 bytes** —
+the whole 18 636-byte file gone, not just the edit. `git status` showed it as an
+ordinary ` M` modification, which is exactly what a file emptied by a crash
+looks like to git.
+
+Recovery was `git checkout -- kernel/src/cap/table.rs` plus re-applying the
+edit, and cost nothing because the file was committed. **That is the entire
+mitigation, and it is luck, not design:** had the truncated file been one of the
+uncommitted ones in the same change set (`cap/mod.rs`, `proc/pcb.rs`,
+`syscall/handlers.rs` — the `SYS_CAP_QUERY` work, then ~2 hours old and not yet
+committed), the content would have been unrecoverable.
+
+**Why this is worth an entry rather than a shrug.**
+
+1. **The failure mode is silent-by-shape.** A zeroed source file still compiles
+   *in the sense that cargo will report errors somewhere else* — every user of
+   `CapTable` breaks, so the diagnostics point away from the emptied file. The
+   one signal that names the real cause is the `ENOSPC` string in the tool
+   error, which scrolls past in the same turn as fifty other lines.
+2. **Every other file written in that window is suspect.** After an ENOSPC, the
+   correct response is not "retry the edit" but "check the size of everything I
+   have touched" — which is what was done here (`ls -la` over all six edited
+   files confirmed only `table.rs` was hit). Skipping that check would have left
+   a second zeroed file to be discovered by a confusing build error later.
+3. **The disk did not fill up by accident and will do it again.** `D:` is
+   1.9 TB, ~1.8 TB of it the operator's data, and the OS project's build
+   artefacts are the elastic part. Deleting `os-lane-a/target` alone returned
+   **13 GB**, which is the measure of how much a single lane's `debug` +
+   `release` + `x86_64-unknown-none` trees hold. Three lanes plus the `os`
+   integration tree carry four such directories, and nothing prunes them.
+
+**Prescription (not yet done, and the first item needs the operator).**
+
+- **[operator] Decide whether the three lane worktrees should share one
+  `CARGO_TARGET_DIR`.** Sharing would cut the artefact footprint by roughly the
+  redundancy factor, at the cost of serialising the lanes' builds against one
+  lock — which on this machine is arguably a *feature*, since concurrent lane
+  builds are already the leading cause of the benchmark contamination this file
+  documents elsewhere. Logged as an open question rather than decided here
+  because it changes how all three agents build, not just Lane A's.
+- **[A] Have `boot-test.sh` refuse to start below a free-space floor** and say
+  so, instead of failing deep inside a link step with a truncated artefact. A
+  build that dies at 90% completion on a full disk can leave a *stale but
+  plausible* kernel image staged in the ESP, and `--no-build` would then
+  cheerfully boot it — a wrong-binary run that reports as a normal one.
+- **[A] Prefer committing before a long edit chain over trusting the editor.**
+  The only reason this cost minutes rather than hours is that `table.rs` was
+  committed. The five files that were *not* committed survived by chance.
+
+**The object store was checked, not assumed.** The same ENOSPC can hit `git`
+itself — a failed `.git/index.lock` write, a half-written loose object — and the
+working tree looking fine says nothing about that, because the damage would only
+surface on a later `checkout` of the object that failed to land. `git fsck` was
+run immediately after recovery: **no `error`, `missing` or `broken link` lines —
+only `dangling` objects**, which are the ordinary detritus of amends and resets
+and mean nothing is *unreachable that should be reachable*. The repository took
+no damage from this incident.
+
+Two notes on how that was established, because the first attempt did not
+establish it: the run was piped through `head -20`, and dangling objects filled
+all twenty lines — so "no errors in the output" was a statement about the first
+twenty lines, not about the check. It was re-run as
+`git fsck --no-progress | grep -v '^dangling'`, which returned nothing. A filter
+that can be saturated by benign output is not a check; recording the *reassurance*
+("the repo stayed responsive") instead of the *result* would have been worse
+still, since it is evidence of nothing at all.
+
+### [A] TOOLING-A-EDITING-A-SHELL-SCRIPT-WHILE-IT-IS-RUNNING-CAN-DERAIL-THE-RUNNING-COPY — ⚠️ HAZARD, avoided 2026-08-15
+
+**Status:** not a bug in the repo; a standing hazard in how we work. Recorded
+because it was very nearly hit today and the failure would have been baffling.
+
+**The hazard.** `bash` does not read a script into memory and then run it. It
+reads it *incrementally*, remembering a byte offset into the file. If the file
+changes underneath a running shell, the shell resumes at its saved offset in
+the **new** bytes — which no longer mean what they did. The result is not a
+clean error: the shell executes whatever fragment now lives at that offset,
+producing syntax errors from lines that are perfectly valid, or, much worse,
+silently running a *different* command than the one on that line.
+
+**How it nearly happened.** `./scripts/boot-test.sh --bench` was running in the
+background (a ~17 min job). The next queued task was to add a free-space floor
+to `scripts/boot-test.sh` — i.e. to rewrite, in place, the exact file a live
+bash was mid-way through interpreting. Whether it corrupts depends on an
+implementation detail nobody should have to reason about: an editor that writes
+to a temp file and `rename()`s over the target is safe (the running shell keeps
+the old inode), while one that truncates and rewrites in place is not. Our
+editing tool's behaviour on Windows is not guaranteed to be the former.
+
+**What makes it nasty.** The damage lands in the *long-running background job*,
+not in the edit, so the two are separated by minutes and look unrelated. A
+boot test that dies with a syntax error at line 900 of a script that `bash -n`
+declares perfectly valid is a genuinely hard thing to diagnose, and the natural
+first hypothesis — "the script is broken" — is wrong.
+
+**Prescription.** Before editing any script, check whether a background task is
+currently executing it, and wait. This is cheap: the queued edit loses a few
+minutes; the alternative costs a confusing debugging session and a wasted run.
+The same applies to `scripts/run-timeout.py` and any other harness file, and it
+is *most* dangerous for exactly the files worth improving — the long-running
+harnesses, which are running precisely when you have the idle window that
+tempts you to improve them.
+
+#### P16 control arm — second reading, now spanning both build profiles; and why today's two failing boots do NOT grade it
+
+The debug boot at `6deaa847e` (2026-08-15) printed:
+
+```
+[spawn]   sleep clocks: HPET 119276000 ns vs TSC/clock_realtime 120088295 ns
+          across the child's lifetime (HPET/TSC = 0.99x)
+```
+
+**This is a control reading, not a grading run** — the child reported 120 ms,
+far above P16's < 40 ms trigger, so nothing anomalous existed for the clocks to
+disagree about.
+
+What it adds is that the control arm now spans **both build profiles**: 1.00x on
+a release boot (84.3 ms child) and 0.99x on a debug boot (120.1 ms child). The
+child's lifetime differs by 43% between the two — debug is slower, as expected —
+and the two oscillators tracked each other through both. That is a stronger
+statement than one profile could make: HPET-vs-TSC agreement is not an artefact
+of a particular build's timing, so a divergence on a failing boot remains
+attributable to the failure.
+
+**Two boots failed today and neither one grades P16.** Break-tests #1 and #2
+(deliberate mutations of `test_valid_entries` and `CapEntryInfo`) both died in
+the capability self-test at serial line ~1071 — roughly 5 500 lines *before* the
+spawn phase, so neither boot ever ran the sleep test at all. Counting them as
+"failing boots" toward P16 would be precisely the error this entry already
+records against the P20 load run: treating a failure as evidence about the
+hypothesis it happens to sit near, rather than the one it actually exercises.
+P16 needs a boot where **the sleep test itself** fails; a boot that failed
+earlier for an unrelated, self-inflicted reason is not a sample of that
+population.
+
+P16 accordingly remains **unresolved and awaiting a qualifying failing boot**.
+
+### [A] B-BENCH-RUN-CONTAMINATED-BY-ANOTHER-LANE-PRUNING-ITS-TARGET-DIR — 2026-08-15 — attribution recorded
+
+**Why this entry exists.** The bench run at `e384f46a2` reported three
+regressions. It also, by luck, is the first run where the contaminating host
+activity was *identified* rather than merely suspected — so it is worth writing
+down how, because the same evidence is available on every future run for free.
+
+**The reported findings** (drift-corrected, run-over-run on this host):
+
+```
+REGRESSED (>25% slower than the suite AND outside its own recent range):
+  ipc_eventfd:               537ns -> 1021ns  (+90%; own range 381-802,  median 542 over 8 runs)
+  http_build_response_1KiB: 8546ns -> 12431ns (+45%; own range 4810-7932, median 6004 over 8 runs)
+  vfs_stat_root:            3278ns -> 4488ns  (+37%; own range 2881-4290, median 3613 over 8 runs)
+```
+
+**The contamination, measured.** Free space on `D:` was sampled three times
+across the run: **41 GB → 45 GB → 49 GB**. Something was deleting on the same
+volume throughout. Per-directory sizing identified it: the **integration
+checkout's** build output fell **59.1 GB → 51.5 GB** — 7.6 GB of files deleted
+concurrently with the benchmark. That is tens of thousands of filesystem
+metadata operations on the volume backing the QEMU image, during a run whose
+three findings are all I/O-adjacent (a VFS stat, an HTTP response build, an
+eventfd round-trip).
+
+**The run graded itself UNPROVEN independently of any of this:**
+
+```
+RUN UNPROVEN: nothing fired, but not every instrument could measure
+  - dispersion: 2 benchmark(s) stalled (ipc_channel mean 31x its min; tcp_checksum_v4 7x)
+  - canary: steady, but CANNOT see host descheduling at all
+```
+
+So the harness and the external evidence agree, which is the useful part: the
+UNPROVEN verdict was not over-cautious boilerplate — on this run there really
+was a specific, nameable disturbance, and the harness flagged it without being
+able to see it directly.
+
+**What this does NOT license.** It is tempting to now dismiss the three
+regressions as contamination and move on. That is the same reasoning error in
+the other direction: "there was noise on this run" is not "these three numbers
+are noise." `ipc_eventfd` at +90% is well outside its 8-run range and deserves a
+verdict, not an excuse. The disposition is a re-run with host load sampled
+(`build/hostload.tsv`, 10 s cadence), not a dismissal.
+
+**Free technique for future runs.** Sampling free space on the volume during a
+benchmark costs nothing and detects the single most common contaminant here
+(another lane building or cleaning). It catches what the in-guest canary
+provably cannot: the canary counts *guest* cycles, which do not advance while
+the host is busy elsewhere, so it reads its cleanest possible verdict on exactly
+the runs that are most disturbed.
+
+### [A] TOOLING-A-A-TRAILING-AMPERSAND-BACKGROUNDS-THE-WHOLE-&&-CHAIN-INCLUDING-THE-cd — 2026-08-15 — ⚠️ HIT, recovered
+
+**What I ran** (intending: background a sampler, then run the benchmark in my
+own lane):
+
+```bash
+cd "…/os-lane-a" && rm -f build/hostload.tsv && (sampler…) & \
+  ./scripts/boot-test.sh --bench > build/bench-rerun2.log 2>&1
+```
+
+**What actually happened.** `&` binds *looser* than `&&`, so it terminates the
+entire preceding `&&` list. The shell backgrounded `cd … && rm … && (sampler)`
+as one unit — **the `cd` included** — and then ran `./scripts/boot-test.sh` in
+the foreground from the *tool's default working directory*, which is
+`D:\visual studio projects\os`: the *integration checkout*, not my lane. It
+started `cargo build -p kernel` there, in the tree another lane was at that
+moment pruning.
+
+**Why it was not obvious.** Every symptom pointed somewhere else. The sampler
+worked and wrote to the right path (it was inside the backgrounded subshell, so
+it *did* get the `cd`), which made the command look like it had worked. The
+benchmark's log file was simply *absent* rather than empty or wrong — and an
+absent file reads as "never started", which invites you to debug the boot test
+rather than the shell. The giveaway was that the log existed under `os/build/`
+instead.
+
+**Damage and recovery.** Build output only — no source touched, and
+`git status` in `os` showed nothing but the pre-existing
+` M .claude/scheduled_tasks.lock` that belongs to another lane. The stray
+`cargo`/`rustc` were killed by PID (not by name), and the stray log removed. But
+the near-miss is the point: this is precisely the class of accident the
+one-worktree-per-lane rule exists to prevent, and the rule did *not* prevent it,
+because the rule governs where I *edit* while this bug governs where a command
+*runs*.
+
+**Prescription.** Never let `&` be the last operator of a chain that contains a
+`cd`. Put the background job in a brace group so the `&` cannot escape it:
+
+```bash
+cd "…/os-lane-a" && { sampler… & } && ./scripts/boot-test.sh --bench …
+```
+
+Better still, for anything that builds or boots: assert the working directory
+first, so a mislanded command fails loudly instead of quietly compiling in
+someone else's tree.
+
+### [A] B-BENCH-A-PERSISTENT-REGRESSION-IS-REPORTED-ONCE-THEN-ABSORBED-INTO-ITS-OWN-RANGE — 2026-08-15 — 🔧 FIXED (harness defect fixed; both "regressions" it exposed are disproved — `http_build_response_1KiB` is a layout lottery per Finding 3, `vfs_stat_root` is smaller than one binary's own spread per Finding 4)
+
+**Two findings: two genuine regressions, and the reason the harness stopped
+reporting them on the very next run.**
+
+#### The series (release runs, ns, oldest → newest)
+
+```
+                          e7b912d 0bd70ab 7a96b55 c43ce8a c43ce8a 8c3f844 8135d14 24a3407 f79aec5 c893184 e384f46 c5a4013
+http_build_response_1KiB     6150    5992   10089    5964    6167    5990    5987    6018    5890  >8546  >12431  >12407
+vfs_stat_root                3473    3777    3721    3453    3591    3635    3883    3998    3136    3278   >4488   >4429
+vfs_stat_breakdown_full         -       -       -       -       -       -    3915    4015    3170    3219   >4424   >4505
+ipc_eventfd                   541     653     652     544     540     539     660     641     534     537   1021     653
+net_ipv6_parse                 81      81      80      80      81      79      80      80     113     169      80      80
+```
+
+#### Finding 1 — two regressions are real, one "regression" was noise
+
+`http_build_response_1KiB` sat at ~6000 ns for nine runs, then went 8546 →
+12431 → **12407**. `vfs_stat_root` sat in 3136-3998 for ten runs, then 4488 →
+**4429**. `vfs_stat_breakdown_full` likewise: 3170-4015, then 4424 → **4505**.
+
+The consecutive pairs agree to **0.2%** (12431 vs 12407) and **1.3%** (4488 vs
+4429). That is the decisive point, and it survives the fact that *both* runs
+were contaminated: host disturbance shows up as **stalls**, which inflate the
+*mean*, and these figures are **min-of-N**. Noise does not reproduce to two
+parts in a thousand. Two independently-disturbed runs landing on the same
+number is evidence *for* a real shift, not against it.
+
+By the same test `ipc_eventfd`'s spectacular +90% (537 → 1021) was **noise**: it
+did not reproduce (653, back inside its long-standing bimodal 534-660). So the
+earlier decision not to dismiss all three as contamination was right, and so was
+declining to accept all three — one of the three was exactly what the
+contamination story predicted, and two were not.
+
+`net_ipv6_parse` is **resolved**: 80 ns across both runs, matching the nine runs
+before the 113/169 excursion. The excursion is over and was never a code change.
+
+#### Finding 2 — the harness reported "no benchmark moved outside its own range" on the run that confirmed the regressions
+
+The re-run's verdict was:
+
+```
+No benchmark moved outside its own recent range (2 crossed 25% run-over-run).
+```
+
+Both statements are true and together they are misleading. The comparison is
+**run-over-run against the immediately preceding run**, and "its own recent
+range" is a window over the last 8 runs. So once a regression has appeared in
+one run:
+
+1. run-over-run sees 12431 → 12407 and correctly reports **no movement**; and
+2. the range has absorbed the elevated sample, so 12407 is now **inside** it.
+
+A regression is therefore visible for exactly **one run**. On the second run it
+becomes the new normal, and the harness affirmatively reports the suite as
+clean. This is worse than silence: a run that says "no benchmark moved outside
+its own recent range" is naturally read as "no regressions", when what it
+actually means is "nothing changed *since the regression*."
+
+The window poisons itself, and it does so fastest for exactly the regressions
+that matter most — a persistent one, which by definition appears in every
+subsequent run.
+
+**The proper fix** is for the range to be computed over runs that are *known
+good*, not over "the last 8 whatever they were": compare against the median of
+the last N runs **that predate the newest run's own value entering the window**,
+or keep a pinned baseline per benchmark that only moves when a change is
+explicitly accepted. A cheap interim check that would have caught this: flag any
+benchmark whose newest value is >25% off the median of runs 5-12 back, in
+addition to the existing run-over-run test.
+
+**Not yet known: what caused the two regressions.** Both jumps bracket merges of
+other lanes' work into `lane-a` as well as this lane's own `sys_cap_query`
+change, so attribution needs a bisect over the recorded commits
+(`f79aec5 → c893184 → e384f46`), not a guess. `http_build_response_1KiB` is the
+better target: it more than doubled, in two clean ~45% steps, from a nine-run
+plateau.
+
+**Step 1 attribution, 2026-08-15: code layout is RULED OUT — and this is a
+positive result, not an absence of evidence.** Both commits were built from a
+scratch worktree (`build/straddle/kernel-f79aec561`, `kernel-c893184fa`) and
+compared with `scripts/straddle-check.py --compare`. The pair is adjacent — one
+commit, `mm/vfs: return Cow<'_, Path> from namespace::resolve_path` — which
+touches nothing in the HTTP path.
+
+The re-roll is enormous, exactly as the family analysis predicted:
+
+| | count |
+|---|---|
+| loops that gained a straddle | 5181 |
+| loops that lost one | 4997 |
+| functions quarantined as recompiled | 9 |
+
+The 9 recompiled functions are precisely `namespace::resolve_path`, its callers
+and their self-tests — the signature check isolated the commit's real footprint
+with no false positives, which is the first end-to-end evidence that the
+quarantine works on a real pair rather than on synthetic inputs.
+
+**And none of those 10178 flips is on this benchmark's path.** That is what
+makes this decisive: the instrument fired ~10k times on the same binary pair
+and still reported nothing here.
+
+| on the `http_build_response_1KiB` path | loops | straddle change |
+|---|---|---|
+| `bench_build_response` (has `build_response` inlined) | none | — |
+| `etag_for_body` — 103 B FNV loop over 1 KiB, **the dominant loop** | 2 | `no` → `no` |
+| `memcpy` / `memset` / `memmove` | **none** (`rep movsb`, no backward branch) | — |
+| `__rust_alloc` / `__rust_dealloc` | none | — |
+| `core::fmt::write` | none | — |
+| only httpd flip in the whole binary: `build_response_gzip` | 1 | straddle **lost** (faster, wrong direction) |
+
+**The straight-line confound was measured too, not waved away.** `straddle-check`
+models *loops*, but a TCG translation block is also cut by a page boundary in
+straight-line code, so a call-heavy path could pay per call rather than per
+iteration. Counting page-boundary crossings inside every function on the path
+gives **2 in the old build, 3 in the new** — the single change being one integer
+`Display` impl. The response formats two integers, so the worst case is two extra
+dispatcher round-trips per call against a +2656-cycle regression. It does not
+account for it.
+
+This limitation of the tool is real and remains: `straddle-check` cannot see
+straight-line page crossings, and here that had to be checked by hand. Logged so
+the next comparison does not quietly assume loops are the only mechanism.
+
+**Why the scratch worktree does not invalidate this.** The two binaries were
+built in `os-straddle-scratch`, not in `os-lane-a` where the recorded bench runs
+were built, and the two directory names differ in length — so if any absolute
+build path were embedded, `.rodata` would shift and the scratch pair would be a
+*different* draw of the layout lottery than the pair that produced the numbers.
+Checked rather than assumed: the only absolute path in the image is
+`D:\visual studio projects\os\netproto\src\ipv4.rs` and friends, which live
+inside the **prebuilt service ELFs** that `include_bytes!` embeds. Those blobs
+were built once on Aug 14 and copied in byte-for-byte, so they are identical in
+both builds and do not vary with the kernel's build directory. No Cargo.toml
+declares an absolute path dependency. The kernel therefore contains no string
+that depends on which worktree built it, and the scratch pair reproduces the
+lane-a pair.
+
+A second, independent consistency check points the same way: the compare
+quarantined exactly **9** recompiled functions, and they are precisely
+`namespace::resolve_path`, its callers and their self-tests. Build
+nondeterminism or a stale artifact would have produced signature changes
+scattered far beyond one commit's source footprint.
+
+**Tooling hazard found while checking this: `strings` is not installed on this
+machine, and neither is `llvm-strings` in the rustup toolchain.** `strings -a
+<elf> | grep …` therefore prints nothing at all — which is indistinguishable
+from "the string is not in the binary", and is exactly the false negative that
+would have "confirmed" path-independence for the wrong reason. It was caught
+only because `grep -a -c` had already reported a match on the same file, so the
+two disagreed. Use `grep -a -o -b ".\{0,60\}<pattern>.\{0,60\}" <elf>` instead;
+it needs no extra tool and prints the byte offset and surrounding context.
+`command -v strings` before trusting an empty result from it.
+
+**So the regression has a non-layout cause, and the leading hypothesis is now
+that the benchmark is not isolated from heap history.** The suite runs in a fixed
+order in one address space; `build_response` allocates a `String` and grows a
+`Vec`, so which slab/free-list path those hit depends on everything allocated
+before them. A commit that removes allocations from path resolution changes the
+heap's shape by the time the HTTP benchmark runs, without touching a line of
+HTTP code. That is the same class of defect as the straddle lottery — a
+whole-binary property masquerading as a per-benchmark regression — and it is
+**not yet tested**; it is written down here as the next thing to falsify, not as
+a finding.
+
+#### Finding 2 — **FIXED 2026-08-15** (lane A): `level_shifts()` in `scripts/bench-history.py`
+
+The harness defect is closed. A new check compares each run against a baseline
+drawn from runs that **predate the shift** — `LEVEL_SHIFT_SKIP = 3` most-recent
+runs are excluded from the reference window, so a regression introduced in the
+last one-to-three runs cannot have entered its own baseline. This is the
+"proper fix" option above (median of runs 5-12 back), not the cheap interim one.
+
+On the recorded history it now prints, on the very run quoted above as reporting
+the suite clean:
+
+```
+SUSTAINED SHIFT (>25% off a baseline from before the last 3 runs, and outside
+that baseline's own spread -- these do NOT show up run-over-run once they persist):
+  http_build_response_1KiB: was ~5991ns -> now 12407ns (+106% vs suite);
+  pre-window baseline 5759-6277ns over 8 runs
+```
+
+**Two things had to be got right, and both were found by measurement, not
+reasoning — recorded because the first version of each looked obviously
+correct:**
+
+1. **Persistence is the entire discriminator.** The first version compared only
+   the newest run to the clean baseline. Replayed causally over all 26 recorded
+   runs it fired on **11 (42%)**, including `net_ipv6_parse +110%` and
+   `page_fault +103%` — the exact single-run excursions this same entry
+   identifies above as noise. Drift correction does not save it: contamination
+   is a **heavy tail, not a uniform slowdown**, so `speed_factor` (a median)
+   removes the central shift and leaves the tail looking like several
+   simultaneous regressions. Requiring the benchmark to be off-baseline in the
+   newest run *and* the `LEVEL_SHIFT_PERSIST = 2` before it took this to 2/26,
+   because host disturbance is random per run while a code regression is in
+   every run after the commit.
+2. **A flat percentage threshold is not scale-aware.** The one survivor was
+   `ipc_channel_sync` (646 → 967 → 684 → **578** — i.e. noise), whose own 1.5-IQR
+   fence is ~20% wide, so a 25% threshold sits *inside* its noise. Judging the
+   level shift against Tukey's **extreme**-outlier fence (`k=3`) instead of the
+   1.5 used elsewhere declines it while `http_build_response_1KiB` remains
+   outside by a factor of two. Final rate: **1 firing in 26 runs**, the true
+   positive.
+
+**Known limitation, deliberate:** this inherits the flat 25% threshold, so the
+concurrent `vfs_stat_root` shift (~3600 → ~4450, **+23%**) is below it and is
+*not* reported by this check. That is the pre-existing blind spot, not a new
+one; the `vfs_stat_root` regression above is still tracked by hand.
+
+Regression tests: `scripts/test-bench-history.py`, three new cases. They were
+**mutation-tested**, not merely observed to pass — deleting the persistence
+check makes both the synthetic one-run-excursion case and the real-history
+"stays quiet" control fail. Note for whoever tunes the constants: patching
+`bh.LEVEL_SHIFT_PCT` at runtime does **nothing**, because `threshold_pct`
+defaults to it and default arguments bind at definition time. A mutation test
+that patches the module attribute silently tests nothing and reports success —
+pass `threshold_pct=` explicitly, as the test does.
+
+**Nothing is still open in this entry.** The harness defect is fixed;
+`http_build_response_1KiB` is resolved by Finding 3 and `vfs_stat_root` by
+Finding 4 — neither was a regression. **Read Findings 3 and 4 before acting on
+Finding 1, which they supersede.**
+
+#### Finding 3 (2026-08-15, supersedes Finding 1 for `http_build_response_1KiB`) — there is no regressing commit; the metric is **bimodal**, and the mode is a property of the binary
+
+**In short:** I was bisecting for a commit that made this benchmark twice as
+slow. There isn't one. The benchmark has two stable speeds — about 6000 ns and
+about 10800 ns — and each *build* lands in one of them, essentially at random,
+depending on where the compiler happened to place the code. Re-running the same
+build always gives the same speed; changing almost any unrelated code can flip
+it. The "regression" is the metric flipping into its slow mode, and it has
+flipped **back and forth** several times already.
+
+**The evidence.** Taking every release-profile, non-`loaded` record in
+`bench/history.jsonl` (n = 20) and sorting by value gives a cleanly separated
+pair of clusters with **nothing in between**:
+
+| mode | n | mean | range |
+|---|---|---|---|
+| LOW  | 11 | 6055 ns | 5877 – 6396 |
+| HIGH |  9 | 10806 ns | 8546 – 12934 |
+
+The gap between the highest LOW (6396) and the lowest HIGH (8546) is empty.
+**HIGH/LOW = 1.78×**, which is the documented TCG page-straddle penalty (~1.7×)
+and not a number I chose.
+
+**The mode is deterministic per binary — this is the decisive test.** Three
+commits were measured more than once, seven measurements in total:
+
+| commit | n | values (ns) | modes |
+|---|---|---|---|
+| `26c1c7330` | 3 | 12934, 8818, 11381 | HIGH only |
+| `3f733c39c` | 2 | 9019, 11633 | HIGH only |
+| `c43ce8acc` | 2 | 5964, 6167 | LOW only |
+
+**Zero repeats cross the mode boundary.** Host noise moves a value by up to
+1.47× *within* the HIGH mode (8818 → 12934) but has never once carried a HIGH
+binary into LOW or the reverse. So the mode is a deterministic function of the
+compiled image, while the scatter inside a mode is run-to-run noise. That is
+exactly the layout-lottery signature: deterministic per binary, re-rolls
+whenever unrelated code shifts an address.
+
+**And the mode flips in both directions across the commit sequence:**
+
+```
+LOW LOW LOW | HIGH HIGH HIGH HIGH HIGH | LOW LOW | HIGH | LOW LOW LOW LOW LOW | HIGH HIGH HIGH
+```
+
+A regression caused by a bad commit does not un-regress and come back. This
+sequence has five direction changes.
+
+**What was wrong with Finding 1.** It read "sat at ~6000 ns for nine runs, then
+went 8546 → 12431 → 12407" and concluded a step change. But its *own* series
+table, printed directly above it, contains `7a96b55 → 10089` inside that
+supposedly-flat stretch — a HIGH-mode reading that was set aside as noise
+because it did not fit the step-change story. It is not noise; it is the same
+mode the last three runs are in. The two-consecutive-runs-agree-to-0.2%
+argument (12431 vs 12407) is still *true*, and still correctly rules out
+run-to-run noise — but agreeing to 0.2% is precisely what two runs of the same
+*mode* do. The argument distinguishes "not noise" from "noise"; it never
+distinguished "code got slower" from "layout re-rolled", which was the actual
+alternative.
+
+**Consistency with the step-1 straddle falsification above.** No contradiction:
+that analysis showed no *loop* straddle flip on the benchmark's path, and it
+was right. It also found straight-line page crossings on the path changing
+2 → 3, which at the time looked minor. Given the bimodality, straight-line
+crossings are now the leading mechanism, and the loop-only tool blind spot
+(since fixed) is why the first pass looked exculpatory.
+
+**Consequences.**
+
+- **The task "attribute the `http_build_response_1KiB` 2× regression" is closed
+  with a negative answer.** There is no commit to attribute it to. Bisecting
+  further is bisecting noise-with-structure and will keep producing
+  plausible-looking but false attributions — `c893184fa` is *not* guilty, it
+  merely re-rolled.
+- **This metric must not gate anything until it is de-lotteried.** Any
+  threshold between 6396 and 8546 fires on a coin flip. The harness's
+  own-range check (`f0cb9eccf`) partly absorbs this, but only by widening the
+  range until the metric says nothing at all.
+- **`vfs_stat_root` is a different shape and is NOT explained by this** — but
+  it is not a regression either; see Finding 4.
+
+#### Finding 4 (2026-08-15) — `vfs_stat_root`'s "regression" is smaller than one binary's own run-to-run spread
+
+**In short:** the other benchmark in this entry was also reported as regressing
+(about 3600 → 4450). It isn't. A *single unchanged build* of this benchmark has
+produced readings from 3344 to 5930 — a spread wider than the entire claimed
+regression, which sits comfortably inside it.
+
+`vfs_stat_root` is **not** mode-structured: its 21 release values form a
+continuous 2623 – 6454 spread with no empty gap, and the repeat-commit test
+declines it (commit `26c1c7330`'s own readings straddle every candidate split).
+So the mechanism is different from Finding 3 — but the conclusion is the same,
+for a simpler reason:
+
+| commit | readings (ns) |
+|---|---|
+| `26c1c7330` | **5930, 4394, 3344** |
+| `3f733c39c` | 2623, 3310 |
+| `c43ce8acc` | 3453, 3591 |
+
+One binary, `26c1c7330`, produced both 3344 and 5930 — a 1.77× spread with no
+code change whatsoever. The reported regression is 3278 → 4488, and 4488 is
+**below** one of that same binary's own readings. There is no effect here to
+attribute: the metric's run-to-run noise is larger than the movement being
+investigated.
+
+`vfs_stat_breakdown_full` has only six release readings (3170 – 4505, 1.42×
+spread) which is too few to judge, and it moves in step with `vfs_stat_root`;
+absent any independent evidence it should be treated the same way until it has
+enough history to say otherwise.
+
+**Consequence.** The task "attribute the `vfs_stat_root` regression" is closed
+with a negative answer, the same as Finding 3's. Both benchmarks are too noisy,
+in different ways, to support the reports that were made about them — and in
+both cases the disproof was already sitting in `bench/history.jsonl` and needed
+no new boot. The general lesson is worth stating plainly: **before attributing a
+movement to a commit, check what the same commit's own repeats do.** That is now
+enforced automatically by `mode_structure()` in `scripts/bench-history.py`,
+which reports a mode-structured shift as "NOT a regression to bisect" and
+excludes it from `--fail-on-regression`.
+
+**Method note, for reuse.** The test that settled this costs nothing and should
+be the *first* step next time a benchmark "regresses": group the history by
+commit, keep only commits measured more than once, and ask whether any of them
+straddles the proposed threshold. If repeats never cross it, the metric is
+mode-structured and bisection is the wrong tool. A great deal of straddle
+tooling was built before anyone ran that three-line query — the raw data it
+needed had been sitting in `bench/history.jsonl` the entire time.
+
+### [A] TOOLING-A-BARE-`bench-history.py`-RECORDS-A-RUN-AND-MISLABELS-ITS-PROVENANCE — 2026-08-15 — ⚠️ OPEN (low severity, easy to trip)
+
+**Status:** open. Hit while validating `level_shifts()`; the bad record was
+caught within the minute and reverted with `git checkout -- bench/history.jsonl`,
+so no bad data reached a commit. Recorded because the failure is silent and the
+file it damages is the baseline every performance verdict is measured against.
+
+**What happens.** `python scripts/bench-history.py` with no arguments is a
+natural thing to type when you want to *read* the analysis — and it **writes**.
+It parses whatever is in `build/serial-test.txt` and appends a record, because
+recording is the intended behaviour when `boot-test.sh` invokes it after a
+`--bench` boot. There is a `--no-record` flag; the default is the destructive
+one.
+
+**Why the record is worse than a mere duplicate.** Two fields are taken from
+the *invocation*, not from the log being parsed:
+
+- `profile` defaults to `LEGACY_PROFILE` (`debug`), and
+- `commit` comes from the current git HEAD.
+
+So the accidental run took release-profile numbers from an older boot and stored
+them tagged `profile=debug`, `commit=<today's HEAD>`. Nothing validates that
+pairing, and nothing could: the serial log does not record which profile or
+commit produced it. Since `comparable_records()` partitions strictly by profile,
+a mislabelled record does not merely add noise — it lands in the *wrong
+partition*, where it is a baseline for numbers it has no relationship to.
+
+**Reproduce:** with any `build/serial-test.txt` containing a scorecard, run
+`python scripts/bench-history.py` and diff `bench/history.jsonl`.
+
+**Proper fix** (not "add a warning"): make the provenance travel with the data
+rather than with the command line. Have the kernel print the build profile and
+the commit hash into the scorecard header at boot, and have `parse_serial()`
+read them; then `--profile` becomes an override that must *agree* with the log,
+and a disagreement is an error rather than a silent relabel. Until then the
+lesser mitigation is to make recording explicit (`--record`) so the read-only
+use is the default, which is the safe direction for a tool whose output is
+advisory but whose side effect is permanent.
+
+### [A] TOOLING-A-JUDGING-A-BACKGROUND-TASK-BY-A-PARTIAL-READ-AND-THEN-DESTROYING-ITS-WORK — 2026-08-15 — ⚠️ HIT, recovered
+
+**Status:** hit and recovered, no data lost. Recorded because the recovery was
+luck (the victim was a throwaway scratch worktree) and the same mistake against
+a lane worktree would have destroyed another agent's uncommitted work.
+
+**What happened.** `git worktree add --detach <scratch> f79aec561` was started
+with `run_in_background: true`. Fifteen seconds later its output file was still
+empty and `ls` on the new directory showed only a handful of files, so it was
+judged **failed**. A `cargo build` there then failed with "failed to read
+`textfmt/Cargo.toml`", which looked like confirmation: a broken tree. The
+cleanup that followed — `git worktree remove --force --force`, `git worktree
+prune`, `rm -rf` — was run against a checkout that was **still being written**.
+
+It had not failed. `git worktree add` was 60% through checking out 13145 files
+and needed ~4 minutes on this tree; the missing `textfmt/` was simply a file it
+had not reached yet. The completion notification arrived later, exit code 0 —
+for the process that by then had been killed mid-write.
+
+**Consequences, all recoverable here:** a half-deleted directory that `rm -rf`
+could not finish ("Device or resource busy"), an orphaned
+`git worktree add` and its `git reset --hard` child still holding
+`index.lock`, and a `.git/worktrees/` entry that `prune` refused to clear.
+Recovery needed killing the two PIDs by ID and re-running the removal.
+
+**The general rule this violates.** A background task has exactly one
+authoritative completion signal: the harness notification. Its output file,
+its exit status and any side effects it is midway through producing are **not**
+readable as progress — and a partially-populated directory is indistinguishable
+from a failed one by inspection. This is the same shape as
+`TOOLING-A-EDITING-A-SHELL-SCRIPT-WHILE-IT-IS-RUNNING`: acting on an artifact
+that another process still owns.
+
+**What makes it dangerous rather than merely annoying.** The forced cleanup
+here (`worktree remove --force --force` + `rm -rf`) is precisely the operation
+CLAUDE.md forbids against another lane's tree, for exactly this reason — an
+agent that has convinced itself a worktree is "broken" will reach for it. The
+mitigation is procedural and cheap: **never run a destructive cleanup on a path
+a background task is still associated with.** Wait for the notification; if the
+task must die first, kill its PID, confirm the PID is gone, and only then
+delete.
+
+**Reproduce:** start any long `git worktree add` in the background, read the
+directory before it completes, and observe that a partial checkout looks
+identical to a failed one.
+
+### [A] B-BENCH-THE-ACCESS-FLOOR-CLAMP-BINDS-ON-EVERY-RUN-AND-SAYS-IT-MEASURED-SOMETHING — 2026-08-15 — 🔧 FIXED in `90457f629`; both constants re-derived per build profile (see RESOLVED section at the end of this entry)
+
+**In short:** the benchmark suite calibrates two of its budgets against "how
+much does one memory access cost on this machine", measures that as **5
+cycles**, then quietly throws the measurement away and uses a hard-coded
+**100** instead — on every run, without ever saying so. The line it prints
+looks like a successful calibration and reads `measured=5.0 ... budgets below
+are multiples of this`, where "this" is 100, not 5. So both budgets are 20x
+looser than they claim to be, and they have never once been calibrated.
+
+**Where:** `kernel/src/bench.rs`, `let floor = core::cmp::max(measured_cycles.unwrap_or(0), 100);`
+(the `access_floor` binding, ~line 1432). Consumers: `mmio_suspicion =
+access_floor * 4` (`fast_cpu_index` PASS/SLOW, ~line 1513) and `access_floor *
+OWNER_TAG_BUDGET_ACCESSES` (frame-owner tagging, ~line 1658). It is also the
+divisor in `accesses()`, which prints "N accesses" figures in the report.
+
+**Evidence it binds every time.** Across every run in `build/` that used the
+current 1024-stores/window calibration:
+
+| run | measured | floor used |
+|---|---|---|
+| 4 runs, 1024 stores/window | 5.0, 5.0, 5.1, 5.1 cycles/store | 100 |
+
+`max(5, 100)` is 100 in all four. There is no recorded run on the current
+calibration where the clamp did not bind, so no budget verdict the suite has
+ever printed was calibrated to the machine it ran on.
+
+**Why the loud `UNMEASURED` path does not catch it.** That path fires only when
+the measurement *fails* (arms did not separate, or the scale check rejected
+it), and it says exactly the right thing: "falling back to the arbitrary clamp
+... verdicts below are NOT calibrated". The case here is the opposite and worse
+— the measurement **succeeded**, was believed, and was then discarded anyway by
+a clamp whose own comment claims it exists only for the degenerate
+`unwrap_or(0)` case. A clamp that binds on a good measurement is not a guard;
+it is a silent override.
+
+**The root cause is a units/quantity confusion, not the constant.** Two
+different physical quantities are being asked of one variable:
+
+1. **Cost of one memory access** (~5 cycles here). This is what is measured,
+   and it is the right divisor for `accesses()` — "this delta is worth N memory
+   accesses" is a meaningful sentence.
+2. **The noise floor of a single-shot measurement** (~100-200 cycles here).
+   This is what the *budgets* actually need, and the comment at the
+   `mmio_suspicion` site says so in as many words: an absolute 200-cycle budget
+   "reported SLOW on every healthy boot ... because 200 is below this harness's
+   floor for a single memory access — the nop baseline alone wanders by more
+   than that between adjacent measurements".
+
+The 100 is a hand-tuned stand-in for quantity 2 wearing quantity 1's name. That
+is why it cannot be simply deleted: dropping to the true 5 would make
+`fast_cpu_index`'s budget 20 cycles, far below the measurement noise, and it
+would report SLOW on every healthy boot — the exact bug the clamp was added to
+paper over.
+
+**Proper fix** (both halves, neither sufficient alone):
+
+1. **Measure quantity 2 instead of hard-coding it.** The A/B already runs
+   `CANARY_ROUNDS` interleaved rounds; the spread of the nop arm across those
+   rounds *is* the single-shot noise floor, and it is free — it is already
+   being computed and thrown away. Budgets become multiples of a measured
+   dispersion, and the two quantities stop sharing a variable.
+2. **Make the clamp announce itself.** Whenever the fallback is used at all —
+   whether because the measurement failed or because it was overridden —
+   the run must say so and its budget verdicts must be marked uncalibrated,
+   the same treatment the `UNMEASURED` branch already gives. Three outcomes
+   (measured / clamped / unmeasured), never two.
+
+**Consequence of leaving it:** the two budget checks cannot fail on this
+harness for any realistic regression, so they are decorative. Nothing else in
+the suite depends on the floor, and the SCORE lines that gate `BENCH_OK` do
+not, so this is a silently-dead check rather than a wrong number — which is
+the failure mode this project keeps rediscovering: a check that cannot fire is
+indistinguishable from a check that passes.
+
+**Fix landed — `90457f629`.** Half 2 went in as written above: three outcomes
+(`measured` / `CLAMPED` / `UNMEASURED`), and the CLAMPED branch states plainly
+that the budgets are looser than the machine warrants, so a PASS is weak
+evidence while a SLOW still counts.
+
+Half 1 went in **differently from the proposal above, and the difference
+matters**, so the reasoning is recorded here rather than lost:
+
+- *Proposed:* measure quantity 2 directly, as the dispersion of the nop arm
+  across the interleaved rounds — free, since it is already computed and
+  discarded.
+- *Implemented:* measure the cost of a **scattered** access —
+  `measure_scattered_access_cost` walks a 512 KiB buffer at a 4 KiB stride, a
+  distinct guest page per store, so each store pays its own softmmu lookup the
+  way real allocator code does.
+- *Why the change:* the proposal accepted the entry's own framing that the
+  budgets want "the noise floor of a single-shot measurement". They do not.
+  They want *the cost of the kind of access the code under test actually
+  makes*, which is a physical property of the workload, not of the instrument.
+  The nop-dispersion figure would have been an honest measurement of the wrong
+  thing — a number that moves when the harness gets noisier and stays put when
+  the memory system gets slower, which is backwards for a budget. The
+  scattered cost satisfies the noise constraint too (it is one to two orders
+  of magnitude above the hot cost, hence well clear of the ~200-cycle wander),
+  so one honest measurement discharges both requirements instead of trading
+  one confusion for another.
+- The clamp is *retained* as the noise guard, because that is the one job the
+  entry correctly identified for it — but it is now a floor that announces
+  itself rather than a silent override, so a machine where the scattered cost
+  genuinely came out under 100 cycles would say so instead of pretending.
+
+The scattered measurement carries its own scale-invariance check, which
+**halves** the store count rather than doubling it: doubling would run past
+the end of the 512 KiB buffer and wrap onto already-resident pages, quietly
+re-measuring the hot case and certifying it as scattered.
+
+**Still open — the two budget constants.** `mmio_suspicion`'s `4` and
+`OWNER_TAG_BUDGET_ACCESSES`'s `150` were both sized against the clamp, so each
+has always meant a flat cycle count (400 and 15000) wearing an "N accesses"
+label. Both are flagged `PENDING RE-DERIVATION` in the source. They are not
+guessed at here because re-deriving them needs a boot that prints the measured
+scattered floor, which had not run when this was written. The arithmetic is
+already in the source comments and points the same way in both cases — the
+`fast_cpu_index` comment says a healthy lookup "is one access or less" and
+healthy boots measure 274-282 cycles, i.e. about *one* scattered access, not
+four; the owner-tag comment reasons in "~16 accesses at TCG's
+few-hundred-cycles-each" while the code divided by a 5-cycle one. Until they
+are re-derived both budgets are merely loose, which is the direction that
+cannot manufacture a false alarm.
+
+#### RESOLVED 2026-08-15 — both constants re-derived, and the cause was a *profile* split, not a floor
+
+The "pending re-derivation" above assumed the two budgets just needed
+restating in the corrected (scattered) unit. That was the wrong diagnosis.
+Re-deriving them from the recorded boots turned up something the unit story
+does not explain:
+
+| check | healthy **release** | healthy **debug** | old budget | old budget vs worst release |
+|---|---|---|---|---|
+| `fast_cpu_index` | 4-10 cycles (n=8) | 188-420 | 400 (`floor*4`) | **40x too loose** |
+| `page_alloc_free_owner_ab` | 42-246 cycles (n=9) | 7660-12708 | 15000 (`floor*150`) | **61x too loose** |
+
+The right-hand columns are the finding. **The 7660-11288 figures quoted in
+the source comment as the healthy range were DEBUG boots**, and the comment
+did not say so — the same kernel is ~40x slower in debug (`page_alloc_free`
+is ~1330 cycles in release and ~52000 in debug). One constant was being asked
+to span both profiles, so it was sized for debug and release lost: in release
+neither check could fire at all. A check that cannot fire is indistinguishable
+from a check that passes, which is why both had reported PASS forever.
+
+**Fix:** both budgets are now absolute per-profile cycle counts selected on
+`cfg!(debug_assertions)` — `mmio_suspicion` 100 release / 2000 debug,
+owner-tag 1500 release / 40000 debug — and are no longer multiples of
+`access_floor` at all. Each line also prints `[{} profile]` so a surprising
+verdict can be attributed to the branch taken rather than to the code under
+test. Verified on a release boot: `fast_cpu_index: PASS (8 cycles, limit 100
+cycles [release profile])`, `page_alloc_free_owner_ab: PASS (92 cycles, limit
+1500 cycles [release profile])`.
+
+Note the second-order consequence: `access_floor` no longer feeds **any**
+verdict. Its only remaining consumer is the display-only "N accesses" figures.
+
+#### B-BENCH-THE-UNMEASURED-WARNING-VOIDS-VERDICTS-IT-NO-LONGER-GOVERNS — found and fixed in the same session
+
+Caught by reading the verification boot's own log rather than its exit code.
+With the budgets now absolute, the floor's failure message was still saying:
+
+> Falling back to the arbitrary clamp of 100 cycles: budget-based verdicts
+> below are NOT calibrated to this machine and **must not be read as
+> findings**.
+
+On that boot the scale check legitimately rejected the measurement, so this
+printed — and the two lines immediately below it were sound absolute-cycle
+verdicts that the reader was being told to discard. This is the exact mirror
+image of the bug the entry above documents: **a warning that taints valid
+findings trains the reader to ignore the instrument just as effectively as a
+budget that cannot fire.** Both end in a verdict nobody acts on.
+
+**Fix:** all three `memory_access_floor` messages (measured / CLAMPED /
+UNMEASURED) now scope their claim to the "N accesses" figures, which are all
+the floor still feeds, and state explicitly that the PASS/SLOW verdicts are
+absolute per-profile cycle counts and still hold. The CLAMPED case also now
+names the *direction* of its error (figures understated, because a bigger
+divisor yields fewer accesses) instead of the previous vague "LOOSER than this
+machine warrants".
+
+**Generalisable:** when a consumer is removed from a shared calibration, the
+calibration's *error messages* are part of its interface and go stale with it.
+Grep the failure text, not just the call sites.
 ### A trailing `| tail` swallows the exit code too — and hides the log while it runs — 2026-08-15
 
 Follow-up to "A trailing `tail` swallows the exit code the notification

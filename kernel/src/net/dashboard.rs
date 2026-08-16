@@ -446,24 +446,42 @@ fn api_bench() -> Vec<u8> {
     let entries = crate::bench::scorecard_snapshot();
 
     let total = entries.len();
-    let passed = entries.iter().filter(|e| e.passed).count();
-    let failed = total.saturating_sub(passed);
+    // `passed`/`failed` are counted over the benchmarks that *have* a target.
+    // A tracked benchmark (`target_ns: null`) is recorded for run-over-run
+    // comparison and has no pass/fail state; counting it as a failure would
+    // report a regression that does not exist. `total` stays the entry count so
+    // it still matches the length of `entries`, and `graded` states the
+    // denominator the other two are taken over rather than leaving a reader to
+    // infer it from a subtraction.
+    let graded = entries.iter().filter(|e| e.target_ns.is_some()).count();
+    let passed = entries.iter().filter(|e| e.passed == Some(true)).count();
+    let failed = graded.saturating_sub(passed);
 
     let mut json = format!(
-        r#"{{"summary":{{"total":{},"passed":{},"failed":{}}},"entries":["#,
-        total, passed, failed,
+        r#"{{"summary":{{"total":{},"graded":{},"passed":{},"failed":{}}},"entries":["#,
+        total, graded, passed, failed,
     );
 
     for (i, e) in entries.iter().enumerate() {
         if i > 0 {
             json.push(',');
         }
+        // `null` rather than `0`/`false` for an ungraded entry: a consumer that
+        // does not know about tracked benchmarks gets a value it must handle
+        // explicitly, instead of a plausible-looking zero target that it would
+        // silently render as a benchmark failing by an infinite margin.
         json.push_str(&format!(
             r#"{{"name":"{}","measured_ns":{},"target_ns":{},"passed":{}}}"#,
             json_escape(e.name),
             e.measured_ns,
-            e.target_ns,
-            e.passed,
+            match e.target_ns {
+                Some(t) => format!("{t}"),
+                None => "null".into(),
+            },
+            match e.passed {
+                Some(p) => format!("{p}"),
+                None => "null".into(),
+            },
         ));
     }
 

@@ -50,7 +50,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::serial_println;
+use crate::{serial_print, serial_println};
 use crate::sync::PreemptSpinMutex as Mutex;
 
 // ---------------------------------------------------------------------------
@@ -463,12 +463,63 @@ pub fn run_with_cache_info<F: FnMut()>(name: &str, iterations: u32, mut f: F) ->
 // Scorecard — automated baseline comparison
 // ---------------------------------------------------------------------------
 
-/// A single scorecard entry comparing a benchmark against its target.
+/// A single scorecard entry: a benchmark's measurement, and *optionally* a
+/// hardware target to grade it against.
 struct ScoreEntry {
     name: &'static str,
     measured_ns: u64,
-    target_ns: u64,
+    /// `None` for a benchmark with no meaningful hardware target.
+    ///
+    /// This used to be a plain `u64`, which fused two independent jobs into
+    /// one: entering a benchmark into the longitudinal record, and grading it
+    /// against a published figure. A benchmark with nothing to grade against
+    /// therefore could not be recorded *at all* — the only way onto the
+    /// scorecard was to invent a target, and an invented target of 0 grades as
+    /// a permanent failure and skews the pass/fail summary. That reasoning is
+    /// still written out at the `ipc_channel_roundtrip_64k` call site, which
+    /// concluded "deliberately NOT added to the scorecard" and printed prose
+    /// instead.
+    ///
+    /// Prose is unparseable, so those benchmarks were not merely ungraded but
+    /// unrecorded: `bench/history.jsonl` has no entry for any of them and
+    /// `scripts/bench-history.py` cannot flag a regression in one. Verified
+    /// rather than assumed — every release record in that file carries zero
+    /// `vfs_stat_breakdown_*` entries. The five phases of the VFS path lookup,
+    /// which are the first place a namespace-translation regression would show
+    /// up, were readable only by hand-diffing serial logs.
+    ///
+    /// Splitting the two jobs is what makes them recordable: [`track`] files a
+    /// measurement with no target, [`score`] files one with a target. See
+    /// `known-issues.md → B-BENCH-BREAKDOWN-PHASES-ARE-NOT-RECORDED`.
+    target_ns: Option<u64>,
+    /// Whether the benchmark met its target; always `false` when there is none.
+    ///
+    /// Read it only alongside `target_ns`: on a tracked entry it means "not
+    /// graded", not "failed". `print_scorecard` and the dashboard therefore
+    /// both compute their pass/fail summary over the targeted subset.
     passed: bool,
+    /// Mean nanoseconds per iteration, carried alongside the reported minimum.
+    ///
+    /// Not a second performance number — a *dispersion* number. The scorecard
+    /// reports `min` because it is the least contaminated estimate of the
+    /// code's cost, but that makes every entry look equally trustworthy when
+    /// they are not: a benchmark whose mean sits at 1.05x its min took a clean
+    /// measurement on nearly every iteration, whereas one at 6x (measured:
+    /// `dashboard_api_status`, 160.4ms mean against a 24.4ms min) was
+    /// interrupted on most of them, so its min is whichever iteration happened
+    /// to dodge the interference. Those two entries cannot share a regression
+    /// threshold, and today they do.
+    ///
+    /// `scripts/bench-history.py` needs a per-benchmark noise scale to size its
+    /// band, and the alternative source — the spread of the same benchmark
+    /// across past runs — requires several recorded runs before it says
+    /// anything, of which there are currently three. `mean/min` is available
+    /// from a single boot. See `known-issues.md →
+    /// TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE`.
+    mean_ns: u64,
+    /// Iterations the mean was taken over; a mean over 50 samples and one over
+    /// 2000 do not carry the same weight.
+    iterations: u32,
 }
 
 /// Public view of a scorecard entry for the dashboard API.
@@ -478,10 +529,15 @@ pub struct ScoreInfo {
     pub name: &'static str,
     /// Measured minimum nanoseconds.
     pub measured_ns: u64,
-    /// Target nanoseconds from baselines.
-    pub target_ns: u64,
-    /// Whether the benchmark met its target.
-    pub passed: bool,
+    /// Target nanoseconds from baselines, or `None` if the benchmark is
+    /// tracked for regression comparison only and has no hardware target.
+    pub target_ns: Option<u64>,
+    /// Whether the benchmark met its target, or `None` if it has no target.
+    ///
+    /// Deliberately not a bare `bool`: a tracked benchmark has not failed, and
+    /// reporting `false` for it would put it in the failure count of every
+    /// consumer that did not think to check `target_ns` first.
+    pub passed: Option<bool>,
 }
 
 /// Return a snapshot of the current scorecard for external use.
@@ -495,7 +551,7 @@ pub fn scorecard_snapshot() -> Vec<ScoreInfo> {
             name: e.name,
             measured_ns: e.measured_ns,
             target_ns: e.target_ns,
-            passed: e.passed,
+            passed: e.target_ns.map(|_| e.passed),
         })
         .collect()
 }
@@ -528,13 +584,43 @@ fn accesses(cycles: u64, floor: u64) -> (u64, u64) {
 }
 
 fn score(name: &'static str, result: &BenchResult, target_ns: u64) {
-    let passed = result.min_ns <= target_ns;
+    record(name, result, Some(target_ns));
+}
+
+/// Record a benchmark that has no hardware target, for regression tracking only.
+///
+/// Use this for any measurement worth comparing run-over-run but not worth
+/// grading against a published figure: the phase decomposition of a larger
+/// benchmark, a baseline for a cost rather than a latency budget, an
+/// exploratory number. It lands in `bench/history.jsonl` exactly like a scored
+/// benchmark and is diffed against the previous boot exactly like one — it just
+/// never appears in the pass/fail summary or the over-target list.
+///
+/// The alternative, and what this code did before, is to print the number in a
+/// human-readable line and drop it. That is not a lighter-weight form of
+/// recording it; it is not recording it. See [`ScoreEntry::target_ns`].
+fn track(name: &'static str, result: &BenchResult) {
+    record(name, result, None);
+}
+
+fn record(name: &'static str, result: &BenchResult, target_ns: Option<u64>) {
+    // `false` for an untargeted entry is "not graded", not "failed"; every
+    // reader of `passed` pairs it with `target_ns`. See `ScoreEntry::passed`.
+    let passed = target_ns.is_some_and(|t| result.min_ns <= t);
     SCORECARD.lock().push(ScoreEntry {
         name,
         measured_ns: result.min_ns,
         target_ns,
         passed,
+        mean_ns: result.mean_ns,
+        iterations: result.iterations,
     });
+    // Sampled here, after the lock is released, rather than from a list of
+    // hand-placed call sites in `run_all`: hooking the one function every
+    // benchmark already calls spreads the samples across the suite
+    // automatically and keeps doing so as benchmarks are added or reordered,
+    // which a hand-maintained list would not.
+    maybe_canary_sample();
 }
 
 /// Print the scorecard summary showing which benchmarks met targets.
@@ -543,8 +629,21 @@ fn score(name: &'static str, result: &BenchResult, target_ns: u64) {
 /// entry, passing or not:
 ///
 /// ```text
-/// [bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER>
+/// [bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER> <mean_ns> <iters>
+/// [bench] SCORE <name> <measured_ns> -           TRACK      <mean_ns> <iters>
 /// ```
+///
+/// The second form is a benchmark recorded by [`track`] rather than [`score`]:
+/// it has no hardware target, so there is nothing to grade and the target
+/// column reads `-`. It is recorded and diffed run-over-run exactly like the
+/// first form — which is the whole point, since the alternative available
+/// before the two forms existed was to print prose and record nothing.
+///
+/// The trailing `<mean_ns> <iters>` are an append-only extension: the parser
+/// treats them as optional so logs recorded before they existed still read
+/// back. They are not a second performance figure — see [`ScoreEntry::mean_ns`]
+/// for why the comparator needs a per-benchmark dispersion number and why the
+/// spread across past runs could not supply one.
 ///
 /// `scripts/bench-history.py` parses those, appends them to
 /// `bench/history.jsonl`, and diffs the run against the previous boot **on the
@@ -564,25 +663,56 @@ fn score(name: &'static str, result: &BenchResult, target_ns: u64) {
 #[allow(clippy::arithmetic_side_effects)]
 fn print_scorecard() {
     let entries = SCORECARD.lock();
-    let total = entries.len();
+    // Counted over the *targeted* subset. A tracked entry has no target, so
+    // including it would inflate the denominator with benchmarks that could
+    // never be "within hardware target" and make the ratio drift downward
+    // every time one was added.
+    let graded = entries.iter().filter(|e| e.target_ns.is_some()).count();
     let passed = entries.iter().filter(|e| e.passed).count();
-    let failed = total.saturating_sub(passed);
+    let failed = graded.saturating_sub(passed);
+    let tracked = entries.len().saturating_sub(graded);
 
     // Machine-readable first, so a truncated log still yields a usable record.
     for entry in &*entries {
-        serial_println!(
-            "[bench] SCORE {} {} {} {}",
-            entry.name,
-            entry.measured_ns,
-            entry.target_ns,
-            if entry.passed { "PASS" } else { "OVER" }
-        );
+        match entry.target_ns {
+            Some(target) => serial_println!(
+                "[bench] SCORE {} {} {} {} {} {}",
+                entry.name,
+                entry.measured_ns,
+                target,
+                if entry.passed { "PASS" } else { "OVER" },
+                entry.mean_ns,
+                entry.iterations
+            ),
+            // `-` rather than `0`: a zero target is indistinguishable from a
+            // real target of zero, and the parser has to be able to tell "no
+            // target" from "a target this failed to meet".
+            None => serial_println!(
+                "[bench] SCORE {} {} - TRACK {} {}",
+                entry.name, entry.measured_ns, entry.mean_ns, entry.iterations
+            ),
+        }
     }
 
-    serial_println!(
-        "[bench] === Scorecard: {}/{} within hardware target ===",
-        passed, total
-    );
+    // Two whole lines rather than a computed suffix: `format!` is not in scope
+    // in this crate and pulling in `alloc::format` to build a fragment of a
+    // diagnostic would put a heap allocation in the benchmark harness itself.
+    //
+    // The tracked count is named and not silently omitted — otherwise the
+    // difference between this denominator and the number of SCORE lines above
+    // is an unexplained discrepancy for anyone checking one against the other.
+    if tracked > 0 {
+        serial_println!(
+            "[bench] === Scorecard: {}/{} within hardware target, \
+             {} tracked without one ===",
+            passed, graded, tracked
+        );
+    } else {
+        serial_println!(
+            "[bench] === Scorecard: {}/{} within hardware target ===",
+            passed, graded
+        );
+    }
 
     if failed > 0 {
         serial_println!(
@@ -590,21 +720,26 @@ fn print_scorecard() {
              TCG measurements are 10-400x hardware; compare bench/history.jsonl):"
         );
         for entry in &*entries {
-            if !entry.passed {
-                let pct = if entry.target_ns > 0 {
-                    entry.measured_ns.saturating_mul(100) / entry.target_ns
+            // `Some(target)` and not `!entry.passed`: a tracked entry also has
+            // `passed == false`, and listing it here would report a benchmark
+            // as over a target it does not have.
+            if let Some(target) = entry.target_ns
+                && !entry.passed
+            {
+                let pct = if target > 0 {
+                    entry.measured_ns.saturating_mul(100) / target
                 } else {
                     0
                 };
                 serial_println!(
                     "[bench]   {} : {}ns (target {}ns, {}%)",
-                    entry.name, entry.measured_ns, entry.target_ns, pct
+                    entry.name, entry.measured_ns, target, pct
                 );
             }
         }
     }
 
-    if failed == 0 && total > 0 {
+    if failed == 0 && graded > 0 {
         serial_println!("[bench] All benchmarks within target.");
     }
 }
@@ -612,6 +747,778 @@ fn print_scorecard() {
 // ---------------------------------------------------------------------------
 // Standard kernel benchmarks
 // ---------------------------------------------------------------------------
+
+/// Interleaved A/B rounds per reference measurement.
+const CANARY_ROUNDS: u32 = 500;
+
+/// Stores per timed window. The per-window delta is ~N x one access, so the
+/// point of a large N is to lift that delta an order of magnitude clear of the
+/// few-hundred-cycle wander of the harness itself.
+///
+/// This was 64, sized against a claimed ~200-cycle access. That figure was an
+/// artefact: it came from a debug build, where both arms of the A/B are mostly
+/// loop scaffolding, and it was quietly carried over to the release build,
+/// where the measured cost is **16 cycles** (boot of 2026-08-14: nop=224,
+/// store=1288 over 64 stores). At N=64 that is a 1064-cycle delta against a
+/// 224-cycle nop arm — a factor of ~5, not the order of magnitude the comment
+/// claimed. The design's amplification was not there.
+///
+/// 1024 restores it from the measured number rather than the artefact:
+/// 16 x 1024 ~ 16k cycles of signal against the same few-hundred-cycle wander.
+/// That the constant was justified by a number from a *different build
+/// profile* is the same error as baselining a benchmark against a single boot,
+/// one level up — see known-issues.md.
+const CANARY_STORES_PER_WINDOW: u64 = 1024;
+
+/// Percent by which the end-of-suite reference may differ from the
+/// start-of-suite one before the run is called contaminated.
+///
+/// Deliberately loose. The honest position is that the run-to-run spread of
+/// this measurement has never been quantified, so any tight bound would be a
+/// number invented rather than observed — and this project has already been
+/// bitten by a benchmark check whose threshold was picked from reasoning
+/// instead of data. The raw pair is printed unconditionally, so the threshold
+/// can be tightened from real records later without changing what is
+/// recorded. Until then it only has to catch the gross case this exists for:
+/// `crypto_ed25519_verify` moved 5.1x when the host got busy.
+const CANARY_TOLERANCE_PCT: u64 = 25;
+
+/// Smallest per-access figure this measurement can resolve, in cycles.
+///
+/// Derived, not invented. The per-access cost is an integer quotient, so at a
+/// per-access value of `m` cycles one cycle of quantisation is `100 / m`
+/// percent. Once that exceeds `CANARY_TOLERANCE_PCT`, any "spread" the canary
+/// reports is rounding rather than host load, and the honest verdict is that
+/// the instrument could not measure — not that the machine was busy.
+///
+/// At a 25% tolerance this is 4 cycles. `scripts/bench-history.py` computes the
+/// identical bound from the identical constant, so the kernel and the history
+/// tool cannot disagree about whether a record is usable.
+const CANARY_MIN_RESOLVABLE: u64 = 100u64.div_ceil(CANARY_TOLERANCE_PCT);
+
+/// Fixed-point scale for the per-access cost: hundredths of a cycle.
+///
+/// The reference cost is a *small integer number of cycles* (measured: 5), and
+/// the spread test compares two such numbers. At 5 cycles one cycle of integer
+/// rounding is 20% and a two-sample spread can be two cycles — 40% — so a
+/// perfectly quiet host reads as contaminated against the 25% tolerance. That
+/// is not hypothetical: the 2026-08-14T21:5x run reported exactly 40% ("5-7
+/// cycles") and it was rounding, not load.
+///
+/// `CANARY_MIN_RESOLVABLE` does not save us here. It bounds a *one*-cycle error
+/// at the tolerance; a spread spans two samples and so can be twice that.
+/// Raising the bound instead would be the wrong fix anyway — the store really
+/// does cost ~5 cycles, and a threshold cannot legislate the hardware faster.
+///
+/// The precision is not missing, only discarded: the raw delta is ~5290 cycles
+/// over 1024 stores, i.e. three significant figures that *were* measured and
+/// that `delta / n` throws away. Carrying hundredths keeps them, putting the
+/// quantisation step at 0.01 cycle (~0.2%) — two orders of magnitude under the
+/// tolerance instead of comfortably over it. The serial line still prints whole
+/// cycles, so the recorded wire format is unchanged; only `spread` and `pct`
+/// get the accuracy, which is exactly where it was wanted.
+const CENTI: u64 = 100;
+
+/// Which build profile these numbers were measured on, for the serial log.
+///
+/// Several budgets below are per-profile, because the same healthy kernel is
+/// roughly 40x slower in debug than in release — measured, not estimated:
+/// `page_alloc_free` costs ~1330 cycles in release and ~52000 in debug across
+/// the recorded boots. A single budget spanning both is necessarily ~40x too
+/// loose for release, which is how two of them came to be unable to fire at
+/// all. Printing the profile beside the limit makes the branch taken visible,
+/// so a surprising verdict can be attributed to the wrong branch rather than
+/// to the code under test.
+const PROFILE_NAME: &str = if cfg!(debug_assertions) { "debug" } else { "release" };
+
+/// Split a centicycle count into `(whole_cycles, tenths)` for display.
+///
+/// Every centicycle value that reaches a human goes through here, so no call
+/// site can accidentally print a raw centicycle count as if it were cycles —
+/// which is the mistake this whole file exists to keep catching one level up.
+/// Tenths, not hundredths: the extra digit is carried for the *arithmetic*
+/// (`spread`, `pct`), not because anyone needs to read a hundredth of a cycle.
+const fn centi_parts(c: u64) -> (u64, u64) {
+    (c / CENTI, (c % CENTI) / 10)
+}
+
+/// Take a mid-suite canary sample every Nth scored benchmark.
+///
+/// 8 gives roughly 8 samples across the current 63-benchmark suite — enough
+/// resolution to catch a burst confined to a few benchmarks, without paying
+/// the reference measurement's cost 63 times.
+const CANARY_SAMPLE_EVERY: u32 = 8;
+
+/// Running extremes of the reference measurement across the suite.
+///
+/// Extremes rather than a list because the verdict only needs the spread, and
+/// two atomics need no allocation and no lock on a path that runs between
+/// benchmarks.
+static CANARY_MIN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+static CANARY_MAX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static CANARY_SAMPLES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Reference measurements whose two arms failed to separate.
+///
+/// Tracked separately from `CANARY_SAMPLES` because "the instrument failed"
+/// and "the instrument found nothing" are different results, and collapsing
+/// them is what let a dead canary report a reassuring 0% spread.
+static CANARY_INVALID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Counts `score` calls so every Nth one triggers a sample.
+static CANARY_SCORED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Per-sample trace: where in the suite each sample was taken, and what it read.
+///
+/// # Why extremes were not enough
+///
+/// `CANARY_MIN`/`CANARY_MAX` answer "how much did the reference cost move",
+/// which is the wrong question once the answer is "a lot". They cannot
+/// distinguish a transient burst landing on one sample from a *systematic*
+/// offset that appears after certain benchmarks — and those two have opposite
+/// remedies. The 2026-08-14T22:1x run measured a 47% spread while both suite
+/// endpoints and both calibration runs agreed exactly, which extremes alone
+/// can neither explain nor even express.
+///
+/// Sized above the ~10 samples a 64-benchmark suite produces at
+/// `CANARY_SAMPLE_EVERY = 8`; excess samples are dropped from the trace but
+/// still counted and still folded into the extremes, so no verdict depends on
+/// the trace being complete.
+const CANARY_TRACE_MAX: usize = 24;
+/// Trace position meaning "a suite endpoint", not a mid-suite sample.
+const CANARY_POS_ENDPOINT: u32 = u32::MAX;
+static CANARY_TRACE_POS: [core::sync::atomic::AtomicU32; CANARY_TRACE_MAX] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; CANARY_TRACE_MAX];
+static CANARY_TRACE_VAL: [AtomicU64; CANARY_TRACE_MAX] =
+    [const { AtomicU64::new(0) }; CANARY_TRACE_MAX];
+
+/// Fold one reference measurement into the running extremes.
+///
+/// `pos` is the scored-benchmark index the sample follows, recorded so the
+/// variation can be *attributed* rather than merely detected: a cost that is
+/// dear at the same positions across two runs is the suite's own cache/TLB
+/// residue, whereas one that is dear at different positions each run is host
+/// load. See known-issues.md P19.
+fn canary_record(measured: u64, pos: u32) {
+    CANARY_MIN.fetch_min(measured, Ordering::Relaxed);
+    CANARY_MAX.fetch_max(measured, Ordering::Relaxed);
+    let slot = CANARY_SAMPLES.fetch_add(1, Ordering::Relaxed) as usize;
+    // `.get()` rather than indexing: a suite longer than the trace must drop
+    // trace entries, not panic in the middle of a benchmark run.
+    if let (Some(p), Some(v)) = (CANARY_TRACE_POS.get(slot), CANARY_TRACE_VAL.get(slot)) {
+        p.store(pos, Ordering::Relaxed);
+        v.store(measured, Ordering::Relaxed);
+    }
+}
+
+/// Sample the reference cost every [`CANARY_SAMPLE_EVERY`] scored benchmarks.
+///
+/// # Why mid-suite sampling exists
+///
+/// The first version of this canary measured only the suite's two endpoints,
+/// and its first real run showed why that is not enough: it reported the host
+/// stable to within 3% while four benchmarks in that same run
+/// (`shm_rw_64bytes`, `tcp_checksum_v4`, `net_ipv4_parse`,
+/// `net_ethernet_parse`) sat 40-160% above their established values. Endpoint
+/// sampling detects a *sustained* load change; the contamination this guards
+/// against is a *transient burst* that lands on whichever benchmark is
+/// executing at that moment and leaves the rest untouched. An endpoint-only
+/// check therefore could not fire on the very case it was built for — which
+/// is the failure mode this project keeps rediscovering.
+fn maybe_canary_sample() {
+    let n = CANARY_SCORED.fetch_add(1, Ordering::Relaxed);
+    if n.wrapping_rem(CANARY_SAMPLE_EVERY) == 0 {
+        match measure_access_cost().0 {
+            Some(measured) => canary_record(measured, n),
+            // Do not fold a failed measurement into the extremes: a `0` would
+            // drag CANARY_MIN to zero and make the spread meaningless (or,
+            // once every sample fails, make it a serene 0%). Count it instead,
+            // so the verdict can say the instrument failed.
+            None => {
+                CANARY_INVALID.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// One amplified A/B measurement of a guest memory access, in cycles.
+///
+/// Returns `(measured, nop, store)` — the per-access cost, and the two raw
+/// arm totals behind it. `measured` is `None` when the two arms failed to
+/// separate: see "Why this returns an Option" below.
+///
+/// Factored into its own function because this same measurement is taken
+/// **twice** per suite: once before the benchmarks, to calibrate the budgets,
+/// and once after, as the contamination canary. The comparison is only
+/// meaningful if both ends measure precisely the same thing, so there is
+/// deliberately one implementation and no parameters to let the two drift
+/// apart.
+///
+/// # Why the store is `write_volatile` and not a relaxed atomic store
+///
+/// It used to be `CALIBRATION_BYTE.store(black_box(1), Relaxed)`, and under
+/// optimisation that measured **zero**, because a relaxed atomic store is LLVM
+/// `monotonic` and dead-store elimination may drop all but the last of a run of
+/// monotonic stores to one address. The N stores per window collapsed to
+/// about one, leaving the "store" arm *cheaper* than the "nop" arm (measured:
+/// nop=400, store=244), and `saturating_sub` reported the negative delta as 0.
+/// `black_box` is a hint, and the elimination it was asked to prevent is
+/// precisely what happened once the optimiser was turned on. `write_volatile`
+/// is a guarantee: the compiler may not elide it. It also compiles to exactly
+/// one guest store instruction, which is what this claims to be measuring.
+///
+/// # Why the trip count is `black_box`ed
+///
+/// This comment used to claim the arms were "kept symmetric — same loop, same
+/// `black_box` on the value — so the delta is the store instruction and nothing
+/// else." That was **false**, and measurably so: raising N from 64 to 1024
+/// moved the per-access figure from 16.6 cycles to 5.2, while the *store* arm's
+/// per-iteration cost stayed put (20.12 → 18.98). The whole 4x move was in the
+/// nop arm (3.50 → 13.82 cyc/iter).
+///
+/// The reason is that symmetric *in source* is not symmetric *after
+/// optimisation*. With a compile-time-constant trip count, an empty loop is
+/// fully unrollable and a loop of `write_volatile` is not, so at N=64 the nop
+/// arm paid no loop overhead and the store arm paid all of it. The delta was
+/// therefore the store instruction **plus ~11 cycles of scaffolding asymmetry**
+/// — a term that varies with N, which is exactly how it was caught.
+///
+/// Making `n` opaque removes the optimiser's ability to treat the two loops
+/// differently: it cannot unroll or const-fold a trip count it cannot see, so
+/// both arms compile to a real loop and the overhead cancels in the
+/// subtraction. Symmetry by construction rather than by hope.
+///
+/// Note the shape of the original bug and this one: first the optimiser removed
+/// the thing being measured, then it removed the thing being measured
+/// *against*. Both are cases of a benchmark whose validity silently depended on
+/// the optimiser declining to do something it was entitled to do.
+///
+/// # Why this returns an Option
+///
+/// A failed A/B is not a measurement of zero. If the arms do not separate by
+/// at least one cycle per access, the right output is "could not measure", so
+/// that callers report an instrument failure instead of a suspiciously round
+/// number. Reporting 0 is how the canary spent nine consecutive runs certifying
+/// nothing at all — see known-issues.md
+/// B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.
+fn measure_access_cost() -> (Option<u64>, u64, u64) {
+    measure_access_at(CANARY_STORES_PER_WINDOW)
+}
+
+/// Bytes the scattered-access reference walks. 512 KiB is 128 guest pages,
+/// comfortably past TCG's softmmu TLB (256 entries, shared with everything else
+/// running), so consecutive iterations miss it rather than replaying one
+/// resolved entry.
+const SCATTER_BYTES: usize = 512 * 1024;
+
+/// Stride between scattered stores: one 4 KiB *guest* page.
+///
+/// Guest page, not our 16 KiB page: the quantity being defeated is TCG's
+/// per-guest-page softmmu TLB entry, and that is sized by the emulated
+/// architecture, not by the page size this kernel happens to map with.
+const SCATTER_STRIDE: usize = 4096;
+
+/// Scratch for [`measure_scattered_access_cost`]. `.bss` only -- it costs
+/// nothing in the image and is never read, only written.
+static SCATTER_BUF: SyncUnsafeScatterBuf = SyncUnsafeScatterBuf(
+    core::cell::UnsafeCell::new([0u8; SCATTER_BYTES]),
+);
+
+/// Wrapper making the scratch buffer a legal `static`.
+///
+/// SAFETY (type-level): the buffer is written only by
+/// `measure_scattered_access_cost`, which runs once per boot on the boot CPU
+/// inside the benchmark suite, and its contents are never read by anything.
+/// There is therefore no observer for a race to be observable by.
+struct SyncUnsafeScatterBuf(core::cell::UnsafeCell<[u8; SCATTER_BYTES]>);
+// SAFETY: see the type's doc comment -- single writer, no readers, no
+// invariants carried in the bytes.
+unsafe impl Sync for SyncUnsafeScatterBuf {}
+
+/// Cost of one *scattered* guest memory access, in centicycles.
+///
+/// # Why a second reference measurement exists
+///
+/// [`measure_access_cost`] stores to one `static` byte in a tight loop. That is
+/// the right instrument for asking "did the harness itself change?" -- it is
+/// maximally repeatable -- but it measures the **best case** access: one guest
+/// address, one softmmu TLB entry resolved once and replayed 1024 times, one
+/// host cache line. It reads ~5 cycles.
+///
+/// The budgets that used to be calibrated against it were not about that
+/// access. They were about the accesses an allocator makes: scattered across
+/// frames, each a distinct guest page, each its own softmmu lookup. Those cost
+/// one to two orders of magnitude more under TCG, which is why both budgets had
+/// to be hand-corrected upward -- `page_alloc_free_owner_ab` to 150 "accesses"
+/// for a 16-access operation, and `access_floor` itself to a hard
+/// `max(..., 100)` that silently overrode the 5-cycle measurement on **every**
+/// run. Two fudge factors, in opposite places, compensating for one wrong
+/// primitive. See known-issues.md
+/// B-BENCH-THE-ACCESS-FLOOR-CLAMP-BINDS-ON-EVERY-RUN-AND-SAYS-IT-MEASURED-SOMETHING.
+///
+/// SCOPE, since 2026-08-15: **no verdict depends on this any more.** Both
+/// budgets that did are now absolute per-profile cycle counts, because the
+/// deeper fault was that one constant cannot span the ~40x debug/release
+/// difference. What still consumes `access_floor` is the display-only "N
+/// accesses" figures, which restate a cycle delta in a unit a human can reason
+/// about. So a bad floor now costs readability, not correctness -- which is why
+/// the UNMEASURED message below no longer tells the reader to discard verdicts.
+/// It used to, and that was the mirror image of the bug it was written to fix:
+/// a warning that taints sound findings trains the reader to ignore the
+/// instrument just as surely as a budget that cannot fire does.
+///
+/// Striding a page at a time through 512 KiB measures the access those figures
+/// are actually counting, so "N accesses" can be stated and *mean* it. The A/B,
+/// the opaque trip count and the `Option` all work exactly as in
+/// [`measure_access_at`], and for the same reasons -- the nop arm here strides
+/// the identical index sequence without storing, so the address arithmetic
+/// cancels in the subtraction and only the store's softmmu cost is left.
+fn measure_scattered_access_cost() -> (Option<u64>, u64, u64) {
+    measure_scattered_at(SCATTER_STORES)
+}
+
+/// Scattered stores per timed window: one per page of [`SCATTER_BYTES`].
+const SCATTER_STORES: u64 = (SCATTER_BYTES / SCATTER_STRIDE) as u64;
+
+/// One scattered A/B at a given trip count. Split out for the same reason
+/// [`measure_access_at`] is: so the scale-invariance check can run it at two
+/// scales. Halving the count walks half the buffer, which is still all
+/// distinct pages, so a physical per-access cost must not move.
+fn measure_scattered_at(count: u64) -> (Option<u64>, u64, u64) {
+    let base = SCATTER_BUF.0.get().cast::<u8>();
+    let n = core::hint::black_box(core::cmp::min(count, SCATTER_STORES));
+    let stride = core::hint::black_box(SCATTER_STRIDE as u64);
+    let (nop, store) = ab_interleaved(
+        CANARY_ROUNDS,
+        || {
+            timed(|| {
+                let mut i = 0u64;
+                while i < n {
+                    // Same index arithmetic as the store arm, no store. What
+                    // is left in the difference is the access, not the loop.
+                    core::hint::black_box(i.wrapping_mul(stride));
+                    i = i.wrapping_add(1);
+                }
+            })
+        },
+        || {
+            timed(|| {
+                let mut i = 0u64;
+                while i < n {
+                    let offset = core::hint::black_box(i.wrapping_mul(stride));
+                    // SAFETY: `offset` is `i * SCATTER_STRIDE` for
+                    // `i < SCATTER_BYTES / SCATTER_STRIDE`, so it is strictly
+                    // less than `SCATTER_BYTES` and the resulting pointer is
+                    // inside `SCATTER_BUF`. The buffer is `'static`, a byte
+                    // store cannot tear, and nothing else in the kernel touches
+                    // it (see `SyncUnsafeScatterBuf`).
+                    unsafe {
+                        core::ptr::write_volatile(
+                            base.add(offset as usize),
+                            core::hint::black_box(1u8),
+                        );
+                    }
+                    i = i.wrapping_add(1);
+                }
+            })
+        },
+    );
+    let measured = store
+        .checked_sub(nop)
+        .filter(|delta| *delta >= n.saturating_mul(CANARY_MIN_RESOLVABLE))
+        .map(|delta| delta.saturating_mul(CENTI) / n);
+    (measured, nop, store)
+}
+
+/// One A/B reference measurement at a given trip count.
+///
+/// Split out from [`measure_access_cost`] so the calibration path can run it at
+/// two scales and check that the answer does not depend on the scale — see
+/// [`scale_invariance_check`]. A per-access cost that changes when N changes is
+/// not a measurement of the access.
+fn measure_access_at(trip: u64) -> (Option<u64>, u64, u64) {
+    static CALIBRATION_BYTE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+    let cell = CALIBRATION_BYTE.as_ptr();
+    // Opaque on purpose: a trip count the optimiser can see is a trip count it
+    // can unroll, and it will unroll the empty arm while leaving the volatile
+    // arm alone. See the doc comment above.
+    let n = core::hint::black_box(trip);
+    let (nop, store) = ab_interleaved(
+        CANARY_ROUNDS,
+        || {
+            timed(|| {
+                let mut i = 0u64;
+                while i < n {
+                    core::hint::black_box(1u8);
+                    i = i.wrapping_add(1);
+                }
+            })
+        },
+        || {
+            timed(|| {
+                let mut i = 0u64;
+                while i < n {
+                    // SAFETY: `cell` points at a live `'static` AtomicU8, so it
+                    // is valid and correctly aligned for the whole program. A
+                    // one-byte store cannot tear, and `CALIBRATION_BYTE` exists
+                    // solely as this loop's scratch target — nothing else in
+                    // the kernel reads or writes it — so there is no concurrent
+                    // access for this write to race with.
+                    unsafe { core::ptr::write_volatile(cell, core::hint::black_box(1u8)) };
+                    i = i.wrapping_add(1);
+                }
+            })
+        },
+    );
+    // Require `CANARY_MIN_RESOLVABLE` cycles per access before believing the
+    // delta. The bound used to be one cycle — enough only to stop the integer
+    // division flooring to 0 — while scripts/bench-history.py independently
+    // rejected anything under 4. Neither rule was wrong by its own lights;
+    // having two rules for one question was the defect, so both now derive
+    // from the tolerance. See CANARY_MIN_RESOLVABLE.
+    let measured = store
+        .checked_sub(nop)
+        .filter(|delta| *delta >= n.saturating_mul(CANARY_MIN_RESOLVABLE))
+        // Centicycles, not cycles: see CENTI. `delta` is ~5290 over 1024
+        // stores, so `delta / n` would round three measured significant figures
+        // away and leave a single digit whose quantisation step is 20% of
+        // itself.
+        .map(|delta| delta.saturating_mul(CENTI) / n);
+    (measured, nop, store)
+}
+
+/// Check that the reference measurement does not depend on how many times it
+/// loops, and report the result.  Runs once per boot, at calibration.
+///
+/// # Why this is here rather than in a comment
+///
+/// The scale-dependence this catches was real, shipped, and invisible: the
+/// A/B's two arms optimised differently, so the per-access figure was 16.6
+/// cycles at N=64 and 5.2 at N=1024 for one and the same store instruction.
+/// It was found only because a prediction had been registered by hand to look
+/// for it. A property that is checked when someone remembers to check it is,
+/// by the maxim this file keeps re-learning, not checked at all — *a check that
+/// cannot fire is indistinguishable from a check that passes*. So the check
+/// becomes part of the instrument.
+///
+/// A physical cost per store cannot depend on the length of the loop around
+/// it. If it does, the subtraction is picking up something other than the
+/// store, and every budget derived from it is a number with no referent.
+///
+/// Returns `true` if the two scales agree within `CANARY_TOLERANCE_PCT`.
+fn scale_invariance_check(base: u64) -> bool {
+    let (small, _, _) = measure_access_at(base);
+    let (large, _, _) = measure_access_at(base.saturating_mul(2));
+    let (Some(a), Some(b)) = (small, large) else {
+        serial_println!(
+            "[bench]   canary scale check: UNMEASURABLE at N={} ({:?}) or N={} ({:?}) — \
+             the arms did not separate, so scale-invariance cannot be assessed.",
+            base, small, base.saturating_mul(2), large
+        );
+        return false;
+    };
+    // Percent difference against the smaller of the two, so the figure reads as
+    // "how much did doubling the loop change the answer". Both are centicycles;
+    // the ratio is unit-invariant, but the *printed* values are not, so they go
+    // through `centi_parts` below.
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let (a_c, a_t) = centi_parts(a);
+    let (b_c, b_t) = centi_parts(b);
+    let diff_pct = if lo > 0 {
+        hi.saturating_sub(lo).saturating_mul(100) / lo
+    } else {
+        100
+    };
+    if diff_pct > CANARY_TOLERANCE_PCT {
+        serial_println!(
+            "[bench]   canary scale check: FAILED — {}.{} cycles/store at N={} but {}.{} at N={} \
+             ({}% apart, tolerance {}%). The per-access cost must not depend on the trip \
+             count; that it does means the A/B subtraction is measuring loop scaffolding \
+             as well as the store, so this run's access_floor is not a physical quantity. \
+             See known-issues.md B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.",
+            a_c, a_t, base, b_c, b_t, base.saturating_mul(2), diff_pct, CANARY_TOLERANCE_PCT
+        );
+        return false;
+    }
+    serial_println!(
+        "[bench]   canary scale check: OK — {}.{} cycles/store at N={}, {}.{} at N={} ({}% apart, \
+         tolerance {}%), so the delta scales with the store count and not with the loop.",
+        a_c, a_t, base, b_c, b_t, base.saturating_mul(2), diff_pct, CANARY_TOLERANCE_PCT
+    );
+    true
+}
+
+/// The same scale check, for the scattered reference the budgets use.
+///
+/// It needs its own because the two measurements can fail independently and
+/// for different reasons: the hot one is defeated by the optimiser treating the
+/// two arms asymmetrically, the scattered one additionally by the buffer being
+/// small enough that TCG's softmmu TLB still holds every page (which would make
+/// it a slower copy of the hot measurement rather than a different quantity).
+/// Both show up here as a per-access cost that moves with the trip count.
+///
+/// Halving the count is the perturbation rather than doubling it, because
+/// doubling would walk past [`SCATTER_BYTES`] and wrap onto pages already
+/// resident -- which is itself scale-dependence, introduced by the test.
+fn scatter_scale_invariance_check() -> bool {
+    let (half, _, _) = measure_scattered_at(SCATTER_STORES / 2);
+    let (full, _, _) = measure_scattered_at(SCATTER_STORES);
+    let (Some(a), Some(b)) = (half, full) else {
+        serial_println!(
+            "[bench]   scatter scale check: UNMEASURABLE at N={} ({:?}) or N={} ({:?}) — \
+             the arms did not separate, so scale-invariance cannot be assessed.",
+            SCATTER_STORES / 2, half, SCATTER_STORES, full
+        );
+        return false;
+    };
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let (a_c, a_t) = centi_parts(a);
+    let (b_c, b_t) = centi_parts(b);
+    let diff_pct = if lo > 0 {
+        hi.saturating_sub(lo).saturating_mul(100) / lo
+    } else {
+        100
+    };
+    if diff_pct > CANARY_TOLERANCE_PCT {
+        serial_println!(
+            "[bench]   scatter scale check: FAILED — {}.{} cycles/scattered store at N={} \
+             but {}.{} at N={} ({}% apart, tolerance {}%). A physical per-access cost \
+             cannot depend on how many pages the loop walks, so this run's budget \
+             calibration is not a physical quantity.",
+            a_c, a_t, SCATTER_STORES / 2, b_c, b_t, SCATTER_STORES, diff_pct,
+            CANARY_TOLERANCE_PCT
+        );
+        return false;
+    }
+    serial_println!(
+        "[bench]   scatter scale check: OK — {}.{} cycles/scattered store at N={}, {}.{} \
+         at N={} ({}% apart, tolerance {}%).",
+        a_c, a_t, SCATTER_STORES / 2, b_c, b_t, SCATTER_STORES, diff_pct,
+        CANARY_TOLERANCE_PCT
+    );
+    true
+}
+
+/// Explain the two things that make an A/B reference measurement fail.
+///
+/// # Why both must be named
+///
+/// This message used to offer exactly one cause — "the optimiser has removed it
+/// again" — because that is what happened the first time and the text was
+/// written from that single instance. The controlled load test (P20) produced
+/// the identical symptom from the opposite cause: with six CPU spinners
+/// competing for the host, 1 of 10 measurements inverted in *both* trials, on a
+/// binary whose store had already been proven intact by the scale-invariance
+/// check in the same run.
+///
+/// A reader who trusts the old wording would go disassemble a function that is
+/// perfectly correct. Naming one cause for a symptom with two is how a
+/// diagnostic becomes a wild-goose chase, and it is the same false attribution
+/// this file has now recorded four times over.
+fn report_arm_failure_causes(invalid: u32) {
+    serial_println!(
+        "[bench]   arm-separation failure has two causes, and they need opposite \
+         responses. (1) HOST LOAD: the two arms differ by ~5 cycles per store, so \
+         competing work on the host can make noise exceed the signal and invert \
+         them. Demonstrated: 6 CPU spinners produced exactly {} such failure(s) \
+         per run on a known-good binary. Re-run on an idle machine before \
+         concluding anything. (2) OPTIMISER REMOVAL: the store was elided, so \
+         there is no signal at all. Distinguish them by the 'canary scale check' \
+         line above — if it reported OK, the store is intact and the cause is \
+         load, not codegen. See known-issues.md \
+         B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.",
+        invalid
+    );
+}
+
+/// Re-measure the reference access cost and report whether the host stayed
+/// quiet for the whole suite.
+///
+/// # Why this exists
+///
+/// The suite runs under QEMU TCG, which is pure emulation and entirely
+/// CPU-bound, so any other load on the host scales the measurements. The
+/// existing median-ratio drift correction in `scripts/bench-history.py`
+/// removes a *uniform* whole-suite factor, but contention from a handful of
+/// short commands is not uniform: it lands on whichever benchmark happens to
+/// be executing and leaves the rest untouched, which is indistinguishable
+/// from a real regression — one or two benchmarks clear of an unchanged
+/// median.
+///
+/// "Remember to keep the machine idle" is not a fix; it already failed once,
+/// the same day it was written down. This makes contamination a property the
+/// data itself can verify, which is the same principle as the stall
+/// detectors: a check that cannot fire is indistinguishable from a check that
+/// passes.
+///
+/// Emits `[bench] CANARY <start> <end> <pct>` where `pct` is `end` as a
+/// percentage of `start`, so 100 means the host was equally loaded at both
+/// ends. The pair is recorded unconditionally rather than only on failure —
+/// a verdict alone would leave no way to ever calibrate the threshold.
+fn report_canary(start: Option<u64>) {
+    let (end, end_nop, end_store) = measure_access_cost();
+    // The endpoints are samples too, so fold them in before reading extremes —
+    // but only the ones that measured something.
+    for endpoint in [start, end] {
+        match endpoint {
+            // Endpoints are not at a suite position; they bracket the suite.
+            // They are already reported individually as `start`/`end`, so the
+            // sentinel only needs to keep them out of the positional analysis.
+            Some(measured) => canary_record(measured, CANARY_POS_ENDPOINT),
+            None => {
+                CANARY_INVALID.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    // Guard the division: a missing start means the calibration itself failed,
+    // and the run's budgets are already untrustworthy in that case.
+    let (start, end) = (start.unwrap_or(0), end.unwrap_or(0));
+    let pct = if start > 0 {
+        end.saturating_mul(100) / start
+    } else {
+        0
+    };
+
+    let samples = CANARY_SAMPLES.load(Ordering::Relaxed);
+    let invalid = CANARY_INVALID.load(Ordering::Relaxed);
+    // `CANARY_MIN` still holds its u64::MAX sentinel when nothing valid was
+    // ever recorded. Print 0 rather than the sentinel, which would otherwise
+    // read as an 18-quintillion-cycle memory access.
+    let lo = if samples == 0 { 0 } else { CANARY_MIN.load(Ordering::Relaxed) };
+    let hi = CANARY_MAX.load(Ordering::Relaxed);
+    // Spread as a percentage of the quietest sample: the minimum is the best
+    // estimate of the uncontended cost, so this reads as "how much slower did
+    // the machine get at its worst moment".
+    let spread = if lo > 0 {
+        hi.saturating_sub(lo).saturating_mul(100) / lo
+    } else {
+        0
+    };
+
+    // The first six wire fields stay in whole cycles so all 18 historical
+    // records keep their meaning.
+    //
+    // But `spread` is computed from centicycles while `min`/`max` are rounded,
+    // and that made each record contradict itself: the 22:1x run wrote
+    // `min=5 max=7 spread=47` when (7-5)/5 is 40%. A reader reconciling those
+    // would reach for the rounded pair, which is the wrong half. So the exact
+    // extremes are appended as two further fields -- append-only, leaving every
+    // existing record and the parser's optional trailing groups untouched --
+    // and they also give the history tool the discriminator it lacks: a record
+    // carrying centicycle extremes has a trustworthy `spread`; one without is a
+    // whole-cycle record whose spread may be two roundings wide.
+    let (start_c, start_t) = centi_parts(start);
+    let (end_c, end_t) = centi_parts(end);
+    let (lo_c, lo_t) = centi_parts(lo);
+    let (hi_c, hi_t) = centi_parts(hi);
+
+    // `<start> <end> <pct>` keeps its original meaning; the trailing fields are
+    // an append-only extension, so the one record written before mid-suite
+    // sampling existed still reads back correctly. `invalid` is the newest.
+    serial_println!(
+        "[bench] CANARY {} {} {} {} {} {} {} {} {} {}",
+        start_c, end_c, pct, lo_c, hi_c, spread, samples, invalid, lo, hi
+    );
+
+    // The positional trace, on its own line so the CANARY record stays a single
+    // fixed-arity tuple. Extremes say *how much* the reference cost moved; only
+    // positions can say *why*, and the two causes have opposite remedies:
+    // samples that are dear at the same positions across runs are the suite's
+    // own cache/TLB residue (not contamination, and not fixable by tuning the
+    // tolerance), whereas dear samples at differing positions are host load.
+    // See known-issues.md P19.
+    if samples > 0 {
+        serial_print!("[bench] CANARY-TRACE");
+        for slot in 0..(samples as usize).min(CANARY_TRACE_MAX) {
+            let (Some(p), Some(v)) = (CANARY_TRACE_POS.get(slot), CANARY_TRACE_VAL.get(slot))
+            else {
+                continue;
+            };
+            let pos = p.load(Ordering::Relaxed);
+            let (c, t) = centi_parts(v.load(Ordering::Relaxed));
+            if pos == CANARY_POS_ENDPOINT {
+                serial_print!(" end:{}.{}", c, t);
+            } else {
+                serial_print!(" {}:{}.{}", pos, c, t);
+            }
+        }
+        serial_println!("");
+    }
+
+    // Three outcomes, deliberately not two. "The instrument failed" is not
+    // "the instrument found contamination": reporting the second when the
+    // first is true sends the reader hunting for host load that was never
+    // there, which is exactly what nine release runs did.
+    //
+    // But the precedence between them is not "any failure wins". A failed
+    // measurement does not erase the successful ones, and a positive finding
+    // from the samples that *did* measure is still a finding. The controlled
+    // load test (P20) proved this concretely: under 6 CPU spinners the suite
+    // reported CANARY BROKEN on a single failed arm-separation while the other
+    // nine samples showed an unmistakable 53% spread. The run was contaminated,
+    // the instrument had measured it, and the verdict said "UNKNOWN".
+    //
+    // So: no valid samples at all is BROKEN, because there is nothing to
+    // conclude from. Otherwise a spread over tolerance is CONTAMINATED even
+    // with failures present -- the failures corroborate it rather than
+    // undermining it. Only a *within*-tolerance spread alongside failures is
+    // UNKNOWN, since the failed samples could have hidden an excursion.
+    if samples == 0 {
+        serial_println!(
+            "[bench] CANARY BROKEN: all {} reference measurements could not \
+             separate their two arms (last: nop={} store={} over {} stores/window), \
+             so contamination is UNKNOWN for this run — not clean. See the note on \
+             causes below.",
+            invalid, end_nop, end_store, CANARY_STORES_PER_WINDOW
+        );
+        report_arm_failure_causes(invalid);
+    } else if invalid > 0 && spread <= CANARY_TOLERANCE_PCT {
+        serial_println!(
+            "[bench] CANARY BROKEN: {} of {} reference measurements could not \
+             separate their two arms (last: nop={} store={} over {} stores/window). \
+             The other {} spread only {}% ({}.{}-{}.{} cycles), but a failed sample \
+             is not a quiet one — it could have been the excursion — so \
+             contamination is UNKNOWN for this run, NOT clean.",
+            invalid,
+            samples.saturating_add(invalid),
+            end_nop,
+            end_store,
+            CANARY_STORES_PER_WINDOW,
+            samples, spread, lo_c, lo_t, hi_c, hi_t
+        );
+        report_arm_failure_causes(invalid);
+    } else if spread > CANARY_TOLERANCE_PCT {
+        serial_println!(
+            "[bench] CONTAMINATED: the reference access cost spread {}% across {} \
+             samples during the suite ({}.{}-{}.{} cycles, endpoints {}.{} -> {}.{} \
+             = {}%, tolerance {}%){}. Host load changed mid-run, so a single-benchmark \
+             outlier in this run is unproven — do not read it as a regression. If you \
+             ran anything else on this machine during the QEMU window, that was the \
+             load: see scripts/boot-test.sh --bench.",
+            spread, samples,
+            lo_c, lo_t, hi_c, hi_t,
+            start_c, start_t, end_c, end_t,
+            pct, CANARY_TOLERANCE_PCT,
+            // The failures are evidence *for* this verdict, not against it:
+            // noise large enough to invert a 5-cycle A/B split is itself load.
+            if invalid > 0 { " — and some measurements failed outright, see below" }
+            else { "" }
+        );
+        if invalid > 0 {
+            serial_println!(
+                "[bench]   ...{} of {} reference measurements also failed to separate \
+                 their arms, which corroborates the verdict rather than weakening it.",
+                invalid, samples.saturating_add(invalid)
+            );
+            report_arm_failure_causes(invalid);
+        }
+    } else {
+        serial_println!(
+            "[bench] Canary OK: reference access cost stable across {} samples \
+             ({}.{}-{}.{} cycles, spread {}%).",
+            samples, lo_c, lo_t, hi_c, hi_t, spread
+        );
+    }
+}
 
 /// Run all standard kernel micro-benchmarks.
 ///
@@ -684,50 +1591,146 @@ pub fn run_all() {
     // calibration incapable of manufacturing a false alarm. Erring toward
     // false negatives is the right direction for a check whose entire purpose
     // is to stop crying wolf at correct code.
-    let access_floor = {
-        static CALIBRATION_BYTE: core::sync::atomic::AtomicU8 =
-            core::sync::atomic::AtomicU8::new(0);
-        const ROUNDS: u32 = 500;
-        /// Stores per timed window. The per-window delta is ~N x one access,
-        /// so at N=64 a ~200-cycle access shows up as ~13k cycles — an order
-        /// of magnitude clear of the few-hundred-cycle harness wander.
-        const N: u64 = 64;
-        let (nop, store) = ab_interleaved(
-            ROUNDS,
-            || {
-                timed(|| {
-                    let mut i = 0u64;
-                    while i < N {
-                        core::hint::black_box(i);
-                        i = i.wrapping_add(1);
-                    }
-                })
-            },
-            || {
-                timed(|| {
-                    let mut i = 0u64;
-                    while i < N {
-                        CALIBRATION_BYTE.store(core::hint::black_box(1u8), Ordering::Relaxed);
-                        i = i.wrapping_add(1);
-                    }
-                })
-            },
-        );
-        // Still clamped: if the two arms somehow land equal the budgets below
-        // must not all collapse to 0 and turn every check into a guaranteed
-        // failure. With the amplification above this should never bind, and if
-        // the printed `measured` is ever at or below it, treat the run's
-        // budget-based verdicts as unreliable rather than as findings.
-        let measured = store.saturating_sub(nop) / N;
-        let floor = core::cmp::max(measured, 100);
-        serial_println!(
-            "[bench]   memory_access_floor: {} cycles/guest byte-store (measured={} \
-             over {} stores/window: nop={} store={}, {} interleaved rounds) — budgets \
-             below are multiples of this",
-            floor, measured, N, nop, store, ROUNDS
-        );
-        floor
+    //
+    // The mechanics live in `measure_access_cost` because this exact
+    // measurement is taken a second time at the end of the suite, as the
+    // contamination canary (see `report_canary`).
+    let calibration = {
+        // Before trusting the number, check that it *is* a number: a per-store
+        // cost that changes when the loop length changes is measuring the loop,
+        // not the store. Costs two extra A/B runs, once per boot.
+        let scale_ok = scale_invariance_check(CANARY_STORES_PER_WINDOW);
+        let (measured, nop, store) = measure_access_cost();
+        // A scale-dependent measurement is not a measurement. Discard it rather
+        // than let it calibrate ~60 budgets, and fall through to the same
+        // "UNMEASURED" reporting path the arms-did-not-separate case uses --
+        // both mean "the instrument failed", which is not "the code is fine".
+        let measured = if scale_ok { measured } else { None };
+
+        // Everything below this point -- every budget, and every "N accesses"
+        // figure -- is calibrated against the SCATTERED access, not the hot one
+        // measured just above.
+        //
+        // The hot measurement stays, but only as the contamination canary's
+        // reference: there, repeatability is the entire requirement and realism
+        // is beside the point, because the canary compares the number to itself
+        // at the end of the suite. It is a bad calibration constant for
+        // everything else, because it measures one guest address replayed 1024
+        // times -- one softmmu TLB entry, one host cache line -- and reads ~5
+        // cycles, while every access the budgets are about (allocator
+        // bookkeeping, owner tags, page zeroing) touches a different frame each
+        // time and so pays a fresh softmmu lookup. Calibrating a 150-access
+        // budget against a 5-cycle best-case access is what forced the two
+        // compensating fudge factors this block used to carry, and what made
+        // the clamp below bind on 100% of recorded runs.
+        let scatter_scale_ok = scatter_scale_invariance_check();
+        let (scattered, s_nop, s_store) = measure_scattered_access_cost();
+        let scattered = if scatter_scale_ok { scattered } else { None };
+        // UNIT CHANGE: `scattered` is centicycles (see CENTI), but its consumer
+        // divides a raw cycle delta by it (`accesses(delta, access_floor)`), so
+        // the floor must be *cycles*. Converting here rather than at that site
+        // keeps exactly one place in the file where the two units meet. Getting
+        // this wrong would misstate every "N accesses" figure by 100x while each
+        // printed number still looked plausible — the same silent-units failure
+        // as the debug/release profile mix-up that made P11 and P13 miss.
+        let scattered_cycles = scattered.map(|c| c / CENTI);
+        // The clamp survives only as a guard against the degenerate case its
+        // comment always claimed it was for -- and now it announces itself
+        // instead of silently overriding a good measurement, which it did on
+        // every recorded run.
+        const FLOOR_FALLBACK: u64 = 100;
+        let clamped = scattered_cycles.is_none_or(|c| c < FLOOR_FALLBACK);
+        let floor = core::cmp::max(scattered_cycles.unwrap_or(0), FLOOR_FALLBACK);
+        match scattered {
+            Some(value) if !clamped => serial_println!(
+                "[bench]   memory_access_floor: {} cycles/scattered guest byte-store \
+                 (measured={}.{} over {} stores at {} B stride: nop={} store={}, {} \
+                 interleaved rounds) — the \"N accesses\" figures below are in units \
+                 of this",
+                floor, centi_parts(value).0, centi_parts(value).1,
+                SCATTER_BYTES / SCATTER_STRIDE, SCATTER_STRIDE, s_nop, s_store,
+                CANARY_ROUNDS
+            ),
+            // Measured, believed, and then overridden anyway. This is NOT the
+            // same as the UNMEASURED case below and must not print like it: the
+            // instrument worked, so the run is diagnostic, and the only casualty
+            // is the unit the "N accesses" figures are quoted in.
+            Some(value) => serial_println!(
+                "[bench]   memory_access_floor: CLAMPED — measured {}.{} cycles/scattered \
+                 guest byte-store (over {} stores at {} B stride: nop={} store={}, {} \
+                 interleaved rounds), which is under the {} cycle fallback, so the \
+                 fallback is the divisor for the \"N accesses\" figures below. Those \
+                 figures are therefore UNDERSTATED (a bigger divisor yields fewer \
+                 accesses); the PASS/SLOW verdicts are absolute per-profile cycle \
+                 counts and are unaffected.",
+                centi_parts(value).0, centi_parts(value).1,
+                SCATTER_BYTES / SCATTER_STRIDE, SCATTER_STRIDE, s_nop, s_store,
+                CANARY_ROUNDS, FLOOR_FALLBACK
+            ),
+            // The clamp used to absorb this silently, and did so on all nine
+            // release-profile runs while its own comment said it should never
+            // bind. Say it out loud -- but say only what is true. This message
+            // used to void every budget verdict below it; since the budgets
+            // became absolute per-profile cycle counts that is over-claiming,
+            // and it was observed doing so on the 2026-08-15 release boot, where
+            // it told the reader to discard two verdicts that were in fact
+            // sound. Scope the warning to what the floor actually feeds.
+            None => serial_println!(
+                "[bench]   memory_access_floor: UNMEASURED — {} (nop={} store={} over {} \
+                 stores at {} B stride, {} interleaved rounds). Falling back to the \
+                 arbitrary clamp of {} cycles: the \"N accesses\" figures below are not \
+                 physical and must not be read as findings. The PASS/SLOW verdicts are \
+                 absolute per-profile cycle counts and DO still hold.",
+                if scatter_scale_ok {
+                    "the A/B arms did not separate; the store arm must be the dearer of the two"
+                } else {
+                    "the scale check rejected the measurement, so the delta is not \
+                     attributable to the store"
+                },
+                s_nop, s_store, SCATTER_BYTES / SCATTER_STRIDE, SCATTER_STRIDE,
+                CANARY_ROUNDS, floor
+            ),
+        }
+        // The hot per-access cost is reported alongside rather than replaced.
+        // Its ratio to the scattered cost is the whole reason the budgets used
+        // to need hand-correction, so printing both every run is what stops the
+        // next reader re-deriving that ratio -- or, worse, re-introducing the
+        // fudge factors. It is also still the canary's reference, so it has to
+        // be printed whatever the budgets use.
+        match measured {
+            Some(value) => serial_println!(
+                "[bench]   memory_access_hot: {}.{} cycles/guest byte-store to ONE address \
+                 ({} stores/window, {} interleaved rounds; nop={} store={}) — the \
+                 contamination canary's reference only; NOT the budget calibration and NOT \
+                 the divisor for the \"N accesses\" figures below",
+                centi_parts(value).0, centi_parts(value).1,
+                CANARY_STORES_PER_WINDOW, CANARY_ROUNDS, nop, store
+            ),
+            None => serial_println!(
+                "[bench]   memory_access_hot: UNMEASURED — {} (nop={} store={} over {} \
+                 stores/window, {} interleaved rounds). The contamination canary has no \
+                 reference this run; the budgets above are unaffected.",
+                if scale_ok {
+                    "the A/B arms did not separate; the store arm must be the dearer of the two"
+                } else {
+                    "the scale check above rejected the measurement, so the delta is not \
+                     attributable to the store"
+                },
+                nop, store, CANARY_STORES_PER_WINDOW, CANARY_ROUNDS
+            ),
+        }
+        (floor, measured)
     };
+    // `access_floor` is the SCATTERED cost from here down -- now only the "N
+    // accesses" figures, since the budgets became absolute per-profile cycle
+    // counts, but still scattered because that is the access allocator code
+    // actually makes. `canary_start` keeps the HOT cost, because
+    // the contamination canary re-measures that same quantity at the end of the
+    // suite and compares the two. One variable was serving both roles, and that
+    // is what hid the problem: the hot number is ~5 cycles, so every budget
+    // derived from it fell under the 100-cycle clamp and the clamp -- not the
+    // measurement -- was silently the answer on every run ever recorded.
+    let (access_floor, canary_start) = calibration;
 
     // --- CPU index lookup (the per-CPU-data primitive under every hot path) ---
     //
@@ -779,19 +1782,49 @@ pub fn run_all() {
         // regression it had just been added to prove was fixed. Four accesses
         // sits clear of the noise while still being far under an MMIO
         // round-trip.
-        let mmio_suspicion = access_floor.saturating_mul(4);
+        //
+        // RE-DERIVED 2026-08-15 from the recorded boot logs, and deliberately
+        // no longer a multiple of `access_floor`. Two things were wrong.
+        //
+        // First, the quantity being bounded is not a memory access cost. The
+        // check asks "did the lookup fall back to an APIC MMIO round-trip?" —
+        // a register read versus a device exit. Sizing that in units of a
+        // memory access was a category error, and it inherited the floor's
+        // 100-cycle clamp, so "4 accesses" has always meant a flat 400 cycles.
+        //
+        // Second, and the reason the number looked untouchable: **one budget
+        // cannot serve both build profiles.** Measured across the recorded
+        // boots, a healthy lookup costs 4-10 cycles in release (n=8) but
+        // 188-420 in debug, because the whole kernel is ~40x slower there. A
+        // budget loose enough for debug is ~40x too loose for release — which
+        // is exactly what 400 was, against a worst release observation of 10.
+        // In release this check could not fire at all, and a check that cannot
+        // fire is indistinguishable from a check that passes.
+        //
+        // Per-profile budgets, each sized against its own measured healthy
+        // range and sitting far under the fault being detected (an MMIO exit
+        // costs hundreds of cycles at minimum, in either profile):
+        //   release: 100 cycles = 10x the worst healthy observation (10)
+        //   debug:  2000 cycles = ~5x the worst healthy observation (420)
+        //
+        // `debug_assertions` rather than a bespoke feature flag because it
+        // already tracks the profile by Cargo default. If a profile is ever
+        // configured with `debug-assertions` decoupled from `opt-level`, this
+        // picks the wrong budget — hence the profile is named in the output
+        // below, so a surprising verdict can be traced to the branch taken.
+        let mmio_suspicion: u64 = if cfg!(debug_assertions) { 2000 } else { 100 };
         if cost <= mmio_suspicion {
             serial_println!(
                 "[bench]   fast_cpu_index: PASS ({} cycles over an empty closure, \
-                 limit {} = 4 accesses; nop={} idx={}, {} interleaved rounds)",
-                cost, mmio_suspicion, nop_cycles, idx_cycles, ROUNDS
+                 limit {} cycles [{} profile]; nop={} idx={}, {} interleaved rounds)",
+                cost, mmio_suspicion, PROFILE_NAME, nop_cycles, idx_cycles, ROUNDS
             );
         } else {
             serial_println!(
                 "[bench]   fast_cpu_index: SLOW ({} cycles over an empty closure, \
-                 limit {} = 4 accesses; nop={} idx={}) — suspect a fallback to the \
-                 APIC MMIO path",
-                cost, mmio_suspicion, nop_cycles, idx_cycles
+                 limit {} cycles [{} profile]; nop={} idx={}) — suspect a fallback \
+                 to the APIC MMIO path",
+                cost, mmio_suspicion, PROFILE_NAME, nop_cycles, idx_cycles
             );
         }
     }
@@ -923,25 +1956,49 @@ pub fn run_all() {
         // cycles-each, against a budget sized for real hardware. The whole
         // investigation is written up in known-issues.md under
         // TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT.
-        const OWNER_TAG_BUDGET_ACCESSES: u64 = 150; // From baselines.toml
-        let budget = access_floor.saturating_mul(OWNER_TAG_BUDGET_ACCESSES);
+        // RE-DERIVED 2026-08-15, same cause and same fix as `mmio_suspicion`
+        // above. 150 was sized against a floor that was really the 100-cycle
+        // clamp, so it has always meant a flat 15000 cycles — and, decisively,
+        // **the 7660-11288 figures quoted just above are DEBUG boots.** The
+        // same tagging costs 42-246 cycles in release (n=9). So the old budget
+        // was 61x the worst release observation: in release it could not fire,
+        // while in debug it was correctly sized. One constant was being asked
+        // to cover a 40x profile difference, and release lost.
+        //
+        // Per-profile budgets from the measured healthy ranges:
+        //   release:  1500 cycles = ~6x the worst healthy observation (246)
+        //   debug:   40000 cycles = ~3x the worst healthy observation (12708)
+        //
+        // The release margin is deliberately wider than `mmio_suspicion`'s
+        // because the healthy release range is itself wide (42-246, a 5.9x
+        // spread) where the cpu-index one is tight (4-10). Both still sit an
+        // order of magnitude under the faults being detected — an MMIO, a
+        // contended lock, or a per-frame loop where a `write_bytes` belongs,
+        // each of which costs 10-100x a plain access.
+        const OWNER_TAG_BUDGET_RELEASE: u64 = 1_500;
+        const OWNER_TAG_BUDGET_DEBUG: u64 = 40_000;
+        let budget: u64 = if cfg!(debug_assertions) {
+            OWNER_TAG_BUDGET_DEBUG
+        } else {
+            OWNER_TAG_BUDGET_RELEASE
+        };
         let delta = min_on.saturating_sub(min_off);
         let (acc_whole, acc_tenth) = accesses(delta, access_floor);
         if delta <= budget {
             serial_println!(
                 "[bench]   page_alloc_free_owner_ab: PASS (tagging costs {} cycles/\
-                 alloc+free = {}.{} accesses, limit {} accesses; off={} on={}, {} \
-                 interleaved rounds)",
-                delta, acc_whole, acc_tenth, OWNER_TAG_BUDGET_ACCESSES,
+                 alloc+free = {}.{} accesses, limit {} cycles [{} profile]; \
+                 off={} on={}, {} interleaved rounds)",
+                delta, acc_whole, acc_tenth, budget, PROFILE_NAME,
                 min_off, min_on, ROUNDS
             );
         } else {
             serial_println!(
                 "[bench]   page_alloc_free_owner_ab: SLOW (tagging costs {} cycles/\
-                 alloc+free = {}.{} accesses, limit {} accesses; off={} on={}, {} \
-                 interleaved rounds) — suspect an MMIO, a lock, or a per-frame \
-                 loop that should be one write_bytes",
-                delta, acc_whole, acc_tenth, OWNER_TAG_BUDGET_ACCESSES,
+                 alloc+free = {}.{} accesses, limit {} cycles [{} profile]; \
+                 off={} on={}, {} interleaved rounds) — suspect an MMIO, a lock, \
+                 or a per-frame loop that should be one write_bytes",
+                delta, acc_whole, acc_tenth, budget, PROFILE_NAME,
                 min_off, min_on, ROUNDS
             );
         }
@@ -1344,6 +2401,12 @@ pub fn run_all() {
 
     // --- VFS benchmarks (fs zone) ---
     bench_vfs_stat();
+    // Runs immediately after vfs_stat so it sees the same dcache occupancy
+    // that vfs_stat was measured against.
+    // Before the VFS breakdown: it interprets its stages in terms of lock
+    // cost, so the lock cost had better be measured first.
+    bench_lock_primitives();
+    bench_vfs_stat_breakdown();
     bench_vfs_read_write();
     bench_vfs_readdir();
 
@@ -1411,6 +2474,13 @@ pub fn run_all() {
     //
     // Target from baselines.toml: < 10 µs (37000 cycles).
     bench_isr_latency();
+
+    // --- Contamination canary ---
+    //
+    // Re-measure the same reference the budgets were calibrated against. Runs
+    // *before* the scorecard so the verdict is already on the log next to the
+    // SCORE lines it qualifies.
+    report_canary(canary_start);
 
     // --- Print scorecard summary ---
     print_scorecard();
@@ -1745,6 +2815,165 @@ fn bench_syscall_dispatch() {
             result.min_ns, target_ns
         );
     }
+
+    bench_syscall_dispatch_breakdown(&result);
+}
+
+/// Decompose `dispatch()` into the work it does *besides* running the handler.
+///
+/// `syscall_dispatch` has sat at ~3.5x its 200 ns target across every boot on
+/// record, and the lockdep O(1) fix — which cut `crate::sync::Mutex`
+/// acquire+release from 632 ns to 274 ns and `vfs_stat_root` by 44% — moved it
+/// by exactly 0 ns.  That is a real finding, not a null result: it says the
+/// cost is somewhere `crate::sync::Mutex` is not.
+///
+/// Rather than infer which of dispatch's five prologue/epilogue stages that is,
+/// each is measured **directly, in isolation**, and the residual is printed as
+/// an explicit `unexplained` term.  This project has twice reasoned about a hot
+/// path from the source alone and been wrong (the `pick_next` benchmark measured
+/// a full yield; the `sched_pick_next` anchor came from a benchmark that took no
+/// lock at all), so the source is used here only to decide *what* to measure,
+/// never to decide *how much* something costs.
+fn bench_syscall_dispatch_breakdown(dispatch_result: &BenchResult) {
+    use crate::syscall::dispatch::SyscallArgs;
+    use crate::syscall::handlers::sys_task_id;
+    use crate::syscall::number::SYS_TASK_ID;
+
+    let args = SyscallArgs {
+        arg0: SYS_TASK_ID,
+        arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let tid = crate::sched::current_task_id();
+
+    // Stage 1: the handler itself — the only work a caller actually asked for.
+    // Everything else this function measures is overhead by definition.
+    let handler = run("sd_handler", 2000, || {
+        core::hint::black_box(sys_task_id(&args));
+    });
+
+    // Stage 2: `sched::current_task_id()`.  Dispatch calls it once directly, and
+    // each `ktrace::record` calls it again — so it is charged three times per
+    // syscall, and is measured alone to price that.
+    let task_id = run("sd_current_task_id", 2000, || {
+        core::hint::black_box(crate::sched::current_task_id());
+    });
+
+    // Stage 3: the syscall filter (seccomp equivalent).  Its doc comment claims
+    // "O(1)" and "~5 ns"; two bullets later the same comment says "linear scan
+    // miss".  Both cannot be true.  Measure it.
+    let scfilter = run("sd_scfilter_check", 2000, || {
+        core::hint::black_box(crate::scfilter::check(tid, SYS_TASK_ID));
+    });
+
+    // Stage 4: the two ktrace calls (enter + exit).  Measured as the pair,
+    // because that is how dispatch pays for them.
+    //
+    // Must mirror dispatch exactly: it calls `record_with_task`, passing the
+    // task id it resolved once at the top.  Benchmarking `record` here instead
+    // would fold two `current_task_id()` lookups into this stage that dispatch
+    // no longer performs — and since `sd_current_task_id` is already its own
+    // stage, the breakdown would over-count and the `unexplained` residual
+    // would go *negative*, which the coherence gate reads as "the parts do not
+    // fit in the whole".
+    let ktrace = run("sd_ktrace_pair", 2000, || {
+        crate::ktrace::record_with_task(
+            crate::ktrace::Category::Syscall,
+            crate::ktrace::event::SYSCALL_ENTER,
+            tid,
+            SYS_TASK_ID,
+            0,
+        );
+        crate::ktrace::record_with_task(
+            crate::ktrace::Category::Syscall,
+            crate::ktrace::event::SYSCALL_EXIT,
+            tid,
+            SYS_TASK_ID,
+            0,
+        );
+    });
+
+    // Stage 5: the syscall-latency histogram, enter+exit as a pair.
+    let sclatency = run("sd_sclatency_pair", 2000, || {
+        let s = crate::sclatency::enter();
+        crate::sclatency::exit(s, SYS_TASK_ID);
+    });
+
+    let accounted = handler.min_ns
+        .saturating_add(task_id.min_ns)
+        .saturating_add(scfilter.min_ns)
+        .saturating_add(ktrace.min_ns)
+        .saturating_add(sclatency.min_ns);
+    let total = dispatch_result.min_ns;
+
+    serial_println!(
+        "[bench]   syscall_dispatch breakdown: total {}ns = handler {}ns + task_id {}ns \
+         + scfilter {}ns + ktrace_pair {}ns + sclatency_pair {}ns + unexplained {}ns",
+        total,
+        handler.min_ns,
+        task_id.min_ns,
+        scfilter.min_ns,
+        ktrace.min_ns,
+        sclatency.min_ns,
+        total.saturating_sub(accounted),
+    );
+    // How many filters exist decides *which* path `sd_scfilter_check` above
+    // just measured, so print it rather than leaving the reading to inference.
+    // With 0 installed, `check` returns after a single atomic load and the
+    // number above is the fast path; with any installed it is the locked
+    // hash-lookup path, and the two are not comparable.
+    //
+    // This line used to end "with 0 installed every call still walks all N
+    // slots", which is how the O(n) scan was found: it made the benchmark
+    // state the thing that was wrong with it.  That is no longer true — the
+    // scan is gone — so the sentence goes with it, because a stale
+    // explanation next to a live number is worse than no explanation.
+    let installed = crate::scfilter::active_count();
+    serial_println!(
+        "[bench]   syscall_dispatch breakdown: scfilter has {} filter(s) installed of {} \
+         slots — measured path: {}",
+        installed,
+        crate::scfilter::MAX_FILTERS,
+        if installed == 0 { "lock-free fast path (1 atomic load)" } else { "locked O(1) hash lookup" },
+    );
+
+    // ---- Coherence gate --------------------------------------------------
+    //
+    // The stage sum above is only usable if the parts were measured under the
+    // same conditions as the whole.  Under TCG they need not be: the VFS
+    // breakdown once printed a part *larger* than its whole, and two
+    // byte-identical benchmarks in one boot disagreed 1.67x.  So re-measure the
+    // whole at the end of the block and report the drift; and flag it when the
+    // parts do not fit inside the whole, because "unexplained" computed with
+    // `saturating_sub` renders that case as a comfortable 0.
+    let total_again = run("sd_dispatch_again", 2000, || {
+        core::hint::black_box(crate::syscall::dispatch::dispatch(SYS_TASK_ID, &args));
+    });
+    let (lo, hi) = if total <= total_again.min_ns {
+        (total, total_again.min_ns)
+    } else {
+        (total_again.min_ns, total)
+    };
+    let drift_pct = if lo == 0 { 0 } else { (hi.saturating_sub(lo)).saturating_mul(100) / lo };
+    const DRIFT_LIMIT_PCT: u64 = 25;
+    serial_println!(
+        "[bench]   syscall_dispatch breakdown: drift check — dispatch twice: {}ns then {}ns ({}%)",
+        total, total_again.min_ns, drift_pct
+    );
+    if drift_pct > DRIFT_LIMIT_PCT {
+        serial_println!(
+            "[bench]   WARNING: syscall_dispatch breakdown is NOT internally coherent \
+             ({}% drift > {}% limit) — the stage split above is measurement drift and \
+             must not be used to attribute cost",
+            drift_pct, DRIFT_LIMIT_PCT
+        );
+    }
+    if accounted > total {
+        serial_println!(
+            "[bench]   WARNING: syscall_dispatch stages sum to {}ns but the whole measured \
+             {}ns — the parts do not fit in the whole, so the split is noise, not attribution",
+            accounted, total
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1848,10 +3077,15 @@ fn bench_ipc_channel_large() {
 
     // No hard latency target: this is a baseline for the data-handling cost,
     // not a pass/fail gate (the small-message round-trip carries the < 2 µs
-    // hot-path target).  Deliberately NOT added to the scorecard — a target of
-    // 0 would always register as a failure and skew the pass/fail summary.
-    // Report min/mean for regression tracking instead; a future zero-copy path
-    // should drive this well below the copy-bound number.
+    // hot-path target).  The comment here used to continue "deliberately NOT
+    // added to the scorecard — a target of 0 would always register as a failure
+    // and skew the pass/fail summary", and then say the min/mean were reported
+    // "for regression tracking instead".  The first half was right and the
+    // second half was false: a serial line is not a regression record, and this
+    // benchmark was absent from `bench/history.jsonl` for its whole life, so
+    // the future zero-copy improvement it anticipates would have had nothing to
+    // be compared against.  `track` records it without inventing a target.
+    track("ipc_channel_roundtrip_64k", &result);
     serial_println!(
         "[bench]   ipc_channel_roundtrip_64k: baseline min {}ns mean {}ns (64 KiB payload)",
         result.min_ns, result.mean_ns
@@ -2868,6 +4102,371 @@ fn bench_vfs_stat() {
     }
 }
 
+/// Diagnostic breakdown of `vfs_stat_root`, which misses its 700 ns target
+/// by ~8.5x (5920 ns measured on the first release-profile run).
+///
+/// This exists to locate the cost rather than guess at it.  `Vfs::stat` is
+/// exactly two phases and both are reachable from public API, so the split
+/// needs no new plumbing:
+///
+/// * `Vfs::stat(p)`          = `resolve_follow(p)` + `stat_resolved(p)`
+/// * `Vfs::stat_resolved(p)` = the second phase alone
+///
+/// so the difference is `resolve_follow` — namespace translation, path
+/// normalisation, and the `VFS_DCACHE` lookup.
+///
+/// **The dcache was the first suspect and it was wrong.**  `VfsDcache::lookup`
+/// is a linear scan over `VFS_DCACHE_SIZE` = 1024 slots, which CLAUDE.md's
+/// performance rules forbid outright ("Linear scans … must be O(1) or
+/// O(log n)"), so it looked like the answer.  The occupancy line below said
+/// otherwise: 25 live entries, 100% hit rate, so a hit-scan terminates in ~25
+/// iterations.  A linear scan's cost is a function of occupancy, not capacity.
+/// The scan is still a latent defect — the *miss* path walks all 1024 slots,
+/// and occupancy grows — but it is not what makes `stat("/")` slow.  The
+/// counters stay in the output precisely so that conclusion keeps being
+/// checked as occupancy changes.
+///
+/// `resolve_follow` is therefore split one level further, into the three
+/// stages it actually performs, so the next fix is aimed by measurement
+/// instead of by inspection.
+/// Benchmark the cost of acquiring and releasing an **uncontended** lock.
+///
+/// This anchor was missing, and its absence is why a wrong number went
+/// unchallenged for a whole investigation.  A prediction about `stat("/")`
+/// argued that "`sched_pick_next` = 40 ns and it takes the run-queue lock,
+/// therefore an uncontended spinlock is ≲ 20 ns" — but `bench_sched_pick_next`
+/// builds a *local* `PriorityRoundRobin` on the stack and never touches
+/// `SCHED.lock()`.  The one figure bounding the most common operation in the
+/// kernel was measured on a lock-free path.  The prediction missed by 4.9x.
+/// See `B-VFS-STAT-ROOT-IS-12x-OVER-TARGET-AND-THE-DCACHE-IS-NOT-WHY`.
+///
+/// The variants, because the interesting quantity is a difference, not an
+/// absolute:
+///
+/// * **raw** — `spin::Mutex`, the bare atomic `try_lock` + store. The floor.
+/// * **tracked** — `crate::sync::Mutex` as the kernel actually uses it, with
+///   `TRACKING_ENABLED` in its default (on) state. Every acquisition calls
+///   `lockdep::lock_acquire`, `preempt_disable`, **one `rdtsc`**, and
+///   `stats.record_uncontended()`; every release calls a **second `rdtsc`**,
+///   `record_hold`, `lockdep::lock_release` and `preempt_enable`.
+/// * **no-lockdep** — the same type with `lockdep::set_enabled(false)`, so both
+///   `lock_acquire` and `lock_release` return on their first load.
+/// * **untracked** — the same type with `TRACKING_ENABLED` off.
+///
+/// Plus the two suspected components measured **directly**, in isolation,
+/// rather than inferred from the differences: a bare `preempt_disable()` /
+/// `preempt_enable()` pair and a bare `rdtsc()` pair. Direct measurement is
+/// the point: the first version of this benchmark reported a lumped
+/// "lockdep+preempt +629ns" and I then *reasoned* about which half dominated —
+/// the same move that has been wrong every single time this session. The
+/// components and the differences are printed together so they can disagree;
+/// if `lockdep + preempt + 2×rdtsc` does not roughly account for
+/// `tracked - raw`, the model is missing something and says so out loud.
+///
+/// A caveat the first version got wrong: **untracked is not "tracked minus the
+/// statistics".** With tracking off, `Mutex::lock` skips the `try_lock` fast
+/// path entirely and calls `lock_contended()`, which is `#[cold]`,
+/// `#[inline(never)]`, and computes `tsc_freq()` plus its own `rdtsc()` before
+/// the first acquisition attempt. So `set_tracking_enabled(false)` can be
+/// *slower* than leaving it on — which is exactly what the first run measured
+/// (654 ns vs 628 ns) and what the old "+0ns for stats" line misreported as
+/// statistics being free.
+///
+/// Whatever the split, it is paid by **every lock acquisition in the kernel**,
+/// so if it is large this is not a VFS finding at all — it is a whole-kernel
+/// one, and every benchmark in this suite that takes a lock is partly
+/// measuring instrumentation.
+fn bench_lock_primitives() {
+    // NB: fully qualified. `Mutex` is aliased to `PreemptSpinMutex` at the top
+    // of this file, which is a *different* lock type with different overhead --
+    // the one under investigation is `crate::sync::Mutex`, the type
+    // `PROCESS_NS` and friends use.
+    static RAW: spin::Mutex<u64> = spin::Mutex::new(0);
+    static TRACKED: crate::sync::Mutex<u64> = crate::sync::Mutex::new(0);
+
+    let raw = run("lock_raw_spin", 2000, || {
+        let mut g = RAW.lock();
+        *g = core::hint::black_box(*g).wrapping_add(1);
+    });
+
+    let tracked = run("lock_tracked", 2000, || {
+        let mut g = TRACKED.lock();
+        *g = core::hint::black_box(*g).wrapping_add(1);
+    });
+
+    // Toggle lockdep off for the third variant, then restore it. Safe to
+    // toggle here only because no tracked lock is held at this point -- see
+    // `lockdep::set_enabled`. Restoring matters twice over: leaving it off
+    // would both change the cost of every later lock and silently retire the
+    // deadlock validator for the rest of the boot.
+    let lockdep_was_on = crate::lockdep::is_enabled();
+    crate::lockdep::set_enabled(false);
+    let no_lockdep = run("lock_no_lockdep", 2000, || {
+        let mut g = TRACKED.lock();
+        *g = core::hint::black_box(*g).wrapping_add(1);
+    });
+    crate::lockdep::set_enabled(lockdep_was_on);
+
+    // Toggle tracking off for the fourth variant, then restore it. Same
+    // reasoning: leaving it off would silently change the cost of every lock in
+    // every benchmark that runs after this one.
+    crate::sync::set_tracking_enabled(false);
+    let untracked = run("lock_tracked_no_stats", 2000, || {
+        let mut g = TRACKED.lock();
+        *g = core::hint::black_box(*g).wrapping_add(1);
+    });
+    crate::sync::set_tracking_enabled(true);
+
+    // The two suspected components, measured on their own rather than
+    // differenced out of the variants above.
+    let preempt = run("preempt_pair", 2000, || {
+        crate::sched::preempt_disable();
+        crate::sched::preempt_enable();
+    });
+    let tsc_pair = run("rdtsc_pair", 2000, || {
+        let a = rdtsc();
+        let b = rdtsc();
+        let _ = core::hint::black_box(b.wrapping_sub(a));
+    });
+
+    serial_println!(
+        "[bench]   lock acquire+release: raw {}ns, tracked {}ns, no-lockdep {}ns, no-stats {}ns",
+        raw.min_ns, tracked.min_ns, no_lockdep.min_ns, untracked.min_ns
+    );
+    serial_println!(
+        "[bench]   lock components (measured): preempt pair {}ns, rdtsc pair {}ns",
+        preempt.min_ns, tsc_pair.min_ns
+    );
+    // Lockdep's per-acquire cost used to be O(registered classes) — a linear
+    // scan run twice per lock operation — so this number was the multiplier on
+    // it. Printed even now that the lookup is a hash, because it is what would
+    // reveal the regression if the index were ever bypassed.
+    serial_println!(
+        "[bench]   lock context: {} lockdep classes registered",
+        crate::lockdep::class_count()
+    );
+
+    // Differences, and then the check that the differences and the direct
+    // measurements tell the same story. `lockdep_delta` is the only component
+    // obtained by subtraction, so it is the one to distrust; the residual line
+    // is what would expose it.
+    let lockdep_delta = tracked.min_ns.saturating_sub(no_lockdep.min_ns);
+    let total_delta = tracked.min_ns.saturating_sub(raw.min_ns);
+    let accounted = lockdep_delta
+        .saturating_add(preempt.min_ns)
+        .saturating_add(tsc_pair.min_ns);
+    serial_println!(
+        "[bench]   lock overhead: total +{}ns = lockdep {}ns + preempt {}ns + rdtsc {}ns \
+         + unexplained {}ns",
+        total_delta,
+        lockdep_delta,
+        preempt.min_ns,
+        tsc_pair.min_ns,
+        total_delta.saturating_sub(accounted),
+    );
+    if accounted > total_delta {
+        serial_println!(
+            "[bench]   lock overhead: WARNING components ({}ns) exceed the measured \
+             total ({}ns) -- the cost model is wrong, not merely imprecise",
+            accounted, total_delta
+        );
+    }
+
+    // Scored against the tracked variant, because that is what the kernel
+    // actually pays. 500ns is the value the vfs_stat stage split *implied*
+    // (3 locks + 3 map lookups + 1 alloc = 1948ns); this benchmark exists to
+    // replace that inference with a measurement, so the target is deliberately
+    // set at the inferred value: if the inference was right this sits exactly
+    // on the line, and any movement is then real.
+    score("lock_uncontended", &tracked, 500);
+}
+
+fn bench_vfs_stat_breakdown() {
+    use crate::fs::vfs::Vfs;
+
+    if Vfs::stat("/").is_err() {
+        serial_println!("[bench] vfs_stat_breakdown: SKIP (VFS not initialized)");
+        return;
+    }
+
+    let (hits_before, misses_before, valid_entries) = Vfs::dcache_stats();
+
+    // Phase A+B together.
+    let full = run("vfs_stat_breakdown_full", 500, || {
+        let _ = core::hint::black_box(Vfs::stat("/"));
+    });
+    // Phase B alone. "/" is already normalised and mount-relative, so this is
+    // the same work `stat` does after `resolve_follow` returns.
+    let resolved_only = run("vfs_stat_breakdown_resolved", 500, || {
+        let _ = core::hint::black_box(Vfs::stat_resolved("/"));
+    });
+
+    // Phase A measured *directly* rather than by subtraction.  `resolve_path`
+    // is a public alias for `resolve_follow`, so the two numbers are the same
+    // quantity obtained two ways; if they disagree, the subtraction is what is
+    // wrong, not the code under it.  That check matters here because `stat`
+    // feeds `stat_resolved` the *resolved* path, whereas the isolated
+    // `stat_resolved` benchmark is fed "/" — if resolution rewrites the path,
+    // subtraction silently charges the difference to the wrong phase.
+    let resolve_direct = run("vfs_stat_breakdown_resolve", 500, || {
+        let _ = core::hint::black_box(Vfs::resolve_path("/"));
+    });
+
+    // Phase A1: per-process namespace translation alone.  For the root
+    // namespace this is semantically a no-op — it returns the input path
+    // unchanged — and measuring it separately is the point: a no-op that costs
+    // anything is pure overhead on every path operation the OS performs.
+    //
+    // This comment used to end "...and allocates a `PathBuf` to say so", which
+    // is the cost the benchmark existed to price.  It no longer does:
+    // `resolve_path` returns `Cow<'_, Path>` and the no-op case is
+    // `Cow::Borrowed`, so the allocation and the byte copy are gone (the two
+    // lock acquisitions were already skipped by `NS_FEATURES_ACTIVE`).  Keep
+    // the benchmark rather than deleting it with the cost it measured: it is
+    // now the check that this path *stays* allocation-free, and this file's
+    // standing lesson is that a check nobody runs is indistinguishable from a
+    // check that passes.  See known-issues.md P21.
+    let root_path = crate::fs::path::Path::new("/");
+    let ns_only = run("vfs_stat_breakdown_ns", 500, || {
+        let _ = core::hint::black_box(crate::ipc::namespace::resolve_path(root_path));
+    });
+    // Phase A1+A2: the whole prologue — namespace translation, then
+    // `validate_path` + `normalize_path` (a second allocation).
+    let prologue = run("vfs_stat_breakdown_prologue", 500, || {
+        let _ = core::hint::black_box(Vfs::resolve_prologue(root_path));
+    });
+
+    let (hits_after, misses_after, valid_after) = Vfs::dcache_stats();
+
+    // Recorded, not merely printed. These five phases are the decomposition of
+    // the VFS path lookup, so they are the first place a regression in path
+    // resolution shows up — and until `track` existed they were computed,
+    // printed as prose in the lines below, and dropped, because `score` was the
+    // only way onto the scorecard and none of them has a published hardware
+    // target to be scored against. The prose stays (it states the *relations*
+    // between the phases, which no single recorded number does); what changes
+    // is that `bench/history.jsonl` now carries the phases themselves and
+    // `scripts/bench-history.py` can diff them run-over-run.
+    track("vfs_stat_breakdown_full", &full);
+    track("vfs_stat_breakdown_resolved", &resolved_only);
+    track("vfs_stat_breakdown_resolve", &resolve_direct);
+    track("vfs_stat_breakdown_ns", &ns_only);
+    track("vfs_stat_breakdown_prologue", &prologue);
+
+    let resolve_ns = full.min_ns.saturating_sub(resolved_only.min_ns);
+    serial_println!(
+        "[bench]   vfs_stat_breakdown: full {}ns = resolve_follow ~{}ns + stat_resolved {}ns",
+        full.min_ns, resolve_ns, resolved_only.min_ns
+    );
+    // Within `resolve_follow`, the residual after the prologue is the dcache
+    // lock + linear scan + `PathBuf` clone of the hit.  Subtracting measured
+    // stages rather than attributing by inspection: the last time this hot
+    // path was reasoned about from the code alone, the conclusion was wrong.
+    serial_println!(
+        "[bench]   vfs_stat_breakdown: resolve_follow measured directly {}ns (vs {}ns by subtraction)",
+        resolve_direct.min_ns, resolve_ns
+    );
+    serial_println!(
+        "[bench]   vfs_stat_breakdown: resolve_follow {}ns = ns_translate {}ns + validate_normalize {}ns + dcache_hit ~{}ns",
+        resolve_direct.min_ns,
+        ns_only.min_ns,
+        prologue.min_ns.saturating_sub(ns_only.min_ns),
+        resolve_direct.min_ns.saturating_sub(prologue.min_ns)
+    );
+    // What resolution actually returns decides whether the subtraction above
+    // compares like with like: `stat` stats *this*, the isolated benchmark
+    // stats "/".
+    match Vfs::resolve_path("/") {
+        Ok(p) => serial_println!(
+            "[bench]   vfs_stat_breakdown: resolve_path(\"/\") -> {:?} ({} bytes)",
+            core::str::from_utf8(p.as_path().as_bytes()).unwrap_or("<non-utf8>"),
+            p.as_path().as_bytes().len()
+        ),
+        Err(e) => serial_println!("[bench]   vfs_stat_breakdown: resolve_path(\"/\") -> Err({:?})", e),
+    }
+    serial_println!(
+        "[bench]   vfs_stat_breakdown: dcache {} valid entries (of {}), +{} hits +{} misses over the run",
+        valid_after,
+        crate::fs::vfs::VFS_DCACHE_SIZE,
+        hits_after.saturating_sub(hits_before),
+        misses_after.saturating_sub(misses_before)
+    );
+    // "The fast path did not help" and "the fast path was never taken" are
+    // different findings, and telling them apart after the fact is exactly what
+    // went wrong twice on this benchmark. Print which one it is.
+    serial_println!(
+        "[bench]   vfs_stat_breakdown: namespace fast path {} (NS_FEATURES_ACTIVE={})",
+        if crate::ipc::namespace::ns_features_active() { "DISABLED" } else { "available" },
+        crate::ipc::namespace::ns_features_active(),
+    );
+    // ---- Coherence gate -------------------------------------------------
+    //
+    // Everything above is stage attribution by subtraction, and subtraction is
+    // only meaningful if the stages were measured under comparable conditions.
+    // They are not guaranteed to be: `min` over 500 iterations still reflects
+    // whatever the *host* was doing during those 500 iterations, and under TCG
+    // that varies enormously (this block has recorded per-iteration maxima of
+    // 1.1e8 cycles -- 21 ms -- inside a benchmark whose min is 2.5 us).
+    //
+    // So: re-measure the very first quantity, unchanged, at the *end* of the
+    // block. `full` and `full_again` are the same code over the same input; any
+    // difference between them is pure measurement drift across the width of
+    // this block, and it bounds how much of every stage difference above is
+    // real. Without this, a run where the harness drifted 1.7x mid-block looks
+    // exactly like a run where a stage got 1.7x slower -- and the last run was
+    // that run: `vfs_stat_root` and `vfs_stat_breakdown_full` are byte-identical
+    // benchmarks and reported 2971 ns and 4976 ns in the same boot, while the
+    // stage components summed to 133% of the whole they were subtracted from.
+    // Both facts were printed and neither was flagged.
+    let full_again = run("vfs_stat_breakdown_full2", 500, || {
+        let _ = core::hint::black_box(Vfs::stat("/"));
+    });
+    let (lo, hi) = if full.min_ns <= full_again.min_ns {
+        (full.min_ns, full_again.min_ns)
+    } else {
+        (full_again.min_ns, full.min_ns)
+    };
+    // Percent, not a ratio: integer division of a ratio would floor 1.9x to 1.
+    let drift_pct = if lo == 0 { 0 } else { (hi.saturating_sub(lo)).saturating_mul(100) / lo };
+    const DRIFT_LIMIT_PCT: u64 = 25;
+    serial_println!(
+        "[bench]   vfs_stat_breakdown: drift check — same benchmark twice: {}ns then {}ns ({}%)",
+        full.min_ns, full_again.min_ns, drift_pct
+    );
+    if drift_pct > DRIFT_LIMIT_PCT {
+        serial_println!(
+            "[bench]   vfs_stat_breakdown: WARNING run is NOT internally coherent ({}% > {}%) \
+             — the stage split above is measurement drift and must not be used to attribute \
+             cost; only cross-boot-replicated totals are usable from this run",
+            drift_pct, DRIFT_LIMIT_PCT
+        );
+    }
+    // The second, independent coherence check: the parts must add up to the
+    // whole. `resolve_follow` is measured both directly and by subtracting
+    // `stat_resolved` from `full`; those are the same quantity by construction,
+    // so a large disagreement means at least one of the three measurements is
+    // not measuring what its name says.
+    let sum_pct = if full.min_ns == 0 {
+        0
+    } else {
+        resolve_direct.min_ns.saturating_add(resolved_only.min_ns).saturating_mul(100)
+            / full.min_ns
+    };
+    serial_println!(
+        "[bench]   vfs_stat_breakdown: parts/whole check — resolve {}ns + resolved {}ns = {}% of full {}ns",
+        resolve_direct.min_ns, resolved_only.min_ns, sum_pct, full.min_ns
+    );
+    if !(75..=125).contains(&sum_pct) {
+        serial_println!(
+            "[bench]   vfs_stat_breakdown: WARNING parts sum to {}% of the whole — the stage \
+             attribution above is not arithmetic, it is noise",
+            sum_pct
+        );
+    }
+
+    let _ = (valid_entries, misses_before);
+}
+
 /// Benchmark VFS read + write cycle.
 ///
 /// Writes a small file, reads it back, then deletes it.  Measures the
@@ -3257,8 +4856,17 @@ fn bench_net_firewall_check() {
         "[bench]   net_firewall_inbound_check: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
-    // Target from baselines.toml: 2000ns (runs on every inbound packet).
-    score("firewall_check", &result, 2000);
+    // Target from baselines.toml: 1000ns (runs on every inbound packet).
+    //
+    // This literal said 2000 while the file said 1000, and the comment cited
+    // the file for the number it disagreed with -- the exact failure that
+    // `report_baselines()` in scripts/bench-history.py was added to catch, and
+    // the last of the 11 it found. The file wins: its 1000ns is corroborated
+    // by its own `target_cycles = 3700` (1000ns at 3.7GHz), whereas the 2000
+    // here had no support other than a citation that was not true. Measured
+    // 53ns, so this is comfortable either way -- which is precisely why it
+    // could drift undetected for so long.
+    score("firewall_check", &result, 1000);
 }
 
 /// Benchmark DNS query packet building (label encoding).

@@ -5202,13 +5202,13 @@ pub fn self_test() {
         // The registered process resolves paths inside its rootfs.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(JAIL_PID, "/bin/sh")
-                .expect("resolve jailed path"),
+                .expect("resolve jailed path").into_owned(),
             PathBuf::from("/containers/test-jail/rootfs/bin/sh"),
         );
         // `..` cannot escape the jail.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(JAIL_PID, "/../../etc/passwd")
-                .expect("resolve escape attempt"),
+                .expect("resolve escape attempt").into_owned(),
             PathBuf::from("/containers/test-jail/rootfs/etc/passwd"),
         );
 
@@ -5266,24 +5266,24 @@ pub fn self_test() {
         // Volume path escapes the rootfs to the host target.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(VOL_PID, "/data/file.txt")
-                .expect("resolve volume path"),
+                .expect("resolve volume path").into_owned(),
             PathBuf::from("/srv/data2/file.txt"),
         );
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(VOL_PID, "/logs/app.log")
-                .expect("resolve logs volume"),
+                .expect("resolve logs volume").into_owned(),
             PathBuf::from("/var/log/test-vol/app.log"),
         );
         // Non-volume path stays jailed under the rootfs.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(VOL_PID, "/bin/sh")
-                .expect("resolve non-volume path"),
+                .expect("resolve non-volume path").into_owned(),
             PathBuf::from("/containers/test-vol/rootfs/bin/sh"),
         );
         // `..` cannot climb out of a volume into the host.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(VOL_PID, "/data/../escape")
-                .expect("resolve escape attempt"),
+                .expect("resolve escape attempt").into_owned(),
             PathBuf::from("/containers/test-vol/rootfs/escape"),
         );
 
@@ -5370,7 +5370,7 @@ pub fn self_test() {
         // Reads / path resolution are unaffected by the read-only flag.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(RO_PID, "/bin/sh")
-                .expect("resolve under ro root"),
+                .expect("resolve under ro root").into_owned(),
             PathBuf::from("/containers/test-ro/rootfs/bin/sh"),
         );
 

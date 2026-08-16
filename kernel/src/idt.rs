@@ -2541,6 +2541,82 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         frame.cs, frame.rflags, frame.rsp, frame.ss
     );
 
+    // Self-identify W-KERNEL-COW-WRITE (known-issues.md).
+    //
+    // A ring-0 *write* to a *present* user-space page (`error == 0x3`) is the
+    // exact signature of a kernel path writing through a user pointer into a
+    // page the read-only page cache mapped RO+COW, without first calling
+    // `mm::user::validate_user_write()` to break CoW at a safe point.  The
+    // user-fault resolver chain above is gated on `error & 4` (CPL3), so such a
+    // fault skips CoW resolution and lands here — indistinguishable, in the
+    // current output, from any other fatal kernel fault.
+    //
+    // This is a *diagnostic only*, deliberately not the "route ring-0
+    // user-address faults to `try_resolve_fault`" hardening: the faulting
+    // kernel code may already hold the VMA/process locks the resolver takes,
+    // so re-entering it here risks deadlock.  Pre-validation exists precisely
+    // to avoid that, and the correct fix is to find the un-pre-validated write
+    // path — which requires knowing this fault happened at all.  The bug has
+    // not reproduced against current source (one prior-session capture at
+    // `0x6000213450`), so the whole value here is making a recurrence
+    // self-identify instead of costing another round of inference, the same
+    // tactic as the bytes-at-RIP dump above for B-PTHREAD-TEARDOWN-PF.
+    if error & 4 == 0 && error & 2 != 0 && error & 1 != 0 && cr2 < page_table::USER_SPACE_END {
+        serial_println!("  *** MATCHES known-issues.md W-KERNEL-COW-WRITE ***");
+        serial_println!("      (ring-0 write to a present user page; CoW resolution was skipped)");
+        match page_table::translate_flags(page_table::active_pml4_phys(), VirtAddr::new(cr2)) {
+            Some(flags) => {
+                let w = flags.contains(PageFlags::WRITABLE);
+                let u = flags.contains(PageFlags::USER_ACCESSIBLE);
+                let c = flags.contains(PageFlags::COW);
+                serial_println!(
+                    "      PTE flags {:#x}: WRITABLE={w} USER_ACCESSIBLE={u} COW={c}",
+                    flags.bits()
+                );
+                if u && !w && c {
+                    // The COW software bit is only ever set on present,
+                    // non-writable PTEs, so this combination is not a guess:
+                    // the page is genuinely awaiting a copy-out.
+                    serial_println!(
+                        "      CONFIRMED: unbroken CoW page. The kernel write path that"
+                    );
+                    serial_println!(
+                        "      produced RIP {:#x} must call mm::user::validate_user_write()",
+                        frame.rip
+                    );
+                    serial_println!(
+                        "      before writing here (see known-issues.md 'Proper fix if it recurs')."
+                    );
+                } else if u && !w {
+                    serial_println!(
+                        "      Read-only user page without the COW bit — NOT plain CoW; the"
+                    );
+                    serial_println!(
+                        "      write target is a genuinely read-only mapping (bad kernel write)."
+                    );
+                } else {
+                    // `translate_flags` reports the *leaf* PTE only, whereas
+                    // the hardware ANDs WRITABLE/USER_ACCESSIBLE across all
+                    // four levels.  So a leaf that looks writable can still
+                    // fault if an intermediate level cleared the bit — which
+                    // is why this branch reports a contradiction to
+                    // investigate rather than asserting the fault was bogus.
+                    serial_println!(
+                        "      Leaf PTE is writable and/or not user-accessible: the error code"
+                    );
+                    serial_println!(
+                        "      matched but the leaf did not.  Check the PML4/PDPT/PD entries (the"
+                    );
+                    serial_println!(
+                        "      CPU ANDs these bits across levels), a stale TLB entry, or a"
+                    );
+                    serial_println!("      concurrent unmap.");
+                }
+            }
+            None => serial_println!("      CR2 {cr2:#x} is not mapped in the active address space"),
+        }
+    }
+
     // Raw stack scan FIRST — before *any* other diagnostic, including the
     // task-context lookup below.  Ordering matters: the scan is the safest
     // probe — it validates every slot against known kernel stack regions before

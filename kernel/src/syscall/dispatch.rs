@@ -676,9 +676,18 @@ const fn build_v1_table() -> SyscallTable {
 pub fn dispatch(nr: u64, args: &SyscallArgs) -> SyscallResult {
     let sc_start = crate::sclatency::enter();
 
-    crate::ktrace::record(
+    // Resolve the current task id **once**, here, and hand it to everything
+    // downstream that needs it: both trace points, the syscall filter, and I/O
+    // accounting.  `sched::current_task_id()` measures ~23 ns, and this
+    // function previously called it three times per syscall — once inside each
+    // of the two `ktrace::record` calls and once for the filter — for a value
+    // that cannot change across a single dispatch.
+    let task_id = crate::sched::current_task_id();
+
+    crate::ktrace::record_with_task(
         crate::ktrace::Category::Syscall,
         crate::ktrace::event::SYSCALL_ENTER,
+        task_id,
         nr,
         args.arg0,
     );
@@ -696,7 +705,6 @@ pub fn dispatch(nr: u64, args: &SyscallArgs) -> SyscallResult {
     // for the calling task.  Denied syscalls return PermissionDenied
     // without ever invoking the handler.  This enforces per-process
     // syscall sandboxing for containers.
-    let task_id = crate::sched::current_task_id();
     if !crate::scfilter::check(task_id, nr) {
         crate::sclatency::exit(sc_start, nr);
         return SyscallResult::err(KernelError::PermissionDenied);
@@ -716,9 +724,10 @@ pub fn dispatch(nr: u64, args: &SyscallArgs) -> SyscallResult {
         SyscallResult::err(KernelError::NotSupported)
     };
 
-    crate::ktrace::record(
+    crate::ktrace::record_with_task(
         crate::ktrace::Category::Syscall,
         crate::ktrace::event::SYSCALL_EXIT,
+        task_id,
         nr,
         result.value as u64,
     );
@@ -727,8 +736,8 @@ pub fn dispatch(nr: u64, args: &SyscallArgs) -> SyscallResult {
     // syscr/syscw).  The Linux-ABI dispatch path accounts its own
     // read/write family separately in `linux::dispatch_linux`; this hook
     // covers the *native* read/write syscalls so native processes get
-    // honest io counters instead of all-zero.  `task_id` is already
-    // resolved above for the syscall filter, so this adds no extra lookup.
+    // honest io counters instead of all-zero.  `task_id` is resolved once at
+    // the top of this function, so this adds no extra lookup.
     account_io_syscall_native(nr, task_id, result.value);
 
     crate::sclatency::exit(sc_start, nr);
@@ -800,6 +809,67 @@ fn account_io_syscall_native(nr: u64, task_id: crate::sched::task::TaskId, value
 #[must_use]
 pub fn current_version() -> u32 {
     super::number::CURRENT_VERSION
+}
+
+/// Verify that dispatch still reaches its handlers once syscall filtering is
+/// live — in particular across the whole syscall number range.
+///
+/// # Why this exists as a *separate* entry point
+///
+/// [`self_test`] runs very early in boot, thousands of lines before
+/// `scfilter::init()`.  Every one of its ~90 cases therefore exercises
+/// `dispatch` with the filter subsystem switched off, which is **not the
+/// configuration the system ever actually runs in**.  Any bug in the
+/// dispatch↔filter interaction is invisible to it by construction.
+///
+/// One such bug shipped: `scfilter::MAX_SYSCALL_NR` had drifted to 1000 while
+/// the dispatch table grew to 1100, so from the moment `scfilter::init()` ran,
+/// every syscall in `1000..1100` — the entire DRM/graphics interface plus
+/// three process-control syscalls — returned `PermissionDenied` to every
+/// process on the system.  The self-test suite could not see it; it had
+/// already finished by then.
+///
+/// # What it checks
+///
+/// That a syscall in the top decade dispatches to its registered handler
+/// rather than being refused by the filter.  `SYS_SIGNAL_STOP_SELF` with
+/// signal 0 is used because it is the highest-numbered syscall with a
+/// registered handler whose *rejection* path is safe to call from the boot
+/// thread (a valid stop signal would park this thread forever — see
+/// `test_dispatch_signal_stop_self_rejects_non_stop_signals`).  It must answer
+/// `InvalidArgument`; `PermissionDenied` means the filter ate it, and
+/// `NotSupported` means the slot is not wired.
+///
+/// # Errors
+///
+/// Returns `InternalError` if a live-filter dispatch is refused.
+pub fn verify_dispatch_under_filtering() -> KernelResult<()> {
+    let args = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let r = dispatch(SYS_SIGNAL_STOP_SELF, &args);
+
+    if r.value == i64::from(KernelError::PermissionDenied.code()) {
+        serial_println!(
+            "[syscall]   FAIL: syscall {} refused by scfilter with no filter installed \
+             (scfilter::MAX_SYSCALL_NR={}, dispatch MAX_SYSCALL_NR={})",
+            SYS_SIGNAL_STOP_SELF,
+            crate::scfilter::MAX_SYSCALL_NR,
+            MAX_SYSCALL_NR
+        );
+        return Err(KernelError::InternalError);
+    }
+    if r.value != i64::from(KernelError::InvalidArgument.code()) {
+        serial_println!(
+            "[syscall]   FAIL: syscall {} under live filtering returned {}, expected InvalidArgument",
+            SYS_SIGNAL_STOP_SELF, r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[syscall] Top-of-range dispatch under live filtering (nr {} of {}): OK",
+        SYS_SIGNAL_STOP_SELF, MAX_SYSCALL_NR
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

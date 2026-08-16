@@ -343,8 +343,8 @@ impl BreakoutApp {
     /// Advance to the next level: reinitialize bricks, increase speed.
     fn next_level(&mut self) {
         self.level += 1;
-        self.ball_speed = (BASE_BALL_SPEED + BALL_SPEED_INCREMENT * (self.level - 1) as f32)
-            .min(MAX_BALL_SPEED);
+        self.ball_speed =
+            (BASE_BALL_SPEED + BALL_SPEED_INCREMENT * (self.level - 1) as f32).min(MAX_BALL_SPEED);
         self.init_bricks();
         self.balls.clear();
         self.powerups.clear();
@@ -540,14 +540,7 @@ impl BreakoutApp {
     }
 
     /// Reflect a ball off a rectangle based on which side was hit.
-    fn reflect_ball_off_rect(
-        &mut self,
-        ball_idx: usize,
-        rx: f32,
-        ry: f32,
-        rw: f32,
-        rh: f32,
-    ) {
+    fn reflect_ball_off_rect(&mut self, ball_idx: usize, rx: f32, ry: f32, rw: f32, rh: f32) {
         let ball = &mut self.balls[ball_idx];
         let cx = rx + rw / 2.0;
         let cy = ry + rh / 2.0;
@@ -1080,7 +1073,12 @@ impl BreakoutApp {
 
         // Title.
         cmds.push(RenderCommand::Text {
-            x: text::center_x(title, box_x + box_w / 2.0, TITLE_FONT_SIZE, FontWeightHint::Bold),
+            x: text::center_x(
+                title,
+                box_x + box_w / 2.0,
+                TITLE_FONT_SIZE,
+                FontWeightHint::Bold,
+            ),
             y: box_y + 35.0,
             text: title.to_string(),
             color: LAVENDER,
@@ -1512,14 +1510,8 @@ mod tests {
     fn test_ball_rect_collision_edge() {
         let app = BreakoutApp::new();
         // Ball just touching the edge (within radius).
-        let result = app.ball_rect_collision(
-            100.0 - BALL_RADIUS + 1.0,
-            110.0,
-            100.0,
-            100.0,
-            20.0,
-            20.0,
-        );
+        let result =
+            app.ball_rect_collision(100.0 - BALL_RADIUS + 1.0, 110.0, 100.0, 100.0, 20.0, 20.0);
         assert!(result);
     }
 
@@ -2029,9 +2021,11 @@ mod tests {
         // Paddle color should differ.
         let find_paddle_color = |cmds: &[RenderCommand]| -> Option<Color> {
             cmds.iter().find_map(|cmd| match cmd {
-                RenderCommand::FillRect {
-                    height, color, ..
-                } if (*height - PADDLE_HEIGHT).abs() < 0.01 => Some(*color),
+                RenderCommand::FillRect { height, color, .. }
+                    if (*height - PADDLE_HEIGHT).abs() < 0.01 =>
+                {
+                    Some(*color)
+                }
                 _ => None,
             })
         };

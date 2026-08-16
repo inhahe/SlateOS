@@ -98,6 +98,50 @@ static INPUT_TAIL: AtomicU32 = AtomicU32::new(0);
 /// enabling cursor-aware line editing (insert/delete at any position).
 static ECHO_ENABLED: AtomicBool = AtomicBool::new(true);
 
+// ---------------------------------------------------------------------------
+// Echo ring — rendering deferred out of hard-IRQ context
+// ---------------------------------------------------------------------------
+
+/// Size of the echo ring (must be a power of two).
+///
+/// Sized to match [`INPUT_BUF_SIZE`] deliberately: the echo ring can never
+/// need more slots than the input ring it shadows, because a byte is only
+/// queued for echo on the same path that admits it to the input ring.
+const ECHO_BUF_SIZE: usize = 256;
+const ECHO_BUF_MASK: usize = ECHO_BUF_SIZE - 1;
+
+/// Bytes awaiting echo to the console.
+///
+/// Single-producer (the IRQ 1 handler), single-consumer (the workqueue
+/// worker task). Same head/tail discipline as [`INPUT_BUF`].
+static ECHO_BUF: [AtomicU8; ECHO_BUF_SIZE] = {
+    const ZERO: AtomicU8 = AtomicU8::new(0);
+    [ZERO; ECHO_BUF_SIZE]
+};
+
+/// Write index (next slot the ISR will write to).
+static ECHO_HEAD: AtomicU32 = AtomicU32::new(0);
+/// Read index (next slot the worker will read from).
+static ECHO_TAIL: AtomicU32 = AtomicU32::new(0);
+
+/// Whether a drain work item is already queued.
+///
+/// Coalesces the submissions: a burst of keystrokes enqueues one work item,
+/// not one per character. Without this a fast typist (or a key-repeat storm)
+/// would exhaust the workqueue's 64-item capacity and start dropping *other*
+/// subsystems' work, which is a far worse failure than slow echo.
+static ECHO_DRAIN_SCHEDULED: AtomicBool = AtomicBool::new(false);
+
+/// Bytes dropped because the echo ring was full, for diagnostics.
+///
+/// Non-zero means the console could not keep up with the keyboard, which
+/// should not happen in practice — it would take the worker being starved for
+/// 256 keystrokes. Counted rather than ignored because a silent drop here
+/// shows up to the user as randomly missing characters on screen while the
+/// input ring still holds the byte, i.e. the shell acts on input that was
+/// never displayed.
+static ECHO_DROPPED: AtomicU32 = AtomicU32::new(0);
+
 /// Whether the driver has been initialized.
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -479,22 +523,127 @@ fn push_char(ch: u8) {
     if !ECHO_ENABLED.load(Ordering::Relaxed) {
         return;
     }
+    queue_echo(ch);
+}
+
+/// Queue one byte for echo, or render it directly if the workqueue is not up.
+///
+/// Called from hard-IRQ context, so it must not render: see
+/// [`drain_echo`] for why the rendering moved to a worker task.
+fn queue_echo(ch: u8) {
     match ch {
-        b'\x08' => {
-            // Backspace: erase the previous glyph (backspace, space,
-            // backspace).  Consumers that drive cursor-aware editing
-            // themselves (e.g. kshell) run with echo disabled, so this only
-            // affects the default echo-on path (the canonical TTY line
-            // discipline), where it gives the expected visual erase.
-            crate::console::putchar(b'\x08');
-            crate::console::putchar(b' ');
-            crate::console::putchar(b'\x08');
-        }
-        0x1B => {} // Don't echo ESC
+        0x1B => return, // Don't echo ESC
         // Don't echo extended key codes (arrow keys, home/end) — the
         // kshell handles their visual effect by redrawing the line.
-        KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT | KEY_HOME | KEY_END => {}
-        _ => crate::console::putchar(ch),
+        KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT | KEY_HOME | KEY_END => return,
+        _ => {}
+    }
+
+    // Before the worker exists there is nothing to defer to, so echo inline.
+    // `keyboard::init` runs ~700 lines of boot ahead of `workqueue::init`, so
+    // this window is real, but it is also the one stretch where rendering from
+    // an ISR is harmless: there is no userspace, no scheduler-visible latency
+    // budget to blow, and nothing else contending for the console lock.
+    // `is_running` is monotonic (set once at init and never cleared), so this
+    // cannot interleave with the deferred path and reorder output.
+    if !crate::workqueue::is_running() {
+        render_echo(ch);
+        return;
+    }
+
+    try_push_echo(ch);
+
+    // Submit only on the false -> true edge; `drain_echo` clears the flag
+    // before it drains, so a byte pushed after that store always finds the
+    // flag clear and schedules a fresh drain. No byte can be stranded.
+    if !ECHO_DRAIN_SCHEDULED.swap(true, Ordering::AcqRel)
+        && !crate::workqueue::submit(drain_echo, 0)
+    {
+        // Queue full: nothing will drain us, so allow the next byte to retry
+        // rather than leaving the flag latched and echo dead forever.
+        ECHO_DRAIN_SCHEDULED.store(false, Ordering::Release);
+    }
+}
+
+/// Push one byte into the echo ring. Returns false if the ring was full.
+///
+/// Pure ring operation: no rendering and no work submission, so the self-test
+/// can exercise it without painting the screen.
+fn try_push_echo(ch: u8) -> bool {
+    let head = ECHO_HEAD.load(Ordering::Acquire);
+    let tail = ECHO_TAIL.load(Ordering::Acquire);
+    let next_head = head.wrapping_add(1);
+    if (next_head & ECHO_BUF_MASK as u32) == (tail & ECHO_BUF_MASK as u32) {
+        ECHO_DROPPED.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    let idx = (head as usize) & ECHO_BUF_MASK;
+    let Some(slot) = ECHO_BUF.get(idx) else {
+        return false;
+    };
+    slot.store(ch, Ordering::Release);
+    ECHO_HEAD.store(next_head, Ordering::Release);
+    true
+}
+
+/// Pop one byte from the echo ring, or `None` when empty.
+fn pop_echo() -> Option<u8> {
+    let head = ECHO_HEAD.load(Ordering::Acquire);
+    let tail = ECHO_TAIL.load(Ordering::Acquire);
+    if (head & ECHO_BUF_MASK as u32) == (tail & ECHO_BUF_MASK as u32) {
+        return None;
+    }
+    let idx = (tail as usize) & ECHO_BUF_MASK;
+    let ch = ECHO_BUF.get(idx)?.load(Ordering::Acquire);
+    ECHO_TAIL.store(tail.wrapping_add(1), Ordering::Release);
+    Some(ch)
+}
+
+/// Render one echoed byte to the console. Task context only.
+fn render_echo(ch: u8) {
+    if ch == b'\x08' {
+        // Backspace: erase the previous glyph (backspace, space, backspace).
+        // Consumers that drive cursor-aware editing themselves (e.g. kshell)
+        // run with echo disabled, so this only affects the default echo-on
+        // path (the canonical TTY line discipline), where it gives the
+        // expected visual erase.
+        crate::console::putchar(b'\x08');
+        crate::console::putchar(b' ');
+        crate::console::putchar(b'\x08');
+    } else {
+        crate::console::putchar(ch);
+    }
+}
+
+/// Workqueue handler: render every byte the ISR queued for echo.
+///
+/// Why echo is deferred at all
+/// ---------------------------
+/// `console::putchar` is the full console pipeline — escape-sequence state
+/// machine, glyph blit, and on the last column a whole-screen scroll, which
+/// at 1024x768x32bpp is a ~3 MiB `memmove` plus a scrollback `Vec::push` that
+/// can reach the heap allocator. Running that from the IRQ 1 handler put a
+/// millisecond-scale operation inside a hard interrupt, against CLAUDE.md's
+/// 10 us total-ISR-latency budget, and stalled the timer tick and every other
+/// device on any keystroke that landed on the bottom line.
+///
+/// Why a workqueue and not a softirq
+/// ---------------------------------
+/// A softirq runs on the interrupted task's kernel stack, so it cannot block
+/// on a lock that task might already hold — `softirq.rs` requires handlers to
+/// use `try_lock`. Echo needs the console lock unconditionally, so a softirq
+/// would only convert the ISR deadlock into a softirq deadlock. The workqueue
+/// runs in a real task context where taking the lock is legal. This is also
+/// what Linux does: `tty_flip_buffer_push` defers to `flush_to_ldisc` on a
+/// workqueue rather than to a softirq.
+fn drain_echo(_arg: u64) {
+    // Clear before draining, not after. A producer that pushes after this
+    // store observes the flag clear and submits a fresh work item; the worst
+    // case is one redundant drain that finds the ring already empty, whereas
+    // clearing afterwards could strand a byte until the next keystroke.
+    ECHO_DRAIN_SCHEDULED.store(false, Ordering::Release);
+    while let Some(ch) = pop_echo() {
+        render_echo(ch);
     }
 }
 
@@ -827,6 +976,79 @@ pub fn self_test() -> Result<(), &'static str> {
         if head == tail { "empty, OK" } else { "non-empty" }
     );
 
+    echo_ring_self_test()?;
+
     crate::serial_println!("[keyboard] Self-test PASSED");
+    Ok(())
+}
+
+/// Exercise the deferred-echo ring: FIFO order, capacity, and drop accounting.
+///
+/// Runs with interrupts masked because the producer under test is the IRQ 1
+/// handler: a keystroke landing mid-test would push into the same ring and
+/// make the assertions describe something other than what they name. Masking
+/// is cheap here — this path only moves bytes, it never renders.
+fn echo_ring_self_test() -> Result<(), &'static str> {
+    let dropped_before = ECHO_DROPPED.load(Ordering::Relaxed);
+
+    let result = crate::cpu::without_interrupts(|| {
+        if pop_echo().is_some() {
+            return Err("echo ring not empty at start of test");
+        }
+
+        // FIFO order must be preserved: echo that reorders is worse than no
+        // echo, because the user cannot tell it happened.
+        for ch in b"abc" {
+            if !try_push_echo(*ch) {
+                return Err("echo ring rejected a push while empty");
+            }
+        }
+        for expected in b"abc" {
+            match pop_echo() {
+                Some(got) if got == *expected => {}
+                Some(_) => return Err("echo ring returned bytes out of order"),
+                None => return Err("echo ring lost a byte"),
+            }
+        }
+        if pop_echo().is_some() {
+            return Err("echo ring had leftover bytes after drain");
+        }
+
+        // Capacity: one slot is sacrificed to distinguish full from empty, so
+        // exactly SIZE-1 pushes must succeed and the next must be refused and
+        // counted rather than silently overwriting an unread byte.
+        for _ in 0..ECHO_BUF_SIZE.saturating_sub(1) {
+            if !try_push_echo(b'x') {
+                return Err("echo ring filled short of its capacity");
+            }
+        }
+        if try_push_echo(b'y') {
+            return Err("echo ring accepted a push past capacity");
+        }
+
+        let mut drained = 0usize;
+        while pop_echo().is_some() {
+            drained = drained.saturating_add(1);
+        }
+        if drained != ECHO_BUF_SIZE.saturating_sub(1) {
+            return Err("echo ring drained a different count than it accepted");
+        }
+        Ok(())
+    });
+    result?;
+
+    // The refused push must have been counted; an uncounted drop is exactly
+    // the silent-corruption case the counter exists to make visible.
+    let dropped_after = ECHO_DROPPED.load(Ordering::Relaxed);
+    if dropped_after != dropped_before.wrapping_add(1) {
+        return Err("echo ring did not count the dropped byte");
+    }
+
+    crate::serial_println!(
+        "[keyboard]   Echo ring: FIFO order, capacity {}, drop accounting OK \
+         (deferred out of IRQ context; {} dropped since boot)",
+        ECHO_BUF_SIZE.saturating_sub(1),
+        dropped_after,
+    );
     Ok(())
 }

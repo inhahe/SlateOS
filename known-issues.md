@@ -398,6 +398,128 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### B-BASH-SLATEOS-ELF-WAS-EXEMPT-FROM-THE-STALENESS-GATE. The one artifact that exercises our libc hardest was the one artifact allowed to be out of date — 2026-08-16 — ✅ GATE FIXED 2026-08-16 by lane B (`scripts/create-ext4-rootfs.sh`); the stale binary itself still needs a relink
+
+**In short:** The image build refuses to ship a ring-3 test program that is
+older than the C library it was compiled against, because such a program tests
+the *old* library while reporting a pass about the new one. That rule was
+written for the nine small `ctest-*` programs and never applied to a tenth,
+much bigger one: GNU bash. Bash was found four days out of date the day anyone
+checked, which means the boot test had been reporting "bash works on our libc"
+about an Aug-12 libc on every boot since. The rule now covers bash too. The
+stale binary itself has not been relinked yet — that needs the cross-build
+objects, not a one-line command.
+
+**Why bash is the worst possible exemption.** Every other staged real-world
+binary (dash, make, tcc) is a stock Ubuntu glibc program that SlateOS runs
+through the staged glibc — it exercises the *loader*, not our libc. Bash is the
+only large program compiled from source *against* `toolchain/sysroot/lib/libc.a`,
+and at ~5.3 MB it is roughly double any `ctest-*` fixture. It references 2,030
+libc symbols where a fixture references a few dozen. So it was simultaneously
+the broadest test of the POSIX layer and the only one permitted to be testing a
+library that is no longer in the build — the widest false-green on the image.
+
+**Why it was missed.** The artifact is built by `scripts/bash-spike/` into the
+**gitignored** `build/spike/`, and `slatelink.sh` hardcodes the *integration*
+worktree path (`/mnt/d/visual studio projects/os/build/spike/…`). So it exists
+in exactly one of the four worktrees. In the three lane worktrees the file is
+simply absent, the self-test self-skips, the harness prints `PATH-Z COVERAGE
+INCOMPLETE`, and nothing looks wrong; in `os` — the tree `main` is built from —
+it is present and was silently ageing. A per-worktree artifact behind a
+best-effort skip is invisible from either side.
+
+**Where it lives.** `scripts/create-ext4-rootfs.sh`, the `BASH_SLATE` block
+(~842) and the new `BASH_STALE` gate after the `ctest-*` gate (~941). The
+consumer is `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`.
+
+**Fix applied.** Absent and stale are now deliberately *not* treated alike:
+
+| State | Before | Now | Why |
+|---|---|---|---|
+| absent | warning, boot green | warning, boot green | A skip reports nothing **and says so**; the harness already prints `PATH-Z COVERAGE INCOMPLETE`. Unlike a fixture it cannot be rebuilt from a one-line command, so failing a fresh checkout would be punitive. |
+| present, older than `libc.a` | staged silently | **exit 1** | A stale binary reports OK and is wrong. This is the `ctest-*` rule verbatim; `ALLOW_STALE_FIXTURES=1` downgrades it, since a host that cannot rebuild the fixtures certainly cannot relink bash. |
+
+**Still open.** `os/build/spike/bash-slateos.elf` is dated 2026-08-12 and must be
+relinked against the current sysroot
+(`wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh`) before the next image
+built from `os` will pass. That is now *enforced* rather than hoped for, which
+is the point of the change — but it does mean the next `main` rootfs build will
+fail loudly until someone relinks it. That is the intended behaviour and is
+strictly better than the silent pass it replaces.
+
+**Worth generalising, again.** This is the third instance of the pattern
+`B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT` names: the check was not wrong, it just
+did not cover everything it applied to. When a rule is written for a *set* of
+artifacts, enumerate the set from the thing they have in common — here "links
+`libc.a`" — not from the directory that happened to hold them when the rule was
+written (`services/ctest-*`).
+
+### TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT. `waitid` cannot express process group 1, cannot honour `WNOWAIT`, and reports `si_uid` as 0 — all three because `SYS_PROCESS_WAIT_STATUS` is `waitpid`-shaped — LOGGED 2026-08-16 by lane B
+
+**In short:** `waitid()` is the modern replacement for `waitpid()`, and it exists
+because `waitpid()`'s arguments cannot express some perfectly reasonable waits.
+libc's `waitid` is now real rather than a stub — it fills the caller's
+`siginfo_t` and supports process-group waits, both of which it previously did
+not — but it is built on the same kernel call `waitpid` uses, so it inherits
+exactly the limits `waitid` was invented to escape. Three remain. None breaks
+anything we ship; each is now *reported* honestly instead of faked.
+
+**Where it lives.** `posix/src/process.rs::waitid` and `siginfo_for_wstatus`;
+the kernel side is `kernel/src/syscall/handlers.rs::sys_process_wait_status`
+(~3993) and `wait_pgid_filter` (~3771).
+
+| Gap | libc's behaviour today | Why libc cannot fix it alone |
+|---|---|---|
+| `waitid(P_PGID, 1, …)` from a caller not in group 1 | `ENOSYS` | `waitpid`'s selector uses `-1` for "any child", so group 1 has no encoding. The kernel infers the group filter from that one signed integer. |
+| `WNOWAIT` (observe a child without reaping it) | accepted, **not honoured** — the child is reaped anyway | The syscall's option mask is `WNOHANG\|WUNTRACED\|WCONTINUED` and the wait path reaps unconditionally. There is no peek mode to ask for. |
+| `siginfo_t.si_uid` (the child's real uid) | always `0` | The child is reaped by the time the call returns; `SYS_PROCESS_GET_CREDENTIALS` takes no pid and reports only the caller's own. |
+
+Also zero for the same "nothing can source it" reason: `si_utime`/`si_stime` —
+there is no per-process CPU accounting, which is why `wait3`/`wait4` have always
+zeroed their `rusage` too.
+
+**Why `si_uid` is 0 rather than the caller's uid.** Substituting `getuid()`
+would be correct for a child that never changed credentials and wrong for
+precisely the case in which a caller would bother to read the field — a child
+that dropped privilege. That is the same rule design-decisions.md **§314** sets
+for capabilities: libc must not invent an answer it does not have. A zero is
+visibly unsourced; a plausible wrong uid is not.
+
+**Why the group-1 case is `ENOSYS` rather than a silent `waitpid(-1, …)`.** A
+wait for any child *reaps* some child, consuming its status permanently. A
+caller that asked for a group wait and got an arbitrary child has no way to
+detect the substitution and has lost the status of a child it was not managing.
+Refusing is recoverable; guessing is not.
+
+**Proper fix — all three are kernel-side**, and filed as
+`requests/b-a-waitid-needs-an-explicit-idtype-wait.md`:
+
+1. An option bit (e.g. `WPGID = 1 << 16`) that makes `arg0` an unsigned pgid,
+   bypassing `wait_pgid_filter`'s inference. Currently rejected by the mask, so
+   no existing caller is affected.
+2. A `WNOWAIT` bit that finds the eligible child and encodes its `wstatus` but
+   skips the reap. `poll_any_child_event` already separates "find" from
+   "consume" for stop/continue; this applies the same split to exits.
+3. Return the child's uid — the PCB already carries it (`pcb.rs:88`). Widening
+   the `arg2` out-parameter from a bare `i32 wstatus` to a small struct is
+   probably cleaner than a second return register, and leaves room for the CPU
+   times if accounting ever lands.
+
+Until then the divergences are documented on `waitid`'s doc comment, which is
+where someone debugging a `WNOWAIT` that reaped will actually look.
+
+**What *is* covered, so this entry is not mistaken for "waitid is untested."**
+Everything `waitid` can do is exercised on target by
+`services/ctest-jobctl/main.c` checks 100-111 (`CLD_STOPPED`/`CLD_CONTINUED`
+against a real kernel-encoded job-control event, plus the proof that observing
+one consumes it), 120-132 (`CLD_EXITED` with the exit *code* in `si_status`,
+`ECHILD` on re-wait, `CLD_KILLED`/`SIGKILL`), and 140-147 (argument
+validation). The fixture is the only place the `wstatus` → `siginfo_t` decoding
+is testable at all: `waitpid`'s syscall arm is compiled out for anything but
+`target_os = "none"`, so a host `waitid` returns `ENOSYS` before a status word
+exists to decode. The three gaps above are exactly the residue — the facts that
+do not survive the reap — and nothing there tests them because nothing can.
+
 ### TD-POSIX-TIMES-FLAKE. `posix::sys_times::tests::test_times_increments_each_call` fails intermittently under a full-workspace run — 2026-08-15 — ✅ FIXED 2026-08-15 by lane B (`posix/src/sys_times.rs`), and the triage found a second, worse bug underneath it
 
 **Status: FIXED 2026-08-15** (lane B, `posix/src/sys_times.rs`). Stays here
@@ -14929,9 +15051,15 @@ keeps this entry open.**
   are, by construction, exactly the ones where under-reporting cannot be
   recovered from. Each of the twelve therefore needs a projection rule, and a
   rule needs a `(ResourceType, Rights)` pair the kernel is willing to mean it.
-  Some have an honest preimage already (`Process` + `METADATA` for credentials;
-  `Timer` + `WRITE` for the timebase); `CAP_NET_BIND_SERVICE` and
-  `CAP_IPC_LOCK` have none and are open questions.
+  Only `CAP_SETUID`/`CAP_SETGID` has an honest preimage already (`Process` +
+  `METADATA` — credentials are process attributes), and that pair is filed as
+  `requests/b-a-cap-grants-for-312-step3-fixtures.md`. The other seven sites —
+  the three clock setters, privileged `bind`, `setrlimit`, `mlock` past the
+  rlimit, alarm timerfds — have **no** object behind them at all, and §312's own
+  precedent (it refuses to invent a handle for `sethostname`) says an invented
+  one is ambient authority in a capability costume. Whether to give them real
+  kernel objects, drop the restriction, or leave them denied is **`open-questions.md`
+  Q48**, and step 3 should not flip until that is answered.
 
   **Fixtures.** The old blocker list here — `services/ctest-jobctl`,
   `self_test_cctty`, `self_test_cpgroup` — is **stale**: §314 deleted libc's

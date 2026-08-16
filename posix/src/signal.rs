@@ -1792,9 +1792,23 @@ pub extern "C" fn __libc_current_sigrtmax() -> i32 {
 
 /// Signal information structure.
 ///
-/// Matches the Linux x86_64 `siginfo_t` layout (128 bytes).
-/// Only the common header fields are defined; the union payload
-/// is represented as opaque padding.
+/// Matches the Linux x86_64 `siginfo_t` layout (128 bytes): a three-`int`
+/// preamble, four bytes of alignment padding (`__ARCH_SI_PREAMBLE_SIZE` is
+/// `4 * sizeof(int)` on 64-bit), then the union of per-signal payloads
+/// starting at offset 16.
+///
+/// Only the **`SIGCHLD` arm** of that union is named here, because it is the
+/// only arm libc itself populates — [`crate::process::waitid`] writes it.
+/// Naming the fields rather than leaving the union an opaque byte array is
+/// what lets `waitid` fill them by assignment instead of by offset arithmetic
+/// through a `*mut u8`, which is the kind of code that silently goes wrong
+/// when a layout changes.  C callers are unaffected: in a real `<signal.h>`
+/// `si_pid`, `si_uid` and `si_status` are macros onto this same union, at
+/// exactly these offsets.
+///
+/// The remaining arms (`_kill`, `_timer`, `_sigfault`, …) stay inside `_pad`.
+/// Add one only when something in this tree actually writes it; an unwritten
+/// named field is a promise the code does not keep.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SiginfoT {
@@ -1804,8 +1818,23 @@ pub struct SiginfoT {
     pub si_errno: i32,
     /// Signal code (SI_USER, SI_KERNEL, CLD_*, etc.).
     pub si_code: i32,
-    /// Padding/union payload (rest of 128 bytes).
-    _pad: [u8; 116],
+    /// Alignment padding — the union begins at offset 16 on 64-bit.
+    _preamble_pad: i32,
+    /// `SIGCHLD` arm: PID of the child whose state changed.
+    pub si_pid: i32,
+    /// `SIGCHLD` arm: real UID of that child.
+    pub si_uid: u32,
+    /// `SIGCHLD` arm: the child's exit code, or the signal that killed,
+    /// stopped or continued it — which of the two is selected by `si_code`.
+    pub si_status: i32,
+    /// Alignment padding — `_utime` is a `clock_t` and so 8-byte aligned.
+    _status_pad: u32,
+    /// `SIGCHLD` arm: child user CPU time (`clock_t`).
+    pub si_utime: i64,
+    /// `SIGCHLD` arm: child system CPU time (`clock_t`).
+    pub si_stime: i64,
+    /// Remainder of the 128-byte union — the arms we do not write.
+    _pad: [u8; 80],
 }
 
 impl Default for SiginfoT {
@@ -3650,6 +3679,30 @@ mod tests {
     fn test_siginfo_t_layout() {
         // siginfo_t is 128 bytes on Linux x86_64.
         assert_eq!(core::mem::size_of::<SiginfoT>(), 128);
+        assert_eq!(core::mem::align_of::<SiginfoT>(), 8);
+    }
+
+    #[test]
+    fn test_siginfo_t_field_offsets_match_linux() {
+        // These offsets are the ABI: a C caller passes a `siginfo_t *` that
+        // its own headers laid out, and we write through it.  If a field
+        // moves, `waitid` starts corrupting the caller's struct silently, so
+        // pin every one.  Values are Linux x86_64 `<asm-generic/siginfo.h>`:
+        // a 3-int preamble, 4 bytes of padding (`__ARCH_SI_PREAMBLE_SIZE` is
+        // `4 * sizeof(int)` on 64-bit), then the `_sigchld` union arm, whose
+        // `clock_t` members force another 4 bytes after `_status`.
+        let si = SiginfoT::default();
+        let base = core::ptr::addr_of!(si) as usize;
+        let off = |p: usize| p - base;
+
+        assert_eq!(off(core::ptr::addr_of!(si.si_signo) as usize), 0);
+        assert_eq!(off(core::ptr::addr_of!(si.si_errno) as usize), 4);
+        assert_eq!(off(core::ptr::addr_of!(si.si_code) as usize), 8);
+        assert_eq!(off(core::ptr::addr_of!(si.si_pid) as usize), 16);
+        assert_eq!(off(core::ptr::addr_of!(si.si_uid) as usize), 20);
+        assert_eq!(off(core::ptr::addr_of!(si.si_status) as usize), 24);
+        assert_eq!(off(core::ptr::addr_of!(si.si_utime) as usize), 32);
+        assert_eq!(off(core::ptr::addr_of!(si.si_stime) as usize), 40);
     }
 
     #[test]
@@ -3658,6 +3711,11 @@ mod tests {
         assert_eq!(si.si_signo, 0);
         assert_eq!(si.si_errno, 0);
         assert_eq!(si.si_code, 0);
+        assert_eq!(si.si_pid, 0);
+        assert_eq!(si.si_uid, 0);
+        assert_eq!(si.si_status, 0);
+        assert_eq!(si.si_utime, 0);
+        assert_eq!(si.si_stime, 0);
     }
 
     // ------------------------------------------------------------------

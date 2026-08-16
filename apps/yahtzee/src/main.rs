@@ -179,29 +179,34 @@ enum GamePhase {
     GameOver,
 }
 
-// ── Seeded RNG ──────────────────────────────────────────────────────
+// ── Randomness ──────────────────────────────────────────────────────
+//
+// From `randrange`, not a local LCG. The local one rolled a die with
+// `state % 6 + 1`, and on a modulus-2^64 generator the low bit of `state`
+// alternates 0,1,0,1 for ever. Six is even, and `x % 6` preserves the parity of
+// `x`, so **adjacent dice always had opposite parity**. Five dice come from
+// five consecutive draws, so every roll went odd, even, odd, even, odd — and
+// therefore:
+//
+//   * a Yahtzee (five alike) was impossible;
+//   * four alike was impossible too, since any four of five dice contain an
+//     adjacent pair;
+//   * three alike, at dice 1, 3 and 5, was the ceiling.
+//
+// Measured before the fix: **zero Yahtzees in 15 000 rolls** across three
+// seeds, where about twelve are expected. The game's own name was unreachable
+// and its Yahtzee-bonus branch was dead code. See `known-issues.md` and
+// `design-decisions.md` §447.
+use randrange::Rng;
 
-struct Rng {
-    state: u64,
-}
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    /// Return a value in `1..=6`.
-    fn die(&mut self) -> u8 {
-        (self.next() % 6) as u8 + 1
-    }
+/// Roll one die: a value in `1..=6`.
+///
+/// A free function rather than a method, because a six-sided die is this
+/// game's unit and not the generator's.
+fn roll_die(rng: &mut Rng) -> u8 {
+    // `below` reduces with the high bits, so nothing carries from one call to
+    // the next. The cast cannot truncate: the result is 0..=5.
+    (rng.below(6) as u8).saturating_add(1)
 }
 
 // ── Scoring logic (pure functions) ──────────────────────────────────
@@ -398,7 +403,7 @@ impl Yahtzee {
 
         for i in 0..NUM_DICE {
             if !self.held[i] {
-                self.dice[i] = self.rng.die();
+                self.dice[i] = roll_die(&mut self.rng);
             }
         }
 
@@ -500,7 +505,7 @@ impl Yahtzee {
     /// Start a new game, preserving the high score.
     fn new_game(&mut self) {
         let high = self.high_score;
-        let seed = self.rng.next();
+        let seed = self.rng.next_u64();
         *self = Self::with_seed(seed);
         self.high_score = high;
     }
@@ -2559,19 +2564,10 @@ mod tests {
     // ════════════════════════════════════════════════════════════════
 
     #[test]
-    fn test_rng_deterministic() {
-        let mut rng1 = Rng::new(12345);
-        let mut rng2 = Rng::new(12345);
-        for _ in 0..100 {
-            assert_eq!(rng1.next(), rng2.next());
-        }
-    }
-
-    #[test]
     fn test_rng_die_range() {
         let mut rng = Rng::new(9999);
         for _ in 0..1000 {
-            let val = rng.die();
+            let val = roll_die(&mut rng);
             assert!((1..=6).contains(&val), "Die out of range: {val}");
         }
     }
@@ -2581,12 +2577,78 @@ mod tests {
         let mut rng = Rng::new(7777);
         let mut seen = [false; 7];
         for _ in 0..10000 {
-            let val = rng.die();
+            let val = roll_die(&mut rng);
             seen[val as usize] = true;
         }
         for v in 1..=6 {
             assert!(seen[v], "RNG never produced {v}");
         }
+    }
+
+    /// A Yahtzee has to be rollable in Yahtzee.
+    ///
+    /// It was not. The old die was `state % 6 + 1`; six is even, `x % 6` keeps
+    /// the parity of `x`, and the low bit of a modulus-2^64 LCG alternates on
+    /// every draw. So consecutive dice always had opposite parity, and five
+    /// alike could not occur — nor four alike, since any four of five dice
+    /// contain an adjacent pair. Three was the ceiling. Measured over 15 000
+    /// rolls at three seeds before the fix: zero Yahtzees.
+    ///
+    /// Note what the two tests above could not see. `test_rng_die_range` and
+    /// `test_rng_produces_all_values` both passed against that die, and were
+    /// right to: every face appeared, and appeared about equally often. The
+    /// defect lived entirely in the *relationship between successive rolls*,
+    /// which no test of one roll at a time can reach. This one rolls five and
+    /// asks about the hand.
+    #[test]
+    fn five_of_a_kind_is_reachable() {
+        // A Yahtzee is 1 in 1296, so 40 000 rolls expects about 31 and misses
+        // entirely with probability below 1e-13. Four alike is counted too: it
+        // was equally impossible and is 25 times more common, so it fails
+        // loudly rather than marginally.
+        let mut rng = Rng::new(2024);
+        let mut yahtzees = 0_u32;
+        let mut four_alike = 0_u32;
+        for _ in 0..40_000 {
+            let dice: [u8; NUM_DICE] = core::array::from_fn(|_| roll_die(&mut rng));
+            let counts = face_counts(&dice);
+            let best = counts.iter().skip(1).copied().max().unwrap_or(0);
+            if best >= 5 {
+                yahtzees += 1;
+            }
+            if best >= 4 {
+                four_alike += 1;
+            }
+        }
+        assert!(yahtzees > 0, "40000 rolls produced no Yahtzee at all");
+        assert!(
+            four_alike > 100,
+            "40000 rolls produced only {four_alike} hands of four alike"
+        );
+    }
+
+    /// Adjacent dice must not be locked to opposite parity.
+    ///
+    /// The defect stated directly rather than through its consequences: with
+    /// the old die, neighbouring dice never showed `(odd, odd)` or
+    /// `(even, even)`, at any seed. All four combinations must be reachable.
+    #[test]
+    fn adjacent_dice_are_not_locked_to_opposite_parity() {
+        let mut rng = Rng::new(31);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..2000 {
+            let dice: [u8; NUM_DICE] = core::array::from_fn(|_| roll_die(&mut rng));
+            for pair in dice.windows(2) {
+                if let [a, b] = pair {
+                    seen.insert((a % 2, b % 2));
+                }
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            4,
+            "adjacent dice only ever showed parity pairs {seen:?}"
+        );
     }
 
     // ════════════════════════════════════════════════════════════════

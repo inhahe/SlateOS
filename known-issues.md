@@ -25196,15 +25196,17 @@ the same exposure — the build directory is on the search path for the whole
 workspace, not just for `oils`. If you write such a test, take `hostpath` with
 it rather than re-deriving it.
 
-## B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-`str::contains` (lane B, 2026-08-16) — **engine landed (`bed21ae38`); callers still to be rewired**
+## B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-`str::contains` (lane B, 2026-08-16) — **engine landed (`bed21ae38`); all four callers rewritten on it; only the unrelated `cat` item below is left**
 
-**In short:** `grep`, `sed`, `awk` and `expr` do not implement regular
-expressions. They search for the pattern as a *literal substring*. So
-`grep '^posix'` finds nothing at all, `sed 's/^/E:/'` copies its input through
-unchanged, and `grep '[ax]'` matches only a line that literally contains the
+**In short:** `grep`, `sed`, `awk` and `expr` did not implement regular
+expressions. They searched for the pattern as a *literal substring*. So
+`grep '^posix'` found nothing at all, `sed 's/^/E:/'` copied its input through
+unchanged, and `grep '[ax]'` matched only a line that literally contained the
 four characters `[ax]`. Every one of those looks like the program working,
 which is how the whole family passed its own test suites: each test asserted the
-substring behaviour it had.
+substring behaviour it had. All four now use the `ere` crate and are checked
+against the host's GNU tools; what is left under this heading is `cat`, which
+is here only because it was found in the same sweep.
 
 Found while fixing
 `B-THE-OILS-TESTS-RESOLVED-grep/sed/cat-FROM-THE-CARGO-BUILD-DIRECTORY` above —
@@ -25219,10 +25221,18 @@ they were failing on was this.
 | `grep` | BRE, and ERE under `-E` | ✅ `ere` (`bb12be713`) |
 | `sed` | BRE | ✅ `ere` (rewritten whole; see below) |
 | `awk`'s `/re/` and `~` | ERE | ✅ `ere` (rewritten whole; see below) |
-| `expr`'s `:` | BRE anchored at the start | `str::contains` |
+| `expr`'s `:` | BRE anchored at the start | ✅ `ere` (rewritten whole; see below) |
 
 It is not four bugs; it is **one missing component, absent four times** — and
 the component already existed, inside the shell.
+
+**Correction (2026-08-16):** the `expr` row of this table said `str::contains`,
+which was *generous*. `expr` had no `:` operator at all — nor `match`, `substr`
+or `index` — so the basename idiom `expr "$path" : '.*/\(.*\)'` was not a wrong
+answer, it was `syntax error`. The entry was written by reading the other three
+callers and assuming the fourth failed the same way. Recording a bug as milder
+than it is costs more than not recording it, because the entry then argues
+against looking.
 
 ### What has landed
 
@@ -25272,8 +25282,31 @@ one-line substitution, because the missing regex is not the only thing missing:
   before the program runs where gawk raises them when first reached. The reasons
   are recorded in the script and in `awk/main.rs`, and the script fails if one
   of them ever stops being true.
-* **`expr`** — BRE anchored at the start, with the POSIX `:` return rule (the
-  first group if there is one, else the match length).
+* ~~**`expr`** — BRE anchored at the start, with the POSIX `:` return rule (the
+  first group if there is one, else the match length).~~ **Done, `cd9e23600`.**
+  A rewrite, and for the same reason as the other two: the regex was not the
+  only thing missing. There was no `:`, `match`, `substr` or `index` at all; the
+  arithmetic was `i64` and would wrap or abort where GNU is
+  arbitrary-precision; a non-numeric operand became a silent `0` via
+  `unwrap_or(0)` instead of a diagnostic; and the comparison level did not loop,
+  so `expr 1 = 1 = 1` was a syntax error. What is there now is the whole
+  grammar — seven looping, left-associative precedence levels over byte
+  strings — with `:` on `ere::bre` and the arithmetic on the new `bignum` crate.
+
+  Anchoring is worth writing down, because the obvious implementation is wrong:
+  `:` is anchored by checking that the leftmost match *begins at offset 0*, not
+  by splicing a `^` onto the pattern. The check is exact only because the engine
+  is leftmost-longest; the splice would break `^a|b`, where it would anchor the
+  first branch alone.
+
+  Verified differentially against the host's GNU `expr` — `scripts/expr-diff.sh`,
+  **156 of 156 cases byte-identical** on stdout and exit status, plus two
+  recorded divergences the script *requires* to keep diverging (a backreference
+  needs a backtracking matcher; `a**` is refused where GNU folds it to `a*`).
+  The cases it took to find GNU's corners are the value here: `expr '' '|' ''`
+  prints `0`, not an empty line; `+0` is true and `-0` is false, because null is
+  exactly `^-?0+$` or empty; `index` searches for any character of a *set*; and
+  `:` binds tighter than `*`.
 * **`cat`**, separately: `-v` and `-A` are missing, and an unknown option is
   treated as a filename and **exits 0**, so a typo silently succeeds.
 

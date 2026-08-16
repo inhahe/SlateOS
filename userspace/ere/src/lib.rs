@@ -22,7 +22,8 @@
 //! ## Why this is a crate
 //!
 //! Five programs in this tree match regular expressions, and until this crate
-//! existed four of them did it by calling `str::contains`:
+//! existed three of them did it by calling `str::contains` and the fourth did
+//! not do it at all:
 //!
 //! | caller | wanted | had | uses this crate |
 //! |---|---|---|---|
@@ -30,14 +31,17 @@
 //! | `grep` | BRE, and ERE under `-E` | substring search | yes |
 //! | `sed` | BRE | substring search, plus a hand-rolled `.`/`*` matcher | yes |
 //! | `awk`'s `/re/` and `~` | ERE | substring search | yes |
-//! | `expr`'s `:` | BRE anchored at the start | substring search | not yet |
+//! | `expr`'s `:` | BRE anchored at the start | no `:` operator whatsoever | yes |
 //!
 //! That is not four small gaps; it is one missing component, absent four times.
-//! It also fails *quietly* — `grep '^posix'` finds nothing rather than
-//! complaining, `sed 's/^/E:/'` copies its input through unchanged, and a
-//! bracket expression matches only a line that literally contains `[ax]`. Each
-//! one looks like the program working, which is how the whole family survived
-//! its own test suites: every test asserted the substring behaviour it had.
+//! Three of the four also failed *quietly* — `grep '^posix'` finds nothing
+//! rather than complaining, `sed 's/^/E:/'` copies its input through unchanged,
+//! and a bracket expression matches only a line that literally contains `[ax]`.
+//! Each one looks like the program working, which is how the whole family
+//! survived its own test suites: every test asserted the substring behaviour it
+//! had. `expr` is the exception that shows the same cause from the other side —
+//! having no `:` at all, it could not fake the behaviour, so it said `syntax
+//! error` and simply went untested.
 //!
 //! It is the same move `tzrules`, `textfmt`, `textfind` and `byteread` already
 //! made in this tree, and for the strongest version of the same reason — the

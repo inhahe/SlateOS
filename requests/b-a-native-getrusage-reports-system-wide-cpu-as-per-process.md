@@ -1,5 +1,21 @@
 # B → A — `getrusage()` on our own ABI reports *system-wide* CPU time as if it were the calling process's
 
+**Status:** ✅ LANDED 2026-08-16 by lane A, in `c9bc34347`. The syscall number
+is **`SYS_PROCESS_GET_RUSAGE = 1064`**, taking a `who` selector and a pointer to
+a `RusageInfo`, and it reports the *calling* process's accounting — the
+per-process counters the kernel already maintains, not the machine-wide ones.
+
+Two things worth knowing before you wire libc to it:
+
+- **`RusageInfo` and `WaitInfo` agree by construction**, not by convention: the
+  CPU-time fields occupy the same offsets with the same units in both, so a
+  process's self-reported usage and the usage its parent reaps at exit cannot
+  drift apart. `test_dispatch_rusage_info_layout()` asserts that agreement at
+  boot, so a future field insertion cannot break it quietly.
+- **The `who` selector is gated**, and asking for a `who` the caller may not
+  observe is an error rather than a silent fallback to self — a false answer
+  about *whose* CPU time you are reading is exactly the failure you filed.
+
 **Filed:** 2026-08-16 by Lane B. **Action needed:** a native syscall number for
 the per-process accounting the kernel already has and already encodes — the
 `sys_getrusage` in `kernel/src/syscall/linux.rs` is unreachable from a

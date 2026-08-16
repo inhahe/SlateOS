@@ -1267,10 +1267,13 @@ impl Face {
     /// Which of this face's `GSUB` script tags a run of `script` is shaped
     /// under, or `None` when the face names none of the ones it would accept.
     ///
-    /// Two callers, and both ask because the *tag* carries meaning beyond which
-    /// features it selects: [`shapes_as_default`](Self::shapes_as_default),
-    /// where `DFLT` or `latn` says the designer wrote no complex shaping, and
-    /// the Indic shaper, where `deva` and `dev2` are two different specs. See
+    /// Three callers, and all ask because the *tag* carries meaning beyond
+    /// which features it selects: [`shapes_as_default`](Self::shapes_as_default),
+    /// where `DFLT` or `latn` says the designer wrote no complex shaping; the
+    /// Indic shaper, where `deva` and `dev2` are two different specs; and the
+    /// Thai private-use fallback, which runs exactly when the answer is *not*
+    /// `thai` — including for a face with no `GSUB` at all, which is why that
+    /// caller cannot use `shapes_as_default`. See
     /// [`otl::chosen_from`](crate::otl::chosen_from).
     #[must_use]
     pub(crate) fn gsub_chosen_script(&self, script: Option<ScriptTags>) -> Option<[u8; 4]> {

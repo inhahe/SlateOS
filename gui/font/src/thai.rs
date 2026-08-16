@@ -63,17 +63,42 @@
 //! a caret cannot land between the consonant and the vowel it carries, which is
 //! what HarfBuzz's default cluster level does too.
 //!
-//! # Not done here
+//! # The private-use fallback
 //!
-//! The other rules on <https://linux.thai.net/~thep/th-otf/shaping.html> pick
-//! private-use glyphs for tone marks that have to shift down or left over a
-//! tall or descending consonant. Those apply only to a face with no Thai
-//! `GSUB`, which is the shaping the font declined to describe; see
-//! `known-issues.md`, `TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`.
+//! The rest of <https://linux.thai.net/~thep/th-otf/shaping.html> is about
+//! where a tone mark goes when the consonant under it is the wrong shape.
+//! Thai stacks up to two marks over a consonant, and three things spoil the
+//! default stacking:
+//!
+//! * **Tall consonants** — `ป`, `ฝ`, `ฟ` carry an ascender the mark would
+//!   collide with, so a mark above them shifts *left* of it.
+//! * **Descenders** — `ญ` and `ฐ` have a tail that a below-base vowel would
+//!   land on, so the tail is removed and a bare form drawn instead.
+//! * **A mark already there** — a tone mark over a vowel that is itself above
+//!   the consonant has to shift *down* to sit on the vowel rather than float.
+//!
+//! An OpenType Thai font expresses all of that in `GSUB` and `GPOS`. A font
+//! from before OpenType expresses it by shipping the shifted forms as extra
+//! glyphs in the private use area — one set at U+F700 for Windows, another at
+//! U+F880 for the Mac — and leaving the engine to pick them. [`pua_shape`] is
+//! that pass: two small state machines, one tracking what is stacked above the
+//! consonant and one what is below, that between them name the substitution.
+//!
+//! It runs **only on a face whose `GSUB` does not register `thai`**, because a
+//! face that does has described its own shaping and is entitled to be believed.
+//! HarfBuzz gates it the same way, on `!plan->map.found_script[0]`, and applies
+//! it to Thai only — Lao has no private-use convention.
+//!
+//! What it replaces is the *glyph*, not the character: a shifted mai ek is
+//! still a mai ek, and the shaper downstream still has to know it is a mark to
+//! give it no advance. Rewriting the character would lose that, because a
+//! private-use codepoint's general category is `Co`.
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use crate::norm::Piece;
+use crate::script::ScriptTags;
 
 /// Whether `ch` is SARA AM — Thai U+0E33 or Lao U+0EB3.
 ///
@@ -174,6 +199,297 @@ pub(crate) fn preprocess(pieces: &mut Vec<Piece>) {
         }
     }
     *pieces = out;
+}
+
+/// Whether a run of `script` is one the private-use fallback applies to.
+///
+/// Thai and not Lao. The private-use conventions were Windows' and Apple's
+/// answers to Thai specifically; no equivalent was ever defined for Lao, and
+/// HarfBuzz tests `props.script == HB_SCRIPT_THAI` for the same reason.
+#[must_use]
+pub(crate) fn legacy_run(script: Option<ScriptTags>) -> bool {
+    script.is_some_and(|s| s.preferred == *b"thai")
+}
+
+/// What kind of consonant a character is, which is what decides how much room
+/// there is above it and what is in the way below.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Consonant {
+    /// Normal: no ascender, no descender.
+    Normal,
+    /// Ascending — `ป` PO PLA, `ฝ` FO FA, `ฟ` FO FAN. A mark above one of
+    /// these has to move left of the ascender.
+    Ascending,
+    /// Removable descender — `ญ` YO YING, `ฐ` THO THAN. The tail comes off to
+    /// make room for a below-base vowel.
+    Removable,
+    /// Fixed descender — `ฎ` DO CHADA, `ฏ` TO PATAK. The tail stays and the
+    /// vowel moves instead.
+    Descending,
+    /// Not a Thai consonant at all, including a vowel or a space. Treated as
+    /// the most crowded case, so nothing is shifted onto it.
+    None,
+}
+
+/// Which of the three positions a mark occupies.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MarkType {
+    /// Above-base vowel, and the nikhahit.
+    Above,
+    /// Below-base vowel.
+    Below,
+    /// Tone mark, or thanthakhat. Drawn above whatever is already there.
+    Tone,
+}
+
+/// What to draw instead, when the default form will not do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Action {
+    /// Leave it alone.
+    Nop,
+    /// Shift the mark down — there is nothing above the consonant after all.
+    Down,
+    /// Shift the mark left — the consonant has an ascender in the way.
+    Left,
+    /// Both.
+    DownLeft,
+    /// Remove the consonant's descender. The only action that rewrites the
+    /// *base* rather than the mark.
+    Descender,
+}
+
+/// How full the space above the consonant is.
+///
+/// The names are HarfBuzz's `T0`–`T3`, and the order is how much is stacked:
+/// nothing, an ascender, an ascender and a mark, full.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Above {
+    Empty,
+    Ascender,
+    AscenderAndMark,
+    Full,
+}
+
+/// What is below the consonant.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Below {
+    /// Nothing in the way.
+    Clear,
+    /// A descender that may be removed to make room.
+    Removable,
+    /// A descender that stays, or something already under there.
+    Occupied,
+}
+
+/// The Thai consonants that shape differently, and everything else.
+///
+/// U+0E2C LO CHULA is an ascender too, but HarfBuzz leaves it out — the
+/// comment in `hb-ot-shaper-thai.cc` has it commented out rather than absent,
+/// so this is a deliberate match with Uniscribe rather than an oversight, and
+/// this crate copies it to stay comparable against the oracle.
+fn consonant_type(ch: char) -> Consonant {
+    match ch as u32 {
+        0x0E1B | 0x0E1D | 0x0E1F => Consonant::Ascending,
+        0x0E0D | 0x0E10 => Consonant::Removable,
+        0x0E0E | 0x0E0F => Consonant::Descending,
+        0x0E01..=0x0E2E => Consonant::Normal,
+        _ => Consonant::None,
+    }
+}
+
+/// Which position a mark takes, or `None` when the character is not a mark
+/// this fallback knows about — which resets both machines.
+fn mark_type(ch: char) -> Option<MarkType> {
+    match ch as u32 {
+        0x0E31 | 0x0E34..=0x0E37 | 0x0E47 | 0x0E4D | 0x0E4E => Some(MarkType::Above),
+        0x0E38..=0x0E3A => Some(MarkType::Below),
+        0x0E48..=0x0E4C => Some(MarkType::Tone),
+        _ => None,
+    }
+}
+
+/// Where the above-base machine starts, given the consonant it starts on.
+///
+/// An ascending consonant already fills the first level; anything that is not
+/// a consonant is treated as full, so a stray mark is never shifted onto it.
+fn above_start(consonant: Consonant) -> Above {
+    match consonant {
+        Consonant::Ascending => Above::Ascender,
+        Consonant::None => Above::Full,
+        _ => Above::Empty,
+    }
+}
+
+/// Where the below-base machine starts.
+fn below_start(consonant: Consonant) -> Below {
+    match consonant {
+        Consonant::Removable => Below::Removable,
+        Consonant::Descending | Consonant::None => Below::Occupied,
+        _ => Below::Clear,
+    }
+}
+
+/// One step of the above-base machine: what to do, and what the space above
+/// the consonant looks like afterwards.
+///
+/// A tone mark landing on an empty space drops onto the consonant
+/// ([`Action::Down`]); landing over an ascender it drops *and* moves left; and
+/// once a vowel is already up there it only moves left, because the vowel is
+/// holding it at the right height. After anything at all the space is full and
+/// nothing more is shifted.
+fn above_step(state: Above, mark: MarkType) -> (Action, Above) {
+    match (state, mark) {
+        (Above::Empty, MarkType::Above) => (Action::Nop, Above::Full),
+        (Above::Empty, MarkType::Below) => (Action::Nop, Above::Empty),
+        (Above::Empty, MarkType::Tone) => (Action::Down, Above::Full),
+        (Above::Ascender, MarkType::Above) => (Action::Left, Above::AscenderAndMark),
+        (Above::Ascender, MarkType::Below) => (Action::Nop, Above::Ascender),
+        (Above::Ascender, MarkType::Tone) => (Action::DownLeft, Above::AscenderAndMark),
+        (Above::AscenderAndMark, MarkType::Above) => (Action::Nop, Above::Full),
+        (Above::AscenderAndMark, MarkType::Below) => (Action::Nop, Above::AscenderAndMark),
+        (Above::AscenderAndMark, MarkType::Tone) => (Action::Left, Above::Full),
+        (Above::Full, _) => (Action::Nop, Above::Full),
+    }
+}
+
+/// One step of the below-base machine.
+///
+/// Only a below-base vowel does anything: it takes a removable descender off
+/// the consonant, or — if the descender is one that stays — shifts itself
+/// down out of the way. Either way the space below is occupied afterwards.
+fn below_step(state: Below, mark: MarkType) -> (Action, Below) {
+    match (state, mark) {
+        (Below::Clear, MarkType::Below) => (Action::Nop, Below::Occupied),
+        (Below::Removable, MarkType::Below) => (Action::Descender, Below::Occupied),
+        (Below::Occupied, MarkType::Below) => (Action::Down, Below::Occupied),
+        (state, _) => (Action::Nop, state),
+    }
+}
+
+/// The private-use forms, as `(character, Windows, Mac)`.
+///
+/// Two conventions because two vendors invented one each, and a font may carry
+/// either. Windows' is tried first, which is HarfBuzz's order and the one that
+/// matches the fonts that are actually installed.
+const SHIFTED_DOWN: &[(u32, u32, u32)] = &[
+    (0x0E48, 0xF70A, 0xF88B), // MAI EK
+    (0x0E49, 0xF70B, 0xF88E), // MAI THO
+    (0x0E4A, 0xF70C, 0xF891), // MAI TRI
+    (0x0E4B, 0xF70D, 0xF894), // MAI CHATTAWA
+    (0x0E4C, 0xF70E, 0xF897), // THANTHAKHAT
+    (0x0E38, 0xF718, 0xF89B), // SARA U
+    (0x0E39, 0xF719, 0xF89C), // SARA UU
+    (0x0E3A, 0xF71A, 0xF89D), // PHINTHU
+];
+
+/// Shifted down and left. Tone marks only: a vowel never needs both.
+const SHIFTED_DOWN_LEFT: &[(u32, u32, u32)] = &[
+    (0x0E48, 0xF705, 0xF88C), // MAI EK
+    (0x0E49, 0xF706, 0xF88F), // MAI THO
+    (0x0E4A, 0xF707, 0xF892), // MAI TRI
+    (0x0E4B, 0xF708, 0xF895), // MAI CHATTAWA
+    (0x0E4C, 0xF709, 0xF898), // THANTHAKHAT
+];
+
+/// Shifted left, to clear an ascender.
+const SHIFTED_LEFT: &[(u32, u32, u32)] = &[
+    (0x0E48, 0xF713, 0xF88A), // MAI EK
+    (0x0E49, 0xF714, 0xF88D), // MAI THO
+    (0x0E4A, 0xF715, 0xF890), // MAI TRI
+    (0x0E4B, 0xF716, 0xF893), // MAI CHATTAWA
+    (0x0E4C, 0xF717, 0xF896), // THANTHAKHAT
+    (0x0E31, 0xF710, 0xF884), // MAI HAN-AKAT
+    (0x0E34, 0xF701, 0xF885), // SARA I
+    (0x0E35, 0xF702, 0xF886), // SARA II
+    (0x0E36, 0xF703, 0xF887), // SARA UE
+    (0x0E37, 0xF704, 0xF888), // SARA UEE
+    (0x0E47, 0xF712, 0xF889), // MAITAIKHU
+    (0x0E4D, 0xF711, 0xF899), // NIKHAHIT
+];
+
+/// The consonants with their descender taken off.
+const NO_DESCENDER: &[(u32, u32, u32)] = &[
+    (0x0E0D, 0xF70F, 0xF89A), // YO YING
+    (0x0E10, 0xF700, 0xF89E), // THO THAN
+];
+
+/// The private-use character `ch` should be drawn as under `action`, if this
+/// face has one.
+///
+/// `None` for a face that has neither vendor's form, which is every font that
+/// was designed for OpenType — and the reason this pass is silently harmless
+/// on a face it does not apply to.
+fn shifted(ch: char, action: Action, has_glyph: &impl Fn(char) -> bool) -> Option<char> {
+    let table = match action {
+        Action::Nop => return None,
+        Action::Down => SHIFTED_DOWN,
+        Action::DownLeft => SHIFTED_DOWN_LEFT,
+        Action::Left => SHIFTED_LEFT,
+        Action::Descender => NO_DESCENDER,
+    };
+    let &(_, windows, mac) = table.iter().find(|&&(u, _, _)| u == ch as u32)?;
+    [windows, mac]
+        .into_iter()
+        .filter_map(char::from_u32)
+        .find(|&form| has_glyph(form))
+}
+
+/// Pick private-use forms for the marks in `range` that the default forms
+/// would place wrongly.
+///
+/// `out` is one slot per piece, and this writes the replacement *glyph*
+/// character into the slots that need one — never the piece itself, because
+/// the character still has to answer questions about what kind of mark it is.
+/// Slots outside `range`, and those needing no replacement, are left alone.
+pub(crate) fn pua_shape(
+    pieces: &[Piece],
+    range: Range<usize>,
+    out: &mut [Option<char>],
+    has_glyph: impl Fn(char) -> bool,
+) {
+    let mut above = above_start(Consonant::None);
+    let mut below = below_start(Consonant::None);
+    // The consonant the marks are landing on, which [`Action::Descender`]
+    // rewrites instead of the mark. Starts at the run's first piece, matching
+    // HarfBuzz — a mark with no consonant before it can only reach `Descender`
+    // from a state no such run is in, so what it names is unreachable rather
+    // than wrong.
+    let mut base = range.start;
+    for i in range {
+        let Some(&(ch, _)) = pieces.get(i) else {
+            break;
+        };
+        let Some(mark) = mark_type(ch) else {
+            let consonant = consonant_type(ch);
+            above = above_start(consonant);
+            below = below_start(consonant);
+            base = i;
+            continue;
+        };
+        let (above_action, above_next) = above_step(above, mark);
+        let (below_action, below_next) = below_step(below, mark);
+        above = above_next;
+        below = below_next;
+        // At most one machine ever fires: the above one only acts on marks it
+        // has room for, the below one only on below-base vowels, and no state
+        // pairs an action with an action.
+        let action = if above_action == Action::Nop {
+            below_action
+        } else {
+            above_action
+        };
+        let (at, target) = if action == Action::Descender {
+            (base, pieces.get(base).map(|&(c, _)| c))
+        } else {
+            (i, Some(ch))
+        };
+        if let Some(target) = target
+            && let Some(form) = shifted(target, action, &has_glyph)
+            && let Some(slot) = out.get_mut(at)
+        {
+            *slot = Some(form);
+        }
+    }
 }
 
 /// Give every piece in `[start, end)` the lowest cluster any of them has.
@@ -339,6 +655,163 @@ mod tests {
         // Nothing in front to merge with, so the two halves stay where the
         // character was.
         assert_eq!(run("\u{0E33}"), vec![('\u{0E4D}', 0), ('\u{0E32}', 0)]);
+    }
+
+    /// The private-use pass over `text`, on a face carrying every form of
+    /// `vendor` — `0xF700` for the Windows convention, `0xF880` for the Mac's.
+    fn pua(text: &str, vendor: u32) -> Vec<Option<u32>> {
+        let mut pieces: Vec<Piece> = text.char_indices().map(|(at, ch)| (ch, at)).collect();
+        preprocess(&mut pieces);
+        let mut out = vec![None; pieces.len()];
+        pua_shape(&pieces, 0..pieces.len(), &mut out, |ch| {
+            (ch as u32) & 0xFF80 == vendor
+        });
+        out.iter()
+            .map(|slot| slot.map(|ch: char| ch as u32))
+            .collect()
+    }
+
+    const WIN: u32 = 0xF700;
+    const MAC: u32 = 0xF880;
+
+    #[test]
+    fn a_tone_mark_on_a_plain_consonant_shifts_down() {
+        // Nothing is above KO KAI, so the mark drops onto it rather than
+        // floating at the height a vowel would have held it.
+        assert_eq!(pua("\u{0E01}\u{0E48}", WIN), vec![None, Some(0xF70A)]);
+    }
+
+    #[test]
+    fn a_tone_mark_on_an_ascending_consonant_shifts_down_and_left() {
+        // PO PLA's ascender is where the mark would have gone.
+        assert_eq!(pua("\u{0E1B}\u{0E48}", WIN), vec![None, Some(0xF705)]);
+    }
+
+    #[test]
+    fn a_vowel_on_an_ascending_consonant_shifts_left() {
+        assert_eq!(pua("\u{0E1B}\u{0E34}", WIN), vec![None, Some(0xF701)]);
+    }
+
+    #[test]
+    fn a_tone_mark_over_a_shifted_vowel_shifts_left_only() {
+        // The vowel is already holding the tone at the right height, so it
+        // only has to clear the ascender.
+        assert_eq!(
+            pua("\u{0E1B}\u{0E34}\u{0E48}", WIN),
+            vec![None, Some(0xF701), Some(0xF713)]
+        );
+    }
+
+    #[test]
+    fn a_tone_mark_over_an_unshifted_vowel_is_left_alone() {
+        // KO KAI has no ascender, so the vowel sits where it always does and
+        // the tone sits on the vowel. Both default forms are right.
+        assert_eq!(pua("\u{0E01}\u{0E34}\u{0E48}", WIN), vec![None, None, None]);
+    }
+
+    #[test]
+    fn a_below_base_vowel_takes_off_a_removable_descender() {
+        // YO YING's tail comes off; the vowel itself is unchanged, and it is
+        // the *base* that is rewritten.
+        assert_eq!(pua("\u{0E0D}\u{0E38}", WIN), vec![Some(0xF70F), None]);
+    }
+
+    #[test]
+    fn a_below_base_vowel_moves_down_past_a_descender_that_stays() {
+        // DO CHADA's tail is part of the letter, so the vowel gives way.
+        assert_eq!(pua("\u{0E0E}\u{0E38}", WIN), vec![None, Some(0xF718)]);
+    }
+
+    #[test]
+    fn a_below_base_vowel_on_a_plain_consonant_is_left_alone() {
+        assert_eq!(pua("\u{0E01}\u{0E38}", WIN), vec![None, None]);
+    }
+
+    #[test]
+    fn the_mac_forms_are_taken_when_the_windows_ones_are_missing() {
+        assert_eq!(pua("\u{0E01}\u{0E48}", MAC), vec![None, Some(0xF88B)]);
+    }
+
+    #[test]
+    fn a_face_with_neither_vendors_forms_is_left_entirely_alone() {
+        // Which is every font designed for OpenType, and the reason this pass
+        // is safe to run whenever the `GSUB` script is missing.
+        assert_eq!(pua("\u{0E1B}\u{0E34}\u{0E48}", 0), vec![None, None, None]);
+    }
+
+    #[test]
+    fn the_nikhahit_from_a_sara_am_is_shifted_like_any_other_vowel() {
+        // The two passes in sequence: SARA AM splits, and the circle it left
+        // above PO PLA then has to clear PO PLA's ascender.
+        assert_eq!(
+            pua("\u{0E1B}\u{0E33}", WIN),
+            vec![None, Some(0xF711), None]
+        );
+    }
+
+    #[test]
+    fn a_consonant_resets_both_machines() {
+        // Two syllables, and the second is shaped as if the first were not
+        // there.
+        assert_eq!(
+            pua("\u{0E1B}\u{0E48}\u{0E01}\u{0E48}", WIN),
+            vec![None, Some(0xF705), None, Some(0xF70A)]
+        );
+    }
+
+    #[test]
+    fn a_mark_with_no_consonant_before_it_is_left_alone() {
+        // The machines start in their most crowded states, so a stray mark is
+        // never shifted onto something that is not there.
+        assert_eq!(pua("\u{0E48}", WIN), vec![None]);
+        assert_eq!(pua(" \u{0E48}", WIN), vec![None, None]);
+    }
+
+    #[test]
+    fn only_thai_runs_reach_the_private_use_pass() {
+        assert!(legacy_run(Some(ScriptTags {
+            preferred: *b"thai",
+            fallback: *b"thai",
+        })));
+        assert!(!legacy_run(Some(ScriptTags {
+            preferred: *b"lao ",
+            fallback: *b"lao ",
+        })));
+        assert!(!legacy_run(None));
+    }
+
+    #[test]
+    fn no_private_use_form_stands_for_two_different_things() {
+        // A character may well be in three tables — a tone mark has a down, a
+        // left and a down-left form — but a private-use codepoint stands for
+        // exactly one of them, in one vendor's convention. Two entries sharing
+        // one would silently draw the wrong shift, and the tables are 60 hand-
+        // transcribed hex numbers.
+        let tables = [SHIFTED_DOWN, SHIFTED_DOWN_LEFT, SHIFTED_LEFT, NO_DESCENDER];
+        let mut forms: Vec<u32> = Vec::new();
+        for table in tables {
+            let mut characters: Vec<u32> = table.iter().map(|&(u, _, _)| u).collect();
+            let before = characters.len();
+            characters.sort_unstable();
+            characters.dedup();
+            assert_eq!(before, characters.len(), "a table names a character twice");
+            for &(_, windows, mac) in table {
+                assert!(
+                    (0xF700..0xF800).contains(&windows),
+                    "{windows:04X} is not in the Windows range"
+                );
+                assert!(
+                    (0xF880..0xF8A0).contains(&mac),
+                    "{mac:04X} is not in the Mac range"
+                );
+                forms.push(windows);
+                forms.push(mac);
+            }
+        }
+        let before = forms.len();
+        forms.sort_unstable();
+        forms.dedup();
+        assert_eq!(before, forms.len(), "two entries share a private-use form");
     }
 
     #[test]

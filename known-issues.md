@@ -14896,22 +14896,60 @@ keeps this entry open.**
   `__libc_start_main` calls before the ELF constructors. `capget()` now reports
   the kernel's answer **intersected with** whatever the process has dropped, so
   a real `capset()` drop still binds and a later refresh cannot undo it.
-- **Step 3 — the gates are still advisory, and that is what is left.** The 63
-  libc gate sites still read the stored words through `has_capability()`, which
-  on the target still starts permissive. Pointing `has_capability` at
-  `reported_caps_effective` is one line, but **that line is not the work**: a
-  dozen of the gates are written as capability-*only* where Linux's rule is
-  "capability **or** something else", so making them truthful would deny
-  operations the kernel itself permits — a regression, not a tightening. That
-  survey is its own entry,
-  TD-POSIX-CAP-GATES-OMIT-LINUX-S-NON-CAPABILITY-ALTERNATIVE, and it lands
-  first. Step 3 then still needs the fixtures spawned `capabilities: &[]` —
-  `services/ctest-jobctl`, `self_test_cctty`, `self_test_cpgroup` — given real
-  capabilities (they are spawned from `kernel/src/proc/spawn.rs`, lane A's
-  tree), and QEMU free. `refresh()`'s fail-soft-on-error behaviour also has to
-  become fail-closed at that point: while the gates are advisory, "we could not
-  ask" and "you may" are the same thing; once they are binding, they stop
-  being.
+- **Step 3 — the gates are still advisory, and that is what is left.** The libc
+  gate sites still read the stored words through `has_capability()`, which on
+  the target still starts permissive. Pointing `has_capability` at
+  `reported_caps_effective` is one line, but **that line is not the work**. The
+  first obstacle — a dozen gates written as capability-*only* where Linux's rule
+  is "capability **or** something else" — was its own entry,
+  TD-POSIX-CAP-GATES-OMIT-LINUX-S-NON-CAPABILITY-ALTERNATIVE, and is **now
+  fixed** (all 14 sites, 2026-08-16). What remains is below.
+
+  **Step-3 audit, 2026-08-16.** After the §314 rework the crate has **48
+  production gate sites** across **19 distinct `CAP_*` bits** (the older count
+  of 63/22 predates §314, which deleted the four `CAP_KILL` gates among others).
+  `kernel_view::project` derives only **six** bits — `CAP_SYS_RAWIO`,
+  `CAP_KILL`, `CAP_SYS_PTRACE`, `CAP_SYS_NICE`, `CAP_NET_RAW`, `CAP_SYS_ADMIN` —
+  and §312 says every unnamed bit reads **false**, on purpose. So the flip turns
+  22 of the 48 sites into permanent denials. Classifying them by what actually
+  stands behind the gate:
+
+  | Consequence | Caps | Sites |
+  |---|---|---|
+  | **Real regression** — the gate fronts a working kernel path, so the operation becomes impossible for every process | `CAP_SETUID`, `CAP_SETGID`, `CAP_SYS_TIME`, `CAP_NET_BIND_SERVICE`, `CAP_IPC_LOCK`, `CAP_SYS_RESOURCE`, `CAP_WAKE_ALARM` | 12 |
+  | **Cosmetic** — the call is an `ENOSYS` stub today, so the only change is `ENOSYS` → `EPERM`, which is what Linux reports to an unprivileged caller anyway | `CAP_SYS_MODULE`, `CAP_MKNOD`, `CAP_SYS_BOOT`, `CAP_SYS_CHROOT`, `CAP_DAC_READ_SEARCH`, `CAP_BPF`, `CAP_PERFMON` | 10 |
+
+  The twelve in the first row are the real work, and `CAP_SETUID`/`CAP_SETGID`
+  show why §312's "under-reporting is recoverable" premise does not carry all
+  the way: it holds only where the kernel re-checks.
+  `SYS_PROCESS_SET_CREDENTIALS` is a thin primitive that explicitly does *not*
+  re-run the policy check (its doc comment says so), so libc is the sole decider
+  and an under-report is final. §314 has already removed every gate that *did*
+  stand in front of a re-checking kernel — which means the gates that survive
+  are, by construction, exactly the ones where under-reporting cannot be
+  recovered from. Each of the twelve therefore needs a projection rule, and a
+  rule needs a `(ResourceType, Rights)` pair the kernel is willing to mean it.
+  Some have an honest preimage already (`Process` + `METADATA` for credentials;
+  `Timer` + `WRITE` for the timebase); `CAP_NET_BIND_SERVICE` and
+  `CAP_IPC_LOCK` have none and are open questions.
+
+  **Fixtures.** The old blocker list here — `services/ctest-jobctl`,
+  `self_test_cctty`, `self_test_cpgroup` — is **stale**: §314 deleted libc's
+  pre-emptive `CAP_KILL` gate, and those three make no other gated call, so they
+  need nothing. Re-auditing every fixture against the 48 sites turns up exactly
+  **two** that do: `fastpy-nice` (raises its own priority; needs `Thread` +
+  `IO_REALTIME` for `CAP_SYS_NICE`) and `fastpy-setuid` (changes its uid/gid to
+  values it does not hold; needs whatever pair the kernel picks for
+  `CAP_SETUID`/`CAP_SETGID`). Both are spawned from `kernel/src/proc/spawn.rs`,
+  lane A's tree — filed as
+  `requests/b-a-cap-grants-for-312-step3-fixtures.md`. Note `fastpy-nice`'s
+  spawn-site comment claims "the calls it makes only *lower* priority (need no
+  cap)", which is wrong (nice 0 → −7 is a raise); the fixture's own build recipe
+  says it is deliberately exercising the gated path.
+
+  **And `refresh()` must become fail-closed.** While the gates are advisory,
+  "we could not ask" and "you may" are the same thing; once they are binding,
+  they stop being.
 
 **What.** `posix/src/sys_capability.rs` keeps the three Linux capability sets
 (effective/permitted/inheritable) in its own store and initialises them from

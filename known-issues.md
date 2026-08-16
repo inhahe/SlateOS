@@ -21513,42 +21513,62 @@ than a solution to it.
 `gui/toolkit/src/text.rs` — `char_index_at`; `gui/font/src/shape.rs` —
 `x_of`/`offset_at`/`Affinity`, which is everything the fix needs from the font.
 
-## TD-OILS-TESTS-CANNOT-SEE-A-FAILED-SPAWN (lane B's tree; filed by lane C, 2026-08-16)
+## B-WORKSPACE-TEST-IS-RED-SLATEOS-COREUTILS-SHADOW-THE-HOSTS (lane B's tree; filed by lane C, 2026-08-16)
 
 **Status: OPEN.** Filed for lane B as
-`requests/c-b-oils-tests-cannot-see-a-failed-spawn.md`. Logged here so the next
-lane to hit it does not re-triage it from scratch.
+`requests/c-b-workspace-test-red-slateos-coreutils-shadow-host.md`. Logged here
+because it blocks *every* lane's pre-merge gate, not just lane C's.
 
-**What.** Eight `oils` `interp::tests` go red under machine load and green on a
-clean re-run, and when they go red the failure message cannot say why. All
-eight pipe through an external host utility (`grep`, `sed`, `cat`); the flake is
-a transient failure to spawn one. `oils` handles that correctly — it reports the
-error via `spawn_error_message` and exits 126/127 — but it reports it on the
-command's **fd 2**, and the `run()` test helper captures **stdout only**. The
-assertion therefore shows `left: ""` against a builtin's expected output, which
-reads as that builtin having stopped producing output. It is not.
+**What.** `cargo test --workspace --target x86_64-pc-windows-gnu` is
+reproducibly red: `-p oils --lib` reports `1488 passed; 8 failed`. Run on its
+own, `cargo test -p oils --lib` passes all 1496.
 
-**How it was seen.** Lane C's pre-merge `cargo test --workspace` run,
-2026-08-16: 1804 test binaries `ok`, `oils` `1488 passed; 8 failed`. Clean
-re-run of `-p oils --lib`: `1496 passed; 0 failed`. The trigger was lane C
-having two workspace runs live at once; the *legibility* problem is
-independent of that and will recur on any loaded machine.
+**Why.** Cargo prepends the build's output directory to `PATH` when it runs a
+test binary — that is how a test finds its crate's dynamic libraries on
+Windows. A *workspace* build puts SlateOS's own coreutils in that directory
+(`target/x86_64-pc-windows-gnu/debug/{grep,sed,cat}.exe`, and ~200 more). The
+eight failing `oils` tests each pipe through `grep`, `sed` or `cat`, so under
+`--workspace` they run **ours** rather than the host's GNU ones — and ours do
+not implement what the tests were written against. In a target directory where
+coreutils was never built, the host's tools win and the tests pass.
 
-**The two conclusive data points**, for anyone who doubts the diagnosis:
-`builtin_diagnostics_honor_stderr_redirect` ran `cd /nodir 2>&1 | sed 's/^/E:/'`
-and got the shell's own diagnostic back complete and correct with the `E:`
-prefix simply absent — `sed` never ran. `local_dash_binds_a_variable_no_listing_reports`
-wrote five `grep -c` pipelines and got **four** lines; `grep -c` prints `0\n`
-when it matches nothing, so a missing line means no process, not no match.
+**Proof.** The *same binary* (`osh-c93d43afff5c6245.exe` — identical hash in
+both target directories, so identical features and flags), three of the eight
+tests, one environment variable:
 
-**Proper fix** (lane B's to make): have `run()` capture fd 2 and surface it in
-the panic message — no test in the file expects a spawn error it did not ask
-for, so it could even be asserted empty. One edit, covers all ~88 external-spawn
-sites. Optionally also convert the six self-filtering `grep`/`sed` pipelines to
-`case`/`while read`, which needs no spawn at all and makes those tests hermetic
-rather than merely legible.
+```
+$ ./target-test/…/deps/osh-c93d43afff5c6245.exe <three tests>
+test result: ok. 3 passed; 0 failed
+$ PATH="$PWD/target/x86_64-pc-windows-gnu/debug:$PATH" ./target-test/…/<same>
+test result: FAILED. 0 passed; 3 failed
+```
 
-**Also learned:** never run two `cargo test --workspace` invocations against one
-`target/`. The earlier of lane C's two died with `os error 32` — "could not
-execute process colorpicker-….exe … being used by another process" — with
-nothing actually under test at the point of failure.
+And the utility by hand: `printf 'declare -r a="1"\n' | ./target/…/grep.exe
+' [ab]='` matches nothing, where GNU `grep` matches. Ours has no bracket
+expressions; the log also carries `grep: unknown option: -E`, `-q` and `--`,
+and a `cat: E9: The system cannot find the file specified. (os error 2)` whose
+wording is Rust's `io::Error` rather than GNU's.
+
+**Why it is worse than one red crate.** Cargo stops at the first failing test
+binary, so `osh` failing means every test target after it alphabetically —
+`p` through `z` — **never runs** on any workspace test anyone does.
+
+**Proper fix** (lane B's to make; the request lays out the fork). Either point
+the `oils` test harness at the host's utilities explicitly, so the result stops
+depending on what else the workspace happened to build — cheapest, and makes
+the suite deterministic at once — or implement the missing coreutils features,
+which is work we owe anyway and turns these eight into a real integration test
+of our own tools. Both, in that order, is the recommendation.
+
+**Correction, same day.** This entry first said the eight were a *load-related
+flake* (transient spawn failure under a busy machine). That was wrong. It came
+from a real observation — a clean re-run of `-p oils --lib` was green — but the
+re-run had quietly changed the only variable that mattered, by using a
+different `CARGO_TARGET_DIR`. Recorded because a wrong diagnosis in a shared
+file is worse than none: the next lane would have re-run it, watched it pass in
+isolation, and believed the note.
+
+**Also, unrelated but learned alongside:** never run two `cargo test
+--workspace` invocations against one `target/`. The first attempt died with
+`os error 32` — "could not execute process colorpicker-….exe … being used by
+another process" — with nothing actually under test at the point of failure.

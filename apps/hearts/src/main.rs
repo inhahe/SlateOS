@@ -479,19 +479,13 @@ impl Hearts {
         if self.pass_direction == PassDirection::Keep {
             self.phase = GamePhase::Playing;
             self.current_player = self.find_two_of_clubs_holder();
-            self.status = format!(
-                "{} leads with 2\u{2663}",
-                self.names[self.current_player]
-            );
+            self.status = format!("{} leads with 2\u{2663}", self.names[self.current_player]);
             if self.current_player != 0 {
                 self.play_ai_turns();
             }
         } else {
             self.phase = GamePhase::Passing;
-            self.status = format!(
-                "Select 3 cards to pass ({})",
-                self.pass_direction.label()
-            );
+            self.status = format!("Select 3 cards to pass ({})", self.pass_direction.label());
         }
 
         self.clamp_selected_index();
@@ -606,15 +600,9 @@ impl Hearts {
             self.round_points[winner] += pts;
             self.current_player = winner;
 
-            self.status = format!(
-                "{} wins the trick ({} pts)",
-                self.names[winner], pts
-            );
+            self.status = format!("{} wins the trick ({} pts)", self.names[winner], pts);
 
-            self.last_trick = Some(core::mem::replace(
-                &mut self.current_trick,
-                Trick::new(),
-            ));
+            self.last_trick = Some(core::mem::replace(&mut self.current_trick, Trick::new()));
             let last = self.last_trick.as_ref().unwrap();
             self.completed_tricks.push(last.clone());
 
@@ -743,10 +731,7 @@ impl Hearts {
         self.pass_selections.clear();
         self.phase = GamePhase::Playing;
         self.current_player = self.find_two_of_clubs_holder();
-        self.status = format!(
-            "{} leads with 2\u{2663}",
-            self.names[self.current_player]
-        );
+        self.status = format!("{} leads with 2\u{2663}", self.names[self.current_player]);
 
         self.clamp_selected_index();
 
@@ -781,8 +766,16 @@ impl Hearts {
                 0
             };
             // Prefer passing hearts
-            let ha = if ca.is_heart() { ca.rank.value() as i32 } else { 0 };
-            let hb = if cb.is_heart() { cb.rank.value() as i32 } else { 0 };
+            let ha = if ca.is_heart() {
+                ca.rank.value() as i32
+            } else {
+                0
+            };
+            let hb = if cb.is_heart() {
+                cb.rank.value() as i32
+            } else {
+                0
+            };
             let score_a = qa + sa + ha;
             let score_b = qb + sb + hb;
             score_b.cmp(&score_a)
@@ -855,12 +848,11 @@ impl Hearts {
             let mut found_below = false;
             for &i in &valid {
                 let v = hand[i].rank.value();
-                if v < current_high
-                    && (!found_below || v > best_val) {
-                        best_val = v;
-                        best = i;
-                        found_below = true;
-                    }
+                if v < current_high && (!found_below || v > best_val) {
+                    best_val = v;
+                    best = i;
+                    found_below = true;
+                }
             }
             if found_below {
                 return best;
@@ -961,10 +953,9 @@ impl Hearts {
             Key::N => {
                 self.new_game();
             }
-            Key::Left
-                if self.selected_index > 0 => {
-                    self.selected_index -= 1;
-                }
+            Key::Left if self.selected_index > 0 => {
+                self.selected_index -= 1;
+            }
             Key::Right => {
                 let max = if self.hands[0].is_empty() {
                     0
@@ -975,34 +966,28 @@ impl Hearts {
                     self.selected_index += 1;
                 }
             }
-            Key::Enter | Key::Space => {
-                match self.phase {
-                    GamePhase::Passing => {
-                        if self.pass_selections.len() == 3 {
-                            self.execute_pass();
-                        } else {
-                            self.toggle_pass_selection(self.selected_index);
-                        }
-                    }
-                    GamePhase::Playing => {
-                        self.human_play_selected();
-                    }
-                    GamePhase::RoundOver => {
-                        self.advance_to_next_round();
-                    }
-                    GamePhase::GameOver => {
-                        self.new_game();
+            Key::Enter | Key::Space => match self.phase {
+                GamePhase::Passing => {
+                    if self.pass_selections.len() == 3 {
+                        self.execute_pass();
+                    } else {
+                        self.toggle_pass_selection(self.selected_index);
                     }
                 }
+                GamePhase::Playing => {
+                    self.human_play_selected();
+                }
+                GamePhase::RoundOver => {
+                    self.advance_to_next_round();
+                }
+                GamePhase::GameOver => {
+                    self.new_game();
+                }
+            },
+            Key::Escape if self.phase == GamePhase::Passing && !self.pass_selections.is_empty() => {
+                self.pass_selections.clear();
+                self.status = format!("Select 3 cards to pass ({})", self.pass_direction.label());
             }
-            Key::Escape
-                if self.phase == GamePhase::Passing && !self.pass_selections.is_empty() => {
-                    self.pass_selections.clear();
-                    self.status = format!(
-                        "Select 3 cards to pass ({})",
-                        self.pass_direction.label()
-                    );
-                }
             _ => {}
         }
     }
@@ -1121,7 +1106,9 @@ impl Hearts {
 
         // Controls hint
         let hint = match self.phase {
-            GamePhase::Passing => "\u{2190}\u{2192} Select | Enter Toggle/Confirm | Esc Clear | N New Game",
+            GamePhase::Passing => {
+                "\u{2190}\u{2192} Select | Enter Toggle/Confirm | Esc Clear | N New Game"
+            }
             GamePhase::Playing => "\u{2190}\u{2192} Select | Enter Play | N New Game",
             GamePhase::RoundOver => "Enter Next Round | N New Game",
             GamePhase::GameOver => "Enter/N New Game",
@@ -1154,10 +1141,10 @@ impl Hearts {
 
         // Render cards in the current trick
         let offsets: [(f32, f32); 4] = [
-            (0.0, 50.0),    // South (human)
-            (-80.0, 0.0),   // West
-            (0.0, -50.0),   // North
-            (80.0, 0.0),    // East
+            (0.0, 50.0),  // South (human)
+            (-80.0, 0.0), // West
+            (0.0, -50.0), // North
+            (80.0, 0.0),  // East
         ];
 
         for tc in &self.current_trick.cards {
@@ -1170,22 +1157,24 @@ impl Hearts {
         // If trick is waiting to be cleared, show last trick dimmed
         if self.current_trick.cards.is_empty()
             && let Some(ref last) = self.last_trick
-                && self.trick_number > 0 && self.trick_number <= 13 {
-                    for tc in &last.cards {
-                        let (ox, oy) = offsets[tc.player];
-                        let cx = TRICK_CENTER_X + ox - CARD_WIDTH / 2.0;
-                        let cy = TRICK_CENTER_Y + oy - CARD_HEIGHT / 2.0;
-                        // Dim the last trick cards
-                        cmds.push(RenderCommand::FillRect {
-                            x: cx,
-                            y: cy,
-                            width: CARD_WIDTH,
-                            height: CARD_HEIGHT,
-                            color: Color::rgba(49, 50, 68, 180),
-                            corner_radii: CornerRadii::all(CARD_CORNER_RADIUS),
-                        });
-                    }
-                }
+            && self.trick_number > 0
+            && self.trick_number <= 13
+        {
+            for tc in &last.cards {
+                let (ox, oy) = offsets[tc.player];
+                let cx = TRICK_CENTER_X + ox - CARD_WIDTH / 2.0;
+                let cy = TRICK_CENTER_Y + oy - CARD_HEIGHT / 2.0;
+                // Dim the last trick cards
+                cmds.push(RenderCommand::FillRect {
+                    x: cx,
+                    y: cy,
+                    width: CARD_WIDTH,
+                    height: CARD_HEIGHT,
+                    color: Color::rgba(49, 50, 68, 180),
+                    corner_radii: CornerRadii::all(CARD_CORNER_RADIUS),
+                });
+            }
+        }
     }
 
     /// Render the human player's hand at the bottom.
@@ -1200,8 +1189,8 @@ impl Hearts {
         for (i, &card) in hand.iter().enumerate() {
             let x = HAND_X_START + i as f32 * CARD_OVERLAP;
             let is_selected = i == self.selected_index;
-            let is_pass_selected = self.phase == GamePhase::Passing
-                && self.pass_selections.contains(&i);
+            let is_pass_selected =
+                self.phase == GamePhase::Passing && self.pass_selections.contains(&i);
             let is_valid = self.phase == GamePhase::Playing && valid_plays.contains(&i);
 
             let y = if is_pass_selected {
@@ -1246,7 +1235,11 @@ impl Hearts {
             x: TRICK_CENTER_X - 200.0,
             y: TRICK_CENTER_Y - 10.0,
             text: format!("{} ({})", self.names[1], west_cards),
-            color: if self.current_player == 1 { GREEN } else { SUBTEXT0 },
+            color: if self.current_player == 1 {
+                GREEN
+            } else {
+                SUBTEXT0
+            },
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1259,7 +1252,11 @@ impl Hearts {
             x: TRICK_CENTER_X - 30.0,
             y: TRICK_CENTER_Y - 120.0,
             text: format!("{} ({})", self.names[2], north_cards),
-            color: if self.current_player == 2 { GREEN } else { SUBTEXT0 },
+            color: if self.current_player == 2 {
+                GREEN
+            } else {
+                SUBTEXT0
+            },
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1272,7 +1269,11 @@ impl Hearts {
             x: TRICK_CENTER_X + 140.0,
             y: TRICK_CENTER_Y - 10.0,
             text: format!("{} ({})", self.names[3], east_cards),
-            color: if self.current_player == 3 { GREEN } else { SUBTEXT0 },
+            color: if self.current_player == 3 {
+                GREEN
+            } else {
+                SUBTEXT0
+            },
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1944,7 +1945,8 @@ mod tests {
         let mut game = make_test_game();
         game.trick_number = 1;
         game.current_trick = Trick::new();
-        game.current_trick.play(3, Card::new(Suit::Clubs, Rank::Seven));
+        game.current_trick
+            .play(3, Card::new(Suit::Clubs, Rank::Seven));
         let valid = game.valid_plays(0);
         // Should only include clubs
         assert_eq!(valid, vec![0, 1]);
@@ -1955,7 +1957,8 @@ mod tests {
         let mut game = make_test_game();
         game.trick_number = 2;
         game.current_trick = Trick::new();
-        game.current_trick.play(3, Card::new(Suit::Spades, Rank::Seven));
+        game.current_trick
+            .play(3, Card::new(Suit::Spades, Rank::Seven));
         // Player 0 has clubs, diamonds, hearts, spades
         let valid = game.valid_plays(0);
         // Has spades: Q of spades -> must follow suit
@@ -2014,7 +2017,8 @@ mod tests {
         game.current_player = 0;
         game.trick_number = 0;
         game.current_trick = Trick::new();
-        game.current_trick.play(3, Card::new(Suit::Clubs, Rank::Two));
+        game.current_trick
+            .play(3, Card::new(Suit::Clubs, Rank::Two));
         let valid = game.valid_plays(0);
         // Can't follow clubs, but first trick no point cards if possible
         // Only the diamond 5 has no points
@@ -2033,7 +2037,8 @@ mod tests {
         game.current_player = 0;
         game.trick_number = 0;
         game.current_trick = Trick::new();
-        game.current_trick.play(3, Card::new(Suit::Clubs, Rank::Two));
+        game.current_trick
+            .play(3, Card::new(Suit::Clubs, Rank::Two));
         let valid = game.valid_plays(0);
         // All point cards, must play one
         assert_eq!(valid.len(), 3);
@@ -2075,7 +2080,8 @@ mod tests {
         game.trick_number = 1;
         game.hearts_broken = false;
         game.current_trick = Trick::new();
-        game.current_trick.play(3, Card::new(Suit::Diamonds, Rank::Five));
+        game.current_trick
+            .play(3, Card::new(Suit::Diamonds, Rank::Five));
         // Play the heart (index 3 in make_test_game hand)
         game.play_card(0, 3);
         assert!(game.hearts_broken);
@@ -2089,10 +2095,14 @@ mod tests {
         game.phase = GamePhase::Playing;
         game.trick_number = 1;
         game.current_trick = Trick::new();
-        game.current_trick.play(0, Card::new(Suit::Hearts, Rank::Five));
-        game.current_trick.play(1, Card::new(Suit::Hearts, Rank::King));
-        game.current_trick.play(2, Card::new(Suit::Hearts, Rank::Two));
-        game.current_trick.play(3, Card::new(Suit::Hearts, Rank::Three));
+        game.current_trick
+            .play(0, Card::new(Suit::Hearts, Rank::Five));
+        game.current_trick
+            .play(1, Card::new(Suit::Hearts, Rank::King));
+        game.current_trick
+            .play(2, Card::new(Suit::Hearts, Rank::Two));
+        game.current_trick
+            .play(3, Card::new(Suit::Hearts, Rank::Three));
         // Manually finish the trick
         game.finish_trick();
         // Player 1 should win (King of hearts is highest)
@@ -2105,10 +2115,14 @@ mod tests {
         game.phase = GamePhase::Playing;
         game.trick_number = 3;
         game.current_trick = Trick::new();
-        game.current_trick.play(0, Card::new(Suit::Clubs, Rank::Five));
-        game.current_trick.play(1, Card::new(Suit::Clubs, Rank::Seven));
-        game.current_trick.play(2, Card::new(Suit::Clubs, Rank::Jack));
-        game.current_trick.play(3, Card::new(Suit::Clubs, Rank::Two));
+        game.current_trick
+            .play(0, Card::new(Suit::Clubs, Rank::Five));
+        game.current_trick
+            .play(1, Card::new(Suit::Clubs, Rank::Seven));
+        game.current_trick
+            .play(2, Card::new(Suit::Clubs, Rank::Jack));
+        game.current_trick
+            .play(3, Card::new(Suit::Clubs, Rank::Two));
         game.finish_trick();
         assert_eq!(game.trick_number, 4);
     }
@@ -2119,10 +2133,14 @@ mod tests {
         game.phase = GamePhase::Playing;
         game.trick_number = 1;
         game.current_trick = Trick::new();
-        game.current_trick.play(0, Card::new(Suit::Clubs, Rank::Five));
-        game.current_trick.play(1, Card::new(Suit::Clubs, Rank::Ace));
-        game.current_trick.play(2, Card::new(Suit::Clubs, Rank::Jack));
-        game.current_trick.play(3, Card::new(Suit::Clubs, Rank::Two));
+        game.current_trick
+            .play(0, Card::new(Suit::Clubs, Rank::Five));
+        game.current_trick
+            .play(1, Card::new(Suit::Clubs, Rank::Ace));
+        game.current_trick
+            .play(2, Card::new(Suit::Clubs, Rank::Jack));
+        game.current_trick
+            .play(3, Card::new(Suit::Clubs, Rank::Two));
         game.finish_trick();
         assert_eq!(game.current_player, 1); // Ace wins
     }
@@ -2279,8 +2297,13 @@ mod tests {
         // hands plus any cards already played in the current trick.
         let hand_total: usize = game.hands.iter().map(|h| h.len()).sum();
         let trick_cards = game.current_trick.cards.len();
-        assert_eq!(hand_total + trick_cards, 52,
-            "Total cards (hands={} + trick={}) should be 52", hand_total, trick_cards);
+        assert_eq!(
+            hand_total + trick_cards,
+            52,
+            "Total cards (hands={} + trick={}) should be 52",
+            hand_total,
+            trick_cards
+        );
     }
 
     // -- Keyboard navigation tests -------------------------------------------
@@ -2522,7 +2545,8 @@ mod tests {
         game.current_player = 1;
         game.trick_number = 2;
         game.current_trick = Trick::new();
-        game.current_trick.play(0, Card::new(Suit::Clubs, Rank::Five));
+        game.current_trick
+            .play(0, Card::new(Suit::Clubs, Rank::Five));
         let choice = game.ai_choose_card(1);
         // AI should dump the Queen of Spades
         assert_eq!(choice, 0);
@@ -2634,8 +2658,10 @@ mod tests {
     fn test_render_with_trick_cards() {
         let mut game = Hearts::new();
         game.phase = GamePhase::Playing;
-        game.current_trick.play(0, Card::new(Suit::Clubs, Rank::Five));
-        game.current_trick.play(1, Card::new(Suit::Clubs, Rank::Seven));
+        game.current_trick
+            .play(0, Card::new(Suit::Clubs, Rank::Five));
+        game.current_trick
+            .play(1, Card::new(Suit::Clubs, Rank::Seven));
         let cmds = game.render(900.0, 650.0);
         assert!(!cmds.is_empty());
     }
@@ -2684,7 +2710,11 @@ mod tests {
         }
 
         let total: u32 = game.round_points.iter().sum();
-        assert_eq!(total, 26, "Total points in a round should be 26, got {}", total);
+        assert_eq!(
+            total, 26,
+            "Total points in a round should be 26, got {}",
+            total
+        );
     }
 
     #[test]
@@ -2709,7 +2739,11 @@ mod tests {
         }
 
         for i in 0..4 {
-            assert!(game.hands[i].is_empty(), "Player {} should have no cards after round", i);
+            assert!(
+                game.hands[i].is_empty(),
+                "Player {} should have no cards after round",
+                i
+            );
         }
     }
 
@@ -2734,14 +2768,28 @@ mod tests {
     #[test]
     fn test_render_card_selected() {
         let mut cmds = Vec::new();
-        render_card(&mut cmds, 10.0, 20.0, Card::new(Suit::Clubs, Rank::King), true, false);
+        render_card(
+            &mut cmds,
+            10.0,
+            20.0,
+            Card::new(Suit::Clubs, Rank::King),
+            true,
+            false,
+        );
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_card_pass_selected() {
         let mut cmds = Vec::new();
-        render_card(&mut cmds, 10.0, 20.0, Card::new(Suit::Diamonds, Rank::Five), false, true);
+        render_card(
+            &mut cmds,
+            10.0,
+            20.0,
+            Card::new(Suit::Diamonds, Rank::Five),
+            false,
+            true,
+        );
         assert!(!cmds.is_empty());
     }
 
@@ -2815,7 +2863,8 @@ mod tests {
         let mut game = make_test_game();
         game.trick_number = 1;
         game.current_trick = Trick::new();
-        game.current_trick.play(3, Card::new(Suit::Clubs, Rank::Seven));
+        game.current_trick
+            .play(3, Card::new(Suit::Clubs, Rank::Seven));
         // Select a diamond (not valid when clubs is led and we have clubs)
         game.selected_index = 2; // Diamonds King
         let hand_before = game.hands[0].len();

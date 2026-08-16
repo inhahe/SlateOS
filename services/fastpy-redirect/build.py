@@ -54,10 +54,13 @@ Diagnostic exit codes:
   120 = child's os.open of the output file (O_WRONLY|O_CREAT|O_TRUNC) failed
   121 = parent's os.open of the output file for read-back failed
 
-Run from the fastpy repo root so `compiler` is importable, e.g.:
+Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
+the worktree you are actually working in. There are four checkouts of this
+repo, and naming one of them in a command is how a lane ends up building
+another lane's artifact -- see `scripts/lib/worktree.sh`:
 
     PYTHONPATH="D:/visual studio projects/fastpy" \
-        python "D:/visual studio projects/os/services/fastpy-redirect/build.py"
+        python services/fastpy-redirect/build.py
 
 The posix sysroot (`libc.a`) must already be built; see
 `toolchain/build-sysroot.ps1`.

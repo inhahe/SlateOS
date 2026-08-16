@@ -28,10 +28,13 @@ stages a known file in `/tmp`, spawns `fastpy-run cat /tmp/...`, and asserts
 that `cat`'s output appears on serial and the process exits with `cat`'s byte
 count — proving the resolve+exec handoff end to end from ring 3.
 
-Run from the fastpy repo root so `compiler` is importable, e.g.:
+Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
+the worktree you are actually working in. There are four checkouts of this
+repo, and naming one of them in a command is how a lane ends up building
+another lane's artifact -- see `scripts/lib/worktree.sh`:
 
     PYTHONPATH="D:/visual studio projects/fastpy" \
-        python "D:/visual studio projects/os/services/fastpy-run/build.py"
+        python services/fastpy-run/build.py
 
 The posix sysroot (`libc.a`) must already be built; see
 `toolchain/build-sysroot.ps1`.

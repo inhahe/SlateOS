@@ -345,23 +345,13 @@ pub(crate) fn shape(
         // font's help.
         return;
     };
-    // Two stages: the seven of `BASIC` together and confined to a syllable,
-    // then everything else at once. "Everything else" is every feature this
-    // crate knows rather than just the four of `GLOBAL`, because the ordinary
-    // features — `rlig`, `calt`, `clig`, `rclt`, and the positioning ones a
-    // face may have filed under `GSUB` — belong to that last stage too:
-    // HarfBuzz adds them after the shaper's own and they land in whatever stage
-    // is open, which is this one. `liga` is the exception, switched off for
-    // Khmer outright by `override_features_khmer`; `clig` is switched *on*
-    // there, and is on here already because this crate never turns it off.
-    let stages = [feature_bits(&BASIC), ALL_FEATURES & !feature_bit(b"liga")];
-    let per_syllable = feature_bits(&BASIC);
+    let stages = stages();
     subs.apply_stages(
         data,
         tags,
         lang,
         &stages,
-        per_syllable,
+        feature_bits(&BASIC),
         glyphs,
         |stage, glyphs| {
             if stage == 0 {
@@ -372,6 +362,36 @@ pub(crate) fn shape(
             }
         },
     );
+}
+
+/// The two passes the lookups are applied in, as sets of feature bits.
+///
+/// The seven of [`BASIC`] together and confined to a syllable, then everything
+/// else at once. "Everything else" is every feature this crate knows rather
+/// than just the four of [`GLOBAL`], because the ordinary features — `rlig`,
+/// `calt`, `clig`, `rclt`, and the positioning ones a face may have filed under
+/// `GSUB` — belong to that last stage too: HarfBuzz adds them after the
+/// shaper's own and they land in whatever stage is open, which is this one.
+/// `liga` is the exception, switched off for Khmer outright by
+/// `override_features_khmer`; `clig` is switched *on* there, and is on here
+/// already because this crate never turns it off.
+///
+/// `BASIC` is masked *out* of the last stage, and has to be: **a feature
+/// belongs to exactly one stage.** HarfBuzz gets that from its map builder,
+/// which merges the two entries a tag can pick up — `locl` and `ccmp` are named
+/// both by this shaper and by the common features every run gets — and keeps
+/// the *lower* stage. Leave them in both and every lookup they reach runs a
+/// second time. On a real face that is usually invisible, because the second
+/// pass looks at glyphs the first already rewrote and matches nothing; on a
+/// face whose features announce themselves it is immediate, and
+/// `tools/gen_khmer_probe.py` is that face.
+///
+/// A lookup reached by *two* features in different stages still runs twice, and
+/// should: the masks differ, and that is HarfBuzz's behaviour too. What must not
+/// happen is one feature running in two stages.
+fn stages() -> [u64; 2] {
+    let basic = feature_bits(&BASIC);
+    [basic, ALL_FEATURES & !basic & !feature_bit(b"liga")]
 }
 
 /// Cut the run into syllables and stamp each glyph with the one it is in.
@@ -492,6 +512,32 @@ mod tests {
     use super::*;
     use crate::indic::Char;
     use alloc::vec;
+
+    /// No feature may appear in both stages. A lookup a feature reaches is
+    /// applied once per stage that names it, so a tag left in both the basic
+    /// stage and the catch-all one runs its lookups twice. `KhmerProbe.ttf` is
+    /// the face that caught this, by reporting `locl`, `ccmp` and the three
+    /// `blwf`/`abvf`/`pstf` markers twice on every glyph; this is the
+    /// assertion that keeps `stages`'s `& !basic` from being deleted as
+    /// redundant.
+    #[test]
+    fn no_feature_is_applied_in_two_stages() {
+        let [first, last] = stages();
+        assert_eq!(first & last, 0);
+        assert_eq!(first, feature_bits(&BASIC));
+        assert_eq!(first | last, ALL_FEATURES & !feature_bit(b"liga"));
+    }
+
+    /// The four global features run in the *last* stage, not the basic one:
+    /// they are added after the pause that clears the syllable stamps, so a
+    /// rule in one of them may match across a syllable boundary.
+    #[test]
+    fn the_global_features_run_after_the_syllables_are_forgotten() {
+        let [first, last] = stages();
+        let global = feature_bits(&GLOBAL);
+        assert_eq!(first & global, 0);
+        assert_eq!(last & global, global);
+    }
 
     fn cut(text: &str) -> Vec<(usize, usize, Syllable)> {
         let cats: Vec<Category> = text.chars().map(|ch| Char::of(ch).category).collect();

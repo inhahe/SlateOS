@@ -1596,25 +1596,7 @@ pub(crate) fn shape(
     }
     setup_syllables(glyphs);
 
-    // Thirteen stages: the two openers together, the eleven basic ones one
-    // each, then everything else at once. "Everything else" is every feature
-    // this crate knows rather than just the six of `AFTER`, because the
-    // ordinary features — `rlig`, `calt`, `clig`, `rclt`, and the positioning
-    // ones a face may have filed under `GSUB` — belong to that last stage too:
-    // HarfBuzz adds them after the shaper's own and they land in whatever stage
-    // is open, which is this one. `liga` is the exception, switched off for
-    // Indic outright, because a standard-ligature lookup written for Latin has
-    // no business joining two Devanagari letters.
-    let mut stages = [0u64; 13];
-    if let Some(first) = stages.first_mut() {
-        *first = feature_bits(&BEFORE);
-    }
-    for (slot, tag) in stages.iter_mut().skip(1).zip(BASIC) {
-        *slot = feature_bit(tag);
-    }
-    if let Some(last) = stages.last_mut() {
-        *last = ALL_FEATURES & !feature_bit(b"liga");
-    }
+    let stages = stages();
     // Everything the shaper itself asked for is confined to one syllable; the
     // ordinary features sharing the last stage with `AFTER` are not.
     let per_syllable = feature_bits(&BEFORE) | feature_bits(&BASIC) | feature_bits(&AFTER);
@@ -1636,6 +1618,50 @@ pub(crate) fn shape(
             final_reordering(&plan, glyphs);
         }
     });
+}
+
+/// The thirteen passes the lookups are applied in, as sets of feature bits.
+///
+/// The two openers together, the eleven basic ones one each, then everything
+/// else at once. The eleven are one stage each because a later one is written
+/// to match glyphs an earlier one built — `rphf` makes the reph that `abvs`
+/// then positions, `half` makes the half-form that `cjct` then stacks.
+///
+/// "Everything else" is every feature this crate knows rather than just the six
+/// of [`AFTER`], because the ordinary features — `rlig`, `calt`, `clig`,
+/// `rclt`, and the positioning ones a face may have filed under `GSUB` — belong
+/// to that last stage too: HarfBuzz adds them after the shaper's own and they
+/// land in whatever stage is open, which is this one. `liga` is the exception,
+/// switched off for Indic outright, because a standard-ligature lookup written
+/// for Latin has no business joining two Devanagari letters.
+///
+/// The twelve earlier stages are masked *out* of that last one, and have to be:
+/// **a feature belongs to exactly one stage.** HarfBuzz gets that from its map
+/// builder, which merges the two entries a tag can pick up — `locl` and `ccmp`
+/// are named both by this shaper and by the common features every run gets —
+/// and keeps the *lower* stage. Leave them in both and every lookup they reach
+/// runs a second time. On a real face that is usually invisible, because the
+/// second pass looks at glyphs the first already rewrote and matches nothing,
+/// which is why 556 host faces never showed it; it took a face whose features
+/// announce themselves — `tools/gen_khmer_probe.py`, built for the sibling
+/// shaper, which has the same shape and had the same bug — to make it visible.
+///
+/// A lookup reached by *two* features in different stages still runs twice, and
+/// should: the masks differ, and that is HarfBuzz's behaviour too. What must not
+/// happen is one feature running in two stages.
+fn stages() -> [u64; 13] {
+    let mut stages = [0u64; 13];
+    if let Some(first) = stages.first_mut() {
+        *first = feature_bits(&BEFORE);
+    }
+    for (slot, tag) in stages.iter_mut().skip(1).zip(BASIC) {
+        *slot = feature_bit(tag);
+    }
+    let staged = feature_bits(&BEFORE) | feature_bits(&BASIC);
+    if let Some(last) = stages.last_mut() {
+        *last = ALL_FEATURES & !staged & !feature_bit(b"liga");
+    }
+    stages
 }
 
 /// Cut the run into syllables and stamp each glyph with the one it is in.
@@ -1711,6 +1737,40 @@ mod tests {
     use crate::gsub::{LOOKUP_LIGATURE, Lig};
     use crate::indic::Char;
     use alloc::vec::Vec;
+
+    /// No feature may appear in two stages. A lookup a feature reaches is
+    /// applied once per stage that names it, so a tag left in both an early
+    /// stage and the catch-all last one runs its lookups twice — which on a
+    /// real face is silent, because the second pass sees glyphs the first
+    /// already rewrote and matches nothing, and on a face whose features
+    /// announce themselves doubles every marker. This is the assertion that
+    /// keeps `stages`'s `& !staged` from being deleted as redundant.
+    #[test]
+    fn no_feature_is_applied_in_two_stages() {
+        let stages = stages();
+        let mut seen = 0u64;
+        for (i, &stage) in stages.iter().enumerate() {
+            assert_eq!(stage & seen, 0, "stage {i} repeats a feature of an earlier one");
+            seen |= stage;
+        }
+        // And the last stage really is the catch-all, minus what ran already
+        // and minus the one feature Indic switches off.
+        assert_eq!(seen, ALL_FEATURES & !feature_bit(b"liga"));
+    }
+
+    /// Each of the eleven basic features gets a stage to itself, in order,
+    /// after the one the two openers share: a later one is written to match
+    /// glyphs an earlier one built, so merging any two would make the second
+    /// look at the run before the first rewrote it.
+    #[test]
+    fn the_basic_features_get_one_stage_each_in_order() {
+        let stages = stages();
+        assert_eq!(stages.len(), BASIC.len() + 2);
+        assert_eq!(stages[0], feature_bits(&BEFORE));
+        for (i, tag) in BASIC.iter().enumerate() {
+            assert_eq!(stages[i + 1], feature_bit(tag), "{:?} is not alone", tag);
+        }
+    }
 
     /// Every script, so a table change cannot be tested against only the one
     /// script the test author had in mind.

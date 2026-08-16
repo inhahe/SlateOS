@@ -1,0 +1,183 @@
+# Corpus for the Universal Shaping Engine, swept against every installed face
+# with
+#
+#     python gui/font/tools/harfbuzz_sweep.py \
+#         --corpus gui/font/tools/use-corpus.txt
+#
+# Unlike the Khmer and Myanmar corpora this one is aimed at the host's real
+# fonts rather than at a synthesized probe, because for once the host has some:
+# `script_survey.py` reports faces declaring `tibt`, `java`, `bali`, `sinh`,
+# `tfng`, `cham` and `bugi`. Seven scripts is not eighty-eight, but it is seven
+# more than the other three shapers had, and between them they cover the three
+# things the engine actually does — cluster the run, move a pre-base vowel,
+# and give a broken cluster a dotted circle.
+#
+# Every line is one edge. Lines in scripts no installed face declares are kept
+# deliberately: they shape to boxes on both sides today, and they are the
+# regression test for the day a face for them is installed.
+#
+# The escapes are `harfbuzz_sweep.py`'s, the same ones `shape_dump.rs` reads.
+# A line starting with `!` is one the two halves cannot be asked the same
+# question about — a run of more than one script, where HarfBuzz guesses a
+# single script for the whole buffer and we itemize. Those are counted apart.
+
+# --- Sinhala (`sinh`, Nirmala.ttc) ---
+# The plainest cluster there is: one consonant.
+\u0d9a
+# Consonant + al-lakuna, a visible virama that ends the cluster.
+\u0d9a\u0dca
+# KOMBUVA is a pre-base vowel: the engine has to move it in front of the KA
+# that it follows in the text.
+\u0d9a\u0dd9
+# KOMBUVA DEKA, the two-part vowel: one character, two pieces, and the pre-base
+# half must end up on the far side of the consonant from the post-base half.
+\u0d9a\u0ddc
+# The same text spelled as the two characters it decomposes to. It must draw
+# the same on a face that has both halves — and, on the 555 faces that have
+# neither, it must *not* collapse back into the one character, because those
+# are two characters the text typed and not one this crate took apart.
+\u0d9a\u0dd9\u0dcf
+# And with the al-lakuna on the end: three pieces from one character, which
+# come back together one step at a time on a face that is missing one of them.
+\u0d9a\u0ddd
+# Rakaransaya: KA, al-lakuna, ZWJ, RA. The ZWJ is hidden from the grammar and
+# joins the cluster in front of it — get the filter wrong and this is two
+# clusters, which is one dotted circle too many.
+\u0d9a\u0dca\u200d\u0dbb
+# Yansaya, the same shape with a different consonant behind it.
+\u0d9a\u0dca\u200d\u0dba
+# The other ZWJ idiom: touching consonants, where the ZWJ comes *first*.
+\u0d9a\u200d\u0dca\u0dbb
+# A word: \u0dc3\u0dd2\u0d82\u0dc4\u0dbd = "Sinhala".
+\u0dc3\u0dd2\u0d82\u0dc4\u0dbd
+# A vowel sign with nothing to hang on: a broken cluster, and the only kind
+# that earns a dotted circle.
+\u0dd9
+\u0dca
+
+# --- Javanese (`java`, javatext.ttf) ---
+# HANACARAKA, the script's own alphabet song and its most ordinary text.
+\ua9b2\ua9a4\ua995\ua9ab\ua98f
+# KA alone.
+\ua98f
+# KA + WULU, a vowel drawn above: one cluster, nothing moves.
+\ua98f\ua9b6
+# KA + TALING, which is pre-base and must move.
+\ua98f\ua9ba
+# KA + PANGKON: a visible virama, so the cluster is virama-terminated.
+\ua98f\ua9c0
+# KA + PANGKON + KA + TALING. The vowel stops at the virama rather than
+# crossing it, so it lands in front of the *second* KA.
+\ua98f\ua9c0\ua990\ua9ba
+# KA + CAKRA (medial ra) + TALING: a medial between base and vowel.
+\ua98f\ua9bf\ua9ba
+# A lone TALING: broken.
+\ua9ba
+
+# --- Balinese (`bali`, SansSerifCollection.ttf) ---
+# KA.
+\u1b13
+# KA + TALING, pre-base again.
+\u1b13\u1b3e
+# KA + ADEG ADEG, the visible virama.
+\u1b13\u1b44
+# KA + ADEG ADEG + KA: two consonants stacked.
+\u1b13\u1b44\u1b13
+# KA + ULU (above) + BISAH (post): every slot filled.
+\u1b13\u1b36\u1b04
+
+# --- Buginese (`bugi`, Leelawadee) ---
+# KA.
+\u1a00
+# KA + vowel I, above.
+\u1a00\u1a17
+# KA + vowel E, which is pre-base.
+\u1a00\u1a19
+# \u1a05\u1a14\u1a15\u1a00\u1a17\u1a17 — "Lontara", the script's own name.
+\u1a04\u1a0f\u1a17\u1a02\u1a00\u1a11
+
+# --- Tibetan (`tibt`, himalaya.ttf) ---
+# KA.
+\u0f40
+# KA + subjoined KA: a stack, which Tibetan spells with its own characters
+# rather than with a virama.
+\u0f40\u0f90
+# KA + GIGU (above) + ZHABKYU (below).
+\u0f40\u0f72\u0f74
+# \u0f56\u0f40\u0fb2\u0f0b\u0f64\u0f72\u0f66 — "bkra shis", the first half of
+# the standard greeting, with a subjoined RA and a tsheg in it.
+\u0f56\u0f40\u0fb2\u0f0b\u0f64\u0f72\u0f66
+# A subjoined consonant with nothing above it: broken.
+\u0f90
+
+# --- Cham (`cham`, SansSerifCollection.ttf) ---
+# KA.
+\uaa00
+# KA + vowel AA, post-base.
+\uaa00\uaa29
+# KA + vowel O, which is pre-base.
+\uaa00\uaa2c
+# KA + final NG.
+\uaa00\uaa40
+
+# --- Tifinagh (`tfng`, DejaVuSans) ---
+# \u2d5c\u2d49\u2d3c\u2d49\u2d4f\u2d30\u2d56 — "Tifinagh". No marks and no
+# reordering: the control that says a USE script with nothing to do comes out
+# exactly as it went in.
+\u2d5c\u2d49\u2d3c\u2d49\u2d4f\u2d30\u2d56
+
+# --- the filtered view, which is USE's alone ---
+# A CGJ between two Javanese consonants: hidden, so this is two clusters and
+# not three.
+\ua98f\u034f\ua990
+# A variation selector, hidden the same way.
+\ua98f\ufe00\ua990
+# ZWNJ before a mark: hidden, so the mark still attaches.
+\ua98f\u200c\ua9b6
+# ZWNJ before a *base*: not hidden, and it is a cluster of its own.
+\ua98f\u200c\ua990
+# A run that begins with a hidden glyph. HarfBuzz leaves it unstamped, so it
+# belongs to no cluster at all and forms one of its own.
+\u200d\ua98f\ua9b6
+# Nothing but hidden glyphs.
+\u200d\u034f
+
+# --- clusters that are not letters ---
+# Brahmi digits joined by the Brahmi number joiner: a numeral cluster, which is
+# one of the four kinds the engine never reorders.
+\U00011066\U0001107F\U00011067
+# The joiner last, which is the other numeral kind.
+\U00011066\U0001107F
+# Egyptian hieroglyphs with a segment bracket and a joiner: their own grammar,
+# and they never join to anything.
+\U00013000\U00013430\U00013001
+\U00013437\U00013000\U00013438
+# Tai Tham with a sakot, which ends a cluster by joining it to the next.
+\u1a20\u1a60\u1a21
+# Batak: LETTER A, PANGOLAT, LETTER A. Pangolat is a reordering killer,
+# which ends a cluster the way an invisible stacker does without stacking
+# anything.
+\u1bc0\u1bf2\u1bc0
+
+# --- the joining scripts, where the positional features come from `joining`
+# --- rather than from USE's per-cluster pass ---
+# Mongolian: four letters, so every one of isol/init/medi/fina is exercised.
+\u1820\u1821\u1822\u1823
+# Phags-pa, which is written vertically and joins.
+\ua840\ua841\ua842
+# Adlam.
+\U0001e922\U0001e923\U0001e924
+# N'Ko.
+\u07ca\u07cb\u07cc
+# Hanifi Rohingya.
+\U00010d00\U00010d01\U00010d02
+
+# --- mixed runs, which are what the itemizer hands the shaper in practice ---
+# Both are marked `!`: HarfBuzz guesses one script for the whole buffer, so it
+# shapes the Javanese in the first as Latin and the Javanese in the second as
+# Sinhala. The difference that comes back is the itemizer's, not the shaper's,
+# and it is reported apart from the rest so it cannot hide a real regression.
+# Latin either side of a Javanese cluster.
+!ab\ua98f\ua9ba cd
+# Two USE scripts adjacent, which is two runs and two clusterings.
+!\u0d9a\u0dd9\ua98f\ua9ba

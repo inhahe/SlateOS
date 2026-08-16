@@ -258,13 +258,18 @@ class Nfa:
         return self.closure(out)
 
 
-def compile_rules(rules):
+def compile_rules(rules, categories=CATEGORIES):
     """Subset-construct a scanner over `rules`. Returns (transitions, accepts).
 
     `rules` is a sequence of `(pattern, syllable_name)`, listed in the order
     ragel would list them: ties go to the earliest. `gen_khmer_machine.py`
     calls this with its own three rules — the construction is the same, only
     the grammar differs.
+
+    `categories` is the alphabet, in the order the transition table's columns
+    are to be laid out. It defaults to the Indic categories, which Khmer and
+    Myanmar share; `gen_universal_machine.py` passes its own, since USE keeps
+    its category in a different buffer slot and shares nothing with these.
     """
     nfa = Nfa()
     start = nfa.state()
@@ -286,7 +291,7 @@ def compile_rules(rules):
     while i < len(order):
         states = order[i]
         row = []
-        for name in CATEGORIES:
+        for name in categories:
             nxt = nfa.step(states, name) if states else dead
             if nxt not in index:
                 index[nxt] = len(order)

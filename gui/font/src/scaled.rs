@@ -692,6 +692,14 @@ impl ScaledFont {
             Script::shaping(t).is_some() || crate::khmer::shapes(t) || crate::myanmar::shapes(t)
         };
         let mut indic = !simple && runs.first().is_some_and(|&(_, t)| categorised(t));
+        // The same question for the Universal Shaping Engine, asked separately
+        // because it reads a category table of its own: the USE categories are
+        // a different, larger set than the Indic ones, and no script is shaped
+        // by both engines. A run that reaches neither pays for neither.
+        let mut use_run = !simple
+            && runs
+                .first()
+                .is_some_and(|&(_, t)| crate::universal::shapes(t));
         for (i, &(ch, cluster)) in pieces.iter().enumerate() {
             while runs.get(run).is_some_and(|&(end, _)| end <= i) {
                 run = run.saturating_add(1);
@@ -703,6 +711,10 @@ impl ScaledFont {
                     .get(run)
                     .is_none_or(|&(_, t)| fallback::positions_marks(t, simple));
                 indic = !simple && runs.get(run).is_some_and(|&(_, t)| categorised(t));
+                use_run = !simple
+                    && runs
+                        .get(run)
+                        .is_some_and(|&(_, t)| crate::universal::shapes(t));
             }
             // A tab has no glyph. Drawn through `cmap` it comes out as the
             // missing-glyph box, one space wide; the width every caller wants
@@ -763,6 +775,16 @@ impl ScaledFont {
                     Char::of(ch)
                 } else {
                     Char::DEFAULT
+                },
+                // And what the Universal Shaping Engine needs, for the same
+                // reason and on the same terms: its category decides which
+                // cluster a character starts or joins, and its mark bit — which
+                // is *not* recoverable from the category — decides whether a
+                // ZWNJ before it is hidden from the grammar.
+                universal: if use_run && !tab {
+                    crate::universal::Char::of(ch)
+                } else {
+                    crate::universal::Char::DEFAULT
                 },
                 word: indic && !tab && continues_word(ch),
                 // A conjoining jamo takes its slot's feature and gives up

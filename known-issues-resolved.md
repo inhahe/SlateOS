@@ -8790,2592 +8790,13 @@ the harness's output file; use `Read`/`tail` on **that file** afterwards instead
 of filtering in the pipeline. Reserve pipes for foreground commands whose status
 does not matter.
 
----
-
-# Lane B
-
-*(none moved yet — see `requests/c-b-known-issues-archive.md`)*
-
----
-
-# Lane C
-
-
-## Byte-indexed display truncation panics on non-ASCII text (lane C)
-
-**Status: FIXED 2026-08-15** (lane C, commits `f508f76cf`, `f53562a09`,
-`feb695bbd`, `8208fad9d`, `83dfaff21`, `5750232c5`, `a8d659199`, `ffbdec410`,
-`54fd94f2b`, `5305d139f`, `b3373ad17`, `db06a8c3c`, `de378bab6`, `37ee779ae`,
-`10db32f9c`). Found while surveying app tables for unbounded columns. Eighteen
-sites across `apps/` and `gui/` confused a byte count with a character count, usually
-while truncating a *display* string:
-
-```rust
-let display = if title.len() > 20 {
-    format!("{}...", &title[..17])   // panics if byte 17 is inside a character
-} else {
-    title
-};
-```
-
-`str::len` is bytes and `&s[..17]` is a byte index, so any string whose 17th
-byte falls inside a multi-byte character panics with
-`byte index 17 is not a char boundary`. The guard makes it *more* likely, not
-less: a 20-character Japanese title is 60 bytes, so it takes the truncating
-branch and then slices mid-character. This is not an edge case for these
-particular apps — it is their ordinary input.
-
-| Site | String | Exposure |
-|---|---|---|
-| `apps/rssreader/src/main.rs:3256,3260` | `article.summary` / `display_content()` | **Remote.** Straight off an RSS feed; any non-English feed crashes the reader. |
-| `apps/pdfviewer/src/main.rs:1452` | the PDF's own `/Title` | Attacker-supplied file metadata. |
-| `gui/desktop/src/file_drop.rs:65` | dropped text | And our paths are byte strings by design. |
-| `apps/flashcards/src/main.rs:1313,1370` | card front/back | A flashcard app is *the* place for CJK and accented text. |
-| `apps/stickynotes/src/main.rs:973` | the note's first line | The user's own text. |
-| `apps/procexplorer/src/main.rs:2359` | `KEY=value` from the environment | Environment strings are arbitrary bytes. |
-| `gui/toolkit/src/colorpicker.rs:175` | `&s[..6]` on a typed hex string | Any multi-byte character in the field. |
-| `gui/desktop/src/clipboard_viewer.rs:112` | `content[..197]` on a clipping | Copying any non-Latin text aborted the shell. |
-| `gui/desktop/src/clipboard_viewer.rs:678` | `&preview_text[..40]` on the same | Same, one layer up. |
-| `apps/videoplayer/src/main.rs:538` | `padded[..3]` in the SRT timestamp parser | **A subtitle file the user merely opened.** |
-| `apps/renamer/src/main.rs:450,460,489,509` | the filename stem, cut at a position the user types | **Any non-ASCII filename**, and it aborts a batch rename *partway through*. |
-| `apps/markdowneditor/src/main.rs` (14 sites) | `cursor_col`, the selection anchor, undo columns | **Press Down onto a line with a wide character, then type.** Aborts with the document unsaved. |
-| `apps/backup/src/main.rs:302` | the `?` glob wildcard, over path bytes | **Not a panic** — an include/exclude pattern silently stops matching, so a file the user believed was covered is not backed up. |
-| `apps/filesearch/src/main.rs` (both matchers) | every single-character construct in the glob *and* regex engines | **Not a panic** — a search over non-ASCII filenames silently returns wrong results, in both directions. |
-| `apps/dbviewer/src/main.rs:895` | SQL `LIKE`'s `_` wildcard | `LIKE '_'` was false for a one-character CJK cell and `LIKE '___'` was true for it. |
-| `apps/indexer/src/main.rs:709` | the `?` wildcard and `[...]` classes of a third glob matcher | Same as filesearch's, in the file indexer. |
-| `apps/indexer/src/main.rs:826` | `levenshtein_bounded`, the fuzzy-match edit distance | One substituted kanji cost 3 of a budget the user reads as "a couple of typos", so near-exact CJK matches were rejected. |
-| `apps/jsonviewer/src/main.rs:304` | the parser's `col`, shown as "Ln 3, Col 17" | Not a panic and not a wrong result — a wrong *report*. The caret pointed up to two columns per preceding character too far right. |
-
-The last ten were found while fixing the first seven and were not in the
-original count. `gui/clipboard/src/main.rs:183` looked like another but is not:
-it already goes through `find_char_boundary`.
-
-The videoplayer one is worth calling out because it does not match the grep
-shape above — there is no `if x.len() > N` guard in sight. It is
-`format!("{ms_str:0<3}")` followed by `padded[..3]`, and the bug is that
-`format!`'s width is counted in **characters** while the slice indexes
-**bytes**. For a fractional part of `"ab日"` the padding adds nothing (already
-3 characters) and byte 3 lands inside the kanji. So the class is wider than
-"a byte budget with a byte guard": it is *any* place where a character count
-and a byte count are used interchangeably. Rust's own `format!` width is a
-character count, which makes it a natural source of the confusion.
-
-**`apps/renamer` is the one site where the byte/character confusion was also a
-*semantic* bug, and the most damaging of the seventeen.** Four rename rules —
-insert-at, remove-from, number-at, datestamp-at — slice the filename stem at a
-position the *user types into the rule*, clamped only with `.min(stem.len())`,
-a byte length. `InsertPosition::At`'s own doc comment has always read "insert at
-a specific character index", so the code contradicted its documented intent: for
-`日本語.txt`, "insert at 3" is past the end of a 3-character stem and should
-append, but the byte clamp put it after the *first* kanji. And unlike a
-truncated label, a wrong position here writes the wrong name to disk. The panic
-is worse still, because a rename batch applies each rule to each file in turn:
-one non-ASCII name aborted the renamer *after* earlier files had already been
-renamed, leaving the batch half-applied with no undo record. Fixed with a
-`char_offset(s, chars)` helper that all four sites route through, which makes
-the position mean what it says and makes the slices sound as a side effect. For
-ASCII names the two numbers coincide, so no existing rule changed behaviour —
-the pre-existing tests confirm it.
-
-**`apps/markdowneditor` is the largest instance, and the only one where the
-bad offset *persists in state* rather than being recomputed each frame.** Every
-column in the editor -- `cursor_col`, the selection anchor, the columns recorded
-in undo actions -- is a byte offset into a line, which is what lets an edit
-apply without re-scanning. Fourteen places kept such an offset in range with
-`.min(line.len())`, and a byte length is the wrong bound: it keeps the offset
-inside the line but says nothing about whether it lands *on* a character.
-
-Pressing Down is enough to reach it. `move_cursor_down` carries the column to
-the next line, so from column 1 of `"abc"` onto `"\u{65e5}x"` the clamp leaves 1,
-inside the kanji. Nothing fails yet -- the cursor is simply in an impossible
-place. The abort comes on the *next* keystroke, in whichever of Backspace,
-Delete, insert, Enter, arrow-key or selection the user happens to press, by
-which point the document is unsaved and the user has been typing. Go-to-line, an
-undo replayed against a line that changed underneath it, and a reload after the
-file changed on disk all reach the same state without any cursor movement at
-all.
-
-Fixed with one `clamp_col(line, byte)` that rounds *down* to a character
-boundary, used at all fourteen sites. Rounding down puts the cursor at the start
-of the character it landed in -- where a user who pressed Down onto a wide
-character expects to be -- and for an all-ASCII document it returns exactly what
-`.min(line.len())` did, which a test asserts directly.
-
-**`apps/backup`'s `?` wildcard is the only member of the class that never
-panics, which is exactly what made it the easiest to miss.** The glob matcher
-works on `&[u8]` throughout, which is *correct* — our paths are byte strings
-that need not be UTF-8 (`CLAUDE.md` item 7), and rewriting it over `&str` would
-have been the wrong fix. But `?` is documented as "any single character except
-`/`" and advanced `ti` by one **byte**, so against `日本.txt` it matched one
-third of a kanji. `file?.txt` silently stopped matching `file日.txt`. In a
-backup tool a pattern that quietly fails to match is worse than a crash: an
-exclude that misses copies a directory the user meant to skip, and an include
-that misses leaves a file unprotected with the run still reporting success.
-
-Fixed with `utf8_char_len(text, i)`, so `?` advances one character. Only `?`
-needed it. `*` is byte-greedy but can only ever *succeed* on a boundary — a
-well-formed needle cannot match starting inside another sequence, by UTF-8
-self-synchronization — and `/` is ASCII, so it can never occur inside a
-multi-byte character.
-
-The interesting part was ill-formed input. The first version clamped a
-truncated sequence to the bytes remaining (`want.min(len - i).max(1)`), which
-my own test caught as a real defect rather than a wrong expectation: for the
-bytes `[0xE6, b'/']` a lead byte announcing three bytes consumes both, and `?`
-has crossed a separator — the one thing it must never do. The rule that works
-is **validate, then consume**: only treat a lead byte as multi-byte if the
-continuation bytes it announces are actually present and in `0x80..=0xBF`,
-otherwise advance one byte and let the literal comparison decide. That keeps
-the separator invariant and still guarantees forward progress.
-
-**`apps/filesearch` is the same bug as `backup`'s `?`, but as a whole engine
-rather than one branch — and it was found by asking "where else does a matcher
-step a byte at a time?" rather than by any grep.** filesearch has two engines,
-a glob matcher and a small regex matcher, and both stepped `ti` by one byte.
-That made *every* single-character construct wrong: `?` and `.`, the character
-classes `[...]`, and `\d`/`\w`/`\s` with their negations. It is wrong in both
-directions at once, which is what makes it hard to notice from one example:
-
-- **False negatives.** `?.txt` did not match `\u{65e5}.txt`; `h.llo` needed
-  three dots for one kanji.
-- **False positives.** `\W\W\W` matched exactly one kanji, because every byte
-  of a multi-byte character fails `is_ascii_alphanumeric`. `[\u{e9}]*` matched
-  `\u{e8}b`, because `\u{e9}` and `\u{e8}` share a lead byte and the class
-  compared one byte. A class *range* like `[\u{430}-\u{44f}]` was not merely
-  wrong but meaningless — it compared bytes of the endpoints' encodings.
-
-Unlike `backup`, both entry points here take `&str`, so the inputs are already
-validated UTF-8 and character semantics is achievable, not just desirable.
-Both engines were converted to `&[char]`. That is the whole fix: with `&[char]`
-every index is a character index by construction, so `?`/`.`/classes/ranges are
-all correct at once and there is no per-construct rule to remember or to get
-wrong again later. The public `&str` entry points are unchanged; the two
-bulk-search paths gained `*_chars` variants so the pattern is decoded once per
-search instead of once per indexed file.
-
-The regression test that earned the most was the *control*:
-`an_ascii_pattern_matches_exactly_as_before` pins 20 pre-existing ASCII cases.
-Under the deliberate re-break it kept passing while all six non-ASCII tests
-failed — which is exactly the evidence wanted, since it shows the six really do
-discriminate and that the refactor changed nothing for ASCII input.
-
-Re-breaking this one is worth recording as a technique: rather than reverting
-the refactor, the byte engine was reproduced by decoding `.bytes().map(|b| b as
-char)` instead of `.chars()`. Every comparison in both engines is by scalar
-value, so mapping each byte to the char of the same value restores the old
-behaviour exactly, at 8 call sites and with no other edit.
-
-**Asking the behavioural question then found three more sites in two more apps,
-which is the strongest evidence that the question is the right tool.** Having
-noticed that no grep finds a byte-at-a-time advance, the lane's remaining
-matchers, parsers and scanners were read with one question in mind — *does this
-walk text one unit at a time, and is that unit a byte?* Three said yes:
-
-- **`dbviewer`'s SQL `LIKE`.** Its own comment reads "`_` matches exactly one
-  character"; it consumed one byte. `LIKE '_'` was false for a one-character
-  CJK cell while `LIKE '___'` was true for it.
-- **`indexer`'s glob matcher** — a third independent copy of the same `?`-and-
-  class bug, after `backup` and `filesearch`.
-- **`indexer`'s `levenshtein_bounded`.** The most interesting of the three,
-  because it is not a wildcard at all: an *edit distance* over bytes charges up
-  to 3 for one substituted kanji. Against a `FUZZY_MAX_DISTANCE` the user reads
-  as "a couple of typos", a near-exact CJK match was rejected while a much
-  worse ASCII one was accepted — and the `abs_diff` length early-out discarded
-  candidates before the DP even ran. Fuzzy matching was effectively off for
-  non-ASCII names.
-
-That three independent glob matchers in one lane each carried the same defect
-is worth noting on its own: this is not a slip someone made once, it is what
-you get by default from reaching for `as_bytes()` to walk a pattern. The
-generalisation is not "`?` is special" but that **any construct meaning "one
-unit of text" is wrong the moment the loop's unit is a byte** — wildcards,
-classes, ranges, quantifier counts and edit costs alike.
-
-A second vacuity trap turned up here, of a kind not seen before: **a test can
-fail to discriminate because the behaviour that survives the break is genuinely
-correct.** `dbviewer`'s first percent-and-literals test passed under the
-deliberate break, not through oversight but because `%` and literal matching
-really are sound over bytes — the same self-synchronization argument that
-cleared `backup`'s `*`. Only a pattern that makes `%` absorb the slack while
-`_` must still count (`"日"` against `"%_%_%"`) can tell the two engines apart.
-Generalised: when part of a construct is provably safe, a test built from that
-part cannot witness the unsafe part, however non-ASCII its input looks.
-
-**The fix was not to hunt for char boundaries at each site.** All but one of
-these is a *display* truncation, and each already had a box to draw into, so
-each became `guitk::text::elide` / `RenderTree::text_in` (or a `guitk::table`
-cell): it measures display width, cuts on a character boundary, and marks the
-cut with `…`. That also removed the second, quieter bug present at every site —
-a truncation counted in bytes has no relationship to the width of the box the
-text is drawn in, so `20` characters of a wide font overflow anyway while `20`
-of a narrow one waste half the space.
-
-Two sites needed something other than eliding:
-
-- **`colorpicker::parse_hex_color` is a parser, not a view.** It branched on
-  `s.len()` as if it were a digit count. Requiring ASCII hex digits up front
-  makes the length a digit count and every offset a character boundary, so the
-  rest of the function is sound by construction. (It also closed a smaller
-  hole: `u32::from_str_radix` accepts a sign, so `"+FFFFF"` parsed as a colour.)
-- **`ClipEntry::text`'s cap is a *retention* bound, not a display one** — a
-  clipping can be megabytes and the history holds many. That bound stayed in
-  the model but became a character count; the display bound moved to the view.
-
-Three sites had truncation in the *model*, where nothing knows how wide the
-drawing surface is: `DragDataType::description`, `NoteStore::sidebar_items`, and
-the clipboard row. All three now return full text and the caller elides.
-
-Writing the regression tests turned up four latent layout bugs the byte budgets
-had been hiding, all fixed in the same commits: pdfviewer's tab title drew 2px
-under its close glyph; flashcards' three columns overlapped below 640px;
-procexplorer's memory row sat at a flat 200px pitch and left the panel at 480px
-wide; and the clipboard row's meta line could run under the sensitive
-indicator.
-
-Grep shape, if this recurs: `&<ident>[..<literal>]` where the receiver is a
-`String`/`&str`, and its `if x.len() > N` guard. That shape found seven of the
-seventeen; the other ten needed a wider sweep for *any* mixing of the two counts.
-Three further forms showed up, none of which the grep can see: `format!` width
-(a *character* count) meeting a byte slice (videoplayer); `.min(s.len())` used
-to clamp a position the user thinks of in characters (renamer,
-markdowneditor); and a byte-at-a-time advance where a character was meant
-(backup's `?`, both of filesearch's engines), which involves no slicing and no
-`len()` at all.
-
-That last form is the one to go looking for next, because no textual pattern
-finds it — it is `ti += 1` in a loop, which matches everything. The question
-that finds it is behavioural: **"does this walk text one unit at a time, and is
-that unit a byte?"** Both remaining instances were found by asking it of every
-matcher/parser/scanner in the lane rather than by grepping. Note this is the same root
-cause as the unbounded-column survey below — **counting characters instead of
-measuring the box** — and it was worth treating as one problem.
-
-Every fix is covered by a test using Japanese/Greek/Russian/emoji input plus a
-string pinning the exact cut index to a continuation byte, and every one was
-verified non-vacuous by re-breaking the production code and confirming the test
-fails. That discipline earned its keep five times here:
-
-- `colorpicker`'s `chars[2]` index was in fact *unreachable* -- `hex_char_to_u8`
-  rejects a multi-byte char one step earlier -- so the "second panic" claimed
-  for that site did not exist.
-- An earlier `file_drop` test passed with its bound removed, because no
-  reachable payload draws both a count badge and a long description.
-- `markdowneditor`'s first sweep drove each edit through `move_cursor_down`, so
-  breaking any *edit* site changed nothing: the sweep already aborted on the
-  cursor-position assertion from the vertical move, one case earlier. Five
-  sites looked verified and were not. Replaced with a test that strands the
-  column directly, which both isolates each site and matches reality, since
-  undo replay and click-positioning strand it without any vertical move.
-- `markdowneditor`'s reload clamp passed with the clamp removed -- no test
-  reached it -- until a test was added for it specifically.
-- `backup`'s "`?` never crosses a separator" test passed under the very break
-  it existed to catch: `?c` against `[0xE6, b'/', b'c']` fails for an unrelated
-  reason, so the assertion never distinguished the two versions. Pinned with
-  `assert!(!glob_match_recursive(b"?", &[0xE6, b'/']))`, which does. A test
-  aimed at an invariant is not the same as a test that can *see* the invariant
-  break.
-
-General rule this keeps re-teaching: **when several defects can abort, break
-them one at a time**, and be suspicious of a break that leaves the failure
-count unchanged -- it usually means the new failure is the old one.
-
-One further trap, from this same session: do not re-break production code while
-a full-workspace test run is in flight. A workspace gate launched earlier picked
-up `renamer` mid-verification and reported two failures that were the
-scaffolding, not the tree.
-
-**Site eighteen shows the class reaches things that neither panic nor compute a
-wrong answer.** `apps/jsonviewer`'s parser counted `col` once per byte. Nothing
-downstream indexes with it — it is used only to *tell the user where the error
-is*, in the status bar and the error list. So the parse was right, the error was
-right, and the caret pointed at the wrong character: a document whose string
-value is `日本語` rather than `xxx` reported column 20 where the ASCII one
-reported 14. That makes it the least dangerous instance and the easiest to
-overlook, because there is no crash and no bad data to notice — just a number
-that quietly stops meaning what its label says. The fix is one line: skip the
-increment for continuation bytes (`b & 0xC0 == 0x80`), which are the tail of a
-character its leading byte already counted.
-
-**A caution about how these are found.** The same grep that turned up kanban's
-real corruption (next section) also flagged `apps/jsonviewer`'s `parse_string`,
-which does `result.push(b as char)` on the very next line — and *that* one is
-correct, because it sits under `if b < 0x80` and the non-ASCII branch rewinds
-into a real UTF-8 decoder with proper surrogate handling. Two functions, the
-same six-token expression, opposite verdicts. No pattern distinguishes them;
-only reading the enclosing guard does. Treat a grep hit in this class as a
-question, never as a finding.
-
-Violates `CLAUDE.md` self-review item 7 (never force UTF-8 assumptions on
-OS-boundary data) and trips the workspace's `clippy::indexing_slicing` warn.
-
-
-## `u8 as char` reinterpreted UTF-8 as Latin-1 in four parsers (lane C)
-
-**Status: FIXED 2026-08-15** (lane C, commits `237636350` kanban, `3b6b60e39`
-backup, `18f1e9abc` rssreader). Found while sweeping for byte-at-a-time text
-walkers, and it is a *different* class from the byte/character-count confusion
-above — worth keeping separate, because the symptom, the detection method and
-the fix all differ. Three JSON readers and one XML reader carried it.
-
-`apps/kanban`'s `JsonImporter::parse_string` built its result one byte at a
-time:
-
-```rust
-} else {
-    result.push(b as char);   // b: u8
-}
-```
-
-`b as char` maps a **byte value** to the Unicode scalar with that value. That is
-a Latin-1 decode. There is no count involved, nothing is truncated, and nothing
-panics: an imported card titled `日本語` (E6 97 A5 ...) simply comes back as
-`æ\u{97}¥...`. It is `String::from_utf8_lossy`'s failure mode reached by a
-different route, and it is worse than a panic in one specific way — **the damage
-persists.** The mojibake becomes the card's title in memory, and the very next
-save writes it to disk as the new truth. Import a board, glance away, and the
-original text is gone.
-
-Why the count-confusion sweep would not have found it: there is no `len()`, no
-slice, no guard, no wildcard. The tell is the cast itself. The generalisation
-worth carrying forward is that **`u8 as char` is almost always a bug on text**;
-it is sound only where the byte is already known to be ASCII — which is exactly
-the distinction that made `apps/jsonviewer`'s identical-looking line correct.
-
-The fix copies unescaped runs out as whole `&str` slices instead. That is sound
-precisely because the two bytes that terminate a run — `"` and `\` — are ASCII,
-and an ASCII byte can never occur inside a multi-byte UTF-8 sequence, so the cut
-is always on a character boundary. (This is the same self-synchronisation
-property that cleared so many near-misses in the sweep above; here it is what
-makes the fix work rather than what made the bug absent.) It is also faster than
-pushing char by char.
-
-Fixing the function properly turned up two further defects in it:
-
-- **`\uXXXX` was never decoded.** It fell through to the unknown-escape arm and
-  came back as a literal backslash, `u`, and four digits. This was not
-  hypothetical: our own `JsonExporter::escape_json` emits exactly that form for
-  every character below U+0020, so **export followed by import did not
-  round-trip** for any card whose text contained a control character. Now
-  decoded, including leading/trailing surrogate pairs — which is how JSON spells
-  anything outside the BMP, so emoji in a board exported by any other tool were
-  equally unreadable. An unpaired surrogate degrades to U+FFFD rather than
-  failing the whole import.
-- **The unknown-escape arm had the same cast** (`result.push(esc as char)`) on a
-  single byte, so a backslash followed by a multi-byte character both corrupted
-  that character and left the scan stranded mid-sequence. It now consumes a
-  whole character.
-
-Non-vacuity was checked by reinstating the byte-at-a-time parser: all four new
-tests fail under it while the ASCII control test and both pre-existing parser
-tests keep passing — the profile that shows the new tests discriminate *and*
-that the rewrite changed nothing for ASCII.
-
-Violates `CLAUDE.md` self-review item 7 in its strongest form: this is not an
-assumption about encoding, it is an actual re-encoding.
-
-### The same bug in `apps/backup`'s manifest reader — the worst instance
-
-`apps/backup`'s `parse_string` had the identical cast, but on data that makes it
-far more consequential: **the strings in a backup manifest are file paths.** A
-backup of `写真/2024.jpg` reads back as a path naming no file at all, so restore
-cannot find it and verify reports it missing. The manifest is the only record of
-what was backed up; corrupting it silently invalidates the archive.
-
-Fixing it turned up two further defects in the same function, both worse than
-the first:
-
-- **A reachable panic.** The `\u` arm did `&input[i + 1..i + 5]` with no bounds
-  or boundary check. On `"\u日本"` that cuts at byte 7, inside `本`, and Rust
-  panics on the non-boundary slice. Reachable from merely *reading a manifest
-  off disk* — no attacker needed, just a path that happens to follow a
-  backslash-u with non-ASCII text. `parse_hex4` now uses
-  `input.get(start..end).ok_or("incomplete unicode escape")?`.
-- **Silent data loss on astral characters.** The `\u` decode used a bare `u16`
-  with no surrogate pairing and `if let Some(c)` with *no `else`* — so an
-  escaped emoji or CJK-extension character in a path did not become U+FFFD, it
-  simply **vanished**, shortening the path to something else entirely. Now
-  paired properly, with U+FFFD for an unpaired surrogate.
-
-Three defects, so non-vacuity was checked with three separate breaks, each
-confirmed to fail only its own tests while the ASCII control kept passing. The
-last test builds a real `Manifest` of non-ASCII `FileEntry` paths and
-round-trips it through `serialize`/`deserialize`. 46 tests pass.
-
-### The same bug in `apps/rssreader` — the only remotely-fed instance
-
-`XmlParser::read_attribute_value` accumulated with `value.push(b as char)` on
-bytes straight off a downloaded feed, so any non-ASCII enclosure URL, title or
-author arrived as mojibake. What makes this one instructive is that it was the
-**outlier in its own file**: `read_until`, `read_name` and the text-node reader
-all already sliced the range out whole and used `from_utf8_lossy` — which is
-exact here, since `parse_xml` takes a `&str` and every delimiter is ASCII. The
-correct pattern was sitting three functions away. Fixed to slice the same way.
-
-Fixing it exposed an unrelated robustness defect in the same path, arguably more
-damaging in practice than the mojibake: `decode_entity` returned `Err` for
-anything outside XML's five entities, and `read_attribute_value` propagated it
-with `?`. So **one `&nbsp;` in any attribute failed the parse and threw away the
-entire feed** — as did a bare `&` in a query string, which is ubiquitous in
-enclosure URLs. The same entity in a *text node* merely rendered literally,
-because that caller fell back to the raw string; only the attribute path was
-fatal. `decode_entities` is now infallible: unrecognised entities are emitted
-exactly as written, bare `&` passes through, and twenty-six common HTML entities
-are decoded rather than left as source text. Two breaks, two disjoint failure
-sets. 147 tests pass.
-
-The pattern across all four: **the cast is never the only bug in the function.**
-Every site that had it also had at least one other defect in the same escape or
-delimiter handling — a panic, a dropped character, or a fatal error on ordinary
-input. Byte-at-a-time text handling seems to correlate with not having thought
-about the hard cases at all.
-
-
-## The file explorer's paste and delete were a weaker duplicate of its own engine (lane C)
-
-**Status: FIXED 2026-08-15** (lane C, commit `bcd1e2d5d`). Found while auditing
-`to_string_lossy` uses in `apps/explorer` — those turned out to be fine (the
-real `PathBuf` is always kept as the truth and the lossy `String` is only ever
-displayed), but the surrounding code was not.
-
-`apps/explorer/src/fileops.rs` is a complete file-operation engine: plans with a
-conflict policy, a crash-recovery journal, per-file error policy, progress, an
-undo stack, and a `RecycleBin` that stores each item with its original path so
-it can be listed and restored. `apps/explorer/src/main.rs` used **none of it.**
-`paste()` and `delete_selected()` called `fs::copy` / `fs::rename` /
-`fs::remove_file` in a loop, discarding every `Result` with `let _ =`. Three
-distinct silent failures followed:
-
-- **Paste destroyed an existing file of the same name.** `fs::copy` overwrites
-  its destination, so pasting `notes.txt` into a folder that already had one
-  replaced it with no prompt, no rename, no undo.
-- **"Move to recycle bin" produced files that could not be restored — and
-  destroyed each other.** It renamed into a flat `/var/recycle` with no
-  metadata, so `RecycleBin::list` never saw the item and `restore` had no
-  original path to restore *to*. And because `fs::rename` overwrites, deleting a
-  second `notes.txt` from a different directory silently destroyed the first
-  one already sitting in the bin. The recycle bin was, in effect, a shredder
-  with an unreliable name-collision hazard.
-- **The status line reported unconditional success.** "Paste complete" whether
-  or not any file copied; "N item(s) deleted" where N was the number
-  *selected*, not the number that worked.
-
-The fix routes both through the existing engine rather than patching the
-duplicate — `copy_dir_recursive` is deleted, not repaired. Two implementations
-of one operation is precisely how the weaker one ends up on the user-facing
-path; `CLAUDE.md`'s "watch for band-aid accumulation" rule names this shape.
-
-**A fourth defect surfaced only when the tests were written.** Every operation
-ends by calling `load_directory()`, which calls `update_status()`, which
-overwrote `status_message` with the folder/file summary. So no operation result
-was *ever* visible to the user — not a paste, not a delete, not a rename, and
-not the `Error: {e}` set when `read_dir` fails, which was assigned and then
-discarded two lines later (an unreadable directory rendered as "0 folder(s), 0
-file(s) — 0 B"). The transient result and the derived summary are now separate
-fields, with `status_bar_text()` preferring the result and navigation clearing
-it.
-
-**The root cause behind all four: `apps/explorer/src/main.rs` had no
-`#[cfg(test)]` module at all.** `columns.rs`, `dropzone.rs`, `fileops.rs` and
-`thumbs.rs` are all well tested; the file holding `ExplorerState` — navigation,
-selection, clipboard, paste, delete, rename — had zero tests. It now has 11,
-with each of the three behavioural fixes verified non-vacuous by a separate
-break. Worth generalising: **a well-tested support module is not evidence that
-the code calling it is tested**, and in this crate the untested file was the one
-users actually touch.
-
-Two smaller defects in `fileops.rs` noticed during the same read — **also FIXED
-2026-08-15**, commit `35f17dfd7`:
-
-- `RecycleBin::recycle` moved data with a bare `fs::rename`, which fails with
-  `EXDEV` across a mount point — so deleting anything from a separate data
-  partition simply errored, and `restore` had the same problem in reverse. Now
-  routed through a `move_path` helper that tries the rename and falls back to
-  copy-then-remove. Note that `fileops::same_device` exists for exactly this
-  check and was referenced only by its own test (`dropzone.rs` carries a second
-  copy of the same function); it was not used here, because attempting the
-  rename and reacting to its failure is both cheaper in the common case and
-  correct where a first-component heuristic guesses wrong.
-- `RecycleBin::recycle` wrote the original path to `meta.txt` with
-  `path.display()`, which is lossy, and `read_entry` parsed it back as UTF-8 —
-  so a non-UTF-8 path was restored under a *different name*, silently renaming
-  the user's data during an operation advertised as reversible. Same class as
-  the `u8 as char` section above, reached through `Display` instead. The path is
-  now percent-encoded from `OsStr::as_encoded_bytes`, with a version marker on
-  line 1 so an already-populated bin is still readable.
-
-A third, unlogged defect fell out of writing those tests: metadata was written
-before the data was moved but not removed if the move failed, so a failed
-recycle left the bin listing an entry whose `data/` was not there. Ordering
-kept (metadata first is the safe order — orphaned metadata is harmless, moved
-data with no metadata is unrestorable), with cleanup on the failure path.
-
-
-## Fixing a parser is not fixing a format: `apps/backup` corrupted paths on the *write* side (lane C)
-
-**Status: FIXED 2026-08-15** (lane C), commit below. This is a follow-up to the
-`u8 as char` section above, and the lesson is the one worth keeping.
-
-Commit `3b6b60e39` fixed `apps/backup`'s manifest **reader** — the JSON string
-parser that re-encoded UTF-8 as Latin-1. That looked like the whole bug. It was
-not. `FileEntry.path` was a `String`, and every one of those strings was
-produced by `relative_path`, which did
-`full.to_string_lossy().replace('\\', "/")`. So a filename the filesystem
-happily stored — our paths allow every byte but `/` and NUL — was flattened to
-U+FFFD *before the manifest writer ever saw it*. A backup of `café.txt`
-(0xE9, not UTF-8) recorded `caf<FFFD>.txt`; restore recreated the file under a
-different name, and `verify` reported the original as missing. The archive was
-self-consistently wrong, so nothing downstream could detect it.
-
-**Generalization: when you find a lossy conversion in a parser, the format has
-two sides — go find the writer.** A round-trip test through the parser alone
-passes vacuously, because the corruption happened upstream of the data the test
-constructs by hand. The reader fix and its tests were both real and both blind
-to this.
-
-Fixed by making the path a `PathBuf` end to end: `relative_path` now strips the
-base and rejoins components on `/` at the byte level, and the manifest stores
-paths percent-encoded from `OsStr::as_encoded_bytes` — the same escape and
-version-marker scheme just adopted for the recycle bin's `meta.txt`. A manifest
-with no `version` field is read as version 1 (paths verbatim), so archives taken
-before this change still restore.
-
-Three further defects fell out of the work:
-
-- `detect_changes` contained a dead push/pop pair and two empty `if` bodies
-  left over from a half-finished edit; it computed `modified` twice, and the
-  first computation was discarded. Rewritten as a single pass. Behaviour is
-  unchanged — the hash comparison was always the one that counted — but the
-  size/mtime "quick check" it pretended to do was never wired to anything.
-- The file-type breakdown in `stats` used `path.rsplit('.').next()`, which
-  reports the whole filename as the extension for `README` and `.gitignore`
-  alike. Now `Path::extension`.
-- Both new percent-decoders (here and in `fileops.rs`) built their `OsStr` with
-  `OsStr::from_encoded_bytes_unchecked` under a SAFETY comment claiming every
-  byte string is valid for the platform's encoding. That is true on Unix and
-  **false on Windows**, where `OsStr` is WTF-8 — and Windows is the host the
-  tests run on, so the unsound branch was the only one ever executed. Replaced
-  with a `#[cfg(unix)]` split: `OsString::from_vec` (safe and total) on the
-  real target, which is `target-family = ["unix"]`, and a documented
-  best-effort on the test host. The lossless core is now byte-level
-  (`encode_bytes`/`decode_bytes`) and tested there, so the round-trip is
-  asserted at the level the file is actually written at rather than at a level
-  the test host cannot represent.
-
-Related tooling gap, now closed: `rustup target add x86_64-unknown-linux-gnu`
-was not installed, so **no `#[cfg(unix)]` code in this lane had ever been
-compiled**, let alone checked. `cargo check --target x86_64-unknown-linux-gnu`
-needs no linker and now covers those branches.
-
-
-## `apps/indexer` stored index paths lossily and panicked on a short header (lane C)
-
-**Status: FIXED 2026-08-15** (lane C), commit below. Third instance of the
-lossy-path class, found by continuing the sweep. The index is a binary,
-length-prefixed format, so unlike `meta.txt` and the backup manifest there was
-never a readability tradeoff to weigh — it simply stored the wrong bytes:
-
-- `serialize` wrote `entry.path.to_string_lossy().as_bytes()` and
-  `deserialize` read them back with `String::from_utf8_lossy`. A file whose
-  name is not UTF-8 was indexed under a name containing U+FFFD, so the search
-  hit that named it could not be opened. Both sides now carry
-  `OsStr::as_encoded_bytes` verbatim; `INDEX_VERSION` goes 1 → 2. No migration
-  is needed — the index is a derived cache and the existing version check
-  already tells the user to reindex.
-- **Panic on a truncated index.** The header check was `data.len() < 28`, but
-  `dirs_scanned` is read from bytes `24..32`, so a file of 28..=31 bytes
-  passed the check and then indexed out of bounds. The existing
-  `test_index_deserialize_too_short` used a 4-byte input and never reached it.
-  Now `< INDEX_HEADER_LEN` (32), with a test that sweeps every length below it.
-
-Two smaller things fixed in passing: the two scanners each carried a verbatim
-copy of the directory-exclusion check (now one `is_excluded_dir`), and each
-copy tested `dir_str.ends_with(excl) || dir_str.contains(excl)` — the same
-predicate written twice, since `contains` is true whenever `ends_with` is.
-
-The `filename` field stays a lossy `String`, now documented as a **search key
-only**: a query is UTF-8 text the user typed, so matching against a lossy
-rendering is a selection heuristic. It is never displayed and never used to
-name a file — `path` is, and `path` is exact. Both producers of the key now go
-through one `filename_key` function so they cannot drift.
-
-
-## The thumbnail cache keyed on a lossy path, so one file showed another's image (lane C)
-
-**Status: FIXED 2026-08-15** (lane C), commit below. Fourth instance of the
-lossy-path class, and the first where the damage is not a lost name but a
-**collision**.
-
-`Thumbnail::source_path` was a `String` built with `to_string_lossy`, and it is
-the disk cache's key: `simple_hash` FNV-hashes it with the mtime to produce the
-cache filename. Every undecodable byte in a name became the same U+FFFD, so two
-genuinely different files whose names differ only in such bytes hashed to one
-cache entry — and the file explorer displayed one of them the other file's
-thumbnail. Nothing errors; the wrong picture is simply shown. `source_path` is
-now a `PathBuf` and `simple_hash` takes `&Path` and hashes
-`as_os_str().as_encoded_bytes()`.
-
-`purge_stale` had a matching problem in the other direction: it compared
-directory entries by `to_string_lossy`, so a foreign file in the cache
-directory whose name is not UTF-8 could be *rendered into* something matching
-our `{hash:016x}.thumb` shape and deleted. Now compared as bytes.
-
-**The lesson worth keeping is about the tests, not the bug.** The natural
-regression test for this class needs a path the platform cannot decode, and on
-the Windows test host `OsString` cannot hold arbitrary bytes at all — so the
-obvious test has to be `#[cfg(unix)]` and never actually *runs* here. A
-`cfg(unix)` test is compile-checked at best (and until this session, not even
-that — see the note in the `apps/backup` entry above). The fix is to find the
-host's *own* uncodable case: on Windows an unpaired surrogate is a legal
-`OsString` that `to_string_lossy` maps to U+FFFD, which reproduces exactly the
-same collision. Both tests now exist, and the Windows one was confirmed to fail
-when the lossy hash is put back. Any future test in this class should carry a
-runnable-on-the-host twin rather than a Unix-only assertion.
-
-
-## TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED — `max_width` cuts mid-glyph and says nothing — ✅ **RESOLVED 2026-08-15**
-
-**Resolution.** `RenderCommand::Text` gained a **required** `overflow:
-TextOverflow` field (`Clip` | `Ellipsis`), and the compositor draws the mark.
-The operator chose "required, no `Default`" from four options precisely so that
-every one of the 4,517 constructions in the tree had to answer the question
-`max_width` had been posing and never answering; see `design-decisions.md` §427
-for the options and §429 for why the commit also had to fill in lane B's 31
-sites. The second measurement the entry complains about below is gone from the
-policy path: the compositor decides about the mark from the run it has already
-shaped, so `text::elide` is no longer the only way to get a cut marked.
-
-Bounded sites default to `Ellipsis` rather than to the behaviour-preserving
-`Clip`, because today's behaviour *is* this entry — a sweep that faithfully
-preserved it at four thousand sites would have done nothing.
-
-Tested at all three layers: the compositor (a mark appears only when earned,
-stays inside the limit, falls back to clipping when the mark itself does not
-fit, and never blanks a field clipping would have filled), the toolkit (each
-helper emits the right policy), and `guiremote` (both policies survive the wire,
-are distinguishable on it, and an unknown byte is a `DecodeError` rather than a
-guess — `PROTOCOL_VERSION` went to 2 for it).
-
-**Status.** ~~Open, and deliberately not fixed in the pass that closed
-`TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP`, because the good fix is a change to
-`RenderCommand::Text` itself and wants a decision rather than a sweep.~~
-The decision was asked and answered.
-
-**What it is.** `max_width` clips: the compositor walks glyphs and stops when
-the next one would cross the limit. It draws no ellipsis. So a label that does
-not fit ends mid-word — and, worse, ends *plausibly*: "Gateway 192.168.1.1 res"
-reads as a complete string to anyone who cannot see the field it was cut from.
-A caller that wants the cut marked has to call `text::elide` first, which
-measures the string a second time to answer a question the compositor is about
-to answer again while drawing. That is the same two-calculations-for-one-quantity
-shape as the wrap bug, one layer down.
-
-**How widespread.** Every single-line label in the app tree that passes
-`max_width: Some(..)` without eliding first — well over a hundred sites. Most
-are fine in practice because the values are short and app-authored; the ones
-that bite are those carrying user or network data (file names, SSIDs, error
-strings, host names). `netmanager`'s diagnostics detail line was fixed by hand;
-the rest were left.
-
-**Proper fix.** Give the command an explicit overflow policy — `Clip` (today's
-behaviour, correct for a progress label that must not jitter) versus `Ellipsis`
-(the right default for a data-bearing label) — and let the compositor draw the
-mark, since it is the only party that knows exactly where the glyphs ran out.
-
-**Why it is not done.** Adding a field to `RenderCommand::Text` touches every
-struct-literal construction of it in `gui/**` and `apps/**` — several hundred —
-because Rust has no default for a struct-variant field. The alternatives are
-each a compromise: a second variant (`TextClipped`) splits the match arms in
-every renderer; a builder function leaves the literal form available and so does
-not actually prevent the mistake; a blanket `text::elide` sweep at the call
-sites fixes the symptom while keeping the double measurement. The mechanical
-churn is cheap to *do* and expensive to *review* against three lanes' in-flight
-work, so it should be scheduled deliberately rather than smuggled into an
-unrelated fix. Recorded for the operator in `open-questions.md`.
-
----
-
-### TD-FONT-NOT-ACTUALLY-NO-STD. `osfont` documents itself as `no_std` but links `std` — 2026-08-14 — OPEN
-
-**What.** `gui/font` is written entirely in `alloc` terms (`alloc::vec::Vec`,
-`alloc::string::String`, no `std::` paths, `extern crate alloc;` at the top),
-and a comment in `cff.rs` asserted outright that "this crate is `no_std`". It
-is not: `src/lib.rs` carries no `#![no_std]` attribute, so the crate links the
-standard library like any other and the discipline is enforced by nothing but
-habit.
-
-**How it was found.** Adding `#![no_std]` to see whether the claim held. It
-does not — the build fails with 47 errors, in two groups:
-
-- **Float math (35 errors).** `f32::sqrt`, `floor`, `ceil`, `round` and
-  `mul_add` are inherent methods provided by `std`, not by `core`. They are
-  used throughout `raster.rs` and `scaled.rs`, which is unavoidable for a
-  rasterizer.
-- **Prelude items (12 errors).** `String`, `vec!` and `format!` are reached
-  through the `std` prelude at a dozen sites instead of being imported from
-  `alloc`.
-
-**Why it matters.** The compositor and the toolkit both depend on this crate
-and both are meant to run on SlateOS. As long as the attribute is absent, a
-`std::`-only construct added here compiles cleanly on the development host and
-fails only when someone finally builds for the target — at which point the
-offending code is old and its author is a previous session. The false comment
-made this worse than a silent omission, because it told the next reader the
-invariant was already being checked.
-
-**Proper fix.** Add `libm` to the workspace, replace the inherent float
-methods with `libm::{sqrtf, floorf, ceilf, roundf, fmaf}` (or the
-`num-traits`/`libm` float shim), import the prelude items from `alloc` at the
-dozen sites, then add `#![no_std]` and `#[cfg(test)] extern crate std;`. The
-mechanical part is small; what makes it more than mechanical is that `libm`
-would be this workspace's first float-math dependency, and whether SlateOS
-userspace GUI binaries get a `std` port at all is Lane B's call (`posix/**`) —
-if they do, `no_std` here buys much less than it seems to. That question
-should be settled before spending the churn.
-
-**Interim.** The false comment in `cff.rs` was corrected and the crate docs in
-`lib.rs` now state the real position, so nobody is misled into thinking the
-invariant is enforced. Keep writing `alloc::` paths: the point of doing so is
-that closing this stays a small change.
-
----
-
-
-## FIXED: TD-START-MENU-POWER-ROW-IS-A-LABEL
-
-**Fixed 2026-08-14.** The footer row is a real button: `power_button_rect()`
-reports `Hit::PowerButton`, which toggles `power_menu_open`, and
-`power_menu_rect()` / `power_menu_row_rect(row)` place a popup that
-`power::render_power_menu` draws and `hit_test` reads — one accessor per
-clickable part, as the `Rect` documentation requires. Its five rows are
-`power_menu_entries()`, exactly the `Category::System` entries that
-`start_menu_entries()` filters out, and clicking one returns the same
-`ShellAction::Launch` an application row does: `/sbin/shutdown` and its
-neighbours are what actually shut the machine down, not the window manager.
-The popup is themed and scaled by the shell (it takes a `PowerMenuStyle`)
-rather than by `power.rs`'s own palette, so it follows the light theme and the
-display scaling like everything else. `close_start_menu()` is now the single
-place the menu closes, which is what keeps the submenu from being stranded over
-an empty desktop. Nine tests in `pointer_tests.rs`, including one that walks
-every scale from 100% to 200% asserting no system action is dropped or drawn
-where it cannot be clicked. No confirmation prompt: Start → Power → Shut down
-is one click on every desktop that has this menu, and an extra "are you sure"
-is not what makes shutdown safe.
-
-The original report follows.
-
-**What.** The foot of the start menu draws the word "Power" in grey. It is
-text, not a control: `hit_test` reports `Hit::StartMenuPanel` there, and the
-five `Category::System` entries of the app database — Shutdown, Restart,
-Sleep, Lock, Logout — are consequently unreachable from the shell. They are
-filtered *out* of `start_menu_entries` on purpose, so that "Shutdown" is not
-one mis-click below "Screenshot"; but nothing yet offers them anywhere else.
-
-**Why it bites.** There is no way to shut the machine down from the desktop.
-
-**Proper fix.** A power submenu opened from that row: a small popup listing the
-`Category::System` entries, which resolves to the same `ShellAction::Launch`
-the application rows produce. `gui/desktop/src/power.rs` already models power
-actions and confirmation prompts and should be the thing that renders it,
-rather than a second list inside `render_start_menu`. Needs the same
-geometry-shared-with-the-hit-test treatment as the rows above it — see the
-`Rect` documentation in `main.rs`.
-
-**Where.** `gui/desktop/src/main.rs` — `render_start_menu`'s footer,
-`DesktopShell::hit_test`; `gui/desktop/src/power.rs`.
-
-
-## FIXED: FLAKY-GUITK-SCALING-TESTS-SHARED-A-PROCESS-GLOBAL
-
-**What.** Five tests in `gui/toolkit/src/scaling.rs` — `global_scale_default_is_1`,
-`set_and_get_global_scale`, `global_scale_clamped`, `per_monitor_override`,
-`per_monitor_clear_falls_back` — each wrote the process-wide `SCALE_TABLE` and
-then asserted on it. Cargo runs tests on parallel threads, so
-`per_monitor_clear_falls_back` (which sets the global scale to 1.5) failed
-whenever another of the five reset it to 1.0 in between. Observed failing once
-in a full `cargo test -p guitk` run and passing when run alone.
-
-**Fix.** A `SCALE_LOCK` mutex in the test module, taken by a `ScaleGuard` whose
-`Drop` restores the whole table. Restoring on drop rather than at the end of
-each test body means a failing assertion — which unwinds — still leaves clean
-state, so one failure cannot cascade. The lock is taken with
-`unwrap_or_else(|e| e.into_inner())` because a poisoned lock carries no
-information once the guard restores the state anyway.
-
-**Residual gap.** `DesktopShell::set_appearance` now publishes the display
-scaling into that same process-global table, so `guitk` widgets hosted in the
-shell lay out at the scale the chrome is drawn at. That one line has no unit
-test of its own: every desktop test that builds a shell writes the value an
-assertion would read, and `desktop` is a binary crate so the assertion cannot
-be moved to an out-of-process integration test. Rationale is recorded on the
-method.
-
-**Where.** `gui/toolkit/src/scaling.rs` (test module);
-`gui/desktop/src/main.rs` — `DesktopShell::set_appearance`.
-
-
-## TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES — ✅ FIXED 2026-08-14
-
-**What.** The `GSUB`/`GPOS` walk in `gui/font/src/otl.rs` starts at the
-FeatureList and takes *every* feature carrying a wanted tag, rather than
-starting at the ScriptList and taking the features that the run's script and
-language actually select. A face that registers the same feature tag under
-several scripts therefore has all of those scripts' lookups applied to every
-run, whatever the run is written in.
-
-**Why it bites now.** This was a documented, mostly-theoretical limitation
-while only `liga`/`rlig` were read: a ligature belonging to another script
-almost never matches Latin glyphs, so the wrong lookups ran but did nothing.
-Reading `ccmp` changes that. `ccmp` is precisely where a script puts its
-normalisation rules, and those rules are meaningless — or wrong — outside it.
-
-**Reproduce.** `cargo test -p osfont --target x86_64-pc-windows-gnu --test
-host_fonts -- --ignored --nocapture installed_fonts_leave_plain_latin_alone`.
-On a stock Windows host, `ebrima.ttf` and `ebrimabd.ttf` substitute the *space*
-glyph in plain English prose: their `ccmp` lookup 15 is an extension-wrapped
-type-1 format-2 subtable mapping glyph 3 (space) to 2220, and it belongs to one
-of the African scripts Ebrima covers, not to Latin. Verified against an
-independent Python parse of the table, so this is our *selection* being wrong,
-not our *parsing*.
-
-The damage is small — 2 faces of the 275 with `GSUB` on this host, and the
-substituted glyph is a space variant — but it is a genuinely wrong glyph, and
-the class of fault grows with every feature added.
-
-**Proper fix.** Script and language selection, in two parts:
-
-1. **The table walk.** Walk the ScriptList, pick the ScriptRecord for the run's
-   script (falling back to `DFLT`), then its LangSys (falling back to the
-   default), and intersect that LangSys's feature indices with the wanted tags.
-   This is contained work in `otl.rs` and affects `kern.rs` and `mark.rs` too,
-   since they share the walk.
-2. **Script itemisation.** Deciding what a run's script *is* needs the Unicode
-   Script property, which this crate does not have — a run must be split into
-   same-script pieces before it can be shaped, which is also the prerequisite
-   for bidi and for complex-script reordering. This is the larger half and is
-   the reason (1) is not enough on its own.
-
-Until both land, `installed_fonts_leave_plain_latin_alone` tolerates a small
-proportion of faces changing plain Latin prose. When script selection works,
-that count should drop from eight to the six Linux Libertine files, whose `Th`
-ligature is correct.
-
-**Where.** `gui/font/src/otl.rs` — `lookup_indices` (the FeatureList walk, and
-the module doc's "What is not here"); `gui/font/src/gsub.rs` — the feature tag
-list in `Substitutions::parse`; `gui/font/tests/host_fonts.rs` —
-`installed_fonts_leave_plain_latin_alone`.
-
-**Fixed 2026-08-14** (commit `6e0746636`), both parts, as designed above and
-recorded in design-decisions.md §411.
-
-1. `ByScript` in `otl.rs` walks the ScriptList, resolves every script the face
-   registers once at parse time, and shares the decoded lookups keyed by
-   LookupList index. `Substitutions::apply` takes the run's script and binary
-   searches for it, falling back `dev2`→`deva`→`DFLT`→`dflt`.
-2. `gui/font/src/script.rs` carries the Unicode Script property (generated
-   into `script_tables.rs` from `fontTools.unicodedata`) and `script::runs`
-   splits a piece list into maximal same-script stretches. The split happens
-   in `ScaledFont::shape` *before* substitution, while glyphs are still one
-   per piece — after anything ligates, a boundary counted in pieces is no
-   longer a boundary counted in glyphs.
-
-Ebrima no longer substitutes the space, and the same change fixed
-`B-FONT-CALIBRI-SHAPES-A-FRACTION-SLASH-DIFFERENTLY-FROM-HARFBUZZ`, whose
-cause turned out to be identical.
-
-**The prediction in this entry was wrong, and the correction is the
-interesting part.** It said the plain-Latin count "should drop from eight to
-the six Linux Libertine files". It is *nine*, and all three non-Libertine
-faces are correct: `segoesc`/`segoescb` have genuine Latin `calt`, and
-`SansSerifCollection` maps `space` through its Latin `locl` — a feature this
-crate had been skipping, and which was only safe to add once features were
-script-scoped. All nine now agree with HarfBuzz glyph for glyph. The test's
-bound is a proportion, not a list, which is why it kept working; a hard-coded
-expected count would have had to be relaxed for a change that made the shaper
-*more* correct.
-
-**Successors.** Four narrower gaps remain and are filed separately:
-`TD-FONT-IGNORES-LANGSYS-OVERRIDES`,
-`TD-GPOS-APPLIES-EVERY-SCRIPTS-FEATURES`,
-`TD-FONT-SCRIPT-RUNS-IGNORE-SCRIPT-EXTENSIONS` and
-`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`.
-
-
-## TD-FONT-IGNORES-LANGSYS-OVERRIDES — a font's per-language rules were unreachable — ✅ **RESOLVED 2026-08-15**
-
-**Resolution.** Exactly the fix sketched below, and the required-feature gap
-beside it. `ScaledFont::shape_lang(text, Option<Lang>)` and
-`SystemFont::shape_lang` take a language; `shape(text)` is `shape_lang(text,
-None)`, so the change is purely additive and no caller that names no language
-can shape differently than it did. `otl::ByScript::parse` now precomputes a
-lookup selection per **(script, language)** rather than per script, preferring
-the named LangSysRecord over the DefaultLangSys, and `feature_indices` finally
-reads `requiredFeatureIndex` — the one feature a language system states outside
-its index list, which the walk had been dropping for the default language too.
-
-`lang.rs` does the BCP 47 → OpenType mapping, following HarfBuzz's
-`hb_ot_tags_from_language` rule for rule: complex rules first (`ro-MD` →
-`MOL `, `zh-Hant` → `ZHT `), then extended-language-subtag substitution, then
-the 2- and 3-letter registries, then the blocked list, else uppercase. It is
-allocation-free and puts no bound on the tag's length.
-`tools/gen_lang_tables.py` generates its four tables from HarfBuzz's source, so
-a registry update is a regeneration rather than an edit.
-
-Four things worth keeping in mind about the shape of the fix:
-
-- **A LangSysRecord replaces the default's feature list; it does not add to
-  it.** So naming a language can take a feature *away* — which is exactly what
-  `TRK ` does to `liga`. Callers should pass `None` rather than a guess: a
-  wrong language is worse than no language.
-- **One BCP 47 tag resolves to a *list* of up to three OpenType tags, not to
-  one.** `ro-MD` is `MOL ` and then `ROM `; `ml` is Malayalam Traditional and
-  then Reformed; `ga` is `IRI ` and then `IRT `. They are candidates and not
-  synonyms: a face is asked for each in turn and the first it **registers**
-  wins. The cap of three is HarfBuzz's `HB_OT_MAX_TAGS_PER_LANGUAGE`, and
-  truncating where HarfBuzz truncates is what keeps the two engines answering
-  alike. See "What the oracle caught" below — the first version of this fix
-  kept only the head of each list and was wrong on 66 of the host's 556 faces.
-- **Language selection deliberately does not fall back the way script
-  selection does.** A script that does not register the language takes its own
-  default, never another script's — HarfBuzz's split between
-  `hb_ot_layout_table_select_script` and
-  `hb_ot_layout_script_select_language`. `gsub::tests::language_selection_does_not_fall_back_to_another_script`
-  pins it.
-- **A script's default entry is stored even when it selects nothing**, because
-  that entry is what says the script exists and stops the fallback chain.
-  Language entries identical to their script's default are *not* stored; two
-  thirds of the host's are. This is why `ByScript` keeps a second list of every
-  (script, language) the face *registers*: "which candidate wins" is decided by
-  what the font registered, never by what happened to be worth storing, or a
-  `MOL ` that says nothing would hand Moldavian to `ROM `'s overrides on the
-  strength of an optimisation.
-
-**Scale.** `tools/langsys_survey.py` measured the host before the fix: of 581
-installed faces, 290 register at least one LangSysRecord, 3031 (script,
-language) records in all, 1203 of which differ from their default and **996 of
-which differ in a feature tag this crate asks for, across 230 faces**. Moved
-tags: `locl` 856, `ccmp` 90, `liga` 67, `calt` 28, `mark` 25. The survey's
-feature list is pinned equal to the shaper's by
-`otl::tests::the_survey_matches_the_shapers_feature_list`, so a number it
-reports cannot quietly come to mean something else.
-
-**Tested** by seven new unit tests over hand-built ScriptLists that
-`fixture::script_list` cannot express (a script with no DefaultLangSys, a
-script with named languages, a `requiredFeatureIndex`, a face registering only
-a language's second candidate, and both orders of a face registering two of
-them), by 20 tests over the BCP 47 mapping, and by `tools/harfbuzz_sweep.py`,
-which grew a language field: each new corpus entry is a string already in the
-corpus plus a tag, so a difference between the two halves is the language and
-nothing else, and both halves map the tag with the same rules. The sweep's
-buffer language is set *after* `guess_segment_properties`, and explicitly to
-`""` for the language-less entries, because the guess otherwise fills it in
-from the machine's locale and the run would pass or fail by where it was made.
-
-**What the oracle caught.** The first version of this fix passed 521 unit
-tests, was clippy-clean, and was wrong. The sweep found it in one run: `ro-MD`
-disagreed with HarfBuzz on **345** faces where plain `ro` disagreed on 279, and
-the 66-face gap was the bug. HarfBuzz's `hb_ot_tags_from_language` returns an
-ordered list of up to `HB_OT_MAX_TAGS_PER_LANGUAGE = 3` candidate tags and asks
-the face for each in turn; `gen_lang_tables.py` had deliberately kept only the
-first of each list, on the reasoning that a language has one tag. Those 66
-faces — `Candara.ttf` among them — register `('latn', 'ROM ')` and no `MOL `,
-so HarfBuzz reached Romanian's comma-below `locl` for Moldavian through the
-second candidate and we did not. After the generator was reworked to keep all
-of them, the `ro-MD` bucket is 279: exactly `ro`'s, exactly the language-less
-twin's, and entirely the pre-existing NFC divergence recorded in
-`design-decisions.md` §410. Final sweep: 556 faces × 35 strings, 18235 agree,
-reordered 0, misplaced 0.
-
-This is the third bug the HarfBuzz oracle has found that a green unit-test
-suite could not, and for the same reason every time: "this face has no glyph
-/ no language system for that" is a *legal* answer, so no self-consistency
-check can tell it apart from the truth. Only a second implementation can.
-
-The original entry follows.
-
----
-
-**What.** `otl::select` reads each ScriptRecord's DefaultLangSys and ignores
-its LangSysRecords entirely. The per-language overrides — Turkish dotless `i`
-under `TRK `, Serbian Cyrillic italic letterforms under `SRB `, Moldovan
-comma-below under `MOL ` — are never reached, and a face whose *only* route to
-a feature is a language system contributes nothing at all.
-
-**Why it bites.** It is invisible until it is not. A Turkish reader gets the
-wrong dot on `i`/`ı`; a Serbian reader gets Russian italics for бгпт. Both are
-the kind of wrongness a native reader notices immediately and nobody else ever
-does.
-
-**Why it is filed rather than fixed.** There is nothing to select *with*.
-Language is a property of the text's provenance, not of its characters — the
-same Cyrillic codepoints are Serbian or Russian depending on who typed them —
-so it cannot be derived the way script is. It needs a language carried on the
-text down to `ScaledFont::shape`, which means an API change reaching the
-toolkit and the locale system, neither of which has a language to hand yet.
-
-**Proper fix.** Add an optional BCP 47 language to the shaping call, map it to
-an OpenType language system tag (the registry is a fixed table, `tr` → `TRK `,
-`sr` → `SRB `), and have `select` prefer that LangSysRecord over the
-DefaultLangSys. Default stays "no language", which is what every shaper does
-when not told and what this crate does now — so the change is additive and
-cannot regress text that names no language.
-
-**Reproduce.** `gsub::tests::a_feature_only_a_language_system_reaches_is_not_applied`
-pins the current behaviour: a `locl` reachable only through `TRK ` yields no
-`Substitutions` at all.
-
-**Where.** `gui/font/src/otl.rs` — `select`, `LangSys`, and the module doc's
-"What is not here".
-
-
-## TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES — RESOLVED 2026-08-15
-
-**Resolved in two commits, because it was two bugs wearing one name.**
-
-*Half one — erasing them* (`88ee69ca7`): `norm::ignorable` classifies the
-character, `SubGlyph::ignorable` carries the answer and is cleared wherever a
-`GSUB` lookup rewrites the glyph, and `ScaledFont::shape` replaces what is left
-with the space glyph, or drops it where the face has none.
-
-*Half two — stepping over them* (this commit): erasing an ignorable at the end
-is not enough, because the lookups in between still saw it as a wall. `f ZWJ i`
-did not ligate; a contextual alternate did not match across a soft hyphen. The
-matcher now answers three ways rather than two, as HarfBuzz's does — hide,
-*step over*, or consider — with the kind of ignorable and the kind of lookup
-deciding which. See `design-decisions.md` §434 for the shape of that, and
-`gui/font/src/skip.rs`'s `Joiners` for the table.
-
-**Measured.** Host sweep, 556 faces × 60 strings: `differ` on `f\u200di` went
-from 76 faces to 0, and `misplaced` from 331 to 170. Khmer probe: 45/45 before
-and after, which is the point — the Indic-family features read the joiners
-themselves and had to come through unchanged.
-
-**The 170 that remain are a deliberate divergence, not a residue.** They are
-every corpus string containing an ignorable, and in all of them the glyphs and
-every *visible* glyph's position agree; what differs is the x of the erased,
-zero-advance glyph itself. HarfBuzz spends a legacy `kern` on the right-hand
-glyph's offset, so its erased glyph sits at the *unkerned* pen — 13 units
-inside the following letter's image, for `a◌͏b` in Arial Rounded. We charge the
-kern to the pair's left glyph, so ours sits exactly where the next glyph is
-drawn. A caret asked to land on the ignorable's cluster wants ours. Recorded in
-`design-decisions.md` §434; do not "fix" it without reading that first.
-
----
-
-*The original entry follows, as filed.*
-
-**What.** A handful of characters exist to instruct the shaper and are never
-meant to be drawn: the zero-width joiner and non-joiner, the soft hyphen, the
-bidi controls, the variation selectors, the byte-order mark. Once shaping is
-over, HarfBuzz erases them — `hb_ot_hide_default_ignorables`, in
-`hb_ot_substitute_post`, replaces each one's glyph with the face's `space`
-glyph, or **deletes the glyph entirely** if the face has no space — and
-`hb_ot_zero_width_default_ignorables`, during positioning, zeroes their
-advances and x-offsets first. We do neither: `ScaledFont::shape` maps the
-character through `cmap` like any other and returns whatever glyph came back.
-
-**Symptom, measured.** The two strings the Khmer probe font disagrees on
-(`gui/font/tools/khmer-corpus.txt`, the `\u17d2\u200d\u1781` and
-`\u17d2\u200c\u1781` lines) are exactly this: HarfBuzz emits the space glyph
-where we emit ZWJ's and ZWNJ's own glyphs. It is invisible in the host sweep
-only because the built-in corpus has no string containing an ignorable that
-the face also maps.
-
-**Why it matters beyond the joiners.** This is crate-wide and
-script-independent, and the joiner case is the *benign* one — a face that maps
-ZWJ usually maps it to something blank anyway. The soft hyphen U+00AD is the
-one that bites: fonts routinely map it to a real hyphen glyph, so a word
-carrying a discretionary break renders with a hyphen sitting in the middle of
-it whether or not the line broke there. The bidi controls and variation
-selectors are the same shape of bug.
-
-**One subtlety that is easy to get wrong.** HarfBuzz's predicate is
-`(unicode_props() & UPROPS_MASK_IGNORABLE) && !_hb_glyph_info_substituted()` —
-a character stops counting as ignorable the moment a GSUB lookup rewrites it,
-because at that point the glyph is whatever the font asked for and is no
-longer the control character. So the flag has to be *cleared on substitution*,
-not merely tested at the end. And the set is HarfBuzz's own hard-coded list
-(U+00AD, U+034F, U+061C, U+17B4–17B5, U+180B–180E, U+200B–200F, U+202A–202E,
-U+2060–206F, U+FE00–FE0F, U+FEFF, U+FFF0–FFF8, U+1BCA0–1BCA3, U+1D173–1D17A,
-U+E0000–E0FFF), *not* Unicode's `Default_Ignorable_Code_Point` property; using
-the Unicode set would make the sweep disagree in the other direction.
-
-**Proper fix.** A flag on `SubGlyph`, set in `scaled.rs`'s per-piece build loop
-from the character, cleared at the three sites in `gsub.rs` that assign a
-glyph id — `apply_single`, `apply_alternate`, the ligature path — and by
-`apply_multiple`'s splice. Then in the loop that builds `out: Vec<ShapedGlyph>`
-at the end of `shape`, zero the advance and offsets and substitute the space
-glyph, or drop the glyph if the face maps no space. Corpus strings containing
-a soft hyphen and the joiners go into `harfbuzz_sweep.py`'s built-in `CORPUS`
-in the same change, so the fix is measured on all 556 host faces rather than
-on the one probe font that happened to expose it.
-
-**Where.** `gui/font/src/scaled.rs` — the per-piece loop that derives
-`tab`/`klass`/`mark`/`indic` from each character, and the `out`-building loop
-after it; `gui/font/src/gsub.rs` — `apply_single`, `apply_multiple`,
-`apply_alternate` and the ligature path; `gui/font/tools/harfbuzz_sweep.py` —
-`CORPUS`.
-
-
-## TD-FONT-HAS-A-HANGUL-SHAPER-NOTHING-CALLS — ✅ FIXED 2026-08-15
-
-**What.** `gui/font/src/hangul.rs` is a complete, tested transcription of
-HarfBuzz's `preprocess_text_hangul` — 673 lines, 19 tests, all passing — that is
-**not declared in `lib.rs`** and therefore compiles nowhere and changes no
-output. It was parked mid-task on an explicit halt, at the point where it worked
-in isolation but was not yet connected.
-
-**Why it is parked rather than either finished or deleted.** The connection is
-all-or-nothing, and the half of it that was written first is a regression on its
-own. Wiring the shaper means telling `norm::pieces` to stop normalizing Hangul —
-HarfBuzz's Hangul shaper sets `HB_OT_SHAPE_NORMALIZATION_MODE_NONE` precisely
-because composing first destroys the distinction the shaper reads. But `pieces`
-composing `<L,V,T>` to a syllable is currently the *only* thing that makes
-Korean render at all on the ordinary Korean text font, which ships the 11,172
-precomposed syllables and no jamo. Exempt Hangul from normalization without the
-shaper in place and that font draws three missing-glyph boxes where it used to
-draw one correct syllable. So the `norm.rs` half was reverted and the module
-kept: a tested, inert file loses nothing, whereas a half-wired one is worse than
-neither.
-
-**The four edits that connect it**, in the order they have to happen:
-
-1. `norm.rs` — thread a private `enum Hangul { Normalize, LeaveAlone }` through
-   `decompose_once`, `compose_pair`, `decompose_into` and `compose`; split `nfc`
-   into `nfc` (which passes `Normalize`, because NFC is NFC and a question about
-   *text* must get that answer) and a private `normalize(text, hangul)`. `pieces`
-   then calls `normalize(text, Hangul::LeaveAlone)`, and `split_undrawable` calls
-   `decompose_once(ch, Hangul::LeaveAlone)` — the latter because a syllable
-   `hangul::preprocess` declined to split has been declined on grounds
-   `split_undrawable` cannot see, namely that the face has no jamo either. Three
-   call sites in `norm.rs`'s own tests need the new argument.
-2. `gsub.rs` — add `b"ljmo"`, `b"vjmo"`, `b"tjmo"` to `FEATURES` with `LJMO`,
-   `VJMO`, `TJMO` bit constants, and a `SubGlyph::jamo(gid, cluster,
-   Option<Jamo>)` constructor that ORs the one jamo bit and **clears `CALT`**.
-   Clearing `calt` is not an optimization: Noto Sans CJK and Source Han Sans file
-   all of their jamo lookups under `calt`, and HarfBuzz's `setup_masks_hangul`
-   turns it off for every L/V/T so those lookups cannot fire twice.
-   `the_masks_match_the_feature_list` has to keep passing.
-3. `scaled.rs::shape` — call `hangul::preprocess` immediately after
-   `norm::pieces`, with `has_glyph = |ch| self.face.glyph_index(ch).is_some()`
-   and `zero_width = ` has-glyph *and* zero horizontal advance; then choose
-   between `SubGlyph::cursive` and `SubGlyph::jamo` in the piece loop on
-   `hangul::is_jamo(ch)`. Guard the whole thing with `hangul::present` so a run
-   with no Korean in it pays nothing.
-4. `fallback.rs` — add `*b"hang"` to `NO_ZERO_WIDTH_MARKS` (the Hangul shaper's
-   `zero_width_marks` is `NONE`) and **not** to `COMPLEX_SCRIPTS` (its
-   `fallback_position` is `true`). Both lists are `is_sorted`-asserted.
-
-**What it should buy.** 553 of the sweep's 892 remaining `differ` cases are the
-single string `\u1100\u1161\u11a8` — jamo we compose to `각` and HarfBuzz leaves
-as three glyphs. Expect `differ` 892 -> ~339. The residue after that is composed
-Latin diacritics, which is a *different* and unsettled question: HarfBuzz
-decomposes and recomposes against font coverage, which reverses the layering
-`norm.rs`'s module doc deliberately chose (`nfc` pure Unicode, `fit_to_face` pure
-font). That one is an operator question, not a bug.
-
-**Where.** `gui/font/src/hangul.rs` (parked), `gui/font/src/lib.rs` (the missing
-`mod hangul;`), and the three files named above. The reference is HarfBuzz's
-`src/hb-ot-shaper-hangul.cc`.
-
-**Resolution — 2026-08-15.** All four edits landed together with the missing
-`mod hangul;`, and the prediction above held to the case. The HarfBuzz
-differential sweep (556 host faces × 23 strings, 12,739 comparisons):
-
-| bucket | before | after |
-|---|---|---|
-| `agree` | 11,847 | **12,400** |
-| `differ` | 892 | **339** |
-| `reordered` | 0 | 0 |
-| `misplaced` | 0 | 0 |
-
-`\u1100\u1161\u11a8` — all 553 of its cases — left the disagreement list
-entirely, and nothing regressed into `reordered`/`misplaced`. `osfont` goes
-from 482 to **501 passing tests**: the module's own 19 tests had never run
-before, because a module that is not declared does not compile and therefore
-does not test either. That is the sharper lesson here — "19 tests, all
-passing" was a true statement about a file `cargo test` had never once
-looked at.
-
-Two notes on how the edits differ from the plan above. `gsub.rs`'s three new
-feature tags are **appended** to `FEATURES` rather than inserted in tag order,
-so that no existing bit constant shifts; the bits are `1 << 34/35/36`.
-And `norm::nfc` lost its last production caller in the split, so it now
-carries `#[cfg_attr(not(test), allow(dead_code, …))]` — it is kept deliberately
-as the text-question half of the split (NFC is NFC), not as dead weight, and
-the reason is written at its definition.
-
-The residual 339 are exactly the composed-Latin-diacritics cases this entry
-predicted (`\u1e09` 255, `\u212b` 57, `été` 10, …). They are **not** tracked
-here as a bug; they are the layering question in `norm.rs`'s module doc, and
-belong to the operator. See `open-questions.md`.
-### [B] D-POSIX-SOCKET-META-WAS-NOT-SCOPED-TO-ITS-FD-TABLE — ✅ FIXED 2026-08-14
-
-**Found while running the eighth audit pass**, not by looking for it:
-`socket::tests::test_phase201_bind_port443_no_cap_eacces` failed once with
-`ENOTSOCK` where `EACCES` was expected, then passed three runs in a row.
-
-`SOCKET_META` (posix/src/socket.rs) is indexed by fd number, so it must have
-exactly the same scope as the fd table it is keyed by. `fdtable` made its
-storage **per-thread** on host builds (design-decisions.md §110) precisely
-because libtest runs tests on parallel threads. `SOCKET_META` stayed a
-process-global `static mut`, and the mismatch was reachable: two tests on
-different threads each create a socket and, drawing from *separate* per-thread
-fd tables, both get the same fd number `N` — near-certain, not unlikely, since
-each thread's table starts empty. They then shared one `SOCKET_META[N]`, and
-the first to `close()` wiped the entry the other was still using, whose next
-call saw a live fd with no metadata and reported `ENOTSOCK` for a good socket.
-
-Fixed by giving `SOCKET_META` the same `cfg`-split storage as
-`fdtable::fd_store`. Six consecutive full runs clean afterwards.
-
-Two things worth keeping from this. First, the `// SAFETY: Single-threaded
-access.` comments on these accesses were **true on the target and false under
-`cargo test`** — a safety comment that silently changes truth value with
-`cfg` is worse than none, and `fdtable` had already learned this lesson
-without the fix being propagated to the table keyed by its own indices.
-Second, an intermittent failure at roughly one run in four is easy to
-dismiss as noise when it appears in a test unrelated to what you are
-changing; it was worth the ten minutes to chase.
-
-### [B] D-POSIX-TIMED-WAITS-DID-NOT-VALIDATE-TV-NSEC — ✅ FIXED 2026-08-14
-
-`pthread_cond_timedwait`, `pthread_mutex_timedlock` and `sem_timedwait`
-accepted any `timespec` whatsoever. A `tv_nsec` of `1_000_000_000` or `-1` —
-the classic result of adding a nanosecond offset without carrying into
-`tv_sec` — should be `EINVAL` (glibc `valid_nanoseconds`, `include/time.h:517`);
-instead it fell through to the deadline comparison, where a too-large
-`tv_nsec` silently extended the wait by up to a second and a negative one made
-the call return `ETIMEDOUT` immediately. Both are wrong in the direction that
-hides the caller's bug. Separately, `mqueue::deadline_from_timespec` checked
-`tv_nsec` but not `tv_sec < 0`, which the kernel's `timespec64_valid` rejects.
-
-Fixed by adding `time::valid_nanoseconds` (glibc's predicate, verbatim) and
-calling it from each site **at the position its own upstream uses** — eagerly
-in `pthread_cond_timedwait` and `sem_timedwait`, lazily (contended branch
-only) in `pthread_mutex_timedlock` — plus the missing `tv_sec` half in
-`mqueue`. See the ninth-pass write-up under
-`D-POSIX-NULL-POINTER-ERRNO-NEEDS-A-PER-FUNCTION-AUDIT` for why the three
-placements differ and why the mqueue predicate is not the same predicate.
-
-Seven tests pin the distinctions, including the two that would silently pass
-under a naive "check it at the top of every function" fix:
-`test_pthread_mutex_timedlock_uncontended_ignores_a_bad_deadline` and
-`test_sem_timedwait_checks_the_deadline_before_the_fast_path`.
-
-**Not fixed, because we do not have them:** `pthread_cond_clockwait`,
-`sem_clockwait` and the `pthread_rwlock_{timed,clock}{rd,wr}lock` family are
-unimplemented. When they are added they need the same predicate plus
-`futex_abstimed_supported_clockid`, and the rwlocks check **eagerly** — see
-the comment at `pthread_rwlock_common.c:286-291`.
-
----
-
-### [B] TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED. bash runs `${z:-<(echo hi)}` and substitutes `/dev/fd/63`; osh yielded the nine characters `<(echo hi)` — 2026-08-14 — ✅ FIXED 2026-08-14
-
-**Where it was:** `userspace/oils/src/lexer.rs`, [`Lexer::read_word_verbatim`],
-which reads the operand, the pattern and the replacement of a `${ … }` and had
-no `<`/`>` arm at all.
-
-bash splits this construct across two files and osh had only one half of it.
-**Part (A) — the parse** — is `parse_matched_pair` naming `<(`, `>(` and `$(` in
-one breath (parse.y:5028) and sending all three through `parse_comsub`
-(parse.y:5042), so a `${ … }` body's scan parses a process substitution where it
-meets it, its syntax error is the enclosing unit's, and what survives is the
-parse *re-printed*; see
-`userspace/oils/tests/corpus/a-process-substitution-in-a-brace-body-is-parsed-where-it-is-met.sh`
-and [`parser::procsub_reprints`]. **Part (B) — the performance** — is
-`expand_word_internal` *running* it, and was this entry.
-
-**The rule** is bash's quoting flag, not the position. `expand_word_internal`
-reads a process substitution only when `if (string[++sindex] != LPAREN ||
-(quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) || (word->flags & W_NOPROCSUB))`
-lets it (subst.c:11079), so an **operand** runs one when the expansion is bare
-and keeps the characters when it is double-quoted, a **pattern** and a
-**replacement** run one either way (both are re-entered without
-`Q_DOUBLE_QUOTES`), and a **subscript** or a **substring bound** never does
-(`Q_DOUBLE_QUOTES|Q_ARITH`), so its arithmetic error names the characters.
-
-**The fix.** [`Verbatim`] gained an `Arith` mode beside `Bare`, `Replacement`
-and `Dquote` — identical to `Bare` in every other respect — and
-[`Lexer::read_word_verbatim`] gained a `<`/`>` arm live in `Bare` and
-`Replacement` only. On the parser side [`parser::verbatim_word_at`] picks the
-lexer entry from a new `Frag` (`Word` or `Arith`), which is what a subscript and
-the `' … '` runs inside it now pass. The body the arm reads is already the
-*re-print* part (A) spliced in, which is what bash performs too: the token
-buffer a `${ … }` scan leaves behind holds the re-print and nothing else.
-
-No new expansion machinery was needed. The double-quoted operand was already
-right — the splice puts the re-print into the text and its nested `$( … )` then
-expands normally, so `"${z:-<(echo $(echo q))}"` is `<(echo q)` in both shells —
-so the whole of part (B) was one liveness decision taken at lex time, which is
-where osh decides quoting.
-
-**The pre-existing inconsistency this closed.** The substring bound
-(`${z:<(echo hi)}`, via [`parser::parse_slice_bounds`]) *did* perform the procsub
-while the subscript beside it did not, so osh's two arithmetic contexts — which
-bash expands identically — disagreed. The bound is tokenized rather than read
-verbatim, so it has no `Verbatim` mode to set; [`parser::word_from_source`], its
-only reader, now turns a `Seg::ProcSub` back into the characters it was read
-from. Both contexts are on the same side now.
-
-**Verified:** `a-process-substitution-in-a-brace-body-is-performed-unless-the-expansion-is-quoted.sh`,
-27 cases across the five contexts. None of them prints a substitution's path —
-bash names it `/dev/fd/N` and osh a temporary file — so each asks a question the
-path does not answer: whether the text still begins `<(`, whether it names
-something that exists, or what a `cat` of it reads.
-
-**How it was found:** implementing part (A) — the eager parse and re-print of a
-process substitution met by a `${ … }` body scan.
-
-### [B] TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN. bash's `brace_gobbler` and its `${x@P}` re-read each meet a `<(` osh's do not — 2026-08-14 — ✅ FIXED 2026-08-14 (both halves, and the arithmetic-fragment residue)
-
-Two residues of TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED
-(above), left after both halves of it were done. Each is a *second* scan of the
-same text — one that is not `parse_matched_pair` and not `expand_word_internal` —
-which has a `<(` row of its own that osh's counterpart lacks. The `$(` spelling
-of each already matches bash byte for byte, so in both the machinery is there
-and only the row is missing.
-
-**Where:** `userspace/oils/src/interp.rs`, [`Shell::gobbled_subs`]; and the
-`${x@P}` re-read, `userspace/oils/src/parser.rs`, [`dquote_word_from_source`].
-
-* **✅ FIXED 2026-08-14.** `echo "${z:-"<(fi)"}"` — bash reports
-  `command substitution: line N+1: syntax error near unexpected token 'fi'`
-  plus the tail of the physical line, where osh prints `<(fi)`. The agent is
-  **`brace_gobbler`**, whose command-substitution row names all three spellings
-  (`(c == '$' || c == '<' || c == '>') && text[i+1] == '('`, braces.c:675) and
-  reaches `extract_command_subst` → `xparse_dolparen`, which *parses* the body
-  and throws the result away. Two facts pin it down. The gobbler's `quoted`
-  state does not nest and `${` opens none of its own (it is treated like `\{`),
-  so the **inner** `"` is `c == quoted` and clears the state — which is why the
-  row fires here and not in the plain `"${z:-<(fi)}"`, where parse.y has
-  already answered. And it fires only where brace expansion runs: an argument
-  or command word errors (`: "${z:-"<(fi)"}"`, `f "${z:-"<(fi)"}"`,
-  `echo "${a["<(fi)"]}"`), while an assignment RHS — which is not brace-expanded
-  — does not (`x="${z:-"<(fi)"}"` is silent). bash only ever *parses* it: with a
-  body that does parse, `echo "${z:-"<(echo hi)"}"` prints `<(echo hi)` in both
-  shells, so this is a diagnostic and not a missing expansion.
-
-  What was missing was something to hang the row on. [`Shell::gobbled_subs`]
-  walks the *parse* structurally, and here the tree is right to hold characters
-  — the `<(` sits in a `" … "` run inside a double-quoted operand, where neither
-  bash's expander nor osh's reads one — so no part was ever going to appear for
-  it. The fix is therefore not another lexer mode but a text-level pass beside
-  the structural walk, as `gobbled_backtick_subs` already is for a backquote:
-
-  * `wordscan::gobbler_procsubs(s, dquoted)` — the same flat-state loop as
-    `gobbler_readable`, reporting the index of each `<(`/`>(` met while `quoted`
-    is 0. (`gobbler_readable` could not answer this: it reports the stretches the
-    **`$(`** row fires in, which is `quoted == 0` *and* `quoted == '"'`, and the
-    `<(` row is the first of those alone.) A `$( … )` is skipped whole rather
-    than reported — that is the one spelling a part already stands for.
-  * `Shell::gobbled_procsubs` — for each index, lex `$(` + the rest of the word
-    with `parser::dquote_word_from_source` and take the resulting
-    `CmdSubBody::Unread`. The two spellings reach the same
-    `extract_command_subst`, so the swap is exact, and one lex settles the body,
-    the remainder and whether there was a `)` at all. It is a *lex*, not the
-    paren count `gobbler_readable` skips with, because `xparse_dolparen` is a
-    real parse: a `(` inside a quoted run of the body is not a nesting level to
-    it, and a count would carve `echo <(echo "(")` into a body that fails.
-  * The two are merged by **remainder length**: every tail the gobbler's word
-    carries is measured against the whole word (`unparse::gobbler_word`), so a
-    longer one is an earlier meeting. That is what keeps the interleaving right
-    where a word holds both — measured, `echo "${z:-'$(fi)'"<(for)"}"` reports
-    the `$(fi)` and `echo "${z:-"<(fi)"'$(for)'}"` the `<(fi)`.
-  * `Shell::has_gobbled_sub` — the cheap pre-test — gained a `WordPart::Literal`
-    row, answering wide (any `<(`/`>(` in a literal under quotes) so the word
-    reaches the scan that settles it.
-
-  **Verified:** `userspace/oils/tests/corpus/a-process-substitution-a-brace-scan-meets-is-read-where-the-quoting-is-clear.sh`,
-  29 rows, all matching bash 5.2.37 — including the parity (`"${z:-"a"<(fi)"b"}"`
-  is a *parse* error, `"${z:-"${y:-"<(fi)"}"}"` is silent), the `set +B` gate, the
-  words brace expansion does not reach (assignment RHS, `case` word, here-doc
-  body), the read happening before expansion (`z=Z`, `${z:+…}`), and the `declare
-  -f` re-print.
-* **✅ FIXED 2026-08-14 for the double-quoted operand** (`${z:-…}`, `${z:+…}`,
-  `${z:=…}`, `${z:?…}` and the plain `${z-…}` family) — which is the position
-  the report named, and the only one a `${x@P}`/`PS4` re-read reaches with the
-  quoting bash's own expansion declines a process substitution under. The
-  remaining positions are a residue of their own, logged at the end of this
-  bullet. Original report: `x='${z:-<(fi)}'; echo "${x@P}"` — bash's `extract_dollar_brace_string`
-  (subst.c:1881-1950) has a `<(` row of its own and recurses into it with a real
-  parse, so the `@P` re-read is a `bad substitution` and the text is printed
-  unchanged; osh splices the re-print and prints `<(fi)`.
-
-  **Measured against bash 5.2.37 (2026-08-14).** The row behaves as the `$(`
-  row beside it in every respect: `A${z:-<(fi)}TAIL` and `A${z:-$(fi)}TAIL`
-  give byte-identical output, down to the quoted remainder `` `fi)}TAIL' ``
-  and the `line 2` numbering `xparse_dolparen` gives an unread body. It is the
-  scan's row and not the string's — `x='a<(fi)b'` is silent — and it is reached
-  only where the scan's own quoting allows: `"<(fi)"` (double-quoted),
-  `'<(fi)'` (single-quoted, `skip_single_quoted`) and `\<(fi)` are all silent
-  and print their text. A body that parses is silent too and is *not*
-  performed: `A${z:-<(echo A >&2)}B` prints `A<(echo A >&2)B` and no `A` on
-  stderr.
-
-  osh already matched on six of those shapes. What it got wrong:
-
-  | written (as `x`, then `echo "${x@P}"`) | bash | osh (before) |
-  |---|---|---|
-  | `A${z:-<(fi)}TAIL` | reports, `bad substitution`, text | `A<(fi)TAIL` |
-  | `A${z:-${y:-<(fi)}}B` | reports (nested body too) | `A<(fi)B` |
-  | `A${z:-p<(fi)q$(for)r}B` | reports the **`<(fi)`** | reports the `$(for)` |
-  | `A${z:-<(fi}B` | `unexpected EOF`, `bad substitution`, text | runs `fi}` — `command not found` |
-
-  All but the last now match. The last is a *different* defect that the `$(`
-  spelling has identically — see
-  TD-OILS-AN-UNCLOSED-SUBSTITUTION-IN-AN-UNREAD-BRACE-BODY-IS-RUN-INSTEAD-OF-REFUSED
-  below — so it was left alone here rather than fixed twice.
-
-  **Why it was not a two-line change.** The `<(` span *is* already collected —
-  `Lexer::read_dollar_brace` has the row (lexer.rs:7069) and records a
-  `CmdSubSpan` with `SubOpen::Proc`, its `src`, its `range` and
-  `SubBody::Unread`. What is missing is a [`WordPart`] for
-  [`Shell::brace_scanned_subs`] to walk to: `procsub_reprints`
-  (parser.rs:6288) splices a re-print only for a `SubBody::Eager` span, and the
-  re-lex that carves the operand out of the body (`read_word_verbatim`) leaves
-  a `<(` as characters on purpose. So for an *unread* body the process
-  substitution survives only as text in a `WordPart::Literal`.
-  `arith_unread_subs` is the shape of the answer for the arithmetic scan, and
-  it excludes this spelling deliberately (parser.rs:6233-6240).
-
-  Two things make the obvious fixes wrong, both measured above:
-
-  * **The remainder runs past the `}`.** `` `fi)}TAIL' `` and
-    `` `fi)}B${y:-<(for)}C' `` are the rest of the *whole re-read string*, not
-    of the `${ … }`. So a text scan confined to the brace's own source (the
-    only text [`Shell::brace_extent_scan`] is handed) cannot build the part's
-    `tail`, and the `$( … )` spelling gets its own from
-    `unparse::attach_comsub_tails`, which runs over the assembled word in the
-    parser.
-  * **It must interleave with the `$(` spelling**, in the order the one scan
-    meets them — hence the `p<(fi)q$(for)r` row above.
-
-  Reusing [`CmdSubBody::Unread`] for the synthesized part is safe for the
-  *read* (the diagnostic quotes the body's remnant, never the delimiter, so a
-  `<(` and a `$(` in this position are byte-identical) but not for anything
-  that re-prints or *runs* one — `interp.rs:34302` performs an unread body, and
-  a process substitution here is never performed. So either the part carries
-  its spelling (a new field on `CmdSubBody::Unread`, two construction sites and
-  one printer, plus the run site taught to refuse) or it is synthesized late
-  enough that it can never escape into a print or a run — which is what
-  `Shell::gobbled_procsubs` does for the `brace_gobbler` half above, and the
-  reason that one could be done without touching the AST.
-
-  **What was done.** The first of the two: the part carries its spelling, which
-  makes both blockers vanish rather than needing to be worked around.
-
-  * `ast::SubDelim { Dollar, ProcIn, ProcOut }`, with `bytes()` (the delimiter
-    as written) and `is_performed()` (true only for `Dollar`). Recorded on
-    `CmdSubBody::Unread` and on the lexer's `SubBody::Unread`. Only the unread
-    form needs it: a body a parser *read* is a `CmdSubBody::Parsed` for `$(`
-    and a `WordPart::ProcSub` for the other two, so those two shapes already
-    tell the spellings apart.
-  * `Lexer::read_word_verbatim` gained a `<(`/`>(` row for `Verbatim::Dquote`
-    **when the text is unread** (`self.here_text`), emitting
-    `Seg::CmdSub(body, close, SubBody::Unread { delim })`. The existing
-    `Verbatim::Bare | Verbatim::Replacement` row above it is untouched — those
-    fragments really do *perform* the substitution, measured:
-    `x='A${z/p/<(echo hi)}B'; echo "${x@P}"` prints a `/dev/fd/N` in bash.
-  * `unparse.rs` prints the body back in `delim.bytes()`, and
-    `Shell::command_sub_body` returns that text instead of running anything
-    when `!delim.is_performed()`.
-  * The backslash arm of the same loop takes a `\<(`/`\>(` into the literal
-    run, because the *scan* that produced this text honours a backslash
-    whatever follows it (`extract_dollar_brace_string`'s `case '\\'`,
-    subst.c:1899) while the operand's own dquote read does not. `A${z:-\<(fi)}B`
-    prints `A\<(fi)B` and reports nothing.
-
-  Both blockers then answer themselves: the `tail` is filled by
-  `unparse::attach_comsub_tails` over the whole assembled word (so it runs past
-  the `}`, giving `` `fi)}TAIL' ``), and the interleaving is
-  `Shell::brace_scanned_subs`'s existing left-to-right walk.
-
-  **Verified:** `userspace/oils/tests/corpus/a-process-substitution-a-brace-re-read-meets-is-read-like-the-dollar-spelling.sh`,
-  22 rows, all matching bash 5.2.37 — the byte-identity with the `$(` spelling,
-  both interleavings, the nested body, the not-performed rows (including
-  `>(cat)` and a body writing to stderr, quoted and unquoted), the read
-  happening before the operand is chosen (`z=Z`, `${z:+…}`), the four shields
-  (unbraced text, `" … "`, `' … '`, backslash), the stepped-over subscript, and
-  the `PS4` spelling of the same re-read.
-
-* **✅ FIXED 2026-08-14** (every position but the arithmetic one; that one
-  closed later the same day, at the end of this bullet)**.** The row
-  was wired for the double-quoted **operand** only, and bash's scan reads the
-  whole `${ … }` body — it walks characters and knows nothing of the `#`, `/`
-  or `^^` it has already passed — so every other fragment wanted the same row:
-
-  | written (as `x`, then `echo "${x@P}"`) | bash | osh before |
-  |---|---|---|
-  | `A${z#<(fi)}B` (pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
-  | `A${z/p/<(fi)}B` (replacement) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
-  | `A${z^^<(fi)}B` (case pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
-  | `A${z:0:<(fi)}B` (offset) | reports ×2, `bad substitution`, text | `AB` |
-
-  The `$( … )` spelling was right in all four (measured), so again only the row
-  was missing. It was harder than the operand's, because in these positions the
-  substitution is *both* read for its extent **and** performed — a replacement
-  really does expand to `/dev/fd/N`, measured — so the part could not simply be
-  the non-performed `CmdSubBody::Unread` the operand's is.
-
-  **What was done.** The split `CmdSubBody` already makes between a body a
-  parser read and one only a scan read is now made for the process-substitution
-  part too, so one part answers for both halves:
-
-  * `ast::ProcSubBody` — `Parsed(Program)` or `Unread { src, tail, closed }` —
-    replaces the bare `Program` in `WordPart::ProcSub`.
-  * `lexer::ProcRead` (`Eager` / `Unread { closed }`) rides on `Seg::ProcSub`;
-    the `Verbatim::Bare | Verbatim::Replacement` arm of
-    `Lexer::read_word_verbatim` picks it from `self.here_text`, and now
-    tolerates a missing `)` exactly as the `$(` spelling does.
-  * `parser::seg_to_part` parses only an eager body. An unread one is carried
-    as text, because its read belongs to the scan and happens later, from
-    where a failure is `bad substitution` rather than a script syntax error.
-  * `unparse`: an unread body prints back as written, and joins
-    `attach_comsub_tails` so it gets the same remainder the `$(` spelling does.
-  * `interp`: `Shell::brace_scanned_subs_slice` collects it,
-    `Shell::extent_read_of_subs` reads it through the same
-    `comsub_reparse_read`, and the new `Shell::proc_sub_body` parses-then-
-    performs at expansion — only reachable if that read succeeded.
-
-  **Verified:** corpus case
-  `a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`,
-  21 rows, IDENTICAL against bash 5.2.37.
-
-  **✅ The arithmetic fragment, 2026-08-14.** Deferred at first, because osh
-  diverged over `<` in a bound before any process substitution was written at
-  all (`${z:1<(2)}` is `bcdef` in bash and was an `operand expected` in osh);
-  that was fixed as
-  TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND,
-  and this row followed.
-
-  It was **not** simply `Verbatim::Arith`'s row, as the deferral assumed. A
-  subscript shares that mode and must *not* get it: bash's scan steps over a
-  subscript whole (`skip_matched_pair` from the `[`), so `${z[<(fi)]}` never
-  offers its body to `extract_command_subst` and is an `operand expected` —
-  which osh already matched. A bound is walked in the open. So the mode split
-  in two: `Verbatim::Bound` / `Frag::Bound`, reached by `lex_bound_verbatim`
-  and `parser::word_bound_from_source_at`, identical to `Arith` in every
-  respect but that it takes `Dquote`'s unread-`<(` arm. That is the whole
-  change — the arm was already written for the operand, and the read/perform
-  split it produces (`SubBody::Unread`) is exactly a bound's: read for its
-  extent by the scan, never performed, because `Q_DOUBLE_QUOTES|Q_ARITH` is
-  what stops `expand_word_internal` (subst.c:11079).
-
-  No interp-side work was needed: `unparse::nested_parts` already classifies
-  `ParamSubstr`/`ArraySlice` bounds as `Nested::Operand`, so
-  `Shell::brace_scanned_subs_slice` was already descending into them.
-
-  **Verified:** 14 further rows in the same corpus case (the bound in offset
-  and length position, `${a[@]:…}` and `${@:…}`, the `@P` and `PS4` spellings,
-  the three quotings that shield it, and the well-formed `${z:<(echo 1)}` that
-  reaches the evaluator as characters), IDENTICAL against bash 5.2.37.
-
-**How it was found:** implementing the entry above.
-
-### [B] TD-OILS-AN-UNCLOSED-SUBSTITUTION-IN-AN-UNREAD-BRACE-BODY-IS-RUN-INSTEAD-OF-REFUSED. `x='A${z:-$(fi}B'; echo "${x@P}"` runs `fi}` where bash reports `bad substitution` — 2026-08-14 — ⚠️ OPEN
-
-A `$( … ` with no `)` inside a `${ … }` written in text no parser read — a
-`${x@P}` re-read, a `PS4`, a here-document body. bash reads the extent with
-`xparse_dolparen`, which fails at end of input; `si` is left past the end of the
-string, so the brace never closes, so `parameter_brace_expand` reports
-`bad substitution` naming the whole text and prints the text unchanged. Nothing
-is run. osh gets the *first* diagnostic right and then runs the body anyway:
-
-```sh
-x='A${z:-$(fi}B'; echo "${x@P}"
-# bash: command substitution: line 3: unexpected EOF while looking for matching `)'
-#       line 1: A${z:-$(fi}B: bad substitution
-#       A${z:-$(fi}B
-# osh:  command substitution: line 3: unexpected EOF while looking for matching `)'
-#       line 1: fi}: command not found
-#       A
-
-x='A${z:-$(echo hi}B'; echo "${x@P}"
-# bash: … unexpected EOF …; … bad substitution; A${z:-$(echo hi}B
-# osh:  … unexpected EOF …; Ahi}
-```
-
-Both spellings are affected identically — `<(fi}` behaves exactly as `$(fi}`,
-which is the point: the delimiter is not what is wrong here.
-
-**Where:** `userspace/oils/src/interp.rs`, [`Shell::extent_read_of_subs`]
-(~29622) and [`Shell::run_abandoned_extent`]. The scan classifies the failed
-read as `ExtentRead::Abandoned { body, rest }` and hands the body on to be run.
-That classification is *right* for an abandoned extent bash really does run on
-— it is `extract_command_subst`'s no-`)` path with the `jump_to_top_level`
-suppressed — but wrong when the caller is the brace scan, because there the
-unclosed read is also what stops the `}` from ever being found, and the
-`bad substitution` that follows pre-empts the run.
-
-**Proper fix:** distinguish the two callers. `extent_read_of_subs` should
-report the abandonment to the brace scan (so `brace_extent_scan` fails the
-whole `${ … }` and takes the `bad substitution` path with the source text)
-rather than letting the body reach `run_abandoned_extent`. The `closed: false`
-flag on `CmdSubBody::Unread` already names exactly this shape, so the test is
-to hand.
-
-**How it was found:** measuring the `<(` row of
-TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN
-against its `$(` twin, which turned out to be wrong the same way.
-
-### [B] TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND
-
-**Status:** ✅ FIXED 2026-08-14. Found 2026-08-14, measured against bash 5.2.37.
-The cause turned out to be wider than the title: the two bounds were
-**tokenized as a command** rather than read as arithmetic, so `<` was only the
-most visible of the operators being lost. See "The fix" at the end.
-
-A `<` in the offset or length of `${z:o:l}` swallows everything to its left.
-The same expression inside a plain `$(( ... ))` is fine, so this is the brace
-fragment's own reading of the text, not the arithmetic evaluator's:
-
-| written | bash | osh |
-|---|---|---|
-| `z=abcdef; echo "${z:1<(2)}"` | `bcdef` | `z: <(2): syntax error: operand expected` |
-| `z=abcdef; echo "${z:0:1<(2)}"` | `a` | same error |
-| `echo $(( 1<(2) ))` | `1` | `1` |
-
-bash reads `1<(2)` as `1 < (2)`, which is `1`, so the offset is 1. osh
-evaluates `<(2)` alone -- the `1` is gone by the time the evaluator sees the
-expression, which is what the quoted error token shows.
-
-**Where:** `userspace/oils/src/lexer.rs`, the `Verbatim::Arith` path of
-[`Lexer::read_word_verbatim`], and whatever splits a `${z:o:l}` body into its
-two fragments in `userspace/oils/src/parser.rs`. The `<` is being taken for
-something other than a comparison operator -- most likely a fragment boundary.
-
-**Proper fix:** treat `<` in an arithmetic fragment as the comparison operator
-it is, so the whole fragment reaches the evaluator. A `<(` there is *not* a
-process substitution to be performed either -- measured, `${z:0:<(echo 1)}` is
-an `operand expected` in bash with the characters `<(echo 1)` standing as the
-error token, which osh already matches.
-
-**Blocked, and then unblocked (same day):** the arithmetic-fragment row of
-TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN.
-bash's `${ ... }` scan reads a `<( ... )` in an arithmetic fragment exactly as it
-reads one anywhere else in the body -- `x='A${z:0:<(fi)}B'; echo "${x@P}"`
-reports the parse twice and then `bad substitution`, where osh printed `AB` --
-but a corpus row for it would have been measuring this bug instead, so the
-corpus case
-`a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`
-left that position out and said so. The fix below removed the obstacle, and the
-rows went in the same day: that case now measures a bound in seven further
-positions.
-
-**How it was found:** measuring where bash's brace scan reads a `<( ... )`,
-while checking whether the `Verbatim::Arith` fragments needed the same row as
-the pattern and replacement ones.
-
-**The fix (2026-08-14).** `parse_slice_bounds`
-(`userspace/oils/src/parser.rs`) read each bound with `word_from_source`, which
-called `tokenize(...)` — a *command* tokenizer — and then joined the surviving
-`Tok::Word`s with a literal space. So every operator character was claimed by
-the tokenizer instead of reaching the evaluator, and whatever it could not make
-a word of was silently dropped. `<` was merely the case that produced an IO
-number and a redirect. The rest, all measured against bash 5.2.37 with
-`z=abcdef`:
-
-| written | bash | osh, tokenized |
-|---|---|---|
-| `${z:1<2}` | `bcdef` | `cdef` — `1<` taken for a redirect |
-| `${z:1>2}` | `abcdef` | `cdef` — likewise |
-| `${z:1<=2}` | `bcdef` | `=2: operand expected` |
-| `${z:1 < (2)}` | `bcdef` | `1 2: syntax error` |
-| `${z:1;2}` | `;2: invalid arithmetic operator` | `1 2: syntax error` |
-| `${z:1&2}` | `abcdef` | `1 2: syntax error` |
-| `${z:3|2}` | `def` | `3 2: syntax error` |
-| `${z:1&&2}` | `bcdef` | `1 2: syntax error` |
-| `${z:1)}` | `1): syntax error in expression` | silently `abcdef` |
-
-Both bounds now go through `word_subscript_from_source_at` — the very reader an
-array subscript uses, which is `verbatim_word_at(..., Frag::Arith)` plus
-`attach_subscript_reads`. The two arithmetic fragments therefore no longer
-disagree with each other, which is what `attach_subscript_reads`'s own doc
-comment had been asking for.
-
-Two further defects of the same splitter were found while measuring it, and are
-fixed in the same change:
-
-* **Which colon cuts.** bash does not `strchr` for the `:`; `skiparith`
-  (subst.c) skips one `:` for every `?` seen, and counts nothing at all inside
-  a `( … )`. `${z:1?2:3}` is `cdef` (the whole text is the offset) while
-  `${z:1?2:3:1}` is `c`; `${z:1?1?2:3:4}` is `cdef`, two `?` swallowing both
-  colons; `${z:(1?2:3):1}` is `c`. osh split on the first `:` unconditionally
-  and so reported `` `:' expected for conditional expression `` for all of
-  these. Now `slice_split_colon` implements the rule.
-* **An empty bounds text.** `${z:}` is `${z:}: bad substitution` in bash, and
-  uniformly so — `${@:}`, `${*:}`, `${a[@]:}`, `${a[1]:}` and an unset
-  parameter all report it. osh printed the whole value. It is the *text* that
-  must be non-empty, not what it expands to: `${z:$e}` with `e=` is `abcdef`.
-  `parse_slice_bounds` now returns `None` for an empty text and each of its
-  three call sites turns that into `WordPart::BadSubst`.
-
-Verified by the corpus case
-`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`
-(75 rows, IDENTICAL), the lib suite and a full sweep.
-
-**Unblocked, and then done (same day):** the arithmetic-fragment row named
-under "Blocks" above was the only thing left of
-TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN,
-and it is now closed there. It was a separate row from this entry's — after
-this fix `${z:1<(2)}` evaluated correctly but `x='A${z:0:<(fi)}B'; echo
-"${x@P}"` still printed `AB`, where bash reads the body for its extent and
-reports `bad substitution`. It turned out **not** to be the `Verbatim::Arith`
-row this entry's title suggested, because the *subscript* shares that mode and
-must not get it: bash's `${ … }` scan steps over a subscript whole
-(`skip_matched_pair`), so `${z[<(fi)]}` never offers its body to the scan and
-is an `operand expected` in bash — which osh already matched. Only a bound is
-walked in the open, so `Frag::Arith` split in two and the new `Frag::Bound`
-took the row. See that entry for the change.
-
-### [B] TD-OILS-AN-UNBALANCED-PAREN-IN-A-SLICES-BOUNDS-IS-AN-ARITHMETIC-ERROR-NOT-A-BAD-SUBSTITUTION
-
-**Status:** ✅ FIXED 2026-08-14. Found 2026-08-14, measured against bash 5.2.37.
-The fix turned up a second rule of the same walk, fixed with it — see "The fix"
-at the end.
-
-`skiparith` (subst.c) balances parens while looking for the colon that cuts
-`${x:off:len}` in two, and an unbalanced `(` makes it run off the end. bash
-then reports that as a **bad substitution** naming the whole bounds text, before
-either bound is evaluated. osh implements the balancing (that is what makes
-`${z:(1?2:3):1}` cut in the right place) but not the complaint, so the text
-reaches the evaluator and produces an arithmetic diagnostic instead:
-
-| written | bash | osh |
-|---|---|---|
-| `${z:(1}` | ``bad substitution: no closing `)' in (1`` | ``z: (1: missing `)' (error token is "1")`` |
-| `${z:(1:2}` | ``… no closing `)' in (1:2`` | ``z: (1: missing `)'`` — and it cut at the colon |
-| `${z:((1:2}` | ``… no closing `)' in ((1:2`` | likewise |
-| `${z:1+(2}` | ``… no closing `)' in 1+(2`` | ``z: 1+(2: missing `)'`` |
-| `${a[@]:(1}` | ``… no closing `)' in (1`` | arithmetic error |
-| `${@:(1}` | ``… no closing `)' in (1`` | arithmetic error |
-
-Both are rc=1, so only the message differs — but the message differs in class,
-not just wording: bash's is the DISCARD-class `bad substitution` family, raised
-by the cut, and it names the bounds text rather than the parameter.
-
-Three things scope it precisely, all measured:
-
-* It is the **whole bounds text** that is checked, once, before the cut — the
-  message quotes `(1:2` entire, the colon never having split it.
-* It is only the text the *cut* walks. Once a colon has been found with the
-  depth back at zero, an unbalanced `(` in the length is an ordinary arithmetic
-  error: `${z:0:(1}` is ``z: (1: missing `)'`` in bash too, and osh matches.
-* A stray `)` at depth zero is not an error at all: `${z:)1}` is
-  `)1: syntax error: operand expected` in both.
-
-**Where:** `userspace/oils/src/parser.rs`, `slice_split_colon` — which already
-tracks the depth and would only need to report a non-zero one at the end — and
-its three call sites in `parse_braced_param_in`, which currently turn the
-`None` that means "empty bounds" into `WordPart::BadSubst(raw)`.
-
-**Proper fix:** `slice_split_colon` reports the unbalanced case distinctly from
-the empty one, and the call sites raise ``bad substitution: no closing `)' in
-<bounds text>``. That message shape already exists in
-`userspace/oils/src/interp.rs` (`b"bad substitution: no closing `)' in "`,
-~35600) but it names the whole *word*, whereas this one names the bounds text
-only, so it needs its own carrier on the word part rather than a reuse of
-`BadSubst`, whose printer names `${…}` entire.
-
-**Blocked:** one row of the corpus case
-`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`,
-which said so in its header and left the shape out. Now measured there.
-
-**How it was found:** measuring bash's slice bounds exhaustively while fixing
-TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND. It
-was the last of four divergences that measurement turned up, and the only one
-not fixed there.
-
-**The fix (2026-08-14).** Two things, because measuring the first turned up the
-second.
-
-**(1) The complaint.** `slice_split_colon` now returns the depth it ended at
-beside the split index, `parse_slice_bounds` carries a non-zero one as
-`SliceBounds::unclosed`, and both `WordPart::ParamSubstr` and
-`WordPart::ArraySlice` gained an `unclosed: Option<Str>` field for it. It is a
-field on the operator rather than a `WordPart::BadSubst`, because *where* it is
-raised is the whole of what distinguishes the two: `${z:}` is a bad
-substitution even for an unset parameter, while `${u:(1}` with `u` unset is
-silently empty. So the check sits exactly where the offset would have been
-evaluated — `Shell::slice_bounds_unclosed`, called from `scalar_slice`,
-`assoc_slice` and the indexed path of `slice_elements_resolved`, each after its
-own "nothing to measure" exit. Every ordering measured lines up: an empty
-array, an empty `$@`, `set -u`, and a set-but-empty scalar (which *does* report,
-having one position).
-
-`no_longjmp_on_fatal_error` — `Shell::prompt_expanding` — **suppresses** the
-complaint rather than rewording it, so under `${x@P}` or `PS4` the characters go
-on to the evaluator and the arithmetic error is what comes out. That is the
-`if (no_longjmp_on_fatal_error == 0)` guard the report sits behind, and it is
-why osh's *old* answer was right in those two contexts and only those two.
-
-**(2) The walk is quote-aware.** Measuring (1) showed the walk steps over a
-`' … '` run, a `" … "` run and a backslash-escape whole — all three counters
-included, not just the paren one. `${z:"1:2"}` does not split (the evaluator
-meets `1:2` as one bound and says so), `${z:1"?"2:3}` does split (the quoted `?`
-buys no colon), and `${z:0"("}`, `${z:0'('}`, `${z:0\(}` and `${z:(1"("2)}` are
-all balanced. osh's walk saw none of that, so before this fix it both cut in the
-wrong place and complained where bash did not. Note this is about the *walk*
-only: the quote characters stay in the bound, and the arithmetic reading each
-half is given removes them (or does not — a `' … '` keeps its second reading).
-
-The walk is over the text **as written**, which the same measurement pins down
-from the other side: `p="("; ${z:$p 1}` and `${z:$(echo "(1")}` are ordinary
-arithmetic errors, each being balanced as written however unbalanced its value.
-
-**Verified:** 37 further rows in
-`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`, the
-lib suite and a full sweep.
-
-### [B] TD-OILS-THE-WAIT-NO-OPERANDS-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP. The job holding `$!` is not spared, once per many sweeps — 2026-08-14 — OPEN
-
-**Where:** `userspace/oils/tests/corpus/wait-with-no-operands-and-a-job-that-just-ended.sh`,
-the group "only the last one backgrounded is spared", against
-`Shell::builtin_wait`'s operand-less arm and `Shell::drain_jobs`
-(`userspace/oils/src/interp.rs`).
-
-**What — and this time the whole row was captured.** One full
-`scripts/osh-bash-diff.py` sweep came back `654 matched, 0 waived, 1 failed`
-with **one line** of the case different, everything else in it identical:
-
-```sh
-( exit 3 ) & ( exit 4 ) & sleep 0.4; wait; echo "  noargs=$?"
-VAR=stale; wait -n -p VAR; echo "  n=$? $(pvar)"
-```
-
-| | bash 5.2.37 | osh (this sweep) |
-|---|---|---|
-| `noargs=` | 0 | 0 (agreed) |
-| `n=` | `4 a pid` | **`127 unset`** |
-
-So osh had nothing left to report where bash still had the last-backgrounded
-job. Re-run on its own immediately after: `1 matched, 0 waived, 0 failed`.
-Saved report:
-`target/dvscratch/corpus-failures/20260814-145703/wait-with-no-operands-and-a-job-that-just-ended.txt`.
-
-**What a 127 requires, read out of the code rather than guessed.** The spare is
-`builtin_wait`'s operand-less arm: after `drain_jobs`, every job with a status
-is marked `notified` *except* the one whose pid is `last_bg_pid`, and
-`cleanup_dead_jobs` then drops exactly the notified ones. But `drain_jobs`
-itself marks `notified` for every job it *waited for*, and it waits for any job
-not already in its `known` snapshot — `known` being the jobs whose `exit_seen`
-was set **before** the wait was reached. So the spare survives only when the
-`$!` job's `exit_seen` was already set, which the unit-boundary
-`cleanup_dead_jobs` does for a job that is both finished and older than
-`JOB_EXIT_NOTICE_GRACE` (20 ms). A 127 means that did not happen for the `$!`
-job specifically: had it been the *other* job that was late, `drain_jobs` would
-have waited that one and the spare would still stand.
-
-**The margin is not thin, which is what makes this odd.** Both shells were
-measured at four margins (`build/pgS.sh`), and they agree exactly:
-
-| `sleep` before the `wait` | bash | osh |
-|---|---|---|
-| none | `127 unset` | `127 unset` |
-| 0.01 | `4 a pid` | `4 a pid` |
-| 0.05 | `4 a pid` | `4 a pid` |
-| 0.4 | `4 a pid` | `4 a pid` |
-
-The flip is between 0 and 0.01, so the case's `sleep 0.4` is a ~40x margin — not
-the ~1x margin that
-TD-OILS-THE-COMPGEN-JOB-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP turned out to
-be. **Do not assume the same diagnosis and just widen the sleep.**
-
-**Loads that do NOT reproduce it — do not spend the time again.** The job is
-thread-backed, not a process (`( exit 4 ) & echo $!` prints the synthetic
-`900000`, where `sleep 0.4 &` prints a real pid), so both of the obvious
-starvation stories were tried and neither bit:
-
-- 20 serial runs of the group alone: clean.
-- 119 runs of the group at 8-way concurrency: clean.
-- 64 runs of the *whole case* at 8-way concurrency: clean.
-- 36 runs under a process-spawn storm (6 loops spawning `osh -c :` and
-  `bash -c :` back to back, this host's documented ~200-290 ms spike source):
-  clean.
-- 30 runs under CPU saturation (24 busy-loop processes on 12 cores): clean.
-
-Probes are `build/repro-wait.sh` (the group), `build/repro-wait2.sh` (the whole
-case), `build/spawnstorm.sh`, `build/cpuburn.py` — all in the gitignored
-`build/`, so re-create them from this entry if they are gone.
-
-**Proper fix.** Unknown, and deliberately not guessed at. The next sighting
-should establish which of the two conditions failed — whether the `$!` job's
-body was genuinely unfinished at the unit-boundary poll, or whether the poll did
-not run — by instrumenting `poll_jobs` to record, per job, `is_finished` and
-`born_at.elapsed()` at each call, and dumping that when `wait -n` answers 127.
-That distinguishes "the thread really was 400 ms late" from a bookkeeping fault,
-and only the first is a case-margin problem.
-
-**Impact.** An intermittently red sweep, which is the gate on every commit —
-and the sweep takes ~19 minutes, so a re-run to disambiguate is expensive.
-
-**Sighting 2026-08-14, in the *unit* suite, and fixed there.**
-`interp::tests::wait_n_ignores_a_job_whose_status_was_already_reported` failed
-once under `cargo test -p oils --lib` (`wait -n` answered 127 where 3 was due,
-i.e. the operand-less `wait` had *not* spared the job) and passed when re-run
-alone. Same shape as this entry, but with a cause the test owned: it backgrounded
-`( exit 3 ) &` and then slept a constant `0.2` to make the job finish first, and
-no constant is long enough to promise that on a loaded machine. Fixed properly
-rather than by lengthening the sleep — a new `settle_jobs` test helper (the
-whole-table form of the existing `settle_job`) polls `poll_jobs` until every job
-has a status, after the same `JOB_EXIT_NOTICE_GRACE`. That removes this test from
-the flaky family; the *corpus* case above is untouched and stays open.
-
----
-
-### TD-OILS-AN-ARITHMETIC-SCAN-REPORTS-NONE-OF-THE-READS-IT-MAKES. `$(( … ))` swallows the diagnostics its nested `$( … )` should raise, and loses the text after a read that stopped early — 2026-08-14
-
-**Where:** `userspace/oils/src/interp.rs` — `Shell::arith_extent_expand` /
-`arith_extent_frame` and the `$((` route out of `Shell::arith_extent_route`.
-
-**What is wrong.** `param_expand` reaches a `$((` through
-`extract_command_subst` with `SX_COMMAND` (subst.c:10575), so the paren count
-*does* recurse into a nested `$( … )` — a real parse, reported where it is met.
-osh runs the count but never reports, and in one shape stops in the wrong place.
-Measured against bash 5.2.37 (`build/pgX.sh` rows a/c, `build/pgY.sh` d4/d5):
-
-| word (inside `v='…'`, via `"${v@P}"`) | bash | osh |
-|---|---|---|
-| `A$((1+$(echo hi⏎q` | reports EOF, `[A]` | reports EOF, `[Ahi]` |
-| `A$((1+$(for⏎q))B` | reports **twice** (`for`, then `` `(1+$(for' ``), `[AB]` | silent, `[A]` |
-| `A$((1+$(for⏎xB` | reports `for`, `[A]` | reports `for`, **runs `fo`**, `[A⏎xB]` |
-
-Rows 1 and 3 report because the read runs from `Shell::arith_nested_read`,
-which does call `Shell::comsub_reparse_read`; what those two get wrong is the
-*value*, both by performing the abandoned extent the way the string level does
-and the brace level does not. Row 2 is the substantive one: the read stopped
-part way, so bash's count resumed after the `for`'s line and found the `))`,
-leaving `B` to the word. osh consumes to the end and loses it — and so never
-reaches the read at all, which is why it is the one row that is also silent.
-
-**What the proper fix looks like.** The `$((` count needs the same two-outcome
-treatment `${ … }` got on 2026-08-14: `Shell::comsub_reparse_read` for the
-report (which also decides jump vs. no-jump), and
-`Shell::failed_extent_split`'s resume point for where the count carries on.
-`Lexer::unread_comsub_stop` already puts the lexer in the right place; what is
-missing is the interp half — an `arith`-side counterpart of
-`Shell::unclosed_brace_reads`.
-
-**Impact.** Diagnostics only for two of the three rows; a wrong value for the
-third. Needs `@P`/`PS4`/here-doc text to be reachable at all.
-
----
-
-### TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN. A `<(`/`>(` in it is never read, though the brace scan names it — 2026-08-14 — ✅ FIXED 2026-08-14
-
-**Where:** `userspace/oils/src/interp.rs` — `Shell::extent_read_of_rest` and
-`Shell::unclosed_brace_reads`, both of which lex their text with
-`crate::parser::dquote_word_from_source` → `crate::lexer::lex_dquote_body`.
-
-**What is wrong.** `extract_dollar_brace_string` names `$(`, `<(` and `>(`
-together and hands each to the same `extract_command_subst` (subst.c:1881-1950),
-**whatever the quoting** — that is why `x='A${z#<(fi)}B'` reports the parse
-twice. A double-quoted *run*, by contrast, has no process substitution in it at
-all: at string level bash and osh agree that `v='A<(echo hi⏎q'` is literal
-text. So `lex_dquote_body` is the right lexer for a string-level remainder and
-the wrong one for text the **brace scan** is walking.
-
-Measured (`build/pgY.sh` d6), `A${z:-P1<(echo hi⏎S1}B` under `${…@P}`:
-
-| | bash 5.2.37 | osh |
-|---|---|---|
-| reports | `` unexpected EOF while looking for matching `)' `` **then** `…: bad substitution` | the `bad substitution` only |
-| value | undecoded word | same |
-
-The `$(` spelling of the same row (`build/pgW.sh` row 5) is byte-exact, so this
-is precisely the two openers `lex_dquote_body` cannot see. The dollar spelling
-of d7 — where the read stops early and the brace closes — is also exact,
-because that path re-lexes through `parse_braced_param_in` in
-`Quoting::Unread`, which *does* read them.
-
-**It is not only the two openers — the whole quote model is wrong** (measured
-2026-08-14, `build/pq1.sh` and `build/pq2.sh`). `extract_dollar_brace_string`
-**skips** a quoted run rather than walking it, and the two quotes skip
-differently:
-
-| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | what it shows |
-|---|---|---|
-| `A${z:-P1<(echo hi⏎S1}B` | reports EOF, `bad substitution` | the bare `<(` row **is** read |
-| `A${z:-P1"<(echo hi⏎S1"}B` | silent, `[AZZB]` | a `<(` inside `" … "` is **not** |
-| `A${z:-P1"$(echo hi⏎S1"}B` | reports EOF, `bad substitution` | a `$(` inside `" … "` **is** |
-| `A${z:-P1'$(echo hi⏎S1'}B` | silent, `[AZZB]` | a `$(` inside `' … '` is **not** |
-| `A${z:-P1'<(echo hi⏎S1'}B` | silent, `[AZZB]` | …nor a `<(` |
-| `A${z:-P1"<(echo hi⏎S1}B` | `bad substitution`, **no** read report | a lone `"` swallows to end of string |
-| `A${z:-P1'<(echo hi⏎S1}B` | `bad substitution`, **no** read report | …and so does a lone `'` |
-| `A${z:-"x"<(echo hi⏎S1}B` | reports EOF, `bad substitution` | a *closed* run does not suppress what follows |
-| `A${z:-P1\<(echo hi⏎S1}B` | silent, `[AZZB]` | a backslash escapes the opener |
-
-So the brace scan delegates a `" … "` run to a double-quote skipper that has
-the `$(` row and **not** the `<(`/`>(` row — bash's ordinary rule that there is
-no process substitution inside double quotes — and skips a `' … '` run whole,
-offering its interior to nothing.
-
-`lex_dquote_body` models neither — it treats both quote characters as ordinary
-literals, which is correct for `Q_DOUBLE_QUOTES`, where the string *is* already
-the quoted run. Measured (`build/pq1.sh`, `build/pq2.sh`, `build/pq3.sh`), osh
-nevertheless agrees with bash on every *quoted* row above, by a different
-mechanism in each case: where the run closes, the brace closes too and the word
-goes through `parse_braced_param_in`, which does model quotes; where the run does
-not close, `lex_dquote_body`'s missing `<(` row happens to suppress the same read
-bash's skip suppresses. Two rows were left where the mechanisms did not coincide;
-the first of them is now fixed:
-
-| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh |
-|---|---|---|
-| `A${z:-P1"$(echo hi⏎S1}B` | reports EOF, `bad substitution`, undecoded | ✅ same since 2026-08-14 |
-| `A${z:-'p$(echo hi'q$(fi⏎S1}B` | reports `fi`, `[AZZB]` | silent, `[AZZB]` |
-
-Row 1 was the serious one — a **spurious command execution**: osh reported the
-EOF, then ran `S1}` and produced `[Ahi]`. A lone `"` opens a run that swallows to
-end of string, leaving the brace nothing to close on, so bash condemns the word;
-osh instead let the failed read out of `read_opaque_span`'s `"`-run `$(` sub-arm,
-where [`Lexer::unclosed_seg`] degraded the whole word into a *string-level*
-`$( … )` and then performed it. Fixed 2026-08-14 by giving that sub-arm
-(`userspace/oils/src/lexer.rs`, `read_opaque_span`'s `'"'` arm) the same
-`Err(e) if self.unread_comsub(&e)` recovery the two `read_dollar_brace_body`
-arms already had: re-emit the `$(` into the raw text, take back what the reader
-consumed with `Lexer::unread_comsub_stop`, and `continue` the quoted-run loop.
-The read is still reported — it happened — and the run then swallows the rest,
-so the brace never closes and the word is condemned, exactly as in bash. The bug
-was **pre-existing**, not a regression: measured identical on the commit before
-the earlier 2026-08-14 brace-scan fix.
-
-Row 2 is a lost diagnostic only; the same row before the brace-scan fix had the
-wrong value *and* ran `f`, so it is much improved.
-
-**A second mechanism loses the same report where the brace *does* close**
-(measured 2026-08-14, `build/pr1.sh` r3). `A${z:-'i"t'<(fi⏎S1}B` reports `fi`
-in bash and expands to `[AZZB]`; osh now gets the value right (it was the
-undecoded word until the unmated-`"` fix of the same day) but still says
-nothing. That path never goes near `extent_read_of_rest`: the brace closed, so
-the reads are replayed off the *parsed operand*, and the operand lexer is
-`read_word_verbatim` in [`Verbatim::Dquote`] — which has a perfectly good `<(`
-row, but never reaches it, because the `"` inside the `' … '` run opens a
-quoted run that swallows `t'<(fi⏎S1` whole.
-
-Both scans are right about their own text and wrong about each other's, which
-is the shape of the whole issue: bash runs **two** passes over these bytes with
-**different quote rules** — `extract_dollar_brace_string`, where a `'` run is
-skipped and a `"` is a quote, and `expand_word_internal`, where a `'` is an
-ordinary character and a `"` is a quote. osh derives the reads from the
-expansion's lex in one path and from a string-level lex in the other, and
-neither is the scan's.
-
-**What the proper fix looks like.** A real lex entry for "text a brace scan is
-walking" — not `lex_dquote_body` with a row bolted on, and not the operand lex
-either. It needs, at its own level: the `<(`/`>(` openers beside `$(`; a `'`
-that consumes to the next `'` or to end of string, offering nothing inside it;
-and a `"` that consumes to the next `"` or to end of string, offering only `$(`
-(and `` ` ``) inside it. A backslash hides the byte after it. Then
-`extent_read_of_rest`, `unclosed_brace_reads` **and `brace_extent_scan`** all
-take their reads from that one pass, `lex_dquote_body` keeps its current
-string-level callers unchanged — the p1/p2 probe above confirms those answers
-are right as they stand — and the operand lex stops being asked a question it
-was never answering.
-
-These rows are the acceptance test the table above does not already cover — the
-ones that pin *which* quote wins when the two are interleaved (measured
-2026-08-14 against bash 5.2.37, `build/pr1.sh`):
-
-| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh today |
-|---|---|---|
-| `A${z:-"it's"$(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
-| `A${z:-"it's"<(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
-| `A${z:-'i"t'<(fi⏎S1}B` | reports `fi`, `[AZZB]` | ✅ same since 2026-08-14 |
-| `A${z:-P1\'<(echo hi⏎S1}B` | reports EOF, `bad substitution` | ✅ same since 2026-08-14 |
-| `A${z:->(echo hi⏎S1}B` | reports EOF, `bad substitution` | ✅ same since 2026-08-14 |
-| `A${z:-${y:-<(fi⏎S1}B` | reports `fi`, `bad substitution` | same |
-
-So a `'` inside a closed `" … "` run opens nothing (rows 1-2) and a `"` inside a
-closed `' … '` run opens nothing (row 3) — each quote is invisible inside the
-other's run — and a backslash spends itself on the quote it precedes, leaving
-the `<(` after it live (row 4).
-
-An attempt that added only the `<(`/`>(` row to `lex_dquote_body` was written
-and reverted on 2026-08-14, before being compiled, because these measurements
-showed it would have regressed the three suppressed rows above (they are silent
-in bash today and in osh today, and would have started reporting).
-
-**Fixed 2026-08-14**, along the lines above. Three pieces:
-
-- `Lexer::brace_scan` (`userspace/oils/src/lexer.rs`) — a flag saying "this
-  scan stands in for `extract_dollar_brace_string`, not for the expansion after
-  it". With it set, `read_double_quote_until` grows the scan's other two
-  openers: a `<(`/`>(` becomes a `SubBody::Unread` segment carrying its own
-  `SubDelim`, which the expansion prints straight back
-  (`SubDelim::is_performed` is false for both), so the word's **value** is
-  untouched and only the extent walk gains a construct to read. The new entry
-  `lexer::lex_brace_scan_body` → `parser::brace_scan_word_from_source` is what
-  `Shell::extent_read_of_rest` now lexes its remainder with, which is the
-  unclosed-brace half (rows 4-5 of the interleaving table above).
-- The closed-brace half (row 3) is the same flag turned on from
-  `read_word_verbatim`'s `"` arm, and **only** when that run opened inside a
-  `' … '` one — `in_run && self.here_text`. That is exactly the case where the
-  scan never saw a quote at all, because it stepped over the single quotes
-  whole. Outside a run the `"` is the scan's own, and there `skip_double_quoted`
-  reads the `$(` spelling alone, which is what the reader already did.
-- The quote state itself moved out of the lexer and into the walk, as
-  `ScanQuote` (`interp.rs`): two independent flags, because
-  `skip_single_quoted` hunts for a `'` and `skip_double_quoted` for a `"` and
-  neither knows the other character — so each quote is an ordinary byte inside
-  the other's run. `Shell::brace_scanned_subs_slice` tracks both over the
-  literal runs (a `\` still hides the byte after it) and suppresses the two
-  process-substitution spellings inside a `" … "` while letting `$(` through;
-  `brace_scanned_subs_in` no longer resets the state on entering a
-  `WordPart::DoubleQuoted` whose `"` the scan never saw.
-
-Corpus case:
-`userspace/oils/tests/corpus/the-brace-scan-reads-a-process-substitution-and-the-expansion-after-it-does-not.sh`
-— 14 shapes plus a here-document body, byte-identical to bash 5.2.37 including
-stderr.
-
-**Impact while it stood.** Diagnostics only — the values already agreed. A
-`<(`/`>(` at brace level lost its read report. The worst shape — a lone `"`
-before a `$( … )` making osh run a command bash does not, and yield the wrong
-value — was fixed earlier the same day (see row 1 of the two-row table above).
-Reachable only through `@P`/`PS4`/here-doc text holding a malformed `${ … }`.
-
-**Not fixed by this, and tracked separately:** row 2 of the two-row table,
-`A${z:-'p$(echo hi'q$(fi⏎S1}B`. That one is not about the openers but about
-where a construct *ends*; see
-`TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN`.
-
----
-
-### TD-OILS-AN-UNMATED-DOUBLE-QUOTE-GROWS-A-MATE-WHEN-THE-WORD-IS-PRINTED-BACK — 2026-08-14 — ✅ FIXED 2026-08-14
-
-**Where:** `userspace/oils/src/unparse.rs` — `part_src`'s
-`WordPart::DoubleQuoted` arm, which writes a `"` on both ends unconditionally;
-the run that has no closing `"` is built by `userspace/oils/src/lexer.rs`,
-`Lexer::read_word_verbatim`'s `'"'` arm under `ParseOpts::tolerant`.
-
-**Repro** (bash 5.2.37, `build/pr11.sh` t1):
-
-```sh
-z=ZZ
-v='A${z:-'"'"'i"t'"'"'$(fi)}B'; printf '[%s]\n' "${v@P}"
-```
-
-| | bash 5.2.37 | osh |
-|---|---|---|
-| remainder quoted by the read | `` `fi)}B' `` | `` `fi)"}B' `` |
-| word named by `bad substitution` | `A${z:-'i"t'$(fi)}B` | `A${z:-'i"t'$(fi)"}B` |
-| value | `[A${z:-'i"t'$(fi)}B]` | same |
-
-**What is wrong.** In text no parser read, a `"` with no mate is not an error:
-`string_extract_double_quoted` is handed a *finished word* and its walk ends at
-the end of the string as readily as at a quote (that is
-`ParseOpts::tolerant`, and the corpus case
-`a-double-quote-with-no-mate-in-an-operand-runs-to-the-end-of-the-operand.sh`
-pins the expansion of it). The resulting `WordPart::DoubleQuoted` therefore
-covers a run whose closing quote **was never in the source** — but the part
-does not record that, and `part_src` prints the pair back. Every consumer of
-`crate::unparse::word_src` then sees one byte that was not in the word.
-
-The value is unaffected, because quote removal drops the `"` either way. What is
-affected is everything derived from the *text*: `Shell::bad_sub_word` (the word
-`bad substitution` names), the tail `extract_command_subst` quotes back in its
-own diagnostic, and — in principle, though no divergence has been measured for
-it yet — `crate::wordscan::word_fault`, which re-scans `word_src` for the
-unclosed `${`/`` ` `` verdicts and could be pushed either way by a stray quote.
-
-The single-quote analogue exists in the same shape:
-`Lexer::read_single_quote` has a `None if self.opts.tolerant => return Ok(s)`
-arm, and `part_src`'s `WordPart::SingleQuoted` likewise writes both `'`s. No
-divergence has been measured for it, because the paths that produce an unmated
-`'` do not currently reach a diagnostic that prints the word back — but the
-defect is the same one and a fix should cover both.
-
-**What the proper fix looks like.** Record the missing mate on the part rather
-than guessing at print time: `Seg::Dq(Vec<Seg>)` → `Seg::Dq(Vec<Seg>, bool)`
-and `WordPart::DoubleQuoted(Vec<WordPart>)` → a `closed` field, exactly as
-`Seg::Sq(Str, bool)` already carries its own flag, with `part_src` writing the
-trailing quote only when it was there. About 27 sites mention `DoubleQuoted`
-across `ast.rs`, `parser.rs`, `interp.rs` and `unparse.rs`; most are matches
-that need only a `..`. The single-quote half is the same edit on
-`WordPart::SingleQuoted`.
-
-Not worth reaching for a cheaper trick: an unmated run always extends to the
-end of its text, so "omit the quote when the part is last" would be *nearly*
-right, and nearly-right quoting is how a word stops re-parsing.
-
-**Fixed 2026-08-14**, along the lines above. `read_double_quote_until` now
-reports whether a `"` really ended the run — it has exactly two `Ok` returns,
-one per case, so the flag falls straight out of the existing control flow — and
-that rides on `Seg::Dq(Vec<Seg>, bool)` into
-`WordPart::DoubleQuoted { parts, closed }`. `part_src` writes the trailing quote
-only when `closed`. The single-quote half is the same edit:
-`read_single_quote`'s tolerant arm answers `false`, `Seg::Sq` became a struct
-variant `{ text, escaped, closed }` rather than grow a second unnamed `bool`,
-and an unmated run prints as `'` + text instead of going through
-`sh_single_quote`, whose whole job is to supply the mate.
-
-Two returns needed thought rather than transcription: the pair inside
-`read_double_quote_until` that end the run on an *unclosed construct* absorbed
-into a `Seg::Unclosed` answer `false`, since the run ended on the construct and
-not on a quote; and the backslash spelling of `Seg::Sq` is unconditionally
-`closed: true`, having no quotes to match.
-
-Corpus case:
-`userspace/oils/tests/corpus/a-double-quote-with-no-mate-does-not-grow-one-when-the-word-is-printed-back.sh`
-— 8 shapes including `PS4` and a here-document body, byte-identical to bash
-5.2.37 including stderr.
-
-**Impact while it stood.** Diagnostics only — one spurious `"` in the two lines
-bash prints for a malformed `${ … }` whose operand holds a `"` opened inside a
-`' … '` run. Reachable only through `@P`/`PS4`/here-doc text.
-
----
-
-### TD-OILS-AN-UNMATED-SQUOTE-IN-A-SUBSCRIPT-LOSES-ITS-QUOTE-BYTES-FROM-THE-WORD-PRINTED-BACK — 2026-08-14 — ✅ FIXED 2026-08-14
-
-**Where:** `attach_subscript_reads` (`userspace/oils/src/parser.rs`), which gives
-each top-level `' … '` of an arithmetic fragment its interior parse.
-
-**Repro** (bash 5.2.37):
-
-```sh
-declare -a arr=(10 20 30)
-declare -A m=([k]=V)
-echo "[${arr['x${m:-']}]"
-```
-
-bash names `` 'x${m:-' `` — the whole fragment, quotes included. osh named
-`x${m:-` — the interior of the run alone.
-
-**Cause, which was not the one first written here.** The first note guessed the
-text came from `crate::unparse::word_src` by way of `crate::wordscan::word_fault`.
-It does not: `word_fault` returns `None` for these words, and the word source osh
-builds is byte-correct. The diagnostic comes from `Shell::expand_unclosed` on an
-`Unclosed::BadSubst` whose `text` the *interior's own lexer* filled in with
-`Lexer::whole_text` — the interior being a string of osh's making. bash has no
-such string: an arithmetic fragment is expanded with `Q_DOUBLE_QUOTES` set, which
-switches the single quote off, so `expand_word_internal` walks straight through
-the pair and the string it was handed is the fragment. Both "no closing"
-reporters echo that string (`report_error (…, string)`, subst.c:1498 for
-`$[ … ]`, subst.c:1972 for `${ … }`).
-
-That also explains the shape the note found puzzling — a name that begins one
-byte late and ends two bytes early is exactly the interior of a `' … '` run.
-There were not two faults there, but there is a second one beside it; see
-`TD-OILS-A-BRACE-WHOSE-NAME-SCAN-RUNS-OFF-A-FRAGMENT-TAKES-THE-OTHER-DIAGNOSTIC`.
-
-**Fix.** `attach_subscript_reads` already re-measures the fragment after parsing
-an interior — that is what `crate::unparse::attach_comsub_tails` does for a
-`$( … )`'s echoed remainder. It now also re-*names*: a new
-`name_unclosed_after_the_fragment` walks the interiors it just attached and gives
-every top-level `WordPart::Unclosed(Unclosed::BadSubst { text, .. })` the
-fragment's source for its `text`. Only the run's own level is renamed; a `" … "`
-inside the interior is carved out by `string_extract_double_quoted` as its own
-string and keeps naming itself, as one written a character to the left of the `'`
-would. `src` is left alone — it is the construct's spelling for a re-print, not a
-diagnostic's `%s`.
-
-Corpus:
-`a-construct-left-open-in-a-quoted-subscript-names-the-fragment-around-it.sh`
-(seven rows: a `${ … }` body scan running off, the same with text after the run,
-a `$[ … ]`, both substring bounds, and a run that closes nothing early).
-
----
-
-### TD-OILS-A-BRACE-WHOSE-NAME-SCAN-RUNS-OFF-A-FRAGMENT-TAKES-THE-OTHER-DIAGNOSTIC — 2026-08-14 — ✅ FIXED 2026-08-14
-
-**Where:** `Shell::expand_unclosed` (`userspace/oils/src/interp.rs`) and the
-`Unclosed::BadSubst` the lexer raises for it (`userspace/oils/src/lexer.rs`).
-
-**Repro** (bash 5.2.37):
-
-```sh
-declare -a arr=(10 20 30)
-declare -A m=([k]=V)
-echo "[${arr['x${m']}]"
-```
-
-| | |
-|---|---|
-| bash | `` 'x${m': bad substitution `` |
-| osh | ``bad substitution: no closing `}' in 'x${m'`` |
-
-The same string is named — that much was fixed the same day — but it is the
-wrong one of bash's two messages.
-
-**Why bash has two.** A `${ … }` in a string is read in two steps, and only the
-second one is `extract_dollar_brace_string`. First `parameter_brace_expand`
-extracts the *name* with `string_extract (string, &t_index, "#%^,~:-=?+/@}",
-SX_VARNAME)` (subst.c:9550), which stops at one of those operator characters or
-at the end of the string — `SX_VARNAME` stepping over a whole `[ … ]` subscript
-on the way. If it stopped at the end, `c` is `NUL` and the `switch (c)` falls to
-`default: case '\0': bad_substitution:` (subst.c:10018-10024), which is
-`report_error (_("%s: bad substitution"), string)` and no longjmp. Only if it
-stopped at an *operator* does the body go to `extract_dollar_brace_string`, whose
-own running-out is the "no closing" one that longjmps (subst.c:1972).
-
-So the two messages divide on whether the unclosed brace got as far as an
-operator, and the division is visible:
-
-| fragment | bash |
-|---|---|
-| `'x${m'` | `` 'x${m': bad substitution `` |
-| `'x${#m'` | `` 'x${#m': bad substitution `` |
-| `'x${m[0]'` | `` 'x${m[0]': bad substitution `` |
-| `'x${m['` | `` 'x${m[': bad substitution `` |
-| `'x${m:-'` | ``no closing `}' in 'x${m:-'`` |
-
-**Two things the entry got wrong, found while fixing it.**
-
-*It is not only a fragment.* A here-document body takes the same two messages,
-and osh had the same one answer for both — `cat <<E`/`a${m b`/`E` is
-`a${m b⏎: bad substitution` in bash. The `${x@P}` case really does collapse
-(`no_longjmp_on_fatal_error` makes `extract_dollar_brace_string` return `NULL`
-quietly and its caller fall to the same label), which is why the divergence
-looked narrower than it was.
-
-*The name scan is not the whole story.* Two checks between it and
-`extract_dollar_brace_string` also reach `bad_substitution:` with an operator
-already found — `valid_brace_expansion_word` on the name (subst.c:9803) and the
-length branch's `string[sindex-1] != RBRACE` (subst.c:9687). So `'x${m[a:b'`
-(the `:` *is* reached, but `m[a` is no name) and `'x${#q:-'` are both plain bad
-substitutions. A third check, `parameter_brace_expand_indir` (subst.c:9807),
-runs there too and reports in the missing brace's place: `a${!nosuch:-b` is
-`nosuch: invalid indirect expansion`, and a pointer holding `not a name` is
-`not a name: invalid variable name`.
-
-**The fix.** None of this needed new state on `Unclosed::BadSubst`. osh already
-had the whole decision procedure — `Shell::unterminated_brace_kind`, written for
-the arithmetic-string scanner, which answers `BadSub` / `NoClosing` /
-`Indir(name)` from the body text alone and has `Shell::arith_indir_resolves`
-beside it for the third. `Shell::expand_unclosed` now asks it, for `close ==
-'}'`, before anything else it does, and a new `Shell::unclosed_bad_substitution`
-reports the `BadSub` answer naming `text` (bash's `string`) with the
-`ErrexitOrPosix` class the `bad_substitution:` label carries.
-
-Asking it *first* matters, and is bash's own order: a `$( … )` written inside
-the name is walked over by `string_extract` without being parsed, so
-`a${m$(fi) b` names the bad substitution and never mentions the `fi` — where osh
-used to run `Shell::unclosed_brace_reads` first and report the `fi`.
-
-**Fixed by:** `Shell::expand_unclosed` + `Shell::unclosed_bad_substitution`
-(`userspace/oils/src/interp.rs`). Corpus:
-`a-brace-whose-name-scan-runs-off-the-text-is-a-bad-substitution-not-a-missing-brace.sh`
-— sixteen shapes covering the fragment, the here-document, the command
-substitution in each half, all three indirection outcomes and the prompt
-collapse, byte-identical to bash 5.2.37 including stderr.
-
----
-
-### TD-OILS-AN-UNCLOSED-ARITH-SUBSTITUTION-IN-A-QUOTED-SUBSCRIPT-IS-NOT-CAUGHT-BEFORE-EXPANSION — 2026-08-14
-
-**Where:** `crate::wordscan` (`userspace/oils/src/wordscan.rs`), the word-extent
-pass `Shell::begin_word` runs before a word is expanded.
-
-**Repro** (bash 5.2.37):
-
-```sh
-declare -a arr=(10 20 30)
-echo "$(touch RAN)[${arr['x$(( 1+ ']}]"
-```
-
-bash prints ``bad substitution: no closing `)' in "$(touch RAN)[${arr['x$(( 1+ ']}]"``
-— the **whole word** — and `RAN` is never created. osh prints
-``bad substitution: no closing `)' in 'x$(( 1+ '`` — the fragment — and the
-`touch` runs.
-
-The side effect is the real defect; the name follows from it. bash reaches this
-one on the *extent* pass, before any part of the word expands, so it names the
-string that pass was walking. osh reaches it only when the subscript is expanded,
-by which time the substitution ahead of it has already run.
-
-**Not the same as the two entries above.** Those are about which string a fault
-found *during* the fragment's expansion names. This one is about a fault bash
-finds before expansion starts and osh does not find at all until later.
-
-**What the proper fix looks like.** `wordscan::scan` has rows for `${`,
-`` ` ``, `$(`, `$[` and `<(`/`>(`, and its faults are `WordFault::Brace` and
-`WordFault::Backquote`. An unclosed `$((` inside a `' … '` in a subscript is a
-third: `extract_delimited_string`'s (subst.c:1498), which names the scanned
-string and closes it with `)`. Adding it means teaching `word_fault` a fault that
-carries its own closing delimiter, and teaching the subscript skip that a `'` in
-there does not hide a `$((` from the enclosing scan.
-
-**Impact.** A command substitution written before such a subscript runs when bash
-would not have run it. Narrow, but it is a side effect and not just text.
-
----
-
-### TD-OILS-A-BACKQUOTE-IN-A-QUOTED-SUBSCRIPT-IS-A-PARSE-ERROR-WHERE-BASH-EXPANDS — 2026-08-14 — ✅ FIXED 2026-08-14 (in-scope half; see the scope note at the end)
-
-**Where:** the `' … '` interior parse of an arithmetic fragment —
-`attach_subscript_reads` (`userspace/oils/src/parser.rs`) and the lexer path
-behind it.
-
-**Repro** (bash 5.2.37):
-
-```sh
-declare -a arr=(10 20 30)
-echo "[${arr['x`fi']}]"
-echo TAIL
-```
-
-| | |
-|---|---|
-| bash | ``bad substitution: no closing "`" in `fi'`` at line 2, then `TAIL` |
-| osh, before | ``unexpected EOF while looking for matching `` ` ``'`` at line 4 — the script never runs |
-| osh, now | identical to bash |
-
-osh turned a runtime diagnostic into a *parse* error, so the whole script was
-rejected. bash's parser stops at the `'` and resumes at its mate, so the
-backquote inside is text as far as any parse is concerned; it is met only by
-`param_expand`'s own `string_extract (…, SX_REQMATCH)` at expansion time
-(subst.c:11269), which names `string + t_index` — the text from the backquote on.
-
-**The fix.** Three parts:
-
-- `Lexer::read_word_verbatim`'s `` ` `` arm used a bare `?`, which let the
-  `LexError` escape as a parse error. It now converts to an `Unclosed::Backquote`
-  segment via `unclosed_seg`, exactly as the `$` arm does for an unmatched `${`.
-  This is the part that stopped the script being rejected.
-- `Unclosed::Backquote` gained a `text` field, because its `%s` is
-  `string + t_index` and not `string`: the report runs from the backquote to the
-  end of the **fragment**, whereas `src` is also what `part_src`/`parts_src`
-  re-print and so cannot be widened in place.
-- `name_unclosed_after_the_fragment` (`parser.rs`) widens that `text` with the
-  fragment tail past the run's interior — the run's own closing quote and
-  whatever follows it — mirroring what it already did for `BadSubst`.
-
-**Verified.** `userspace/oils/tests/corpus/an-unmated-backquote-in-a-quoted-subscript-is-met-at-expansion-and-not-by-a-parse.sh`
-is byte-identical to bash 5.2.37, as are probes `build/pr28.sh` and
-`build/pr29.sh`. Full sweep green.
-
-**SCOPE: one residue is out of frozen scope (§305) and is deliberately left
-unfixed.** Where the unmated backquote sits inside a *nested double quote* within
-the run — `build/pr30.sh` d2, `echo "[${arr['x"`fi"']}]"` — bash reports
-``no closing "`" in `fi"'`` and osh reports ``no closing "`" in `fi"``: osh is one
-trailing `'` short. Everything else matches, including the script surviving, the
-exit status and all other output. The cause is known:
-`name_unclosed_after_the_fragment` visits only the run's own top level and does
-not descend into a nested `DoubleQuoted` part (`crate::unparse::nested_parts_mut`
-would give the descent; note its `SingleQuoted { .. }` arm returns `Vec::new()`,
-so it can only supplement the outer loop, not replace it).
-
-This is **the exact substring an error message echoes**, which design-decisions
-§305 names as out of scope: nothing SlateOS runs will ever depend on it. Fix it only
-if it turns up as part of something that does. The in-scope half of this
-entry — a whole script being rejected where bash runs it — is closed.
-
-**Fixed by:** the corpus case named above, plus `lexer.rs` (`Unclosed::Backquote`
-`text` field, `read_word_verbatim`'s `` ` `` arm), `interp.rs`
-(`Unclosed::Backquote` report) and `parser.rs`
-(`name_unclosed_after_the_fragment`).
-
-### TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN. A `$( … )` opened inside one swallows the read that should have followed it — 2026-08-14
-
-**Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_word_verbatim`'s `$`
-arm in [`Verbatim::Dquote`], reached through
-`Shell::brace_extent_scan` → `Shell::brace_scanned_subs`.
-
-**Repro** (bash 5.2.37, `build/pr12.sh`):
-
-```sh
-z=ZZ
-v='A${z:-'"'"'p$(echo hi'"'"'q$(fi
-S1}B'; printf '[%s]\n' "${v@P}"
-```
-
-| | bash 5.2.37 | osh |
-|---|---|---|
-| reports | ``syntax error near unexpected token `fi' `` | **nothing** |
-| value | `[AZZB]` | same |
-
-**What is wrong.** The two passes bash makes over this word carve it into
-*different constructs*, not merely read the same constructs differently.
-
-- `extract_dollar_brace_string` meets the `'` and hands the run to
-  `skip_single_quoted`, which stops at the **mate**. So `'p$(echo hi'` is one
-  skipped run, the `$(` inside it is never seen at all, and the scan resumes at
-  `q` — where it meets `$(fi⏎S1}B`, reads it, and reports `fi`.
-- `expand_word_internal` has no `'` left to speak of, so its
-  `string_extract_double_quoted` meets the **first** `$(`, hands the rest of the
-  word to `extract_command_subst`, and — there being no `)` anywhere — takes
-  everything. One substitution, not two.
-
-osh derives the brace scan's reads from the expansion's lex, so it gets the
-second carving and the second `$(` is inside the first's body, where the walk
-never reaches it. `Shell::brace_scanned_subs_slice`'s single-quote bookkeeping
-then correctly suppresses the one construct it *can* see (it is inside the run),
-and the result is silence.
-
-This is the residue of
-`TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN`, which
-fixed the part of the same disagreement that was only about *which openers*
-count. Rows where the two passes agree on the extents but not on the openers are
-now handled by `Lexer::brace_scan`; this row is one where they disagree on the
-extents, and no flag on the expansion's lex can express it.
-
-**What the proper fix looks like.** `Shell::brace_extent_scan` has to run over
-the brace's **text**, with the scan's own carve, rather than over the parsed
-part. Concretely: keep the undecoded source of an unread `${ … }` on the part
-(or reach it through `crate::unparse`), and lex it once in
-`Lexer::brace_scan` mode with the single-quote rule the scan really has — a `'`
-consumes to its mate and offers nothing inside, so a `$(` in there can neither
-be read nor run past the mate. `read_word_verbatim` already computes that mate
-(`sq_close`); what it does not do is let it bound a substitution, because for
-the *expansion* it must not.
-
-Note that `Lexer::brace_scan` as it stands is deliberately the narrow version:
-it adds openers and leaves extents alone. Widening it to bound a `$( … )` at
-`sq_close` would be wrong for the same lexer's expansion duty, so the widening
-has to come with the second pass, not instead of it.
-
-**Impact.** Diagnostics only — the value is already right. Reachable only
-through `@P`/`PS4`/here-doc text holding a `${ … }` whose operand has both an
-unterminated `$( … )` inside a `' … '` run and a failing one after it.
-
----
-
-### TD-OILS-A-DOLLAR-BRACKET-BOUND-DOES-NOT-PERFORM-ITS-COMMAND-SUBSTITUTION. `$[ 1+$(… ]` reads the `$( … )` as an arithmetic operand token — 2026-08-14
-
-**Where:** `userspace/oils/src/interp.rs` — the evaluation of a
-`WordPart::ArithSub { bracket: true, … }` whose expression text holds an
-unclosed `$( … )`.
-
-**What is wrong.** `extract_arithmetic_subst` is
-`extract_delimited_string (string, sindex, "$[", "[", "]", 0)` (subst.c:1299) —
-flags `0`, so **no** `SX_COMMAND` and no nested read. The `$[` therefore closes
-at its `]` by plain delimiter counting, and the unclosed `$( … )` inside is met
-later, by the *arithmetic expansion* of the bounds text, which performs it under
-`Q_DOUBLE_QUOTES|Q_ARITH`: it reports, runs the abandoned extent, and yields
-nothing. osh instead hands the raw characters to its arithmetic tokenizer, which
-calls them a bad operand.
-
-Measured (`build/pgY.sh` d1/d2):
-
-| word (inside `v='…'`, via `"${v@P}"`) | bash | osh |
-|---|---|---|
-| `A$[1+$(for⏎x]B` | reports `for`, runs `fo`, `[A1B]` | silent, `[AA$[1+$(for⏎x]B]` |
-| `A$[1+$(echo hi⏎x]B` | reports EOF, `[A1B]` | silent, `[AA$[1+$(echo hi⏎x]B]` |
-
-Row d3 — the same body with no `]` at all — is byte-exact in both shells
-(silent, undecoded text), because there the `$[` genuinely never closes.
-
-**What the proper fix looks like.** Two things, in order. (1) `$[`'s lex must
-close at its `]` by plain delimiter counting, without the nested read — which
-means `Lexer::read_opaque_span` needs to know its enclosing close character, so
-that the `$((` spelling (SX_COMMAND) and the `$[` one (flags `0`) can part
-company. Routing that arm through `Lexer::unread_comsub_stop` was tried on
-2026-08-14 and reverted: it made the `$[` bounds text match bash on d1/d2, but
-it *regressed* the `$((` spelling in the corpus case
-`an-unterminated-construct-in-text-no-parser-read-is-a-runtime-failure`, whose
-`$((1+$(echo` row must report the read and stop rather than condemn the `$((`.
-A passing case outranks a documented divergence, so that arm keeps its `?`.
-(2) The arithmetic evaluator must perform a `$( … )` in its expression text
-with the unread-text rule rather than tokenizing it — which is what makes both
-rows' values follow.
-
-**Impact.** Wrong value and wrong diagnostic for a deprecated spelling of
-arithmetic expansion, in malformed input, reachable only through `@P`/`PS4`/
-here-doc text.
----
+*The 18 entries below are lane A's. They arrived in lane C's section by
+accident: the archive cut of 2026-08-15 was made on `##` boundaries, and these
+are `###` entries that happened to sit after a lane C `##` heading in the
+append-only `known-issues.md`, so conservation carried them but placement did
+not. Lane A reported it in `requests/a-c-archive-cut-swept-lanes-a-and-b.md`
+and lane C moved them here on 2026-08-16 — verbatim, at their original heading
+level, with no edit to their text.*
 
 ### [A] B-SMP-FAST-CPU-INDEX-PANICS-BEFORE-APIC-INIT. `smp::fast_cpu_index()` reads the APIC before it is mapped — `debug_assert` panic in debug, wild read in release — FIXED 2026-08-14
 
@@ -13286,6 +10707,2599 @@ correspond to any commit. Recorded here so it is not lost.
 
 ---
 
+# Lane B
+
+*The 17 entries below are lane B's, moved here by lane C on 2026-08-16 for the
+same reason the note in `# Lane A` gives: the 2026-08-15 archive cut ran on
+`##` boundaries and swept these `###` entries into lane C's section. They are
+verbatim, at their original heading level. Lane B still owns the rest of the
+move — see `requests/c-b-known-issues-archive.md`; what is here is only what
+the cut misplaced, not everything of lane B's that is resolved.*
+
+### [B] D-POSIX-SOCKET-META-WAS-NOT-SCOPED-TO-ITS-FD-TABLE — ✅ FIXED 2026-08-14
+
+**Found while running the eighth audit pass**, not by looking for it:
+`socket::tests::test_phase201_bind_port443_no_cap_eacces` failed once with
+`ENOTSOCK` where `EACCES` was expected, then passed three runs in a row.
+
+`SOCKET_META` (posix/src/socket.rs) is indexed by fd number, so it must have
+exactly the same scope as the fd table it is keyed by. `fdtable` made its
+storage **per-thread** on host builds (design-decisions.md §110) precisely
+because libtest runs tests on parallel threads. `SOCKET_META` stayed a
+process-global `static mut`, and the mismatch was reachable: two tests on
+different threads each create a socket and, drawing from *separate* per-thread
+fd tables, both get the same fd number `N` — near-certain, not unlikely, since
+each thread's table starts empty. They then shared one `SOCKET_META[N]`, and
+the first to `close()` wiped the entry the other was still using, whose next
+call saw a live fd with no metadata and reported `ENOTSOCK` for a good socket.
+
+Fixed by giving `SOCKET_META` the same `cfg`-split storage as
+`fdtable::fd_store`. Six consecutive full runs clean afterwards.
+
+Two things worth keeping from this. First, the `// SAFETY: Single-threaded
+access.` comments on these accesses were **true on the target and false under
+`cargo test`** — a safety comment that silently changes truth value with
+`cfg` is worse than none, and `fdtable` had already learned this lesson
+without the fix being propagated to the table keyed by its own indices.
+Second, an intermittent failure at roughly one run in four is easy to
+dismiss as noise when it appears in a test unrelated to what you are
+changing; it was worth the ten minutes to chase.
+
+### [B] D-POSIX-TIMED-WAITS-DID-NOT-VALIDATE-TV-NSEC — ✅ FIXED 2026-08-14
+
+`pthread_cond_timedwait`, `pthread_mutex_timedlock` and `sem_timedwait`
+accepted any `timespec` whatsoever. A `tv_nsec` of `1_000_000_000` or `-1` —
+the classic result of adding a nanosecond offset without carrying into
+`tv_sec` — should be `EINVAL` (glibc `valid_nanoseconds`, `include/time.h:517`);
+instead it fell through to the deadline comparison, where a too-large
+`tv_nsec` silently extended the wait by up to a second and a negative one made
+the call return `ETIMEDOUT` immediately. Both are wrong in the direction that
+hides the caller's bug. Separately, `mqueue::deadline_from_timespec` checked
+`tv_nsec` but not `tv_sec < 0`, which the kernel's `timespec64_valid` rejects.
+
+Fixed by adding `time::valid_nanoseconds` (glibc's predicate, verbatim) and
+calling it from each site **at the position its own upstream uses** — eagerly
+in `pthread_cond_timedwait` and `sem_timedwait`, lazily (contended branch
+only) in `pthread_mutex_timedlock` — plus the missing `tv_sec` half in
+`mqueue`. See the ninth-pass write-up under
+`D-POSIX-NULL-POINTER-ERRNO-NEEDS-A-PER-FUNCTION-AUDIT` for why the three
+placements differ and why the mqueue predicate is not the same predicate.
+
+Seven tests pin the distinctions, including the two that would silently pass
+under a naive "check it at the top of every function" fix:
+`test_pthread_mutex_timedlock_uncontended_ignores_a_bad_deadline` and
+`test_sem_timedwait_checks_the_deadline_before_the_fast_path`.
+
+**Not fixed, because we do not have them:** `pthread_cond_clockwait`,
+`sem_clockwait` and the `pthread_rwlock_{timed,clock}{rd,wr}lock` family are
+unimplemented. When they are added they need the same predicate plus
+`futex_abstimed_supported_clockid`, and the rwlocks check **eagerly** — see
+the comment at `pthread_rwlock_common.c:286-291`.
+
+---
+
+### [B] TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED. bash runs `${z:-<(echo hi)}` and substitutes `/dev/fd/63`; osh yielded the nine characters `<(echo hi)` — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where it was:** `userspace/oils/src/lexer.rs`, [`Lexer::read_word_verbatim`],
+which reads the operand, the pattern and the replacement of a `${ … }` and had
+no `<`/`>` arm at all.
+
+bash splits this construct across two files and osh had only one half of it.
+**Part (A) — the parse** — is `parse_matched_pair` naming `<(`, `>(` and `$(` in
+one breath (parse.y:5028) and sending all three through `parse_comsub`
+(parse.y:5042), so a `${ … }` body's scan parses a process substitution where it
+meets it, its syntax error is the enclosing unit's, and what survives is the
+parse *re-printed*; see
+`userspace/oils/tests/corpus/a-process-substitution-in-a-brace-body-is-parsed-where-it-is-met.sh`
+and [`parser::procsub_reprints`]. **Part (B) — the performance** — is
+`expand_word_internal` *running* it, and was this entry.
+
+**The rule** is bash's quoting flag, not the position. `expand_word_internal`
+reads a process substitution only when `if (string[++sindex] != LPAREN ||
+(quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) || (word->flags & W_NOPROCSUB))`
+lets it (subst.c:11079), so an **operand** runs one when the expansion is bare
+and keeps the characters when it is double-quoted, a **pattern** and a
+**replacement** run one either way (both are re-entered without
+`Q_DOUBLE_QUOTES`), and a **subscript** or a **substring bound** never does
+(`Q_DOUBLE_QUOTES|Q_ARITH`), so its arithmetic error names the characters.
+
+**The fix.** [`Verbatim`] gained an `Arith` mode beside `Bare`, `Replacement`
+and `Dquote` — identical to `Bare` in every other respect — and
+[`Lexer::read_word_verbatim`] gained a `<`/`>` arm live in `Bare` and
+`Replacement` only. On the parser side [`parser::verbatim_word_at`] picks the
+lexer entry from a new `Frag` (`Word` or `Arith`), which is what a subscript and
+the `' … '` runs inside it now pass. The body the arm reads is already the
+*re-print* part (A) spliced in, which is what bash performs too: the token
+buffer a `${ … }` scan leaves behind holds the re-print and nothing else.
+
+No new expansion machinery was needed. The double-quoted operand was already
+right — the splice puts the re-print into the text and its nested `$( … )` then
+expands normally, so `"${z:-<(echo $(echo q))}"` is `<(echo q)` in both shells —
+so the whole of part (B) was one liveness decision taken at lex time, which is
+where osh decides quoting.
+
+**The pre-existing inconsistency this closed.** The substring bound
+(`${z:<(echo hi)}`, via [`parser::parse_slice_bounds`]) *did* perform the procsub
+while the subscript beside it did not, so osh's two arithmetic contexts — which
+bash expands identically — disagreed. The bound is tokenized rather than read
+verbatim, so it has no `Verbatim` mode to set; [`parser::word_from_source`], its
+only reader, now turns a `Seg::ProcSub` back into the characters it was read
+from. Both contexts are on the same side now.
+
+**Verified:** `a-process-substitution-in-a-brace-body-is-performed-unless-the-expansion-is-quoted.sh`,
+27 cases across the five contexts. None of them prints a substitution's path —
+bash names it `/dev/fd/N` and osh a temporary file — so each asks a question the
+path does not answer: whether the text still begins `<(`, whether it names
+something that exists, or what a `cat` of it reads.
+
+**How it was found:** implementing part (A) — the eager parse and re-print of a
+process substitution met by a `${ … }` body scan.
+
+### [B] TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN. bash's `brace_gobbler` and its `${x@P}` re-read each meet a `<(` osh's do not — 2026-08-14 — ✅ FIXED 2026-08-14 (both halves, and the arithmetic-fragment residue)
+
+Two residues of TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED
+(above), left after both halves of it were done. Each is a *second* scan of the
+same text — one that is not `parse_matched_pair` and not `expand_word_internal` —
+which has a `<(` row of its own that osh's counterpart lacks. The `$(` spelling
+of each already matches bash byte for byte, so in both the machinery is there
+and only the row is missing.
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::gobbled_subs`]; and the
+`${x@P}` re-read, `userspace/oils/src/parser.rs`, [`dquote_word_from_source`].
+
+* **✅ FIXED 2026-08-14.** `echo "${z:-"<(fi)"}"` — bash reports
+  `command substitution: line N+1: syntax error near unexpected token 'fi'`
+  plus the tail of the physical line, where osh prints `<(fi)`. The agent is
+  **`brace_gobbler`**, whose command-substitution row names all three spellings
+  (`(c == '$' || c == '<' || c == '>') && text[i+1] == '('`, braces.c:675) and
+  reaches `extract_command_subst` → `xparse_dolparen`, which *parses* the body
+  and throws the result away. Two facts pin it down. The gobbler's `quoted`
+  state does not nest and `${` opens none of its own (it is treated like `\{`),
+  so the **inner** `"` is `c == quoted` and clears the state — which is why the
+  row fires here and not in the plain `"${z:-<(fi)}"`, where parse.y has
+  already answered. And it fires only where brace expansion runs: an argument
+  or command word errors (`: "${z:-"<(fi)"}"`, `f "${z:-"<(fi)"}"`,
+  `echo "${a["<(fi)"]}"`), while an assignment RHS — which is not brace-expanded
+  — does not (`x="${z:-"<(fi)"}"` is silent). bash only ever *parses* it: with a
+  body that does parse, `echo "${z:-"<(echo hi)"}"` prints `<(echo hi)` in both
+  shells, so this is a diagnostic and not a missing expansion.
+
+  What was missing was something to hang the row on. [`Shell::gobbled_subs`]
+  walks the *parse* structurally, and here the tree is right to hold characters
+  — the `<(` sits in a `" … "` run inside a double-quoted operand, where neither
+  bash's expander nor osh's reads one — so no part was ever going to appear for
+  it. The fix is therefore not another lexer mode but a text-level pass beside
+  the structural walk, as `gobbled_backtick_subs` already is for a backquote:
+
+  * `wordscan::gobbler_procsubs(s, dquoted)` — the same flat-state loop as
+    `gobbler_readable`, reporting the index of each `<(`/`>(` met while `quoted`
+    is 0. (`gobbler_readable` could not answer this: it reports the stretches the
+    **`$(`** row fires in, which is `quoted == 0` *and* `quoted == '"'`, and the
+    `<(` row is the first of those alone.) A `$( … )` is skipped whole rather
+    than reported — that is the one spelling a part already stands for.
+  * `Shell::gobbled_procsubs` — for each index, lex `$(` + the rest of the word
+    with `parser::dquote_word_from_source` and take the resulting
+    `CmdSubBody::Unread`. The two spellings reach the same
+    `extract_command_subst`, so the swap is exact, and one lex settles the body,
+    the remainder and whether there was a `)` at all. It is a *lex*, not the
+    paren count `gobbler_readable` skips with, because `xparse_dolparen` is a
+    real parse: a `(` inside a quoted run of the body is not a nesting level to
+    it, and a count would carve `echo <(echo "(")` into a body that fails.
+  * The two are merged by **remainder length**: every tail the gobbler's word
+    carries is measured against the whole word (`unparse::gobbler_word`), so a
+    longer one is an earlier meeting. That is what keeps the interleaving right
+    where a word holds both — measured, `echo "${z:-'$(fi)'"<(for)"}"` reports
+    the `$(fi)` and `echo "${z:-"<(fi)"'$(for)'}"` the `<(fi)`.
+  * `Shell::has_gobbled_sub` — the cheap pre-test — gained a `WordPart::Literal`
+    row, answering wide (any `<(`/`>(` in a literal under quotes) so the word
+    reaches the scan that settles it.
+
+  **Verified:** `userspace/oils/tests/corpus/a-process-substitution-a-brace-scan-meets-is-read-where-the-quoting-is-clear.sh`,
+  29 rows, all matching bash 5.2.37 — including the parity (`"${z:-"a"<(fi)"b"}"`
+  is a *parse* error, `"${z:-"${y:-"<(fi)"}"}"` is silent), the `set +B` gate, the
+  words brace expansion does not reach (assignment RHS, `case` word, here-doc
+  body), the read happening before expansion (`z=Z`, `${z:+…}`), and the `declare
+  -f` re-print.
+* **✅ FIXED 2026-08-14 for the double-quoted operand** (`${z:-…}`, `${z:+…}`,
+  `${z:=…}`, `${z:?…}` and the plain `${z-…}` family) — which is the position
+  the report named, and the only one a `${x@P}`/`PS4` re-read reaches with the
+  quoting bash's own expansion declines a process substitution under. The
+  remaining positions are a residue of their own, logged at the end of this
+  bullet. Original report: `x='${z:-<(fi)}'; echo "${x@P}"` — bash's `extract_dollar_brace_string`
+  (subst.c:1881-1950) has a `<(` row of its own and recurses into it with a real
+  parse, so the `@P` re-read is a `bad substitution` and the text is printed
+  unchanged; osh splices the re-print and prints `<(fi)`.
+
+  **Measured against bash 5.2.37 (2026-08-14).** The row behaves as the `$(`
+  row beside it in every respect: `A${z:-<(fi)}TAIL` and `A${z:-$(fi)}TAIL`
+  give byte-identical output, down to the quoted remainder `` `fi)}TAIL' ``
+  and the `line 2` numbering `xparse_dolparen` gives an unread body. It is the
+  scan's row and not the string's — `x='a<(fi)b'` is silent — and it is reached
+  only where the scan's own quoting allows: `"<(fi)"` (double-quoted),
+  `'<(fi)'` (single-quoted, `skip_single_quoted`) and `\<(fi)` are all silent
+  and print their text. A body that parses is silent too and is *not*
+  performed: `A${z:-<(echo A >&2)}B` prints `A<(echo A >&2)B` and no `A` on
+  stderr.
+
+  osh already matched on six of those shapes. What it got wrong:
+
+  | written (as `x`, then `echo "${x@P}"`) | bash | osh (before) |
+  |---|---|---|
+  | `A${z:-<(fi)}TAIL` | reports, `bad substitution`, text | `A<(fi)TAIL` |
+  | `A${z:-${y:-<(fi)}}B` | reports (nested body too) | `A<(fi)B` |
+  | `A${z:-p<(fi)q$(for)r}B` | reports the **`<(fi)`** | reports the `$(for)` |
+  | `A${z:-<(fi}B` | `unexpected EOF`, `bad substitution`, text | runs `fi}` — `command not found` |
+
+  All but the last now match. The last is a *different* defect that the `$(`
+  spelling has identically — see
+  TD-OILS-AN-UNCLOSED-SUBSTITUTION-IN-AN-UNREAD-BRACE-BODY-IS-RUN-INSTEAD-OF-REFUSED
+  below — so it was left alone here rather than fixed twice.
+
+  **Why it was not a two-line change.** The `<(` span *is* already collected —
+  `Lexer::read_dollar_brace` has the row (lexer.rs:7069) and records a
+  `CmdSubSpan` with `SubOpen::Proc`, its `src`, its `range` and
+  `SubBody::Unread`. What is missing is a [`WordPart`] for
+  [`Shell::brace_scanned_subs`] to walk to: `procsub_reprints`
+  (parser.rs:6288) splices a re-print only for a `SubBody::Eager` span, and the
+  re-lex that carves the operand out of the body (`read_word_verbatim`) leaves
+  a `<(` as characters on purpose. So for an *unread* body the process
+  substitution survives only as text in a `WordPart::Literal`.
+  `arith_unread_subs` is the shape of the answer for the arithmetic scan, and
+  it excludes this spelling deliberately (parser.rs:6233-6240).
+
+  Two things make the obvious fixes wrong, both measured above:
+
+  * **The remainder runs past the `}`.** `` `fi)}TAIL' `` and
+    `` `fi)}B${y:-<(for)}C' `` are the rest of the *whole re-read string*, not
+    of the `${ … }`. So a text scan confined to the brace's own source (the
+    only text [`Shell::brace_extent_scan`] is handed) cannot build the part's
+    `tail`, and the `$( … )` spelling gets its own from
+    `unparse::attach_comsub_tails`, which runs over the assembled word in the
+    parser.
+  * **It must interleave with the `$(` spelling**, in the order the one scan
+    meets them — hence the `p<(fi)q$(for)r` row above.
+
+  Reusing [`CmdSubBody::Unread`] for the synthesized part is safe for the
+  *read* (the diagnostic quotes the body's remnant, never the delimiter, so a
+  `<(` and a `$(` in this position are byte-identical) but not for anything
+  that re-prints or *runs* one — `interp.rs:34302` performs an unread body, and
+  a process substitution here is never performed. So either the part carries
+  its spelling (a new field on `CmdSubBody::Unread`, two construction sites and
+  one printer, plus the run site taught to refuse) or it is synthesized late
+  enough that it can never escape into a print or a run — which is what
+  `Shell::gobbled_procsubs` does for the `brace_gobbler` half above, and the
+  reason that one could be done without touching the AST.
+
+  **What was done.** The first of the two: the part carries its spelling, which
+  makes both blockers vanish rather than needing to be worked around.
+
+  * `ast::SubDelim { Dollar, ProcIn, ProcOut }`, with `bytes()` (the delimiter
+    as written) and `is_performed()` (true only for `Dollar`). Recorded on
+    `CmdSubBody::Unread` and on the lexer's `SubBody::Unread`. Only the unread
+    form needs it: a body a parser *read* is a `CmdSubBody::Parsed` for `$(`
+    and a `WordPart::ProcSub` for the other two, so those two shapes already
+    tell the spellings apart.
+  * `Lexer::read_word_verbatim` gained a `<(`/`>(` row for `Verbatim::Dquote`
+    **when the text is unread** (`self.here_text`), emitting
+    `Seg::CmdSub(body, close, SubBody::Unread { delim })`. The existing
+    `Verbatim::Bare | Verbatim::Replacement` row above it is untouched — those
+    fragments really do *perform* the substitution, measured:
+    `x='A${z/p/<(echo hi)}B'; echo "${x@P}"` prints a `/dev/fd/N` in bash.
+  * `unparse.rs` prints the body back in `delim.bytes()`, and
+    `Shell::command_sub_body` returns that text instead of running anything
+    when `!delim.is_performed()`.
+  * The backslash arm of the same loop takes a `\<(`/`\>(` into the literal
+    run, because the *scan* that produced this text honours a backslash
+    whatever follows it (`extract_dollar_brace_string`'s `case '\\'`,
+    subst.c:1899) while the operand's own dquote read does not. `A${z:-\<(fi)}B`
+    prints `A\<(fi)B` and reports nothing.
+
+  Both blockers then answer themselves: the `tail` is filled by
+  `unparse::attach_comsub_tails` over the whole assembled word (so it runs past
+  the `}`, giving `` `fi)}TAIL' ``), and the interleaving is
+  `Shell::brace_scanned_subs`'s existing left-to-right walk.
+
+  **Verified:** `userspace/oils/tests/corpus/a-process-substitution-a-brace-re-read-meets-is-read-like-the-dollar-spelling.sh`,
+  22 rows, all matching bash 5.2.37 — the byte-identity with the `$(` spelling,
+  both interleavings, the nested body, the not-performed rows (including
+  `>(cat)` and a body writing to stderr, quoted and unquoted), the read
+  happening before the operand is chosen (`z=Z`, `${z:+…}`), the four shields
+  (unbraced text, `" … "`, `' … '`, backslash), the stepped-over subscript, and
+  the `PS4` spelling of the same re-read.
+
+* **✅ FIXED 2026-08-14** (every position but the arithmetic one; that one
+  closed later the same day, at the end of this bullet)**.** The row
+  was wired for the double-quoted **operand** only, and bash's scan reads the
+  whole `${ … }` body — it walks characters and knows nothing of the `#`, `/`
+  or `^^` it has already passed — so every other fragment wanted the same row:
+
+  | written (as `x`, then `echo "${x@P}"`) | bash | osh before |
+  |---|---|---|
+  | `A${z#<(fi)}B` (pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z/p/<(fi)}B` (replacement) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z^^<(fi)}B` (case pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z:0:<(fi)}B` (offset) | reports ×2, `bad substitution`, text | `AB` |
+
+  The `$( … )` spelling was right in all four (measured), so again only the row
+  was missing. It was harder than the operand's, because in these positions the
+  substitution is *both* read for its extent **and** performed — a replacement
+  really does expand to `/dev/fd/N`, measured — so the part could not simply be
+  the non-performed `CmdSubBody::Unread` the operand's is.
+
+  **What was done.** The split `CmdSubBody` already makes between a body a
+  parser read and one only a scan read is now made for the process-substitution
+  part too, so one part answers for both halves:
+
+  * `ast::ProcSubBody` — `Parsed(Program)` or `Unread { src, tail, closed }` —
+    replaces the bare `Program` in `WordPart::ProcSub`.
+  * `lexer::ProcRead` (`Eager` / `Unread { closed }`) rides on `Seg::ProcSub`;
+    the `Verbatim::Bare | Verbatim::Replacement` arm of
+    `Lexer::read_word_verbatim` picks it from `self.here_text`, and now
+    tolerates a missing `)` exactly as the `$(` spelling does.
+  * `parser::seg_to_part` parses only an eager body. An unread one is carried
+    as text, because its read belongs to the scan and happens later, from
+    where a failure is `bad substitution` rather than a script syntax error.
+  * `unparse`: an unread body prints back as written, and joins
+    `attach_comsub_tails` so it gets the same remainder the `$(` spelling does.
+  * `interp`: `Shell::brace_scanned_subs_slice` collects it,
+    `Shell::extent_read_of_subs` reads it through the same
+    `comsub_reparse_read`, and the new `Shell::proc_sub_body` parses-then-
+    performs at expansion — only reachable if that read succeeded.
+
+  **Verified:** corpus case
+  `a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`,
+  21 rows, IDENTICAL against bash 5.2.37.
+
+  **✅ The arithmetic fragment, 2026-08-14.** Deferred at first, because osh
+  diverged over `<` in a bound before any process substitution was written at
+  all (`${z:1<(2)}` is `bcdef` in bash and was an `operand expected` in osh);
+  that was fixed as
+  TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND,
+  and this row followed.
+
+  It was **not** simply `Verbatim::Arith`'s row, as the deferral assumed. A
+  subscript shares that mode and must *not* get it: bash's scan steps over a
+  subscript whole (`skip_matched_pair` from the `[`), so `${z[<(fi)]}` never
+  offers its body to `extract_command_subst` and is an `operand expected` —
+  which osh already matched. A bound is walked in the open. So the mode split
+  in two: `Verbatim::Bound` / `Frag::Bound`, reached by `lex_bound_verbatim`
+  and `parser::word_bound_from_source_at`, identical to `Arith` in every
+  respect but that it takes `Dquote`'s unread-`<(` arm. That is the whole
+  change — the arm was already written for the operand, and the read/perform
+  split it produces (`SubBody::Unread`) is exactly a bound's: read for its
+  extent by the scan, never performed, because `Q_DOUBLE_QUOTES|Q_ARITH` is
+  what stops `expand_word_internal` (subst.c:11079).
+
+  No interp-side work was needed: `unparse::nested_parts` already classifies
+  `ParamSubstr`/`ArraySlice` bounds as `Nested::Operand`, so
+  `Shell::brace_scanned_subs_slice` was already descending into them.
+
+  **Verified:** 14 further rows in the same corpus case (the bound in offset
+  and length position, `${a[@]:…}` and `${@:…}`, the `@P` and `PS4` spellings,
+  the three quotings that shield it, and the well-formed `${z:<(echo 1)}` that
+  reaches the evaluator as characters), IDENTICAL against bash 5.2.37.
+
+**How it was found:** implementing the entry above.
+
+### [B] TD-OILS-AN-UNCLOSED-SUBSTITUTION-IN-AN-UNREAD-BRACE-BODY-IS-RUN-INSTEAD-OF-REFUSED. `x='A${z:-$(fi}B'; echo "${x@P}"` runs `fi}` where bash reports `bad substitution` — 2026-08-14 — ⚠️ OPEN
+
+A `$( … ` with no `)` inside a `${ … }` written in text no parser read — a
+`${x@P}` re-read, a `PS4`, a here-document body. bash reads the extent with
+`xparse_dolparen`, which fails at end of input; `si` is left past the end of the
+string, so the brace never closes, so `parameter_brace_expand` reports
+`bad substitution` naming the whole text and prints the text unchanged. Nothing
+is run. osh gets the *first* diagnostic right and then runs the body anyway:
+
+```sh
+x='A${z:-$(fi}B'; echo "${x@P}"
+# bash: command substitution: line 3: unexpected EOF while looking for matching `)'
+#       line 1: A${z:-$(fi}B: bad substitution
+#       A${z:-$(fi}B
+# osh:  command substitution: line 3: unexpected EOF while looking for matching `)'
+#       line 1: fi}: command not found
+#       A
+
+x='A${z:-$(echo hi}B'; echo "${x@P}"
+# bash: … unexpected EOF …; … bad substitution; A${z:-$(echo hi}B
+# osh:  … unexpected EOF …; Ahi}
+```
+
+Both spellings are affected identically — `<(fi}` behaves exactly as `$(fi}`,
+which is the point: the delimiter is not what is wrong here.
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::extent_read_of_subs`]
+(~29622) and [`Shell::run_abandoned_extent`]. The scan classifies the failed
+read as `ExtentRead::Abandoned { body, rest }` and hands the body on to be run.
+That classification is *right* for an abandoned extent bash really does run on
+— it is `extract_command_subst`'s no-`)` path with the `jump_to_top_level`
+suppressed — but wrong when the caller is the brace scan, because there the
+unclosed read is also what stops the `}` from ever being found, and the
+`bad substitution` that follows pre-empts the run.
+
+**Proper fix:** distinguish the two callers. `extent_read_of_subs` should
+report the abandonment to the brace scan (so `brace_extent_scan` fails the
+whole `${ … }` and takes the `bad substitution` path with the source text)
+rather than letting the body reach `run_abandoned_extent`. The `closed: false`
+flag on `CmdSubBody::Unread` already names exactly this shape, so the test is
+to hand.
+
+**How it was found:** measuring the `<(` row of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN
+against its `$(` twin, which turned out to be wrong the same way.
+
+### [B] TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND
+
+**Status:** ✅ FIXED 2026-08-14. Found 2026-08-14, measured against bash 5.2.37.
+The cause turned out to be wider than the title: the two bounds were
+**tokenized as a command** rather than read as arithmetic, so `<` was only the
+most visible of the operators being lost. See "The fix" at the end.
+
+A `<` in the offset or length of `${z:o:l}` swallows everything to its left.
+The same expression inside a plain `$(( ... ))` is fine, so this is the brace
+fragment's own reading of the text, not the arithmetic evaluator's:
+
+| written | bash | osh |
+|---|---|---|
+| `z=abcdef; echo "${z:1<(2)}"` | `bcdef` | `z: <(2): syntax error: operand expected` |
+| `z=abcdef; echo "${z:0:1<(2)}"` | `a` | same error |
+| `echo $(( 1<(2) ))` | `1` | `1` |
+
+bash reads `1<(2)` as `1 < (2)`, which is `1`, so the offset is 1. osh
+evaluates `<(2)` alone -- the `1` is gone by the time the evaluator sees the
+expression, which is what the quoted error token shows.
+
+**Where:** `userspace/oils/src/lexer.rs`, the `Verbatim::Arith` path of
+[`Lexer::read_word_verbatim`], and whatever splits a `${z:o:l}` body into its
+two fragments in `userspace/oils/src/parser.rs`. The `<` is being taken for
+something other than a comparison operator -- most likely a fragment boundary.
+
+**Proper fix:** treat `<` in an arithmetic fragment as the comparison operator
+it is, so the whole fragment reaches the evaluator. A `<(` there is *not* a
+process substitution to be performed either -- measured, `${z:0:<(echo 1)}` is
+an `operand expected` in bash with the characters `<(echo 1)` standing as the
+error token, which osh already matches.
+
+**Blocked, and then unblocked (same day):** the arithmetic-fragment row of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN.
+bash's `${ ... }` scan reads a `<( ... )` in an arithmetic fragment exactly as it
+reads one anywhere else in the body -- `x='A${z:0:<(fi)}B'; echo "${x@P}"`
+reports the parse twice and then `bad substitution`, where osh printed `AB` --
+but a corpus row for it would have been measuring this bug instead, so the
+corpus case
+`a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`
+left that position out and said so. The fix below removed the obstacle, and the
+rows went in the same day: that case now measures a bound in seven further
+positions.
+
+**How it was found:** measuring where bash's brace scan reads a `<( ... )`,
+while checking whether the `Verbatim::Arith` fragments needed the same row as
+the pattern and replacement ones.
+
+**The fix (2026-08-14).** `parse_slice_bounds`
+(`userspace/oils/src/parser.rs`) read each bound with `word_from_source`, which
+called `tokenize(...)` — a *command* tokenizer — and then joined the surviving
+`Tok::Word`s with a literal space. So every operator character was claimed by
+the tokenizer instead of reaching the evaluator, and whatever it could not make
+a word of was silently dropped. `<` was merely the case that produced an IO
+number and a redirect. The rest, all measured against bash 5.2.37 with
+`z=abcdef`:
+
+| written | bash | osh, tokenized |
+|---|---|---|
+| `${z:1<2}` | `bcdef` | `cdef` — `1<` taken for a redirect |
+| `${z:1>2}` | `abcdef` | `cdef` — likewise |
+| `${z:1<=2}` | `bcdef` | `=2: operand expected` |
+| `${z:1 < (2)}` | `bcdef` | `1 2: syntax error` |
+| `${z:1;2}` | `;2: invalid arithmetic operator` | `1 2: syntax error` |
+| `${z:1&2}` | `abcdef` | `1 2: syntax error` |
+| `${z:3|2}` | `def` | `3 2: syntax error` |
+| `${z:1&&2}` | `bcdef` | `1 2: syntax error` |
+| `${z:1)}` | `1): syntax error in expression` | silently `abcdef` |
+
+Both bounds now go through `word_subscript_from_source_at` — the very reader an
+array subscript uses, which is `verbatim_word_at(..., Frag::Arith)` plus
+`attach_subscript_reads`. The two arithmetic fragments therefore no longer
+disagree with each other, which is what `attach_subscript_reads`'s own doc
+comment had been asking for.
+
+Two further defects of the same splitter were found while measuring it, and are
+fixed in the same change:
+
+* **Which colon cuts.** bash does not `strchr` for the `:`; `skiparith`
+  (subst.c) skips one `:` for every `?` seen, and counts nothing at all inside
+  a `( … )`. `${z:1?2:3}` is `cdef` (the whole text is the offset) while
+  `${z:1?2:3:1}` is `c`; `${z:1?1?2:3:4}` is `cdef`, two `?` swallowing both
+  colons; `${z:(1?2:3):1}` is `c`. osh split on the first `:` unconditionally
+  and so reported `` `:' expected for conditional expression `` for all of
+  these. Now `slice_split_colon` implements the rule.
+* **An empty bounds text.** `${z:}` is `${z:}: bad substitution` in bash, and
+  uniformly so — `${@:}`, `${*:}`, `${a[@]:}`, `${a[1]:}` and an unset
+  parameter all report it. osh printed the whole value. It is the *text* that
+  must be non-empty, not what it expands to: `${z:$e}` with `e=` is `abcdef`.
+  `parse_slice_bounds` now returns `None` for an empty text and each of its
+  three call sites turns that into `WordPart::BadSubst`.
+
+Verified by the corpus case
+`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`
+(75 rows, IDENTICAL), the lib suite and a full sweep.
+
+**Unblocked, and then done (same day):** the arithmetic-fragment row named
+under "Blocks" above was the only thing left of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN,
+and it is now closed there. It was a separate row from this entry's — after
+this fix `${z:1<(2)}` evaluated correctly but `x='A${z:0:<(fi)}B'; echo
+"${x@P}"` still printed `AB`, where bash reads the body for its extent and
+reports `bad substitution`. It turned out **not** to be the `Verbatim::Arith`
+row this entry's title suggested, because the *subscript* shares that mode and
+must not get it: bash's `${ … }` scan steps over a subscript whole
+(`skip_matched_pair`), so `${z[<(fi)]}` never offers its body to the scan and
+is an `operand expected` in bash — which osh already matched. Only a bound is
+walked in the open, so `Frag::Arith` split in two and the new `Frag::Bound`
+took the row. See that entry for the change.
+
+### [B] TD-OILS-AN-UNBALANCED-PAREN-IN-A-SLICES-BOUNDS-IS-AN-ARITHMETIC-ERROR-NOT-A-BAD-SUBSTITUTION
+
+**Status:** ✅ FIXED 2026-08-14. Found 2026-08-14, measured against bash 5.2.37.
+The fix turned up a second rule of the same walk, fixed with it — see "The fix"
+at the end.
+
+`skiparith` (subst.c) balances parens while looking for the colon that cuts
+`${x:off:len}` in two, and an unbalanced `(` makes it run off the end. bash
+then reports that as a **bad substitution** naming the whole bounds text, before
+either bound is evaluated. osh implements the balancing (that is what makes
+`${z:(1?2:3):1}` cut in the right place) but not the complaint, so the text
+reaches the evaluator and produces an arithmetic diagnostic instead:
+
+| written | bash | osh |
+|---|---|---|
+| `${z:(1}` | ``bad substitution: no closing `)' in (1`` | ``z: (1: missing `)' (error token is "1")`` |
+| `${z:(1:2}` | ``… no closing `)' in (1:2`` | ``z: (1: missing `)'`` — and it cut at the colon |
+| `${z:((1:2}` | ``… no closing `)' in ((1:2`` | likewise |
+| `${z:1+(2}` | ``… no closing `)' in 1+(2`` | ``z: 1+(2: missing `)'`` |
+| `${a[@]:(1}` | ``… no closing `)' in (1`` | arithmetic error |
+| `${@:(1}` | ``… no closing `)' in (1`` | arithmetic error |
+
+Both are rc=1, so only the message differs — but the message differs in class,
+not just wording: bash's is the DISCARD-class `bad substitution` family, raised
+by the cut, and it names the bounds text rather than the parameter.
+
+Three things scope it precisely, all measured:
+
+* It is the **whole bounds text** that is checked, once, before the cut — the
+  message quotes `(1:2` entire, the colon never having split it.
+* It is only the text the *cut* walks. Once a colon has been found with the
+  depth back at zero, an unbalanced `(` in the length is an ordinary arithmetic
+  error: `${z:0:(1}` is ``z: (1: missing `)'`` in bash too, and osh matches.
+* A stray `)` at depth zero is not an error at all: `${z:)1}` is
+  `)1: syntax error: operand expected` in both.
+
+**Where:** `userspace/oils/src/parser.rs`, `slice_split_colon` — which already
+tracks the depth and would only need to report a non-zero one at the end — and
+its three call sites in `parse_braced_param_in`, which currently turn the
+`None` that means "empty bounds" into `WordPart::BadSubst(raw)`.
+
+**Proper fix:** `slice_split_colon` reports the unbalanced case distinctly from
+the empty one, and the call sites raise ``bad substitution: no closing `)' in
+<bounds text>``. That message shape already exists in
+`userspace/oils/src/interp.rs` (`b"bad substitution: no closing `)' in "`,
+~35600) but it names the whole *word*, whereas this one names the bounds text
+only, so it needs its own carrier on the word part rather than a reuse of
+`BadSubst`, whose printer names `${…}` entire.
+
+**Blocked:** one row of the corpus case
+`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`,
+which said so in its header and left the shape out. Now measured there.
+
+**How it was found:** measuring bash's slice bounds exhaustively while fixing
+TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND. It
+was the last of four divergences that measurement turned up, and the only one
+not fixed there.
+
+**The fix (2026-08-14).** Two things, because measuring the first turned up the
+second.
+
+**(1) The complaint.** `slice_split_colon` now returns the depth it ended at
+beside the split index, `parse_slice_bounds` carries a non-zero one as
+`SliceBounds::unclosed`, and both `WordPart::ParamSubstr` and
+`WordPart::ArraySlice` gained an `unclosed: Option<Str>` field for it. It is a
+field on the operator rather than a `WordPart::BadSubst`, because *where* it is
+raised is the whole of what distinguishes the two: `${z:}` is a bad
+substitution even for an unset parameter, while `${u:(1}` with `u` unset is
+silently empty. So the check sits exactly where the offset would have been
+evaluated — `Shell::slice_bounds_unclosed`, called from `scalar_slice`,
+`assoc_slice` and the indexed path of `slice_elements_resolved`, each after its
+own "nothing to measure" exit. Every ordering measured lines up: an empty
+array, an empty `$@`, `set -u`, and a set-but-empty scalar (which *does* report,
+having one position).
+
+`no_longjmp_on_fatal_error` — `Shell::prompt_expanding` — **suppresses** the
+complaint rather than rewording it, so under `${x@P}` or `PS4` the characters go
+on to the evaluator and the arithmetic error is what comes out. That is the
+`if (no_longjmp_on_fatal_error == 0)` guard the report sits behind, and it is
+why osh's *old* answer was right in those two contexts and only those two.
+
+**(2) The walk is quote-aware.** Measuring (1) showed the walk steps over a
+`' … '` run, a `" … "` run and a backslash-escape whole — all three counters
+included, not just the paren one. `${z:"1:2"}` does not split (the evaluator
+meets `1:2` as one bound and says so), `${z:1"?"2:3}` does split (the quoted `?`
+buys no colon), and `${z:0"("}`, `${z:0'('}`, `${z:0\(}` and `${z:(1"("2)}` are
+all balanced. osh's walk saw none of that, so before this fix it both cut in the
+wrong place and complained where bash did not. Note this is about the *walk*
+only: the quote characters stay in the bound, and the arithmetic reading each
+half is given removes them (or does not — a `' … '` keeps its second reading).
+
+The walk is over the text **as written**, which the same measurement pins down
+from the other side: `p="("; ${z:$p 1}` and `${z:$(echo "(1")}` are ordinary
+arithmetic errors, each being balanced as written however unbalanced its value.
+
+**Verified:** 37 further rows in
+`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`, the
+lib suite and a full sweep.
+
+### [B] TD-OILS-THE-WAIT-NO-OPERANDS-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP. The job holding `$!` is not spared, once per many sweeps — 2026-08-14 — OPEN
+
+**Where:** `userspace/oils/tests/corpus/wait-with-no-operands-and-a-job-that-just-ended.sh`,
+the group "only the last one backgrounded is spared", against
+`Shell::builtin_wait`'s operand-less arm and `Shell::drain_jobs`
+(`userspace/oils/src/interp.rs`).
+
+**What — and this time the whole row was captured.** One full
+`scripts/osh-bash-diff.py` sweep came back `654 matched, 0 waived, 1 failed`
+with **one line** of the case different, everything else in it identical:
+
+```sh
+( exit 3 ) & ( exit 4 ) & sleep 0.4; wait; echo "  noargs=$?"
+VAR=stale; wait -n -p VAR; echo "  n=$? $(pvar)"
+```
+
+| | bash 5.2.37 | osh (this sweep) |
+|---|---|---|
+| `noargs=` | 0 | 0 (agreed) |
+| `n=` | `4 a pid` | **`127 unset`** |
+
+So osh had nothing left to report where bash still had the last-backgrounded
+job. Re-run on its own immediately after: `1 matched, 0 waived, 0 failed`.
+Saved report:
+`target/dvscratch/corpus-failures/20260814-145703/wait-with-no-operands-and-a-job-that-just-ended.txt`.
+
+**What a 127 requires, read out of the code rather than guessed.** The spare is
+`builtin_wait`'s operand-less arm: after `drain_jobs`, every job with a status
+is marked `notified` *except* the one whose pid is `last_bg_pid`, and
+`cleanup_dead_jobs` then drops exactly the notified ones. But `drain_jobs`
+itself marks `notified` for every job it *waited for*, and it waits for any job
+not already in its `known` snapshot — `known` being the jobs whose `exit_seen`
+was set **before** the wait was reached. So the spare survives only when the
+`$!` job's `exit_seen` was already set, which the unit-boundary
+`cleanup_dead_jobs` does for a job that is both finished and older than
+`JOB_EXIT_NOTICE_GRACE` (20 ms). A 127 means that did not happen for the `$!`
+job specifically: had it been the *other* job that was late, `drain_jobs` would
+have waited that one and the spare would still stand.
+
+**The margin is not thin, which is what makes this odd.** Both shells were
+measured at four margins (`build/pgS.sh`), and they agree exactly:
+
+| `sleep` before the `wait` | bash | osh |
+|---|---|---|
+| none | `127 unset` | `127 unset` |
+| 0.01 | `4 a pid` | `4 a pid` |
+| 0.05 | `4 a pid` | `4 a pid` |
+| 0.4 | `4 a pid` | `4 a pid` |
+
+The flip is between 0 and 0.01, so the case's `sleep 0.4` is a ~40x margin — not
+the ~1x margin that
+TD-OILS-THE-COMPGEN-JOB-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP turned out to
+be. **Do not assume the same diagnosis and just widen the sleep.**
+
+**Loads that do NOT reproduce it — do not spend the time again.** The job is
+thread-backed, not a process (`( exit 4 ) & echo $!` prints the synthetic
+`900000`, where `sleep 0.4 &` prints a real pid), so both of the obvious
+starvation stories were tried and neither bit:
+
+- 20 serial runs of the group alone: clean.
+- 119 runs of the group at 8-way concurrency: clean.
+- 64 runs of the *whole case* at 8-way concurrency: clean.
+- 36 runs under a process-spawn storm (6 loops spawning `osh -c :` and
+  `bash -c :` back to back, this host's documented ~200-290 ms spike source):
+  clean.
+- 30 runs under CPU saturation (24 busy-loop processes on 12 cores): clean.
+
+Probes are `build/repro-wait.sh` (the group), `build/repro-wait2.sh` (the whole
+case), `build/spawnstorm.sh`, `build/cpuburn.py` — all in the gitignored
+`build/`, so re-create them from this entry if they are gone.
+
+**Proper fix.** Unknown, and deliberately not guessed at. The next sighting
+should establish which of the two conditions failed — whether the `$!` job's
+body was genuinely unfinished at the unit-boundary poll, or whether the poll did
+not run — by instrumenting `poll_jobs` to record, per job, `is_finished` and
+`born_at.elapsed()` at each call, and dumping that when `wait -n` answers 127.
+That distinguishes "the thread really was 400 ms late" from a bookkeeping fault,
+and only the first is a case-margin problem.
+
+**Impact.** An intermittently red sweep, which is the gate on every commit —
+and the sweep takes ~19 minutes, so a re-run to disambiguate is expensive.
+
+**Sighting 2026-08-14, in the *unit* suite, and fixed there.**
+`interp::tests::wait_n_ignores_a_job_whose_status_was_already_reported` failed
+once under `cargo test -p oils --lib` (`wait -n` answered 127 where 3 was due,
+i.e. the operand-less `wait` had *not* spared the job) and passed when re-run
+alone. Same shape as this entry, but with a cause the test owned: it backgrounded
+`( exit 3 ) &` and then slept a constant `0.2` to make the job finish first, and
+no constant is long enough to promise that on a loaded machine. Fixed properly
+rather than by lengthening the sleep — a new `settle_jobs` test helper (the
+whole-table form of the existing `settle_job`) polls `poll_jobs` until every job
+has a status, after the same `JOB_EXIT_NOTICE_GRACE`. That removes this test from
+the flaky family; the *corpus* case above is untouched and stays open.
+
+---
+
+### TD-OILS-AN-ARITHMETIC-SCAN-REPORTS-NONE-OF-THE-READS-IT-MAKES. `$(( … ))` swallows the diagnostics its nested `$( … )` should raise, and loses the text after a read that stopped early — 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::arith_extent_expand` /
+`arith_extent_frame` and the `$((` route out of `Shell::arith_extent_route`.
+
+**What is wrong.** `param_expand` reaches a `$((` through
+`extract_command_subst` with `SX_COMMAND` (subst.c:10575), so the paren count
+*does* recurse into a nested `$( … )` — a real parse, reported where it is met.
+osh runs the count but never reports, and in one shape stops in the wrong place.
+Measured against bash 5.2.37 (`build/pgX.sh` rows a/c, `build/pgY.sh` d4/d5):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash | osh |
+|---|---|---|
+| `A$((1+$(echo hi⏎q` | reports EOF, `[A]` | reports EOF, `[Ahi]` |
+| `A$((1+$(for⏎q))B` | reports **twice** (`for`, then `` `(1+$(for' ``), `[AB]` | silent, `[A]` |
+| `A$((1+$(for⏎xB` | reports `for`, `[A]` | reports `for`, **runs `fo`**, `[A⏎xB]` |
+
+Rows 1 and 3 report because the read runs from `Shell::arith_nested_read`,
+which does call `Shell::comsub_reparse_read`; what those two get wrong is the
+*value*, both by performing the abandoned extent the way the string level does
+and the brace level does not. Row 2 is the substantive one: the read stopped
+part way, so bash's count resumed after the `for`'s line and found the `))`,
+leaving `B` to the word. osh consumes to the end and loses it — and so never
+reaches the read at all, which is why it is the one row that is also silent.
+
+**What the proper fix looks like.** The `$((` count needs the same two-outcome
+treatment `${ … }` got on 2026-08-14: `Shell::comsub_reparse_read` for the
+report (which also decides jump vs. no-jump), and
+`Shell::failed_extent_split`'s resume point for where the count carries on.
+`Lexer::unread_comsub_stop` already puts the lexer in the right place; what is
+missing is the interp half — an `arith`-side counterpart of
+`Shell::unclosed_brace_reads`.
+
+**Impact.** Diagnostics only for two of the three rows; a wrong value for the
+third. Needs `@P`/`PS4`/here-doc text to be reachable at all.
+
+---
+
+### TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN. A `<(`/`>(` in it is never read, though the brace scan names it — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::extent_read_of_rest` and
+`Shell::unclosed_brace_reads`, both of which lex their text with
+`crate::parser::dquote_word_from_source` → `crate::lexer::lex_dquote_body`.
+
+**What is wrong.** `extract_dollar_brace_string` names `$(`, `<(` and `>(`
+together and hands each to the same `extract_command_subst` (subst.c:1881-1950),
+**whatever the quoting** — that is why `x='A${z#<(fi)}B'` reports the parse
+twice. A double-quoted *run*, by contrast, has no process substitution in it at
+all: at string level bash and osh agree that `v='A<(echo hi⏎q'` is literal
+text. So `lex_dquote_body` is the right lexer for a string-level remainder and
+the wrong one for text the **brace scan** is walking.
+
+Measured (`build/pgY.sh` d6), `A${z:-P1<(echo hi⏎S1}B` under `${…@P}`:
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| reports | `` unexpected EOF while looking for matching `)' `` **then** `…: bad substitution` | the `bad substitution` only |
+| value | undecoded word | same |
+
+The `$(` spelling of the same row (`build/pgW.sh` row 5) is byte-exact, so this
+is precisely the two openers `lex_dquote_body` cannot see. The dollar spelling
+of d7 — where the read stops early and the brace closes — is also exact,
+because that path re-lexes through `parse_braced_param_in` in
+`Quoting::Unread`, which *does* read them.
+
+**It is not only the two openers — the whole quote model is wrong** (measured
+2026-08-14, `build/pq1.sh` and `build/pq2.sh`). `extract_dollar_brace_string`
+**skips** a quoted run rather than walking it, and the two quotes skip
+differently:
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | what it shows |
+|---|---|---|
+| `A${z:-P1<(echo hi⏎S1}B` | reports EOF, `bad substitution` | the bare `<(` row **is** read |
+| `A${z:-P1"<(echo hi⏎S1"}B` | silent, `[AZZB]` | a `<(` inside `" … "` is **not** |
+| `A${z:-P1"$(echo hi⏎S1"}B` | reports EOF, `bad substitution` | a `$(` inside `" … "` **is** |
+| `A${z:-P1'$(echo hi⏎S1'}B` | silent, `[AZZB]` | a `$(` inside `' … '` is **not** |
+| `A${z:-P1'<(echo hi⏎S1'}B` | silent, `[AZZB]` | …nor a `<(` |
+| `A${z:-P1"<(echo hi⏎S1}B` | `bad substitution`, **no** read report | a lone `"` swallows to end of string |
+| `A${z:-P1'<(echo hi⏎S1}B` | `bad substitution`, **no** read report | …and so does a lone `'` |
+| `A${z:-"x"<(echo hi⏎S1}B` | reports EOF, `bad substitution` | a *closed* run does not suppress what follows |
+| `A${z:-P1\<(echo hi⏎S1}B` | silent, `[AZZB]` | a backslash escapes the opener |
+
+So the brace scan delegates a `" … "` run to a double-quote skipper that has
+the `$(` row and **not** the `<(`/`>(` row — bash's ordinary rule that there is
+no process substitution inside double quotes — and skips a `' … '` run whole,
+offering its interior to nothing.
+
+`lex_dquote_body` models neither — it treats both quote characters as ordinary
+literals, which is correct for `Q_DOUBLE_QUOTES`, where the string *is* already
+the quoted run. Measured (`build/pq1.sh`, `build/pq2.sh`, `build/pq3.sh`), osh
+nevertheless agrees with bash on every *quoted* row above, by a different
+mechanism in each case: where the run closes, the brace closes too and the word
+goes through `parse_braced_param_in`, which does model quotes; where the run does
+not close, `lex_dquote_body`'s missing `<(` row happens to suppress the same read
+bash's skip suppresses. Two rows were left where the mechanisms did not coincide;
+the first of them is now fixed:
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh |
+|---|---|---|
+| `A${z:-P1"$(echo hi⏎S1}B` | reports EOF, `bad substitution`, undecoded | ✅ same since 2026-08-14 |
+| `A${z:-'p$(echo hi'q$(fi⏎S1}B` | reports `fi`, `[AZZB]` | silent, `[AZZB]` |
+
+Row 1 was the serious one — a **spurious command execution**: osh reported the
+EOF, then ran `S1}` and produced `[Ahi]`. A lone `"` opens a run that swallows to
+end of string, leaving the brace nothing to close on, so bash condemns the word;
+osh instead let the failed read out of `read_opaque_span`'s `"`-run `$(` sub-arm,
+where [`Lexer::unclosed_seg`] degraded the whole word into a *string-level*
+`$( … )` and then performed it. Fixed 2026-08-14 by giving that sub-arm
+(`userspace/oils/src/lexer.rs`, `read_opaque_span`'s `'"'` arm) the same
+`Err(e) if self.unread_comsub(&e)` recovery the two `read_dollar_brace_body`
+arms already had: re-emit the `$(` into the raw text, take back what the reader
+consumed with `Lexer::unread_comsub_stop`, and `continue` the quoted-run loop.
+The read is still reported — it happened — and the run then swallows the rest,
+so the brace never closes and the word is condemned, exactly as in bash. The bug
+was **pre-existing**, not a regression: measured identical on the commit before
+the earlier 2026-08-14 brace-scan fix.
+
+Row 2 is a lost diagnostic only; the same row before the brace-scan fix had the
+wrong value *and* ran `f`, so it is much improved.
+
+**A second mechanism loses the same report where the brace *does* close**
+(measured 2026-08-14, `build/pr1.sh` r3). `A${z:-'i"t'<(fi⏎S1}B` reports `fi`
+in bash and expands to `[AZZB]`; osh now gets the value right (it was the
+undecoded word until the unmated-`"` fix of the same day) but still says
+nothing. That path never goes near `extent_read_of_rest`: the brace closed, so
+the reads are replayed off the *parsed operand*, and the operand lexer is
+`read_word_verbatim` in [`Verbatim::Dquote`] — which has a perfectly good `<(`
+row, but never reaches it, because the `"` inside the `' … '` run opens a
+quoted run that swallows `t'<(fi⏎S1` whole.
+
+Both scans are right about their own text and wrong about each other's, which
+is the shape of the whole issue: bash runs **two** passes over these bytes with
+**different quote rules** — `extract_dollar_brace_string`, where a `'` run is
+skipped and a `"` is a quote, and `expand_word_internal`, where a `'` is an
+ordinary character and a `"` is a quote. osh derives the reads from the
+expansion's lex in one path and from a string-level lex in the other, and
+neither is the scan's.
+
+**What the proper fix looks like.** A real lex entry for "text a brace scan is
+walking" — not `lex_dquote_body` with a row bolted on, and not the operand lex
+either. It needs, at its own level: the `<(`/`>(` openers beside `$(`; a `'`
+that consumes to the next `'` or to end of string, offering nothing inside it;
+and a `"` that consumes to the next `"` or to end of string, offering only `$(`
+(and `` ` ``) inside it. A backslash hides the byte after it. Then
+`extent_read_of_rest`, `unclosed_brace_reads` **and `brace_extent_scan`** all
+take their reads from that one pass, `lex_dquote_body` keeps its current
+string-level callers unchanged — the p1/p2 probe above confirms those answers
+are right as they stand — and the operand lex stops being asked a question it
+was never answering.
+
+These rows are the acceptance test the table above does not already cover — the
+ones that pin *which* quote wins when the two are interleaved (measured
+2026-08-14 against bash 5.2.37, `build/pr1.sh`):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh today |
+|---|---|---|
+| `A${z:-"it's"$(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
+| `A${z:-"it's"<(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
+| `A${z:-'i"t'<(fi⏎S1}B` | reports `fi`, `[AZZB]` | ✅ same since 2026-08-14 |
+| `A${z:-P1\'<(echo hi⏎S1}B` | reports EOF, `bad substitution` | ✅ same since 2026-08-14 |
+| `A${z:->(echo hi⏎S1}B` | reports EOF, `bad substitution` | ✅ same since 2026-08-14 |
+| `A${z:-${y:-<(fi⏎S1}B` | reports `fi`, `bad substitution` | same |
+
+So a `'` inside a closed `" … "` run opens nothing (rows 1-2) and a `"` inside a
+closed `' … '` run opens nothing (row 3) — each quote is invisible inside the
+other's run — and a backslash spends itself on the quote it precedes, leaving
+the `<(` after it live (row 4).
+
+An attempt that added only the `<(`/`>(` row to `lex_dquote_body` was written
+and reverted on 2026-08-14, before being compiled, because these measurements
+showed it would have regressed the three suppressed rows above (they are silent
+in bash today and in osh today, and would have started reporting).
+
+**Fixed 2026-08-14**, along the lines above. Three pieces:
+
+- `Lexer::brace_scan` (`userspace/oils/src/lexer.rs`) — a flag saying "this
+  scan stands in for `extract_dollar_brace_string`, not for the expansion after
+  it". With it set, `read_double_quote_until` grows the scan's other two
+  openers: a `<(`/`>(` becomes a `SubBody::Unread` segment carrying its own
+  `SubDelim`, which the expansion prints straight back
+  (`SubDelim::is_performed` is false for both), so the word's **value** is
+  untouched and only the extent walk gains a construct to read. The new entry
+  `lexer::lex_brace_scan_body` → `parser::brace_scan_word_from_source` is what
+  `Shell::extent_read_of_rest` now lexes its remainder with, which is the
+  unclosed-brace half (rows 4-5 of the interleaving table above).
+- The closed-brace half (row 3) is the same flag turned on from
+  `read_word_verbatim`'s `"` arm, and **only** when that run opened inside a
+  `' … '` one — `in_run && self.here_text`. That is exactly the case where the
+  scan never saw a quote at all, because it stepped over the single quotes
+  whole. Outside a run the `"` is the scan's own, and there `skip_double_quoted`
+  reads the `$(` spelling alone, which is what the reader already did.
+- The quote state itself moved out of the lexer and into the walk, as
+  `ScanQuote` (`interp.rs`): two independent flags, because
+  `skip_single_quoted` hunts for a `'` and `skip_double_quoted` for a `"` and
+  neither knows the other character — so each quote is an ordinary byte inside
+  the other's run. `Shell::brace_scanned_subs_slice` tracks both over the
+  literal runs (a `\` still hides the byte after it) and suppresses the two
+  process-substitution spellings inside a `" … "` while letting `$(` through;
+  `brace_scanned_subs_in` no longer resets the state on entering a
+  `WordPart::DoubleQuoted` whose `"` the scan never saw.
+
+Corpus case:
+`userspace/oils/tests/corpus/the-brace-scan-reads-a-process-substitution-and-the-expansion-after-it-does-not.sh`
+— 14 shapes plus a here-document body, byte-identical to bash 5.2.37 including
+stderr.
+
+**Impact while it stood.** Diagnostics only — the values already agreed. A
+`<(`/`>(` at brace level lost its read report. The worst shape — a lone `"`
+before a `$( … )` making osh run a command bash does not, and yield the wrong
+value — was fixed earlier the same day (see row 1 of the two-row table above).
+Reachable only through `@P`/`PS4`/here-doc text holding a malformed `${ … }`.
+
+**Not fixed by this, and tracked separately:** row 2 of the two-row table,
+`A${z:-'p$(echo hi'q$(fi⏎S1}B`. That one is not about the openers but about
+where a construct *ends*; see
+`TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN`.
+
+---
+
+### TD-OILS-AN-UNMATED-DOUBLE-QUOTE-GROWS-A-MATE-WHEN-THE-WORD-IS-PRINTED-BACK — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `userspace/oils/src/unparse.rs` — `part_src`'s
+`WordPart::DoubleQuoted` arm, which writes a `"` on both ends unconditionally;
+the run that has no closing `"` is built by `userspace/oils/src/lexer.rs`,
+`Lexer::read_word_verbatim`'s `'"'` arm under `ParseOpts::tolerant`.
+
+**Repro** (bash 5.2.37, `build/pr11.sh` t1):
+
+```sh
+z=ZZ
+v='A${z:-'"'"'i"t'"'"'$(fi)}B'; printf '[%s]\n' "${v@P}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| remainder quoted by the read | `` `fi)}B' `` | `` `fi)"}B' `` |
+| word named by `bad substitution` | `A${z:-'i"t'$(fi)}B` | `A${z:-'i"t'$(fi)"}B` |
+| value | `[A${z:-'i"t'$(fi)}B]` | same |
+
+**What is wrong.** In text no parser read, a `"` with no mate is not an error:
+`string_extract_double_quoted` is handed a *finished word* and its walk ends at
+the end of the string as readily as at a quote (that is
+`ParseOpts::tolerant`, and the corpus case
+`a-double-quote-with-no-mate-in-an-operand-runs-to-the-end-of-the-operand.sh`
+pins the expansion of it). The resulting `WordPart::DoubleQuoted` therefore
+covers a run whose closing quote **was never in the source** — but the part
+does not record that, and `part_src` prints the pair back. Every consumer of
+`crate::unparse::word_src` then sees one byte that was not in the word.
+
+The value is unaffected, because quote removal drops the `"` either way. What is
+affected is everything derived from the *text*: `Shell::bad_sub_word` (the word
+`bad substitution` names), the tail `extract_command_subst` quotes back in its
+own diagnostic, and — in principle, though no divergence has been measured for
+it yet — `crate::wordscan::word_fault`, which re-scans `word_src` for the
+unclosed `${`/`` ` `` verdicts and could be pushed either way by a stray quote.
+
+The single-quote analogue exists in the same shape:
+`Lexer::read_single_quote` has a `None if self.opts.tolerant => return Ok(s)`
+arm, and `part_src`'s `WordPart::SingleQuoted` likewise writes both `'`s. No
+divergence has been measured for it, because the paths that produce an unmated
+`'` do not currently reach a diagnostic that prints the word back — but the
+defect is the same one and a fix should cover both.
+
+**What the proper fix looks like.** Record the missing mate on the part rather
+than guessing at print time: `Seg::Dq(Vec<Seg>)` → `Seg::Dq(Vec<Seg>, bool)`
+and `WordPart::DoubleQuoted(Vec<WordPart>)` → a `closed` field, exactly as
+`Seg::Sq(Str, bool)` already carries its own flag, with `part_src` writing the
+trailing quote only when it was there. About 27 sites mention `DoubleQuoted`
+across `ast.rs`, `parser.rs`, `interp.rs` and `unparse.rs`; most are matches
+that need only a `..`. The single-quote half is the same edit on
+`WordPart::SingleQuoted`.
+
+Not worth reaching for a cheaper trick: an unmated run always extends to the
+end of its text, so "omit the quote when the part is last" would be *nearly*
+right, and nearly-right quoting is how a word stops re-parsing.
+
+**Fixed 2026-08-14**, along the lines above. `read_double_quote_until` now
+reports whether a `"` really ended the run — it has exactly two `Ok` returns,
+one per case, so the flag falls straight out of the existing control flow — and
+that rides on `Seg::Dq(Vec<Seg>, bool)` into
+`WordPart::DoubleQuoted { parts, closed }`. `part_src` writes the trailing quote
+only when `closed`. The single-quote half is the same edit:
+`read_single_quote`'s tolerant arm answers `false`, `Seg::Sq` became a struct
+variant `{ text, escaped, closed }` rather than grow a second unnamed `bool`,
+and an unmated run prints as `'` + text instead of going through
+`sh_single_quote`, whose whole job is to supply the mate.
+
+Two returns needed thought rather than transcription: the pair inside
+`read_double_quote_until` that end the run on an *unclosed construct* absorbed
+into a `Seg::Unclosed` answer `false`, since the run ended on the construct and
+not on a quote; and the backslash spelling of `Seg::Sq` is unconditionally
+`closed: true`, having no quotes to match.
+
+Corpus case:
+`userspace/oils/tests/corpus/a-double-quote-with-no-mate-does-not-grow-one-when-the-word-is-printed-back.sh`
+— 8 shapes including `PS4` and a here-document body, byte-identical to bash
+5.2.37 including stderr.
+
+**Impact while it stood.** Diagnostics only — one spurious `"` in the two lines
+bash prints for a malformed `${ … }` whose operand holds a `"` opened inside a
+`' … '` run. Reachable only through `@P`/`PS4`/here-doc text.
+
+---
+
+### TD-OILS-AN-UNMATED-SQUOTE-IN-A-SUBSCRIPT-LOSES-ITS-QUOTE-BYTES-FROM-THE-WORD-PRINTED-BACK — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `attach_subscript_reads` (`userspace/oils/src/parser.rs`), which gives
+each top-level `' … '` of an arithmetic fragment its interior parse.
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+declare -A m=([k]=V)
+echo "[${arr['x${m:-']}]"
+```
+
+bash names `` 'x${m:-' `` — the whole fragment, quotes included. osh named
+`x${m:-` — the interior of the run alone.
+
+**Cause, which was not the one first written here.** The first note guessed the
+text came from `crate::unparse::word_src` by way of `crate::wordscan::word_fault`.
+It does not: `word_fault` returns `None` for these words, and the word source osh
+builds is byte-correct. The diagnostic comes from `Shell::expand_unclosed` on an
+`Unclosed::BadSubst` whose `text` the *interior's own lexer* filled in with
+`Lexer::whole_text` — the interior being a string of osh's making. bash has no
+such string: an arithmetic fragment is expanded with `Q_DOUBLE_QUOTES` set, which
+switches the single quote off, so `expand_word_internal` walks straight through
+the pair and the string it was handed is the fragment. Both "no closing"
+reporters echo that string (`report_error (…, string)`, subst.c:1498 for
+`$[ … ]`, subst.c:1972 for `${ … }`).
+
+That also explains the shape the note found puzzling — a name that begins one
+byte late and ends two bytes early is exactly the interior of a `' … '` run.
+There were not two faults there, but there is a second one beside it; see
+`TD-OILS-A-BRACE-WHOSE-NAME-SCAN-RUNS-OFF-A-FRAGMENT-TAKES-THE-OTHER-DIAGNOSTIC`.
+
+**Fix.** `attach_subscript_reads` already re-measures the fragment after parsing
+an interior — that is what `crate::unparse::attach_comsub_tails` does for a
+`$( … )`'s echoed remainder. It now also re-*names*: a new
+`name_unclosed_after_the_fragment` walks the interiors it just attached and gives
+every top-level `WordPart::Unclosed(Unclosed::BadSubst { text, .. })` the
+fragment's source for its `text`. Only the run's own level is renamed; a `" … "`
+inside the interior is carved out by `string_extract_double_quoted` as its own
+string and keeps naming itself, as one written a character to the left of the `'`
+would. `src` is left alone — it is the construct's spelling for a re-print, not a
+diagnostic's `%s`.
+
+Corpus:
+`a-construct-left-open-in-a-quoted-subscript-names-the-fragment-around-it.sh`
+(seven rows: a `${ … }` body scan running off, the same with text after the run,
+a `$[ … ]`, both substring bounds, and a run that closes nothing early).
+
+---
+
+### TD-OILS-A-BRACE-WHOSE-NAME-SCAN-RUNS-OFF-A-FRAGMENT-TAKES-THE-OTHER-DIAGNOSTIC — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `Shell::expand_unclosed` (`userspace/oils/src/interp.rs`) and the
+`Unclosed::BadSubst` the lexer raises for it (`userspace/oils/src/lexer.rs`).
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+declare -A m=([k]=V)
+echo "[${arr['x${m']}]"
+```
+
+| | |
+|---|---|
+| bash | `` 'x${m': bad substitution `` |
+| osh | ``bad substitution: no closing `}' in 'x${m'`` |
+
+The same string is named — that much was fixed the same day — but it is the
+wrong one of bash's two messages.
+
+**Why bash has two.** A `${ … }` in a string is read in two steps, and only the
+second one is `extract_dollar_brace_string`. First `parameter_brace_expand`
+extracts the *name* with `string_extract (string, &t_index, "#%^,~:-=?+/@}",
+SX_VARNAME)` (subst.c:9550), which stops at one of those operator characters or
+at the end of the string — `SX_VARNAME` stepping over a whole `[ … ]` subscript
+on the way. If it stopped at the end, `c` is `NUL` and the `switch (c)` falls to
+`default: case '\0': bad_substitution:` (subst.c:10018-10024), which is
+`report_error (_("%s: bad substitution"), string)` and no longjmp. Only if it
+stopped at an *operator* does the body go to `extract_dollar_brace_string`, whose
+own running-out is the "no closing" one that longjmps (subst.c:1972).
+
+So the two messages divide on whether the unclosed brace got as far as an
+operator, and the division is visible:
+
+| fragment | bash |
+|---|---|
+| `'x${m'` | `` 'x${m': bad substitution `` |
+| `'x${#m'` | `` 'x${#m': bad substitution `` |
+| `'x${m[0]'` | `` 'x${m[0]': bad substitution `` |
+| `'x${m['` | `` 'x${m[': bad substitution `` |
+| `'x${m:-'` | ``no closing `}' in 'x${m:-'`` |
+
+**Two things the entry got wrong, found while fixing it.**
+
+*It is not only a fragment.* A here-document body takes the same two messages,
+and osh had the same one answer for both — `cat <<E`/`a${m b`/`E` is
+`a${m b⏎: bad substitution` in bash. The `${x@P}` case really does collapse
+(`no_longjmp_on_fatal_error` makes `extract_dollar_brace_string` return `NULL`
+quietly and its caller fall to the same label), which is why the divergence
+looked narrower than it was.
+
+*The name scan is not the whole story.* Two checks between it and
+`extract_dollar_brace_string` also reach `bad_substitution:` with an operator
+already found — `valid_brace_expansion_word` on the name (subst.c:9803) and the
+length branch's `string[sindex-1] != RBRACE` (subst.c:9687). So `'x${m[a:b'`
+(the `:` *is* reached, but `m[a` is no name) and `'x${#q:-'` are both plain bad
+substitutions. A third check, `parameter_brace_expand_indir` (subst.c:9807),
+runs there too and reports in the missing brace's place: `a${!nosuch:-b` is
+`nosuch: invalid indirect expansion`, and a pointer holding `not a name` is
+`not a name: invalid variable name`.
+
+**The fix.** None of this needed new state on `Unclosed::BadSubst`. osh already
+had the whole decision procedure — `Shell::unterminated_brace_kind`, written for
+the arithmetic-string scanner, which answers `BadSub` / `NoClosing` /
+`Indir(name)` from the body text alone and has `Shell::arith_indir_resolves`
+beside it for the third. `Shell::expand_unclosed` now asks it, for `close ==
+'}'`, before anything else it does, and a new `Shell::unclosed_bad_substitution`
+reports the `BadSub` answer naming `text` (bash's `string`) with the
+`ErrexitOrPosix` class the `bad_substitution:` label carries.
+
+Asking it *first* matters, and is bash's own order: a `$( … )` written inside
+the name is walked over by `string_extract` without being parsed, so
+`a${m$(fi) b` names the bad substitution and never mentions the `fi` — where osh
+used to run `Shell::unclosed_brace_reads` first and report the `fi`.
+
+**Fixed by:** `Shell::expand_unclosed` + `Shell::unclosed_bad_substitution`
+(`userspace/oils/src/interp.rs`). Corpus:
+`a-brace-whose-name-scan-runs-off-the-text-is-a-bad-substitution-not-a-missing-brace.sh`
+— sixteen shapes covering the fragment, the here-document, the command
+substitution in each half, all three indirection outcomes and the prompt
+collapse, byte-identical to bash 5.2.37 including stderr.
+
+---
+
+### TD-OILS-AN-UNCLOSED-ARITH-SUBSTITUTION-IN-A-QUOTED-SUBSCRIPT-IS-NOT-CAUGHT-BEFORE-EXPANSION — 2026-08-14
+
+**Where:** `crate::wordscan` (`userspace/oils/src/wordscan.rs`), the word-extent
+pass `Shell::begin_word` runs before a word is expanded.
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+echo "$(touch RAN)[${arr['x$(( 1+ ']}]"
+```
+
+bash prints ``bad substitution: no closing `)' in "$(touch RAN)[${arr['x$(( 1+ ']}]"``
+— the **whole word** — and `RAN` is never created. osh prints
+``bad substitution: no closing `)' in 'x$(( 1+ '`` — the fragment — and the
+`touch` runs.
+
+The side effect is the real defect; the name follows from it. bash reaches this
+one on the *extent* pass, before any part of the word expands, so it names the
+string that pass was walking. osh reaches it only when the subscript is expanded,
+by which time the substitution ahead of it has already run.
+
+**Not the same as the two entries above.** Those are about which string a fault
+found *during* the fragment's expansion names. This one is about a fault bash
+finds before expansion starts and osh does not find at all until later.
+
+**What the proper fix looks like.** `wordscan::scan` has rows for `${`,
+`` ` ``, `$(`, `$[` and `<(`/`>(`, and its faults are `WordFault::Brace` and
+`WordFault::Backquote`. An unclosed `$((` inside a `' … '` in a subscript is a
+third: `extract_delimited_string`'s (subst.c:1498), which names the scanned
+string and closes it with `)`. Adding it means teaching `word_fault` a fault that
+carries its own closing delimiter, and teaching the subscript skip that a `'` in
+there does not hide a `$((` from the enclosing scan.
+
+**Impact.** A command substitution written before such a subscript runs when bash
+would not have run it. Narrow, but it is a side effect and not just text.
+
+---
+
+### TD-OILS-A-BACKQUOTE-IN-A-QUOTED-SUBSCRIPT-IS-A-PARSE-ERROR-WHERE-BASH-EXPANDS — 2026-08-14 — ✅ FIXED 2026-08-14 (in-scope half; see the scope note at the end)
+
+**Where:** the `' … '` interior parse of an arithmetic fragment —
+`attach_subscript_reads` (`userspace/oils/src/parser.rs`) and the lexer path
+behind it.
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+echo "[${arr['x`fi']}]"
+echo TAIL
+```
+
+| | |
+|---|---|
+| bash | ``bad substitution: no closing "`" in `fi'`` at line 2, then `TAIL` |
+| osh, before | ``unexpected EOF while looking for matching `` ` ``'`` at line 4 — the script never runs |
+| osh, now | identical to bash |
+
+osh turned a runtime diagnostic into a *parse* error, so the whole script was
+rejected. bash's parser stops at the `'` and resumes at its mate, so the
+backquote inside is text as far as any parse is concerned; it is met only by
+`param_expand`'s own `string_extract (…, SX_REQMATCH)` at expansion time
+(subst.c:11269), which names `string + t_index` — the text from the backquote on.
+
+**The fix.** Three parts:
+
+- `Lexer::read_word_verbatim`'s `` ` `` arm used a bare `?`, which let the
+  `LexError` escape as a parse error. It now converts to an `Unclosed::Backquote`
+  segment via `unclosed_seg`, exactly as the `$` arm does for an unmatched `${`.
+  This is the part that stopped the script being rejected.
+- `Unclosed::Backquote` gained a `text` field, because its `%s` is
+  `string + t_index` and not `string`: the report runs from the backquote to the
+  end of the **fragment**, whereas `src` is also what `part_src`/`parts_src`
+  re-print and so cannot be widened in place.
+- `name_unclosed_after_the_fragment` (`parser.rs`) widens that `text` with the
+  fragment tail past the run's interior — the run's own closing quote and
+  whatever follows it — mirroring what it already did for `BadSubst`.
+
+**Verified.** `userspace/oils/tests/corpus/an-unmated-backquote-in-a-quoted-subscript-is-met-at-expansion-and-not-by-a-parse.sh`
+is byte-identical to bash 5.2.37, as are probes `build/pr28.sh` and
+`build/pr29.sh`. Full sweep green.
+
+**SCOPE: one residue is out of frozen scope (§305) and is deliberately left
+unfixed.** Where the unmated backquote sits inside a *nested double quote* within
+the run — `build/pr30.sh` d2, `echo "[${arr['x"`fi"']}]"` — bash reports
+``no closing "`" in `fi"'`` and osh reports ``no closing "`" in `fi"``: osh is one
+trailing `'` short. Everything else matches, including the script surviving, the
+exit status and all other output. The cause is known:
+`name_unclosed_after_the_fragment` visits only the run's own top level and does
+not descend into a nested `DoubleQuoted` part (`crate::unparse::nested_parts_mut`
+would give the descent; note its `SingleQuoted { .. }` arm returns `Vec::new()`,
+so it can only supplement the outer loop, not replace it).
+
+This is **the exact substring an error message echoes**, which design-decisions
+§305 names as out of scope: nothing SlateOS runs will ever depend on it. Fix it only
+if it turns up as part of something that does. The in-scope half of this
+entry — a whole script being rejected where bash runs it — is closed.
+
+**Fixed by:** the corpus case named above, plus `lexer.rs` (`Unclosed::Backquote`
+`text` field, `read_word_verbatim`'s `` ` `` arm), `interp.rs`
+(`Unclosed::Backquote` report) and `parser.rs`
+(`name_unclosed_after_the_fragment`).
+
+### TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN. A `$( … )` opened inside one swallows the read that should have followed it — 2026-08-14
+
+**Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_word_verbatim`'s `$`
+arm in [`Verbatim::Dquote`], reached through
+`Shell::brace_extent_scan` → `Shell::brace_scanned_subs`.
+
+**Repro** (bash 5.2.37, `build/pr12.sh`):
+
+```sh
+z=ZZ
+v='A${z:-'"'"'p$(echo hi'"'"'q$(fi
+S1}B'; printf '[%s]\n' "${v@P}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| reports | ``syntax error near unexpected token `fi' `` | **nothing** |
+| value | `[AZZB]` | same |
+
+**What is wrong.** The two passes bash makes over this word carve it into
+*different constructs*, not merely read the same constructs differently.
+
+- `extract_dollar_brace_string` meets the `'` and hands the run to
+  `skip_single_quoted`, which stops at the **mate**. So `'p$(echo hi'` is one
+  skipped run, the `$(` inside it is never seen at all, and the scan resumes at
+  `q` — where it meets `$(fi⏎S1}B`, reads it, and reports `fi`.
+- `expand_word_internal` has no `'` left to speak of, so its
+  `string_extract_double_quoted` meets the **first** `$(`, hands the rest of the
+  word to `extract_command_subst`, and — there being no `)` anywhere — takes
+  everything. One substitution, not two.
+
+osh derives the brace scan's reads from the expansion's lex, so it gets the
+second carving and the second `$(` is inside the first's body, where the walk
+never reaches it. `Shell::brace_scanned_subs_slice`'s single-quote bookkeeping
+then correctly suppresses the one construct it *can* see (it is inside the run),
+and the result is silence.
+
+This is the residue of
+`TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN`, which
+fixed the part of the same disagreement that was only about *which openers*
+count. Rows where the two passes agree on the extents but not on the openers are
+now handled by `Lexer::brace_scan`; this row is one where they disagree on the
+extents, and no flag on the expansion's lex can express it.
+
+**What the proper fix looks like.** `Shell::brace_extent_scan` has to run over
+the brace's **text**, with the scan's own carve, rather than over the parsed
+part. Concretely: keep the undecoded source of an unread `${ … }` on the part
+(or reach it through `crate::unparse`), and lex it once in
+`Lexer::brace_scan` mode with the single-quote rule the scan really has — a `'`
+consumes to its mate and offers nothing inside, so a `$(` in there can neither
+be read nor run past the mate. `read_word_verbatim` already computes that mate
+(`sq_close`); what it does not do is let it bound a substitution, because for
+the *expansion* it must not.
+
+Note that `Lexer::brace_scan` as it stands is deliberately the narrow version:
+it adds openers and leaves extents alone. Widening it to bound a `$( … )` at
+`sq_close` would be wrong for the same lexer's expansion duty, so the widening
+has to come with the second pass, not instead of it.
+
+**Impact.** Diagnostics only — the value is already right. Reachable only
+through `@P`/`PS4`/here-doc text holding a `${ … }` whose operand has both an
+unterminated `$( … )` inside a `' … '` run and a failing one after it.
+
+---
+
+### TD-OILS-A-DOLLAR-BRACKET-BOUND-DOES-NOT-PERFORM-ITS-COMMAND-SUBSTITUTION. `$[ 1+$(… ]` reads the `$( … )` as an arithmetic operand token — 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — the evaluation of a
+`WordPart::ArithSub { bracket: true, … }` whose expression text holds an
+unclosed `$( … )`.
+
+**What is wrong.** `extract_arithmetic_subst` is
+`extract_delimited_string (string, sindex, "$[", "[", "]", 0)` (subst.c:1299) —
+flags `0`, so **no** `SX_COMMAND` and no nested read. The `$[` therefore closes
+at its `]` by plain delimiter counting, and the unclosed `$( … )` inside is met
+later, by the *arithmetic expansion* of the bounds text, which performs it under
+`Q_DOUBLE_QUOTES|Q_ARITH`: it reports, runs the abandoned extent, and yields
+nothing. osh instead hands the raw characters to its arithmetic tokenizer, which
+calls them a bad operand.
+
+Measured (`build/pgY.sh` d1/d2):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash | osh |
+|---|---|---|
+| `A$[1+$(for⏎x]B` | reports `for`, runs `fo`, `[A1B]` | silent, `[AA$[1+$(for⏎x]B]` |
+| `A$[1+$(echo hi⏎x]B` | reports EOF, `[A1B]` | silent, `[AA$[1+$(echo hi⏎x]B]` |
+
+Row d3 — the same body with no `]` at all — is byte-exact in both shells
+(silent, undecoded text), because there the `$[` genuinely never closes.
+
+**What the proper fix looks like.** Two things, in order. (1) `$[`'s lex must
+close at its `]` by plain delimiter counting, without the nested read — which
+means `Lexer::read_opaque_span` needs to know its enclosing close character, so
+that the `$((` spelling (SX_COMMAND) and the `$[` one (flags `0`) can part
+company. Routing that arm through `Lexer::unread_comsub_stop` was tried on
+2026-08-14 and reverted: it made the `$[` bounds text match bash on d1/d2, but
+it *regressed* the `$((` spelling in the corpus case
+`an-unterminated-construct-in-text-no-parser-read-is-a-runtime-failure`, whose
+`$((1+$(echo` row must report the read and stop rather than condemn the `$((`.
+A passing case outranks a documented divergence, so that arm keeps its `?`.
+(2) The arithmetic evaluator must perform a `$( … )` in its expression text
+with the unread-text rule rather than tokenizing it — which is what makes both
+rows' values follow.
+
+**Impact.** Wrong value and wrong diagnostic for a deprecated spelling of
+arithmetic expansion, in malformed input, reachable only through `@P`/`PS4`/
+here-doc text.
+---
+
+
+---
+
+# Lane C
+
+
+## Byte-indexed display truncation panics on non-ASCII text (lane C)
+
+**Status: FIXED 2026-08-15** (lane C, commits `f508f76cf`, `f53562a09`,
+`feb695bbd`, `8208fad9d`, `83dfaff21`, `5750232c5`, `a8d659199`, `ffbdec410`,
+`54fd94f2b`, `5305d139f`, `b3373ad17`, `db06a8c3c`, `de378bab6`, `37ee779ae`,
+`10db32f9c`). Found while surveying app tables for unbounded columns. Eighteen
+sites across `apps/` and `gui/` confused a byte count with a character count, usually
+while truncating a *display* string:
+
+```rust
+let display = if title.len() > 20 {
+    format!("{}...", &title[..17])   // panics if byte 17 is inside a character
+} else {
+    title
+};
+```
+
+`str::len` is bytes and `&s[..17]` is a byte index, so any string whose 17th
+byte falls inside a multi-byte character panics with
+`byte index 17 is not a char boundary`. The guard makes it *more* likely, not
+less: a 20-character Japanese title is 60 bytes, so it takes the truncating
+branch and then slices mid-character. This is not an edge case for these
+particular apps — it is their ordinary input.
+
+| Site | String | Exposure |
+|---|---|---|
+| `apps/rssreader/src/main.rs:3256,3260` | `article.summary` / `display_content()` | **Remote.** Straight off an RSS feed; any non-English feed crashes the reader. |
+| `apps/pdfviewer/src/main.rs:1452` | the PDF's own `/Title` | Attacker-supplied file metadata. |
+| `gui/desktop/src/file_drop.rs:65` | dropped text | And our paths are byte strings by design. |
+| `apps/flashcards/src/main.rs:1313,1370` | card front/back | A flashcard app is *the* place for CJK and accented text. |
+| `apps/stickynotes/src/main.rs:973` | the note's first line | The user's own text. |
+| `apps/procexplorer/src/main.rs:2359` | `KEY=value` from the environment | Environment strings are arbitrary bytes. |
+| `gui/toolkit/src/colorpicker.rs:175` | `&s[..6]` on a typed hex string | Any multi-byte character in the field. |
+| `gui/desktop/src/clipboard_viewer.rs:112` | `content[..197]` on a clipping | Copying any non-Latin text aborted the shell. |
+| `gui/desktop/src/clipboard_viewer.rs:678` | `&preview_text[..40]` on the same | Same, one layer up. |
+| `apps/videoplayer/src/main.rs:538` | `padded[..3]` in the SRT timestamp parser | **A subtitle file the user merely opened.** |
+| `apps/renamer/src/main.rs:450,460,489,509` | the filename stem, cut at a position the user types | **Any non-ASCII filename**, and it aborts a batch rename *partway through*. |
+| `apps/markdowneditor/src/main.rs` (14 sites) | `cursor_col`, the selection anchor, undo columns | **Press Down onto a line with a wide character, then type.** Aborts with the document unsaved. |
+| `apps/backup/src/main.rs:302` | the `?` glob wildcard, over path bytes | **Not a panic** — an include/exclude pattern silently stops matching, so a file the user believed was covered is not backed up. |
+| `apps/filesearch/src/main.rs` (both matchers) | every single-character construct in the glob *and* regex engines | **Not a panic** — a search over non-ASCII filenames silently returns wrong results, in both directions. |
+| `apps/dbviewer/src/main.rs:895` | SQL `LIKE`'s `_` wildcard | `LIKE '_'` was false for a one-character CJK cell and `LIKE '___'` was true for it. |
+| `apps/indexer/src/main.rs:709` | the `?` wildcard and `[...]` classes of a third glob matcher | Same as filesearch's, in the file indexer. |
+| `apps/indexer/src/main.rs:826` | `levenshtein_bounded`, the fuzzy-match edit distance | One substituted kanji cost 3 of a budget the user reads as "a couple of typos", so near-exact CJK matches were rejected. |
+| `apps/jsonviewer/src/main.rs:304` | the parser's `col`, shown as "Ln 3, Col 17" | Not a panic and not a wrong result — a wrong *report*. The caret pointed up to two columns per preceding character too far right. |
+
+The last ten were found while fixing the first seven and were not in the
+original count. `gui/clipboard/src/main.rs:183` looked like another but is not:
+it already goes through `find_char_boundary`.
+
+The videoplayer one is worth calling out because it does not match the grep
+shape above — there is no `if x.len() > N` guard in sight. It is
+`format!("{ms_str:0<3}")` followed by `padded[..3]`, and the bug is that
+`format!`'s width is counted in **characters** while the slice indexes
+**bytes**. For a fractional part of `"ab日"` the padding adds nothing (already
+3 characters) and byte 3 lands inside the kanji. So the class is wider than
+"a byte budget with a byte guard": it is *any* place where a character count
+and a byte count are used interchangeably. Rust's own `format!` width is a
+character count, which makes it a natural source of the confusion.
+
+**`apps/renamer` is the one site where the byte/character confusion was also a
+*semantic* bug, and the most damaging of the seventeen.** Four rename rules —
+insert-at, remove-from, number-at, datestamp-at — slice the filename stem at a
+position the *user types into the rule*, clamped only with `.min(stem.len())`,
+a byte length. `InsertPosition::At`'s own doc comment has always read "insert at
+a specific character index", so the code contradicted its documented intent: for
+`日本語.txt`, "insert at 3" is past the end of a 3-character stem and should
+append, but the byte clamp put it after the *first* kanji. And unlike a
+truncated label, a wrong position here writes the wrong name to disk. The panic
+is worse still, because a rename batch applies each rule to each file in turn:
+one non-ASCII name aborted the renamer *after* earlier files had already been
+renamed, leaving the batch half-applied with no undo record. Fixed with a
+`char_offset(s, chars)` helper that all four sites route through, which makes
+the position mean what it says and makes the slices sound as a side effect. For
+ASCII names the two numbers coincide, so no existing rule changed behaviour —
+the pre-existing tests confirm it.
+
+**`apps/markdowneditor` is the largest instance, and the only one where the
+bad offset *persists in state* rather than being recomputed each frame.** Every
+column in the editor -- `cursor_col`, the selection anchor, the columns recorded
+in undo actions -- is a byte offset into a line, which is what lets an edit
+apply without re-scanning. Fourteen places kept such an offset in range with
+`.min(line.len())`, and a byte length is the wrong bound: it keeps the offset
+inside the line but says nothing about whether it lands *on* a character.
+
+Pressing Down is enough to reach it. `move_cursor_down` carries the column to
+the next line, so from column 1 of `"abc"` onto `"\u{65e5}x"` the clamp leaves 1,
+inside the kanji. Nothing fails yet -- the cursor is simply in an impossible
+place. The abort comes on the *next* keystroke, in whichever of Backspace,
+Delete, insert, Enter, arrow-key or selection the user happens to press, by
+which point the document is unsaved and the user has been typing. Go-to-line, an
+undo replayed against a line that changed underneath it, and a reload after the
+file changed on disk all reach the same state without any cursor movement at
+all.
+
+Fixed with one `clamp_col(line, byte)` that rounds *down* to a character
+boundary, used at all fourteen sites. Rounding down puts the cursor at the start
+of the character it landed in -- where a user who pressed Down onto a wide
+character expects to be -- and for an all-ASCII document it returns exactly what
+`.min(line.len())` did, which a test asserts directly.
+
+**`apps/backup`'s `?` wildcard is the only member of the class that never
+panics, which is exactly what made it the easiest to miss.** The glob matcher
+works on `&[u8]` throughout, which is *correct* — our paths are byte strings
+that need not be UTF-8 (`CLAUDE.md` item 7), and rewriting it over `&str` would
+have been the wrong fix. But `?` is documented as "any single character except
+`/`" and advanced `ti` by one **byte**, so against `日本.txt` it matched one
+third of a kanji. `file?.txt` silently stopped matching `file日.txt`. In a
+backup tool a pattern that quietly fails to match is worse than a crash: an
+exclude that misses copies a directory the user meant to skip, and an include
+that misses leaves a file unprotected with the run still reporting success.
+
+Fixed with `utf8_char_len(text, i)`, so `?` advances one character. Only `?`
+needed it. `*` is byte-greedy but can only ever *succeed* on a boundary — a
+well-formed needle cannot match starting inside another sequence, by UTF-8
+self-synchronization — and `/` is ASCII, so it can never occur inside a
+multi-byte character.
+
+The interesting part was ill-formed input. The first version clamped a
+truncated sequence to the bytes remaining (`want.min(len - i).max(1)`), which
+my own test caught as a real defect rather than a wrong expectation: for the
+bytes `[0xE6, b'/']` a lead byte announcing three bytes consumes both, and `?`
+has crossed a separator — the one thing it must never do. The rule that works
+is **validate, then consume**: only treat a lead byte as multi-byte if the
+continuation bytes it announces are actually present and in `0x80..=0xBF`,
+otherwise advance one byte and let the literal comparison decide. That keeps
+the separator invariant and still guarantees forward progress.
+
+**`apps/filesearch` is the same bug as `backup`'s `?`, but as a whole engine
+rather than one branch — and it was found by asking "where else does a matcher
+step a byte at a time?" rather than by any grep.** filesearch has two engines,
+a glob matcher and a small regex matcher, and both stepped `ti` by one byte.
+That made *every* single-character construct wrong: `?` and `.`, the character
+classes `[...]`, and `\d`/`\w`/`\s` with their negations. It is wrong in both
+directions at once, which is what makes it hard to notice from one example:
+
+- **False negatives.** `?.txt` did not match `\u{65e5}.txt`; `h.llo` needed
+  three dots for one kanji.
+- **False positives.** `\W\W\W` matched exactly one kanji, because every byte
+  of a multi-byte character fails `is_ascii_alphanumeric`. `[\u{e9}]*` matched
+  `\u{e8}b`, because `\u{e9}` and `\u{e8}` share a lead byte and the class
+  compared one byte. A class *range* like `[\u{430}-\u{44f}]` was not merely
+  wrong but meaningless — it compared bytes of the endpoints' encodings.
+
+Unlike `backup`, both entry points here take `&str`, so the inputs are already
+validated UTF-8 and character semantics is achievable, not just desirable.
+Both engines were converted to `&[char]`. That is the whole fix: with `&[char]`
+every index is a character index by construction, so `?`/`.`/classes/ranges are
+all correct at once and there is no per-construct rule to remember or to get
+wrong again later. The public `&str` entry points are unchanged; the two
+bulk-search paths gained `*_chars` variants so the pattern is decoded once per
+search instead of once per indexed file.
+
+The regression test that earned the most was the *control*:
+`an_ascii_pattern_matches_exactly_as_before` pins 20 pre-existing ASCII cases.
+Under the deliberate re-break it kept passing while all six non-ASCII tests
+failed — which is exactly the evidence wanted, since it shows the six really do
+discriminate and that the refactor changed nothing for ASCII input.
+
+Re-breaking this one is worth recording as a technique: rather than reverting
+the refactor, the byte engine was reproduced by decoding `.bytes().map(|b| b as
+char)` instead of `.chars()`. Every comparison in both engines is by scalar
+value, so mapping each byte to the char of the same value restores the old
+behaviour exactly, at 8 call sites and with no other edit.
+
+**Asking the behavioural question then found three more sites in two more apps,
+which is the strongest evidence that the question is the right tool.** Having
+noticed that no grep finds a byte-at-a-time advance, the lane's remaining
+matchers, parsers and scanners were read with one question in mind — *does this
+walk text one unit at a time, and is that unit a byte?* Three said yes:
+
+- **`dbviewer`'s SQL `LIKE`.** Its own comment reads "`_` matches exactly one
+  character"; it consumed one byte. `LIKE '_'` was false for a one-character
+  CJK cell while `LIKE '___'` was true for it.
+- **`indexer`'s glob matcher** — a third independent copy of the same `?`-and-
+  class bug, after `backup` and `filesearch`.
+- **`indexer`'s `levenshtein_bounded`.** The most interesting of the three,
+  because it is not a wildcard at all: an *edit distance* over bytes charges up
+  to 3 for one substituted kanji. Against a `FUZZY_MAX_DISTANCE` the user reads
+  as "a couple of typos", a near-exact CJK match was rejected while a much
+  worse ASCII one was accepted — and the `abs_diff` length early-out discarded
+  candidates before the DP even ran. Fuzzy matching was effectively off for
+  non-ASCII names.
+
+That three independent glob matchers in one lane each carried the same defect
+is worth noting on its own: this is not a slip someone made once, it is what
+you get by default from reaching for `as_bytes()` to walk a pattern. The
+generalisation is not "`?` is special" but that **any construct meaning "one
+unit of text" is wrong the moment the loop's unit is a byte** — wildcards,
+classes, ranges, quantifier counts and edit costs alike.
+
+A second vacuity trap turned up here, of a kind not seen before: **a test can
+fail to discriminate because the behaviour that survives the break is genuinely
+correct.** `dbviewer`'s first percent-and-literals test passed under the
+deliberate break, not through oversight but because `%` and literal matching
+really are sound over bytes — the same self-synchronization argument that
+cleared `backup`'s `*`. Only a pattern that makes `%` absorb the slack while
+`_` must still count (`"日"` against `"%_%_%"`) can tell the two engines apart.
+Generalised: when part of a construct is provably safe, a test built from that
+part cannot witness the unsafe part, however non-ASCII its input looks.
+
+**The fix was not to hunt for char boundaries at each site.** All but one of
+these is a *display* truncation, and each already had a box to draw into, so
+each became `guitk::text::elide` / `RenderTree::text_in` (or a `guitk::table`
+cell): it measures display width, cuts on a character boundary, and marks the
+cut with `…`. That also removed the second, quieter bug present at every site —
+a truncation counted in bytes has no relationship to the width of the box the
+text is drawn in, so `20` characters of a wide font overflow anyway while `20`
+of a narrow one waste half the space.
+
+Two sites needed something other than eliding:
+
+- **`colorpicker::parse_hex_color` is a parser, not a view.** It branched on
+  `s.len()` as if it were a digit count. Requiring ASCII hex digits up front
+  makes the length a digit count and every offset a character boundary, so the
+  rest of the function is sound by construction. (It also closed a smaller
+  hole: `u32::from_str_radix` accepts a sign, so `"+FFFFF"` parsed as a colour.)
+- **`ClipEntry::text`'s cap is a *retention* bound, not a display one** — a
+  clipping can be megabytes and the history holds many. That bound stayed in
+  the model but became a character count; the display bound moved to the view.
+
+Three sites had truncation in the *model*, where nothing knows how wide the
+drawing surface is: `DragDataType::description`, `NoteStore::sidebar_items`, and
+the clipboard row. All three now return full text and the caller elides.
+
+Writing the regression tests turned up four latent layout bugs the byte budgets
+had been hiding, all fixed in the same commits: pdfviewer's tab title drew 2px
+under its close glyph; flashcards' three columns overlapped below 640px;
+procexplorer's memory row sat at a flat 200px pitch and left the panel at 480px
+wide; and the clipboard row's meta line could run under the sensitive
+indicator.
+
+Grep shape, if this recurs: `&<ident>[..<literal>]` where the receiver is a
+`String`/`&str`, and its `if x.len() > N` guard. That shape found seven of the
+seventeen; the other ten needed a wider sweep for *any* mixing of the two counts.
+Three further forms showed up, none of which the grep can see: `format!` width
+(a *character* count) meeting a byte slice (videoplayer); `.min(s.len())` used
+to clamp a position the user thinks of in characters (renamer,
+markdowneditor); and a byte-at-a-time advance where a character was meant
+(backup's `?`, both of filesearch's engines), which involves no slicing and no
+`len()` at all.
+
+That last form is the one to go looking for next, because no textual pattern
+finds it — it is `ti += 1` in a loop, which matches everything. The question
+that finds it is behavioural: **"does this walk text one unit at a time, and is
+that unit a byte?"** Both remaining instances were found by asking it of every
+matcher/parser/scanner in the lane rather than by grepping. Note this is the same root
+cause as the unbounded-column survey below — **counting characters instead of
+measuring the box** — and it was worth treating as one problem.
+
+Every fix is covered by a test using Japanese/Greek/Russian/emoji input plus a
+string pinning the exact cut index to a continuation byte, and every one was
+verified non-vacuous by re-breaking the production code and confirming the test
+fails. That discipline earned its keep five times here:
+
+- `colorpicker`'s `chars[2]` index was in fact *unreachable* -- `hex_char_to_u8`
+  rejects a multi-byte char one step earlier -- so the "second panic" claimed
+  for that site did not exist.
+- An earlier `file_drop` test passed with its bound removed, because no
+  reachable payload draws both a count badge and a long description.
+- `markdowneditor`'s first sweep drove each edit through `move_cursor_down`, so
+  breaking any *edit* site changed nothing: the sweep already aborted on the
+  cursor-position assertion from the vertical move, one case earlier. Five
+  sites looked verified and were not. Replaced with a test that strands the
+  column directly, which both isolates each site and matches reality, since
+  undo replay and click-positioning strand it without any vertical move.
+- `markdowneditor`'s reload clamp passed with the clamp removed -- no test
+  reached it -- until a test was added for it specifically.
+- `backup`'s "`?` never crosses a separator" test passed under the very break
+  it existed to catch: `?c` against `[0xE6, b'/', b'c']` fails for an unrelated
+  reason, so the assertion never distinguished the two versions. Pinned with
+  `assert!(!glob_match_recursive(b"?", &[0xE6, b'/']))`, which does. A test
+  aimed at an invariant is not the same as a test that can *see* the invariant
+  break.
+
+General rule this keeps re-teaching: **when several defects can abort, break
+them one at a time**, and be suspicious of a break that leaves the failure
+count unchanged -- it usually means the new failure is the old one.
+
+One further trap, from this same session: do not re-break production code while
+a full-workspace test run is in flight. A workspace gate launched earlier picked
+up `renamer` mid-verification and reported two failures that were the
+scaffolding, not the tree.
+
+**Site eighteen shows the class reaches things that neither panic nor compute a
+wrong answer.** `apps/jsonviewer`'s parser counted `col` once per byte. Nothing
+downstream indexes with it — it is used only to *tell the user where the error
+is*, in the status bar and the error list. So the parse was right, the error was
+right, and the caret pointed at the wrong character: a document whose string
+value is `日本語` rather than `xxx` reported column 20 where the ASCII one
+reported 14. That makes it the least dangerous instance and the easiest to
+overlook, because there is no crash and no bad data to notice — just a number
+that quietly stops meaning what its label says. The fix is one line: skip the
+increment for continuation bytes (`b & 0xC0 == 0x80`), which are the tail of a
+character its leading byte already counted.
+
+**A caution about how these are found.** The same grep that turned up kanban's
+real corruption (next section) also flagged `apps/jsonviewer`'s `parse_string`,
+which does `result.push(b as char)` on the very next line — and *that* one is
+correct, because it sits under `if b < 0x80` and the non-ASCII branch rewinds
+into a real UTF-8 decoder with proper surrogate handling. Two functions, the
+same six-token expression, opposite verdicts. No pattern distinguishes them;
+only reading the enclosing guard does. Treat a grep hit in this class as a
+question, never as a finding.
+
+Violates `CLAUDE.md` self-review item 7 (never force UTF-8 assumptions on
+OS-boundary data) and trips the workspace's `clippy::indexing_slicing` warn.
+
+
+## `u8 as char` reinterpreted UTF-8 as Latin-1 in four parsers (lane C)
+
+**Status: FIXED 2026-08-15** (lane C, commits `237636350` kanban, `3b6b60e39`
+backup, `18f1e9abc` rssreader). Found while sweeping for byte-at-a-time text
+walkers, and it is a *different* class from the byte/character-count confusion
+above — worth keeping separate, because the symptom, the detection method and
+the fix all differ. Three JSON readers and one XML reader carried it.
+
+`apps/kanban`'s `JsonImporter::parse_string` built its result one byte at a
+time:
+
+```rust
+} else {
+    result.push(b as char);   // b: u8
+}
+```
+
+`b as char` maps a **byte value** to the Unicode scalar with that value. That is
+a Latin-1 decode. There is no count involved, nothing is truncated, and nothing
+panics: an imported card titled `日本語` (E6 97 A5 ...) simply comes back as
+`æ\u{97}¥...`. It is `String::from_utf8_lossy`'s failure mode reached by a
+different route, and it is worse than a panic in one specific way — **the damage
+persists.** The mojibake becomes the card's title in memory, and the very next
+save writes it to disk as the new truth. Import a board, glance away, and the
+original text is gone.
+
+Why the count-confusion sweep would not have found it: there is no `len()`, no
+slice, no guard, no wildcard. The tell is the cast itself. The generalisation
+worth carrying forward is that **`u8 as char` is almost always a bug on text**;
+it is sound only where the byte is already known to be ASCII — which is exactly
+the distinction that made `apps/jsonviewer`'s identical-looking line correct.
+
+The fix copies unescaped runs out as whole `&str` slices instead. That is sound
+precisely because the two bytes that terminate a run — `"` and `\` — are ASCII,
+and an ASCII byte can never occur inside a multi-byte UTF-8 sequence, so the cut
+is always on a character boundary. (This is the same self-synchronisation
+property that cleared so many near-misses in the sweep above; here it is what
+makes the fix work rather than what made the bug absent.) It is also faster than
+pushing char by char.
+
+Fixing the function properly turned up two further defects in it:
+
+- **`\uXXXX` was never decoded.** It fell through to the unknown-escape arm and
+  came back as a literal backslash, `u`, and four digits. This was not
+  hypothetical: our own `JsonExporter::escape_json` emits exactly that form for
+  every character below U+0020, so **export followed by import did not
+  round-trip** for any card whose text contained a control character. Now
+  decoded, including leading/trailing surrogate pairs — which is how JSON spells
+  anything outside the BMP, so emoji in a board exported by any other tool were
+  equally unreadable. An unpaired surrogate degrades to U+FFFD rather than
+  failing the whole import.
+- **The unknown-escape arm had the same cast** (`result.push(esc as char)`) on a
+  single byte, so a backslash followed by a multi-byte character both corrupted
+  that character and left the scan stranded mid-sequence. It now consumes a
+  whole character.
+
+Non-vacuity was checked by reinstating the byte-at-a-time parser: all four new
+tests fail under it while the ASCII control test and both pre-existing parser
+tests keep passing — the profile that shows the new tests discriminate *and*
+that the rewrite changed nothing for ASCII.
+
+Violates `CLAUDE.md` self-review item 7 in its strongest form: this is not an
+assumption about encoding, it is an actual re-encoding.
+
+### The same bug in `apps/backup`'s manifest reader — the worst instance
+
+`apps/backup`'s `parse_string` had the identical cast, but on data that makes it
+far more consequential: **the strings in a backup manifest are file paths.** A
+backup of `写真/2024.jpg` reads back as a path naming no file at all, so restore
+cannot find it and verify reports it missing. The manifest is the only record of
+what was backed up; corrupting it silently invalidates the archive.
+
+Fixing it turned up two further defects in the same function, both worse than
+the first:
+
+- **A reachable panic.** The `\u` arm did `&input[i + 1..i + 5]` with no bounds
+  or boundary check. On `"\u日本"` that cuts at byte 7, inside `本`, and Rust
+  panics on the non-boundary slice. Reachable from merely *reading a manifest
+  off disk* — no attacker needed, just a path that happens to follow a
+  backslash-u with non-ASCII text. `parse_hex4` now uses
+  `input.get(start..end).ok_or("incomplete unicode escape")?`.
+- **Silent data loss on astral characters.** The `\u` decode used a bare `u16`
+  with no surrogate pairing and `if let Some(c)` with *no `else`* — so an
+  escaped emoji or CJK-extension character in a path did not become U+FFFD, it
+  simply **vanished**, shortening the path to something else entirely. Now
+  paired properly, with U+FFFD for an unpaired surrogate.
+
+Three defects, so non-vacuity was checked with three separate breaks, each
+confirmed to fail only its own tests while the ASCII control kept passing. The
+last test builds a real `Manifest` of non-ASCII `FileEntry` paths and
+round-trips it through `serialize`/`deserialize`. 46 tests pass.
+
+### The same bug in `apps/rssreader` — the only remotely-fed instance
+
+`XmlParser::read_attribute_value` accumulated with `value.push(b as char)` on
+bytes straight off a downloaded feed, so any non-ASCII enclosure URL, title or
+author arrived as mojibake. What makes this one instructive is that it was the
+**outlier in its own file**: `read_until`, `read_name` and the text-node reader
+all already sliced the range out whole and used `from_utf8_lossy` — which is
+exact here, since `parse_xml` takes a `&str` and every delimiter is ASCII. The
+correct pattern was sitting three functions away. Fixed to slice the same way.
+
+Fixing it exposed an unrelated robustness defect in the same path, arguably more
+damaging in practice than the mojibake: `decode_entity` returned `Err` for
+anything outside XML's five entities, and `read_attribute_value` propagated it
+with `?`. So **one `&nbsp;` in any attribute failed the parse and threw away the
+entire feed** — as did a bare `&` in a query string, which is ubiquitous in
+enclosure URLs. The same entity in a *text node* merely rendered literally,
+because that caller fell back to the raw string; only the attribute path was
+fatal. `decode_entities` is now infallible: unrecognised entities are emitted
+exactly as written, bare `&` passes through, and twenty-six common HTML entities
+are decoded rather than left as source text. Two breaks, two disjoint failure
+sets. 147 tests pass.
+
+The pattern across all four: **the cast is never the only bug in the function.**
+Every site that had it also had at least one other defect in the same escape or
+delimiter handling — a panic, a dropped character, or a fatal error on ordinary
+input. Byte-at-a-time text handling seems to correlate with not having thought
+about the hard cases at all.
+
+
+## The file explorer's paste and delete were a weaker duplicate of its own engine (lane C)
+
+**Status: FIXED 2026-08-15** (lane C, commit `bcd1e2d5d`). Found while auditing
+`to_string_lossy` uses in `apps/explorer` — those turned out to be fine (the
+real `PathBuf` is always kept as the truth and the lossy `String` is only ever
+displayed), but the surrounding code was not.
+
+`apps/explorer/src/fileops.rs` is a complete file-operation engine: plans with a
+conflict policy, a crash-recovery journal, per-file error policy, progress, an
+undo stack, and a `RecycleBin` that stores each item with its original path so
+it can be listed and restored. `apps/explorer/src/main.rs` used **none of it.**
+`paste()` and `delete_selected()` called `fs::copy` / `fs::rename` /
+`fs::remove_file` in a loop, discarding every `Result` with `let _ =`. Three
+distinct silent failures followed:
+
+- **Paste destroyed an existing file of the same name.** `fs::copy` overwrites
+  its destination, so pasting `notes.txt` into a folder that already had one
+  replaced it with no prompt, no rename, no undo.
+- **"Move to recycle bin" produced files that could not be restored — and
+  destroyed each other.** It renamed into a flat `/var/recycle` with no
+  metadata, so `RecycleBin::list` never saw the item and `restore` had no
+  original path to restore *to*. And because `fs::rename` overwrites, deleting a
+  second `notes.txt` from a different directory silently destroyed the first
+  one already sitting in the bin. The recycle bin was, in effect, a shredder
+  with an unreliable name-collision hazard.
+- **The status line reported unconditional success.** "Paste complete" whether
+  or not any file copied; "N item(s) deleted" where N was the number
+  *selected*, not the number that worked.
+
+The fix routes both through the existing engine rather than patching the
+duplicate — `copy_dir_recursive` is deleted, not repaired. Two implementations
+of one operation is precisely how the weaker one ends up on the user-facing
+path; `CLAUDE.md`'s "watch for band-aid accumulation" rule names this shape.
+
+**A fourth defect surfaced only when the tests were written.** Every operation
+ends by calling `load_directory()`, which calls `update_status()`, which
+overwrote `status_message` with the folder/file summary. So no operation result
+was *ever* visible to the user — not a paste, not a delete, not a rename, and
+not the `Error: {e}` set when `read_dir` fails, which was assigned and then
+discarded two lines later (an unreadable directory rendered as "0 folder(s), 0
+file(s) — 0 B"). The transient result and the derived summary are now separate
+fields, with `status_bar_text()` preferring the result and navigation clearing
+it.
+
+**The root cause behind all four: `apps/explorer/src/main.rs` had no
+`#[cfg(test)]` module at all.** `columns.rs`, `dropzone.rs`, `fileops.rs` and
+`thumbs.rs` are all well tested; the file holding `ExplorerState` — navigation,
+selection, clipboard, paste, delete, rename — had zero tests. It now has 11,
+with each of the three behavioural fixes verified non-vacuous by a separate
+break. Worth generalising: **a well-tested support module is not evidence that
+the code calling it is tested**, and in this crate the untested file was the one
+users actually touch.
+
+Two smaller defects in `fileops.rs` noticed during the same read — **also FIXED
+2026-08-15**, commit `35f17dfd7`:
+
+- `RecycleBin::recycle` moved data with a bare `fs::rename`, which fails with
+  `EXDEV` across a mount point — so deleting anything from a separate data
+  partition simply errored, and `restore` had the same problem in reverse. Now
+  routed through a `move_path` helper that tries the rename and falls back to
+  copy-then-remove. Note that `fileops::same_device` exists for exactly this
+  check and was referenced only by its own test (`dropzone.rs` carries a second
+  copy of the same function); it was not used here, because attempting the
+  rename and reacting to its failure is both cheaper in the common case and
+  correct where a first-component heuristic guesses wrong.
+- `RecycleBin::recycle` wrote the original path to `meta.txt` with
+  `path.display()`, which is lossy, and `read_entry` parsed it back as UTF-8 —
+  so a non-UTF-8 path was restored under a *different name*, silently renaming
+  the user's data during an operation advertised as reversible. Same class as
+  the `u8 as char` section above, reached through `Display` instead. The path is
+  now percent-encoded from `OsStr::as_encoded_bytes`, with a version marker on
+  line 1 so an already-populated bin is still readable.
+
+A third, unlogged defect fell out of writing those tests: metadata was written
+before the data was moved but not removed if the move failed, so a failed
+recycle left the bin listing an entry whose `data/` was not there. Ordering
+kept (metadata first is the safe order — orphaned metadata is harmless, moved
+data with no metadata is unrestorable), with cleanup on the failure path.
+
+
+## Fixing a parser is not fixing a format: `apps/backup` corrupted paths on the *write* side (lane C)
+
+**Status: FIXED 2026-08-15** (lane C), commit below. This is a follow-up to the
+`u8 as char` section above, and the lesson is the one worth keeping.
+
+Commit `3b6b60e39` fixed `apps/backup`'s manifest **reader** — the JSON string
+parser that re-encoded UTF-8 as Latin-1. That looked like the whole bug. It was
+not. `FileEntry.path` was a `String`, and every one of those strings was
+produced by `relative_path`, which did
+`full.to_string_lossy().replace('\\', "/")`. So a filename the filesystem
+happily stored — our paths allow every byte but `/` and NUL — was flattened to
+U+FFFD *before the manifest writer ever saw it*. A backup of `café.txt`
+(0xE9, not UTF-8) recorded `caf<FFFD>.txt`; restore recreated the file under a
+different name, and `verify` reported the original as missing. The archive was
+self-consistently wrong, so nothing downstream could detect it.
+
+**Generalization: when you find a lossy conversion in a parser, the format has
+two sides — go find the writer.** A round-trip test through the parser alone
+passes vacuously, because the corruption happened upstream of the data the test
+constructs by hand. The reader fix and its tests were both real and both blind
+to this.
+
+Fixed by making the path a `PathBuf` end to end: `relative_path` now strips the
+base and rejoins components on `/` at the byte level, and the manifest stores
+paths percent-encoded from `OsStr::as_encoded_bytes` — the same escape and
+version-marker scheme just adopted for the recycle bin's `meta.txt`. A manifest
+with no `version` field is read as version 1 (paths verbatim), so archives taken
+before this change still restore.
+
+Three further defects fell out of the work:
+
+- `detect_changes` contained a dead push/pop pair and two empty `if` bodies
+  left over from a half-finished edit; it computed `modified` twice, and the
+  first computation was discarded. Rewritten as a single pass. Behaviour is
+  unchanged — the hash comparison was always the one that counted — but the
+  size/mtime "quick check" it pretended to do was never wired to anything.
+- The file-type breakdown in `stats` used `path.rsplit('.').next()`, which
+  reports the whole filename as the extension for `README` and `.gitignore`
+  alike. Now `Path::extension`.
+- Both new percent-decoders (here and in `fileops.rs`) built their `OsStr` with
+  `OsStr::from_encoded_bytes_unchecked` under a SAFETY comment claiming every
+  byte string is valid for the platform's encoding. That is true on Unix and
+  **false on Windows**, where `OsStr` is WTF-8 — and Windows is the host the
+  tests run on, so the unsound branch was the only one ever executed. Replaced
+  with a `#[cfg(unix)]` split: `OsString::from_vec` (safe and total) on the
+  real target, which is `target-family = ["unix"]`, and a documented
+  best-effort on the test host. The lossless core is now byte-level
+  (`encode_bytes`/`decode_bytes`) and tested there, so the round-trip is
+  asserted at the level the file is actually written at rather than at a level
+  the test host cannot represent.
+
+Related tooling gap, now closed: `rustup target add x86_64-unknown-linux-gnu`
+was not installed, so **no `#[cfg(unix)]` code in this lane had ever been
+compiled**, let alone checked. `cargo check --target x86_64-unknown-linux-gnu`
+needs no linker and now covers those branches.
+
+
+## `apps/indexer` stored index paths lossily and panicked on a short header (lane C)
+
+**Status: FIXED 2026-08-15** (lane C), commit below. Third instance of the
+lossy-path class, found by continuing the sweep. The index is a binary,
+length-prefixed format, so unlike `meta.txt` and the backup manifest there was
+never a readability tradeoff to weigh — it simply stored the wrong bytes:
+
+- `serialize` wrote `entry.path.to_string_lossy().as_bytes()` and
+  `deserialize` read them back with `String::from_utf8_lossy`. A file whose
+  name is not UTF-8 was indexed under a name containing U+FFFD, so the search
+  hit that named it could not be opened. Both sides now carry
+  `OsStr::as_encoded_bytes` verbatim; `INDEX_VERSION` goes 1 → 2. No migration
+  is needed — the index is a derived cache and the existing version check
+  already tells the user to reindex.
+- **Panic on a truncated index.** The header check was `data.len() < 28`, but
+  `dirs_scanned` is read from bytes `24..32`, so a file of 28..=31 bytes
+  passed the check and then indexed out of bounds. The existing
+  `test_index_deserialize_too_short` used a 4-byte input and never reached it.
+  Now `< INDEX_HEADER_LEN` (32), with a test that sweeps every length below it.
+
+Two smaller things fixed in passing: the two scanners each carried a verbatim
+copy of the directory-exclusion check (now one `is_excluded_dir`), and each
+copy tested `dir_str.ends_with(excl) || dir_str.contains(excl)` — the same
+predicate written twice, since `contains` is true whenever `ends_with` is.
+
+The `filename` field stays a lossy `String`, now documented as a **search key
+only**: a query is UTF-8 text the user typed, so matching against a lossy
+rendering is a selection heuristic. It is never displayed and never used to
+name a file — `path` is, and `path` is exact. Both producers of the key now go
+through one `filename_key` function so they cannot drift.
+
+
+## The thumbnail cache keyed on a lossy path, so one file showed another's image (lane C)
+
+**Status: FIXED 2026-08-15** (lane C), commit below. Fourth instance of the
+lossy-path class, and the first where the damage is not a lost name but a
+**collision**.
+
+`Thumbnail::source_path` was a `String` built with `to_string_lossy`, and it is
+the disk cache's key: `simple_hash` FNV-hashes it with the mtime to produce the
+cache filename. Every undecodable byte in a name became the same U+FFFD, so two
+genuinely different files whose names differ only in such bytes hashed to one
+cache entry — and the file explorer displayed one of them the other file's
+thumbnail. Nothing errors; the wrong picture is simply shown. `source_path` is
+now a `PathBuf` and `simple_hash` takes `&Path` and hashes
+`as_os_str().as_encoded_bytes()`.
+
+`purge_stale` had a matching problem in the other direction: it compared
+directory entries by `to_string_lossy`, so a foreign file in the cache
+directory whose name is not UTF-8 could be *rendered into* something matching
+our `{hash:016x}.thumb` shape and deleted. Now compared as bytes.
+
+**The lesson worth keeping is about the tests, not the bug.** The natural
+regression test for this class needs a path the platform cannot decode, and on
+the Windows test host `OsString` cannot hold arbitrary bytes at all — so the
+obvious test has to be `#[cfg(unix)]` and never actually *runs* here. A
+`cfg(unix)` test is compile-checked at best (and until this session, not even
+that — see the note in the `apps/backup` entry above). The fix is to find the
+host's *own* uncodable case: on Windows an unpaired surrogate is a legal
+`OsString` that `to_string_lossy` maps to U+FFFD, which reproduces exactly the
+same collision. Both tests now exist, and the Windows one was confirmed to fail
+when the lossy hash is put back. Any future test in this class should carry a
+runnable-on-the-host twin rather than a Unix-only assertion.
+
+
+## TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED — `max_width` cuts mid-glyph and says nothing — ✅ **RESOLVED 2026-08-15**
+
+**Resolution.** `RenderCommand::Text` gained a **required** `overflow:
+TextOverflow` field (`Clip` | `Ellipsis`), and the compositor draws the mark.
+The operator chose "required, no `Default`" from four options precisely so that
+every one of the 4,517 constructions in the tree had to answer the question
+`max_width` had been posing and never answering; see `design-decisions.md` §427
+for the options and §429 for why the commit also had to fill in lane B's 31
+sites. The second measurement the entry complains about below is gone from the
+policy path: the compositor decides about the mark from the run it has already
+shaped, so `text::elide` is no longer the only way to get a cut marked.
+
+Bounded sites default to `Ellipsis` rather than to the behaviour-preserving
+`Clip`, because today's behaviour *is* this entry — a sweep that faithfully
+preserved it at four thousand sites would have done nothing.
+
+Tested at all three layers: the compositor (a mark appears only when earned,
+stays inside the limit, falls back to clipping when the mark itself does not
+fit, and never blanks a field clipping would have filled), the toolkit (each
+helper emits the right policy), and `guiremote` (both policies survive the wire,
+are distinguishable on it, and an unknown byte is a `DecodeError` rather than a
+guess — `PROTOCOL_VERSION` went to 2 for it).
+
+**Status.** ~~Open, and deliberately not fixed in the pass that closed
+`TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP`, because the good fix is a change to
+`RenderCommand::Text` itself and wants a decision rather than a sweep.~~
+The decision was asked and answered.
+
+**What it is.** `max_width` clips: the compositor walks glyphs and stops when
+the next one would cross the limit. It draws no ellipsis. So a label that does
+not fit ends mid-word — and, worse, ends *plausibly*: "Gateway 192.168.1.1 res"
+reads as a complete string to anyone who cannot see the field it was cut from.
+A caller that wants the cut marked has to call `text::elide` first, which
+measures the string a second time to answer a question the compositor is about
+to answer again while drawing. That is the same two-calculations-for-one-quantity
+shape as the wrap bug, one layer down.
+
+**How widespread.** Every single-line label in the app tree that passes
+`max_width: Some(..)` without eliding first — well over a hundred sites. Most
+are fine in practice because the values are short and app-authored; the ones
+that bite are those carrying user or network data (file names, SSIDs, error
+strings, host names). `netmanager`'s diagnostics detail line was fixed by hand;
+the rest were left.
+
+**Proper fix.** Give the command an explicit overflow policy — `Clip` (today's
+behaviour, correct for a progress label that must not jitter) versus `Ellipsis`
+(the right default for a data-bearing label) — and let the compositor draw the
+mark, since it is the only party that knows exactly where the glyphs ran out.
+
+**Why it is not done.** Adding a field to `RenderCommand::Text` touches every
+struct-literal construction of it in `gui/**` and `apps/**` — several hundred —
+because Rust has no default for a struct-variant field. The alternatives are
+each a compromise: a second variant (`TextClipped`) splits the match arms in
+every renderer; a builder function leaves the literal form available and so does
+not actually prevent the mistake; a blanket `text::elide` sweep at the call
+sites fixes the symptom while keeping the double measurement. The mechanical
+churn is cheap to *do* and expensive to *review* against three lanes' in-flight
+work, so it should be scheduled deliberately rather than smuggled into an
+unrelated fix. Recorded for the operator in `open-questions.md`.
+
+---
+
+### TD-FONT-NOT-ACTUALLY-NO-STD. `osfont` documents itself as `no_std` but links `std` — 2026-08-14 — OPEN
+
+**What.** `gui/font` is written entirely in `alloc` terms (`alloc::vec::Vec`,
+`alloc::string::String`, no `std::` paths, `extern crate alloc;` at the top),
+and a comment in `cff.rs` asserted outright that "this crate is `no_std`". It
+is not: `src/lib.rs` carries no `#![no_std]` attribute, so the crate links the
+standard library like any other and the discipline is enforced by nothing but
+habit.
+
+**How it was found.** Adding `#![no_std]` to see whether the claim held. It
+does not — the build fails with 47 errors, in two groups:
+
+- **Float math (35 errors).** `f32::sqrt`, `floor`, `ceil`, `round` and
+  `mul_add` are inherent methods provided by `std`, not by `core`. They are
+  used throughout `raster.rs` and `scaled.rs`, which is unavoidable for a
+  rasterizer.
+- **Prelude items (12 errors).** `String`, `vec!` and `format!` are reached
+  through the `std` prelude at a dozen sites instead of being imported from
+  `alloc`.
+
+**Why it matters.** The compositor and the toolkit both depend on this crate
+and both are meant to run on SlateOS. As long as the attribute is absent, a
+`std::`-only construct added here compiles cleanly on the development host and
+fails only when someone finally builds for the target — at which point the
+offending code is old and its author is a previous session. The false comment
+made this worse than a silent omission, because it told the next reader the
+invariant was already being checked.
+
+**Proper fix.** Add `libm` to the workspace, replace the inherent float
+methods with `libm::{sqrtf, floorf, ceilf, roundf, fmaf}` (or the
+`num-traits`/`libm` float shim), import the prelude items from `alloc` at the
+dozen sites, then add `#![no_std]` and `#[cfg(test)] extern crate std;`. The
+mechanical part is small; what makes it more than mechanical is that `libm`
+would be this workspace's first float-math dependency, and whether SlateOS
+userspace GUI binaries get a `std` port at all is Lane B's call (`posix/**`) —
+if they do, `no_std` here buys much less than it seems to. That question
+should be settled before spending the churn.
+
+**Interim.** The false comment in `cff.rs` was corrected and the crate docs in
+`lib.rs` now state the real position, so nobody is misled into thinking the
+invariant is enforced. Keep writing `alloc::` paths: the point of doing so is
+that closing this stays a small change.
+
+---
+
+
+## FIXED: TD-START-MENU-POWER-ROW-IS-A-LABEL
+
+**Fixed 2026-08-14.** The footer row is a real button: `power_button_rect()`
+reports `Hit::PowerButton`, which toggles `power_menu_open`, and
+`power_menu_rect()` / `power_menu_row_rect(row)` place a popup that
+`power::render_power_menu` draws and `hit_test` reads — one accessor per
+clickable part, as the `Rect` documentation requires. Its five rows are
+`power_menu_entries()`, exactly the `Category::System` entries that
+`start_menu_entries()` filters out, and clicking one returns the same
+`ShellAction::Launch` an application row does: `/sbin/shutdown` and its
+neighbours are what actually shut the machine down, not the window manager.
+The popup is themed and scaled by the shell (it takes a `PowerMenuStyle`)
+rather than by `power.rs`'s own palette, so it follows the light theme and the
+display scaling like everything else. `close_start_menu()` is now the single
+place the menu closes, which is what keeps the submenu from being stranded over
+an empty desktop. Nine tests in `pointer_tests.rs`, including one that walks
+every scale from 100% to 200% asserting no system action is dropped or drawn
+where it cannot be clicked. No confirmation prompt: Start → Power → Shut down
+is one click on every desktop that has this menu, and an extra "are you sure"
+is not what makes shutdown safe.
+
+The original report follows.
+
+**What.** The foot of the start menu draws the word "Power" in grey. It is
+text, not a control: `hit_test` reports `Hit::StartMenuPanel` there, and the
+five `Category::System` entries of the app database — Shutdown, Restart,
+Sleep, Lock, Logout — are consequently unreachable from the shell. They are
+filtered *out* of `start_menu_entries` on purpose, so that "Shutdown" is not
+one mis-click below "Screenshot"; but nothing yet offers them anywhere else.
+
+**Why it bites.** There is no way to shut the machine down from the desktop.
+
+**Proper fix.** A power submenu opened from that row: a small popup listing the
+`Category::System` entries, which resolves to the same `ShellAction::Launch`
+the application rows produce. `gui/desktop/src/power.rs` already models power
+actions and confirmation prompts and should be the thing that renders it,
+rather than a second list inside `render_start_menu`. Needs the same
+geometry-shared-with-the-hit-test treatment as the rows above it — see the
+`Rect` documentation in `main.rs`.
+
+**Where.** `gui/desktop/src/main.rs` — `render_start_menu`'s footer,
+`DesktopShell::hit_test`; `gui/desktop/src/power.rs`.
+
+
+## FIXED: FLAKY-GUITK-SCALING-TESTS-SHARED-A-PROCESS-GLOBAL
+
+**What.** Five tests in `gui/toolkit/src/scaling.rs` — `global_scale_default_is_1`,
+`set_and_get_global_scale`, `global_scale_clamped`, `per_monitor_override`,
+`per_monitor_clear_falls_back` — each wrote the process-wide `SCALE_TABLE` and
+then asserted on it. Cargo runs tests on parallel threads, so
+`per_monitor_clear_falls_back` (which sets the global scale to 1.5) failed
+whenever another of the five reset it to 1.0 in between. Observed failing once
+in a full `cargo test -p guitk` run and passing when run alone.
+
+**Fix.** A `SCALE_LOCK` mutex in the test module, taken by a `ScaleGuard` whose
+`Drop` restores the whole table. Restoring on drop rather than at the end of
+each test body means a failing assertion — which unwinds — still leaves clean
+state, so one failure cannot cascade. The lock is taken with
+`unwrap_or_else(|e| e.into_inner())` because a poisoned lock carries no
+information once the guard restores the state anyway.
+
+**Residual gap.** `DesktopShell::set_appearance` now publishes the display
+scaling into that same process-global table, so `guitk` widgets hosted in the
+shell lay out at the scale the chrome is drawn at. That one line has no unit
+test of its own: every desktop test that builds a shell writes the value an
+assertion would read, and `desktop` is a binary crate so the assertion cannot
+be moved to an out-of-process integration test. Rationale is recorded on the
+method.
+
+**Where.** `gui/toolkit/src/scaling.rs` (test module);
+`gui/desktop/src/main.rs` — `DesktopShell::set_appearance`.
+
+
+## TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES — ✅ FIXED 2026-08-14
+
+**What.** The `GSUB`/`GPOS` walk in `gui/font/src/otl.rs` starts at the
+FeatureList and takes *every* feature carrying a wanted tag, rather than
+starting at the ScriptList and taking the features that the run's script and
+language actually select. A face that registers the same feature tag under
+several scripts therefore has all of those scripts' lookups applied to every
+run, whatever the run is written in.
+
+**Why it bites now.** This was a documented, mostly-theoretical limitation
+while only `liga`/`rlig` were read: a ligature belonging to another script
+almost never matches Latin glyphs, so the wrong lookups ran but did nothing.
+Reading `ccmp` changes that. `ccmp` is precisely where a script puts its
+normalisation rules, and those rules are meaningless — or wrong — outside it.
+
+**Reproduce.** `cargo test -p osfont --target x86_64-pc-windows-gnu --test
+host_fonts -- --ignored --nocapture installed_fonts_leave_plain_latin_alone`.
+On a stock Windows host, `ebrima.ttf` and `ebrimabd.ttf` substitute the *space*
+glyph in plain English prose: their `ccmp` lookup 15 is an extension-wrapped
+type-1 format-2 subtable mapping glyph 3 (space) to 2220, and it belongs to one
+of the African scripts Ebrima covers, not to Latin. Verified against an
+independent Python parse of the table, so this is our *selection* being wrong,
+not our *parsing*.
+
+The damage is small — 2 faces of the 275 with `GSUB` on this host, and the
+substituted glyph is a space variant — but it is a genuinely wrong glyph, and
+the class of fault grows with every feature added.
+
+**Proper fix.** Script and language selection, in two parts:
+
+1. **The table walk.** Walk the ScriptList, pick the ScriptRecord for the run's
+   script (falling back to `DFLT`), then its LangSys (falling back to the
+   default), and intersect that LangSys's feature indices with the wanted tags.
+   This is contained work in `otl.rs` and affects `kern.rs` and `mark.rs` too,
+   since they share the walk.
+2. **Script itemisation.** Deciding what a run's script *is* needs the Unicode
+   Script property, which this crate does not have — a run must be split into
+   same-script pieces before it can be shaped, which is also the prerequisite
+   for bidi and for complex-script reordering. This is the larger half and is
+   the reason (1) is not enough on its own.
+
+Until both land, `installed_fonts_leave_plain_latin_alone` tolerates a small
+proportion of faces changing plain Latin prose. When script selection works,
+that count should drop from eight to the six Linux Libertine files, whose `Th`
+ligature is correct.
+
+**Where.** `gui/font/src/otl.rs` — `lookup_indices` (the FeatureList walk, and
+the module doc's "What is not here"); `gui/font/src/gsub.rs` — the feature tag
+list in `Substitutions::parse`; `gui/font/tests/host_fonts.rs` —
+`installed_fonts_leave_plain_latin_alone`.
+
+**Fixed 2026-08-14** (commit `6e0746636`), both parts, as designed above and
+recorded in design-decisions.md §411.
+
+1. `ByScript` in `otl.rs` walks the ScriptList, resolves every script the face
+   registers once at parse time, and shares the decoded lookups keyed by
+   LookupList index. `Substitutions::apply` takes the run's script and binary
+   searches for it, falling back `dev2`→`deva`→`DFLT`→`dflt`.
+2. `gui/font/src/script.rs` carries the Unicode Script property (generated
+   into `script_tables.rs` from `fontTools.unicodedata`) and `script::runs`
+   splits a piece list into maximal same-script stretches. The split happens
+   in `ScaledFont::shape` *before* substitution, while glyphs are still one
+   per piece — after anything ligates, a boundary counted in pieces is no
+   longer a boundary counted in glyphs.
+
+Ebrima no longer substitutes the space, and the same change fixed
+`B-FONT-CALIBRI-SHAPES-A-FRACTION-SLASH-DIFFERENTLY-FROM-HARFBUZZ`, whose
+cause turned out to be identical.
+
+**The prediction in this entry was wrong, and the correction is the
+interesting part.** It said the plain-Latin count "should drop from eight to
+the six Linux Libertine files". It is *nine*, and all three non-Libertine
+faces are correct: `segoesc`/`segoescb` have genuine Latin `calt`, and
+`SansSerifCollection` maps `space` through its Latin `locl` — a feature this
+crate had been skipping, and which was only safe to add once features were
+script-scoped. All nine now agree with HarfBuzz glyph for glyph. The test's
+bound is a proportion, not a list, which is why it kept working; a hard-coded
+expected count would have had to be relaxed for a change that made the shaper
+*more* correct.
+
+**Successors.** Four narrower gaps remain and are filed separately:
+`TD-FONT-IGNORES-LANGSYS-OVERRIDES`,
+`TD-GPOS-APPLIES-EVERY-SCRIPTS-FEATURES`,
+`TD-FONT-SCRIPT-RUNS-IGNORE-SCRIPT-EXTENSIONS` and
+`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`.
+
+
+## TD-FONT-IGNORES-LANGSYS-OVERRIDES — a font's per-language rules were unreachable — ✅ **RESOLVED 2026-08-15**
+
+**Resolution.** Exactly the fix sketched below, and the required-feature gap
+beside it. `ScaledFont::shape_lang(text, Option<Lang>)` and
+`SystemFont::shape_lang` take a language; `shape(text)` is `shape_lang(text,
+None)`, so the change is purely additive and no caller that names no language
+can shape differently than it did. `otl::ByScript::parse` now precomputes a
+lookup selection per **(script, language)** rather than per script, preferring
+the named LangSysRecord over the DefaultLangSys, and `feature_indices` finally
+reads `requiredFeatureIndex` — the one feature a language system states outside
+its index list, which the walk had been dropping for the default language too.
+
+`lang.rs` does the BCP 47 → OpenType mapping, following HarfBuzz's
+`hb_ot_tags_from_language` rule for rule: complex rules first (`ro-MD` →
+`MOL `, `zh-Hant` → `ZHT `), then extended-language-subtag substitution, then
+the 2- and 3-letter registries, then the blocked list, else uppercase. It is
+allocation-free and puts no bound on the tag's length.
+`tools/gen_lang_tables.py` generates its four tables from HarfBuzz's source, so
+a registry update is a regeneration rather than an edit.
+
+Four things worth keeping in mind about the shape of the fix:
+
+- **A LangSysRecord replaces the default's feature list; it does not add to
+  it.** So naming a language can take a feature *away* — which is exactly what
+  `TRK ` does to `liga`. Callers should pass `None` rather than a guess: a
+  wrong language is worse than no language.
+- **One BCP 47 tag resolves to a *list* of up to three OpenType tags, not to
+  one.** `ro-MD` is `MOL ` and then `ROM `; `ml` is Malayalam Traditional and
+  then Reformed; `ga` is `IRI ` and then `IRT `. They are candidates and not
+  synonyms: a face is asked for each in turn and the first it **registers**
+  wins. The cap of three is HarfBuzz's `HB_OT_MAX_TAGS_PER_LANGUAGE`, and
+  truncating where HarfBuzz truncates is what keeps the two engines answering
+  alike. See "What the oracle caught" below — the first version of this fix
+  kept only the head of each list and was wrong on 66 of the host's 556 faces.
+- **Language selection deliberately does not fall back the way script
+  selection does.** A script that does not register the language takes its own
+  default, never another script's — HarfBuzz's split between
+  `hb_ot_layout_table_select_script` and
+  `hb_ot_layout_script_select_language`. `gsub::tests::language_selection_does_not_fall_back_to_another_script`
+  pins it.
+- **A script's default entry is stored even when it selects nothing**, because
+  that entry is what says the script exists and stops the fallback chain.
+  Language entries identical to their script's default are *not* stored; two
+  thirds of the host's are. This is why `ByScript` keeps a second list of every
+  (script, language) the face *registers*: "which candidate wins" is decided by
+  what the font registered, never by what happened to be worth storing, or a
+  `MOL ` that says nothing would hand Moldavian to `ROM `'s overrides on the
+  strength of an optimisation.
+
+**Scale.** `tools/langsys_survey.py` measured the host before the fix: of 581
+installed faces, 290 register at least one LangSysRecord, 3031 (script,
+language) records in all, 1203 of which differ from their default and **996 of
+which differ in a feature tag this crate asks for, across 230 faces**. Moved
+tags: `locl` 856, `ccmp` 90, `liga` 67, `calt` 28, `mark` 25. The survey's
+feature list is pinned equal to the shaper's by
+`otl::tests::the_survey_matches_the_shapers_feature_list`, so a number it
+reports cannot quietly come to mean something else.
+
+**Tested** by seven new unit tests over hand-built ScriptLists that
+`fixture::script_list` cannot express (a script with no DefaultLangSys, a
+script with named languages, a `requiredFeatureIndex`, a face registering only
+a language's second candidate, and both orders of a face registering two of
+them), by 20 tests over the BCP 47 mapping, and by `tools/harfbuzz_sweep.py`,
+which grew a language field: each new corpus entry is a string already in the
+corpus plus a tag, so a difference between the two halves is the language and
+nothing else, and both halves map the tag with the same rules. The sweep's
+buffer language is set *after* `guess_segment_properties`, and explicitly to
+`""` for the language-less entries, because the guess otherwise fills it in
+from the machine's locale and the run would pass or fail by where it was made.
+
+**What the oracle caught.** The first version of this fix passed 521 unit
+tests, was clippy-clean, and was wrong. The sweep found it in one run: `ro-MD`
+disagreed with HarfBuzz on **345** faces where plain `ro` disagreed on 279, and
+the 66-face gap was the bug. HarfBuzz's `hb_ot_tags_from_language` returns an
+ordered list of up to `HB_OT_MAX_TAGS_PER_LANGUAGE = 3` candidate tags and asks
+the face for each in turn; `gen_lang_tables.py` had deliberately kept only the
+first of each list, on the reasoning that a language has one tag. Those 66
+faces — `Candara.ttf` among them — register `('latn', 'ROM ')` and no `MOL `,
+so HarfBuzz reached Romanian's comma-below `locl` for Moldavian through the
+second candidate and we did not. After the generator was reworked to keep all
+of them, the `ro-MD` bucket is 279: exactly `ro`'s, exactly the language-less
+twin's, and entirely the pre-existing NFC divergence recorded in
+`design-decisions.md` §410. Final sweep: 556 faces × 35 strings, 18235 agree,
+reordered 0, misplaced 0.
+
+This is the third bug the HarfBuzz oracle has found that a green unit-test
+suite could not, and for the same reason every time: "this face has no glyph
+/ no language system for that" is a *legal* answer, so no self-consistency
+check can tell it apart from the truth. Only a second implementation can.
+
+The original entry follows.
+
+---
+
+**What.** `otl::select` reads each ScriptRecord's DefaultLangSys and ignores
+its LangSysRecords entirely. The per-language overrides — Turkish dotless `i`
+under `TRK `, Serbian Cyrillic italic letterforms under `SRB `, Moldovan
+comma-below under `MOL ` — are never reached, and a face whose *only* route to
+a feature is a language system contributes nothing at all.
+
+**Why it bites.** It is invisible until it is not. A Turkish reader gets the
+wrong dot on `i`/`ı`; a Serbian reader gets Russian italics for бгпт. Both are
+the kind of wrongness a native reader notices immediately and nobody else ever
+does.
+
+**Why it is filed rather than fixed.** There is nothing to select *with*.
+Language is a property of the text's provenance, not of its characters — the
+same Cyrillic codepoints are Serbian or Russian depending on who typed them —
+so it cannot be derived the way script is. It needs a language carried on the
+text down to `ScaledFont::shape`, which means an API change reaching the
+toolkit and the locale system, neither of which has a language to hand yet.
+
+**Proper fix.** Add an optional BCP 47 language to the shaping call, map it to
+an OpenType language system tag (the registry is a fixed table, `tr` → `TRK `,
+`sr` → `SRB `), and have `select` prefer that LangSysRecord over the
+DefaultLangSys. Default stays "no language", which is what every shaper does
+when not told and what this crate does now — so the change is additive and
+cannot regress text that names no language.
+
+**Reproduce.** `gsub::tests::a_feature_only_a_language_system_reaches_is_not_applied`
+pins the current behaviour: a `locl` reachable only through `TRK ` yields no
+`Substitutions` at all.
+
+**Where.** `gui/font/src/otl.rs` — `select`, `LangSys`, and the module doc's
+"What is not here".
+
+
+## TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES — RESOLVED 2026-08-15
+
+**Resolved in two commits, because it was two bugs wearing one name.**
+
+*Half one — erasing them* (`88ee69ca7`): `norm::ignorable` classifies the
+character, `SubGlyph::ignorable` carries the answer and is cleared wherever a
+`GSUB` lookup rewrites the glyph, and `ScaledFont::shape` replaces what is left
+with the space glyph, or drops it where the face has none.
+
+*Half two — stepping over them* (this commit): erasing an ignorable at the end
+is not enough, because the lookups in between still saw it as a wall. `f ZWJ i`
+did not ligate; a contextual alternate did not match across a soft hyphen. The
+matcher now answers three ways rather than two, as HarfBuzz's does — hide,
+*step over*, or consider — with the kind of ignorable and the kind of lookup
+deciding which. See `design-decisions.md` §434 for the shape of that, and
+`gui/font/src/skip.rs`'s `Joiners` for the table.
+
+**Measured.** Host sweep, 556 faces × 60 strings: `differ` on `f\u200di` went
+from 76 faces to 0, and `misplaced` from 331 to 170. Khmer probe: 45/45 before
+and after, which is the point — the Indic-family features read the joiners
+themselves and had to come through unchanged.
+
+**The 170 that remain are a deliberate divergence, not a residue.** They are
+every corpus string containing an ignorable, and in all of them the glyphs and
+every *visible* glyph's position agree; what differs is the x of the erased,
+zero-advance glyph itself. HarfBuzz spends a legacy `kern` on the right-hand
+glyph's offset, so its erased glyph sits at the *unkerned* pen — 13 units
+inside the following letter's image, for `a◌͏b` in Arial Rounded. We charge the
+kern to the pair's left glyph, so ours sits exactly where the next glyph is
+drawn. A caret asked to land on the ignorable's cluster wants ours. Recorded in
+`design-decisions.md` §434; do not "fix" it without reading that first.
+
+---
+
+*The original entry follows, as filed.*
+
+**What.** A handful of characters exist to instruct the shaper and are never
+meant to be drawn: the zero-width joiner and non-joiner, the soft hyphen, the
+bidi controls, the variation selectors, the byte-order mark. Once shaping is
+over, HarfBuzz erases them — `hb_ot_hide_default_ignorables`, in
+`hb_ot_substitute_post`, replaces each one's glyph with the face's `space`
+glyph, or **deletes the glyph entirely** if the face has no space — and
+`hb_ot_zero_width_default_ignorables`, during positioning, zeroes their
+advances and x-offsets first. We do neither: `ScaledFont::shape` maps the
+character through `cmap` like any other and returns whatever glyph came back.
+
+**Symptom, measured.** The two strings the Khmer probe font disagrees on
+(`gui/font/tools/khmer-corpus.txt`, the `\u17d2\u200d\u1781` and
+`\u17d2\u200c\u1781` lines) are exactly this: HarfBuzz emits the space glyph
+where we emit ZWJ's and ZWNJ's own glyphs. It is invisible in the host sweep
+only because the built-in corpus has no string containing an ignorable that
+the face also maps.
+
+**Why it matters beyond the joiners.** This is crate-wide and
+script-independent, and the joiner case is the *benign* one — a face that maps
+ZWJ usually maps it to something blank anyway. The soft hyphen U+00AD is the
+one that bites: fonts routinely map it to a real hyphen glyph, so a word
+carrying a discretionary break renders with a hyphen sitting in the middle of
+it whether or not the line broke there. The bidi controls and variation
+selectors are the same shape of bug.
+
+**One subtlety that is easy to get wrong.** HarfBuzz's predicate is
+`(unicode_props() & UPROPS_MASK_IGNORABLE) && !_hb_glyph_info_substituted()` —
+a character stops counting as ignorable the moment a GSUB lookup rewrites it,
+because at that point the glyph is whatever the font asked for and is no
+longer the control character. So the flag has to be *cleared on substitution*,
+not merely tested at the end. And the set is HarfBuzz's own hard-coded list
+(U+00AD, U+034F, U+061C, U+17B4–17B5, U+180B–180E, U+200B–200F, U+202A–202E,
+U+2060–206F, U+FE00–FE0F, U+FEFF, U+FFF0–FFF8, U+1BCA0–1BCA3, U+1D173–1D17A,
+U+E0000–E0FFF), *not* Unicode's `Default_Ignorable_Code_Point` property; using
+the Unicode set would make the sweep disagree in the other direction.
+
+**Proper fix.** A flag on `SubGlyph`, set in `scaled.rs`'s per-piece build loop
+from the character, cleared at the three sites in `gsub.rs` that assign a
+glyph id — `apply_single`, `apply_alternate`, the ligature path — and by
+`apply_multiple`'s splice. Then in the loop that builds `out: Vec<ShapedGlyph>`
+at the end of `shape`, zero the advance and offsets and substitute the space
+glyph, or drop the glyph if the face maps no space. Corpus strings containing
+a soft hyphen and the joiners go into `harfbuzz_sweep.py`'s built-in `CORPUS`
+in the same change, so the fix is measured on all 556 host faces rather than
+on the one probe font that happened to expose it.
+
+**Where.** `gui/font/src/scaled.rs` — the per-piece loop that derives
+`tab`/`klass`/`mark`/`indic` from each character, and the `out`-building loop
+after it; `gui/font/src/gsub.rs` — `apply_single`, `apply_multiple`,
+`apply_alternate` and the ligature path; `gui/font/tools/harfbuzz_sweep.py` —
+`CORPUS`.
+
+
+## TD-FONT-HAS-A-HANGUL-SHAPER-NOTHING-CALLS — ✅ FIXED 2026-08-15
+
+**What.** `gui/font/src/hangul.rs` is a complete, tested transcription of
+HarfBuzz's `preprocess_text_hangul` — 673 lines, 19 tests, all passing — that is
+**not declared in `lib.rs`** and therefore compiles nowhere and changes no
+output. It was parked mid-task on an explicit halt, at the point where it worked
+in isolation but was not yet connected.
+
+**Why it is parked rather than either finished or deleted.** The connection is
+all-or-nothing, and the half of it that was written first is a regression on its
+own. Wiring the shaper means telling `norm::pieces` to stop normalizing Hangul —
+HarfBuzz's Hangul shaper sets `HB_OT_SHAPE_NORMALIZATION_MODE_NONE` precisely
+because composing first destroys the distinction the shaper reads. But `pieces`
+composing `<L,V,T>` to a syllable is currently the *only* thing that makes
+Korean render at all on the ordinary Korean text font, which ships the 11,172
+precomposed syllables and no jamo. Exempt Hangul from normalization without the
+shaper in place and that font draws three missing-glyph boxes where it used to
+draw one correct syllable. So the `norm.rs` half was reverted and the module
+kept: a tested, inert file loses nothing, whereas a half-wired one is worse than
+neither.
+
+**The four edits that connect it**, in the order they have to happen:
+
+1. `norm.rs` — thread a private `enum Hangul { Normalize, LeaveAlone }` through
+   `decompose_once`, `compose_pair`, `decompose_into` and `compose`; split `nfc`
+   into `nfc` (which passes `Normalize`, because NFC is NFC and a question about
+   *text* must get that answer) and a private `normalize(text, hangul)`. `pieces`
+   then calls `normalize(text, Hangul::LeaveAlone)`, and `split_undrawable` calls
+   `decompose_once(ch, Hangul::LeaveAlone)` — the latter because a syllable
+   `hangul::preprocess` declined to split has been declined on grounds
+   `split_undrawable` cannot see, namely that the face has no jamo either. Three
+   call sites in `norm.rs`'s own tests need the new argument.
+2. `gsub.rs` — add `b"ljmo"`, `b"vjmo"`, `b"tjmo"` to `FEATURES` with `LJMO`,
+   `VJMO`, `TJMO` bit constants, and a `SubGlyph::jamo(gid, cluster,
+   Option<Jamo>)` constructor that ORs the one jamo bit and **clears `CALT`**.
+   Clearing `calt` is not an optimization: Noto Sans CJK and Source Han Sans file
+   all of their jamo lookups under `calt`, and HarfBuzz's `setup_masks_hangul`
+   turns it off for every L/V/T so those lookups cannot fire twice.
+   `the_masks_match_the_feature_list` has to keep passing.
+3. `scaled.rs::shape` — call `hangul::preprocess` immediately after
+   `norm::pieces`, with `has_glyph = |ch| self.face.glyph_index(ch).is_some()`
+   and `zero_width = ` has-glyph *and* zero horizontal advance; then choose
+   between `SubGlyph::cursive` and `SubGlyph::jamo` in the piece loop on
+   `hangul::is_jamo(ch)`. Guard the whole thing with `hangul::present` so a run
+   with no Korean in it pays nothing.
+4. `fallback.rs` — add `*b"hang"` to `NO_ZERO_WIDTH_MARKS` (the Hangul shaper's
+   `zero_width_marks` is `NONE`) and **not** to `COMPLEX_SCRIPTS` (its
+   `fallback_position` is `true`). Both lists are `is_sorted`-asserted.
+
+**What it should buy.** 553 of the sweep's 892 remaining `differ` cases are the
+single string `\u1100\u1161\u11a8` — jamo we compose to `각` and HarfBuzz leaves
+as three glyphs. Expect `differ` 892 -> ~339. The residue after that is composed
+Latin diacritics, which is a *different* and unsettled question: HarfBuzz
+decomposes and recomposes against font coverage, which reverses the layering
+`norm.rs`'s module doc deliberately chose (`nfc` pure Unicode, `fit_to_face` pure
+font). That one is an operator question, not a bug.
+
+**Where.** `gui/font/src/hangul.rs` (parked), `gui/font/src/lib.rs` (the missing
+`mod hangul;`), and the three files named above. The reference is HarfBuzz's
+`src/hb-ot-shaper-hangul.cc`.
+
+**Resolution — 2026-08-15.** All four edits landed together with the missing
+`mod hangul;`, and the prediction above held to the case. The HarfBuzz
+differential sweep (556 host faces × 23 strings, 12,739 comparisons):
+
+| bucket | before | after |
+|---|---|---|
+| `agree` | 11,847 | **12,400** |
+| `differ` | 892 | **339** |
+| `reordered` | 0 | 0 |
+| `misplaced` | 0 | 0 |
+
+`\u1100\u1161\u11a8` — all 553 of its cases — left the disagreement list
+entirely, and nothing regressed into `reordered`/`misplaced`. `osfont` goes
+from 482 to **501 passing tests**: the module's own 19 tests had never run
+before, because a module that is not declared does not compile and therefore
+does not test either. That is the sharper lesson here — "19 tests, all
+passing" was a true statement about a file `cargo test` had never once
+looked at.
+
+Two notes on how the edits differ from the plan above. `gsub.rs`'s three new
+feature tags are **appended** to `FEATURES` rather than inserted in tag order,
+so that no existing bit constant shifts; the bits are `1 << 34/35/36`.
+And `norm::nfc` lost its last production caller in the split, so it now
+carries `#[cfg_attr(not(test), allow(dead_code, …))]` — it is kept deliberately
+as the text-question half of the split (NFC is NFC), not as dead weight, and
+the reason is written at its definition.
+
+The residual 339 are exactly the composed-Latin-diacritics cases this entry
+predicted (`\u1e09` 255, `\u212b` 57, `été` 10, …). They are **not** tracked
+here as a bug; they are the layering question in `norm.rs`'s module doc, and
+belong to the operator. See `open-questions.md`.
+---
+
 
 ## FIXED (2026-08-15, lane C) — three workspace test failures from real-glyph measurement, two of them real bugs
 
@@ -14214,3 +14228,352 @@ named after the bug; before the fix only a bystander test caught it.
 Three breaks were run against the final code (reinstate the emptiness guess;
 stop folding in `Property::new`; make `Property::new` return `Heading`). All
 three are caught, each by at least two named tests.
+
+
+## TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE — ✅ **RESOLVED 2026-08-16**
+
+**What.** Of HarfBuzz's six complex shapers we have two: Arabic (joining) and
+Indic (reordering). The other four — Khmer, Myanmar, Thai/Lao, and the
+Universal Shaping Engine that covers roughly ninety further scripts — are not
+written, so a run in any of those scripts gets the default shaper: `ccmp`,
+`locl`, the ligature features, and nothing positional or reordering.
+
+**Symptom.** Unmeasured. No string in the sweep corpus is Khmer, Myanmar, Thai
+(as *shaped* text — the Thai string in the corpus exercises mark fallback on
+faces that do not cover it), Tibetan, Javanese or any other USE script, so the
+sweep reports zero disagreement for them because it never asks. The expected
+failure is the same shape as Devanagari's was before the Indic shaper: pre-base
+vowels drawn after their consonant, conjuncts not forming, and in Khmer the
+coeng-joined subscripts drawn as full-size letters on the baseline.
+
+**Why it is filed rather than fixed.** It is the largest single piece of
+shaping left and it wants its own measurement first. The sweep's corpus has to
+gain strings for each family before the work can be checked, and the host's 556
+faces have to be surveyed for which of them cover those scripts at all — on a
+Windows development host that is likely to be very few, which is itself an
+argument for doing it after the things the host *can* measure.
+
+**The survey has now been run** (2026-08-15, `gui/font/tools/script_survey.py`,
+579 faces), and it contradicts the guess above. Counting only faces that both
+cover the script *and* register its tag in `GSUB` — the sharper test, since a
+face that declares nothing gives both implementations nothing to do and agrees
+trivially:
+
+| shaper | script | measuring faces |
+|---|---|---|
+| Thai | Thai | **8** |
+| Thai | Lao | **19** |
+| Khmer | Khmer | 3 |
+| Myanmar | Myanmar | 2 |
+| USE | Tifinagh | 6 |
+| USE | Buginese | 4 |
+| USE | Tibetan / Javanese / Balinese / Sinhala / Cham | 1 each |
+| USE | Tai Tham | 0 (covered by one face, declared by none) |
+| *(control)* Indic | Devanagari | 5 |
+| *(control)* Arabic | Arabic | 43 |
+
+The control row is the point: **Devanagari, already written and measured from
+`misplaced 13` to `0`, had only five faces to measure against.** Thai has eight
+and Lao nineteen. So the host is not thin for these scripts at all — it is
+thin for exactly one of the four families, USE, where most scripts have a
+single face and Tai Tham has none.
+
+**Proper fix — order revised by the survey.** ~~USE first, since it subsumes
+the most scripts.~~ USE subsumes the most scripts and is the *least*
+measurable of the four; writing it first means writing the largest piece of
+shaping left with an oracle that can barely disagree with it. Take them in
+order of how well the host can check the work:
+
+1. **Thai/Lao first** — best measured (27 faces between them) and smallest.
+   It is not a reordering shaper at all: it is the PUA fallback for Thai fonts
+   with no `GSUB`, plus a `ccmp`-like normalization of the vowel/tone order.
+2. **Khmer, then Myanmar** — 3 and 2 faces, variants of the Indic model that
+   can reuse `initial_reordering_syllable`'s base-finding.
+3. **USE last** — the cluster grammar from the Unicode Shaping Engine spec,
+   the same stage driver `indic_shape.rs` already has, and `Plan`'s probing of
+   what the face declares. By then the three smaller shapers will have shaken
+   out the stage driver against faces that can actually object.
+
+Each step needs its corpus strings added to `harfbuzz_sweep.py` first, or the
+sweep reports agreement it never tested.
+
+**Step 1 of 3 done — Thai/Lao, 2026-08-15** (`gui/font/src/thai.rs`, commits
+`48597037a` and `a7130c6b4`). Both halves the survey predicted, and both
+measured:
+
+* **SARA AM decomposition.** U+0E33 (Lao U+0EB3) is one character drawn as two
+  marks in two places, and Unicode gives it no canonical decomposition, so we
+  were asking faces for a glyph almost none have. `thai::preprocess` splits it
+  into nikhahit + sara aa and walks the nikhahit back over any above-base
+  marks, which is HarfBuzz's `preprocess_text_thai` — Uniscribe's behaviour,
+  not the MS OT Thai spec's. It runs from `norm::normalize` *between*
+  decomposition and the mark sort, and the ordering is load-bearing rather
+  than incidental: sorting first puts the nikhahit on the wrong side of a
+  tone mark. Host sweep, 556 faces: **agree 18806 → 21015, reordered 3 → 0,
+  differ 3382 → 1176**, every Thai and Lao string now agreeing on every face.
+  The residual 1176 is entirely the pre-existing NFC bucket, untouched.
+* **The private-use fallback.** `thai::pua_shape`, two state machines
+  transcribed from `hb-ot-shaper-thai.cc`, gated on HarfBuzz's
+  `!plan->map.found_script[0]` — the face's `GSUB` did not name `thai`.
+  Note that this is *not* `Face::shapes_as_default`, which answers false for a
+  face with no `GSUB` at all; a face with no `GSUB` is exactly the font the
+  pass exists for, and using the wrong predicate made the pass never fire.
+
+  This one could not be measured against the host at all: **not one of the 556
+  installed faces carries a single Thai private-use glyph** (probed directly),
+  because every Thai font Windows ships today describes its shaping in `GSUB`,
+  which turns the fallback off. A host sweep would have reported agreement it
+  never tested. So the oracle was built instead —
+  `gui/font/tools/gen_thai_legacy.py` synthesizes three faces with no
+  `GSUB`/`GPOS`/`GDEF` (Windows forms, Mac forms, and none), and
+  `thai-pua-corpus.txt` names one string per edge of the two machines plus
+  controls. **78 of 78 agree**, including the vendor preference and the
+  no-private-use face, which the pass must leave untouched.
+
+`harfbuzz_sweep.py` gained a `--corpus FILE` flag along the way, so each of
+the remaining steps can bring its own corpus without editing the built-in one.
+
+**Step 2 of 3 done — Khmer, 2026-08-15** (`gui/font/src/khmer.rs`, commits
+`1897b9b19` and `8f1247264`). The shaper, the oracle that could disagree with
+it, and the bug that oracle found in a shaper that had been shipping for weeks:
+
+* **The shaper.** Khmer is the Indic model with two moves and one structural
+  difference. The moves: a COENG+RO pair jumps to the head of its syllable and
+  takes `pref`, and everything it jumped over takes `cfar`; a pre-base vowel
+  moves to the head as well, ahead of a fronted pair. The five split vowels
+  (U+17BE–U+17C5) get no canonical decomposition from Unicode, so they are
+  split by hand into U+17C1 plus a second half before the syllables are cut.
+  The structural difference is that the reordering runs *before the first
+  lookup* rather than after `locl`/`ccmp` as Indic does. The syllable-serial
+  stamping the two shapers share came out into `gui/font/src/syllabic.rs` at
+  the same time. `cfar` was appended to `gsub::FEATURES` (and to
+  `langsys_survey.py`'s `WANTED`, which `otl.rs` pins equal to it).
+* **The host measurement.** 556 faces: **agree 27421 → 27687**, differ back
+  down to the same 1176 pre-existing NFC baseline, **reordered 0, misplaced 0**
+  — every Khmer string agreeing on every face.
+* **The oracle, per §431 of `design-decisions.md`.** That host number is worth
+  much less than it looks. Only three installed faces register `khmr` at all
+  (the Leelawadee UI family), and **not one face on this machine has a `cfar`
+  lookup**, nor `pres`, nor `psts` — probed directly. So the sweep was
+  reporting agreement about masks it never applied. `gui/font/tools/
+  gen_khmer_probe.py` builds `KhmerProbe.ttf`, where each of thirteen features
+  has one lookup rewriting every Khmer glyph as *itself followed by a marker
+  glyph unique to that feature*, so a glyph run spells out which features
+  reached it and in what order. It is a one-to-two substitution on purpose: the
+  base has to survive so the next feature still matches it, and `cfar` — which
+  is applied after `blwf`, on the very glyphs `blwf` is set on — is precisely
+  the feature a one-to-one substitution would have hidden. Markers carry zero
+  advance so a wrong mask can never smear into the positions.
+  `khmer-corpus.txt` is one string per edge of the shaper rather than sampled
+  text. **43 of 45 agree.**
+* **What it found.** `locl`, `ccmp`, `blwf`, `abvf` and `pstf` were each being
+  applied **twice** — named in an early stage and then again in the final
+  `ALL_FEATURES` stage, which `gsub::apply_stages` does not deduplicate.
+  HarfBuzz gives each feature exactly one stage (`hb_ot_map_builder_t::compile`
+  merges duplicate tags at the `hb_min` of their stages), so this was a real
+  divergence. **The Indic shaper had the same bug**, and 556 installed faces
+  had hidden it for as long as that shaper has existed: a duplicate application
+  is invisible unless a lookup is not idempotent, and real faces' lookups
+  overwhelmingly are. Fixed in both by masking the earlier stages out of the
+  last one; `stages()` was factored out of `shape` in each so the "one feature,
+  one stage" invariant is four tests rather than a comment.
+* **The two that still differ** are the joiner strings, and are not a Khmer
+  bug: HarfBuzz emits the face's space glyph for a default-ignorable character
+  (ZWJ, ZWNJ, soft hyphen …) once shaping is done, and deletes it outright if
+  the face has no space. We emit the character's own glyph. That is crate-wide
+  and script-independent — a soft hyphen would draw a visible hyphen mid-word
+  on any face that maps it — so it is tracked separately under
+  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES` rather than here.
+
+**Step 3 of 3 done — Myanmar, 2026-08-15** (`gui/font/src/myanmar.rs`,
+`myanmar_machine.rs`, `tools/gen_myanmar_machine.py`). The shaper is the
+smallest of the three, and the pass it forced open — mark positioning — was
+the largest thing found in this whole exercise.
+
+* **The shaper.** Myanmar is syllabic like Indic and Khmer and shares their
+  category table and machine generator, but it reorders by a different
+  mechanism: it assigns a `Position` to *every* glyph of the syllable and then
+  **stably sorts** by it, rather than rotating a fixed few. Three things move —
+  a kinzi (`Ra + Asat + virama`) sorts to just after the base, a medial RA
+  (U+103C) to `PreC`, and a pre-base vowel (U+1031) to `PreM`, with a run of
+  several pre-base vowels flipped, the same repair Indic makes. The base search
+  is forwards and stops at the first consonant: there is no reph to guess at,
+  because a Myanmar kinzi is spelled out and recognised by that spelling.
+  `rphf`, `pref`, `blwf` and `pstf` each get a stage of their own with a pause,
+  where Khmer runs its basic features in one. The reordering runs *after*
+  `locl`/`ccmp` — Khmer's most surprising property inverted.
+
+* **Measured.** Myanmar sweep (`mmrtext.ttf`, `mmrtextb.ttf`): **58 of 58
+  agree**, `misplaced 0`. Full host sweep, 556 faces × 89 strings: `agree
+  48087`, `reordered 0`, `misplaced 170`, `differ 1178`, `mixed 49` — the 170
+  being the deliberate ignorable-caret divergence recorded under
+  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES`, unchanged.
+
+* **What it found: our mark fallback had HarfBuzz's *two* zeroing routes fused
+  into one.** HarfBuzz zeroes a mark's advance by two independent routes, and
+  we had been approximating them with a single union.
+  - *Route 1*, `zero_mark_widths_by_gdef`, is gated on the per-script
+    `plan->zero_marks` — which eleven scripts turn off — and zeroes every glyph
+    whose `GDEF` class is mark, **or**, only when the face has no `GDEF`
+    classes at all, every glyph whose general category is `Mn`. Either/or,
+    never both: a face that classifies has *stated* which glyphs are marks and
+    the character's category must not second-guess it.
+  - *Route 2*, `_hb_ot_shape_fallback_mark_position`, zeroes only the marks it
+    actually places (combining class ≠ 0), plus — when the base has no
+    extents — every `Mn` in the cluster.
+
+  We had the two `||`-ed together and the per-script gate missing entirely.
+  `scaled.rs` now encodes them separately: `zeroed_at` carries `zero_marks`
+  per segment, `marks` is the either/or, and `synthesize_marks` is a two-phase
+  transcription of `position_cluster_impl`/`position_around_base` — walk the
+  clusters and apply route-2 zeroing, *then* compute the pens, *then* place.
+  See `design-decisions.md` §436.
+
+* **And the bug that made it visible.** A mark whose combining class is zero is
+  not placed and not zeroed, which made it look exactly like a base to the old
+  cluster splitter, so the measurement **restarted at it** and every mark after
+  it was measured against the wrong glyph. In `ကို့` the dot below landed two
+  letters right of where HarfBuzz draws it. HarfBuzz cuts clusters on the
+  general *category* and takes the base as the first non-mark; the class only
+  decides whether a mark is moved once the base is known. Fixed, and pinned by
+  `scaled.rs`'s `a_class_zero_mark_does_not_start_a_new_cluster` and
+  `only_the_marks_the_fallback_places_lose_their_advance`. It was the whole of
+  the remaining `simsun.ttc` divergence (`0;-128;0` → HarfBuzz's `0;-640;0`).
+
+**One known gap, believed unreachable — the cluster splitter reads `Mn` where
+HarfBuzz reads `Mn|Mc|Me`.** `norm::is_mark` is `Mn`-only, which is exactly
+right for route 1 (it transcribes `hb_synthesize_glyph_classes`, which is also
+`Mn`-only) but is *narrower* than the `_hb_glyph_info_is_unicode_mark` that
+cuts fallback clusters. A spacing combining mark (`Mc` — an Indic matra) or an
+enclosing one (`Me`) would therefore end a cluster here and continue one in
+HarfBuzz. It cannot arise in NFC text: reaching it needs an `Mc` followed by a
+non-zero-class `Mn` inside one cluster, i.e. a matra with a nukta after it,
+which canonical ordering does not produce — and every path into this pass has
+already normalised. Filed rather than fixed because the fix is a second
+general-category predicate (`is_unicode_mark`) used by the splitter only, and
+adding an untestable one costs more than it buys. If a corpus string is ever
+found that reaches it, that is the fix.
+
+USE is next, and is now the only shaper left. Note for it: like Myanmar, it
+zeroes mark advances *before* `GPOS` rather than after, so its script tags have
+to join `mym2` in `fallback::Zeroing::BeforeGpos`.
+
+**Where.** `gui/font/src/sfnt.rs` — `Face::substitute`, which dispatches on
+`Script::shaping` and would gain the other families; `gui/font/src/indic.rs`
+and `indic_machine.rs` — the models to copy; `gui/font/tools/harfbuzz_sweep.py`
+— `CORPUS`, which needs a string per family before any of this is measurable.
+
+**Step 4 of 4 done — the Universal Shaping Engine, 2026-08-16. This entry is
+closed: all five complex shapers now exist** (`gui/font/src/universal.rs`,
+`universal_machine.rs`, `universal_tables.rs`, `tools/gen_universal_machine.py`,
+`tools/gen_universal_table.py`, `tools/use-corpus.txt`, `tools/hb_use_oracle.py`).
+
+* **The shaper.** One engine for eighty-eight scripts, and the only one of the
+  five that does not encode a writing system's rules. It encodes the *shape*
+  those rules share — a cluster is a base with modifiers hung on it — and leaves
+  the particulars to the font. Its own contribution is to say where a cluster
+  ends, which glyphs a repha and a pre-base vowel move past, and which of the
+  four positional forms a cluster takes. `Category` and its ranges are generated
+  from Unicode plus the `ms-use` override files HarfBuzz vendors and checked
+  against HarfBuzz's packed table code point by code point; `Cluster` and its
+  DFA are generated from the ten regular expressions of the ragel grammar.
+  Neither is hand-transcribed.
+
+* **Three things make it unlike the other three syllabic shapers**, and each is
+  a class of bug the others cannot have.
+  - *The machine reads a **filtered** view of the run.* Indic, Khmer and Myanmar
+    hand their machines every glyph; USE first hides the `CGJ` category (the
+    combining grapheme joiner, ZWJ and the variation selectors) and a ZWNJ whose
+    next visible glyph is a combining mark, so that neither can cut a cluster in
+    half. The hidden glyphs are not removed — they stay in the run and belong to
+    whichever cluster the machine was in when it stepped over them, and a run
+    that *begins* with a hidden glyph leaves it in no cluster at all.
+  - *The **font** decides what a repha is.* Indic recognises a reph by spelling
+    (`Ra` + virama) and Myanmar a kinzi likewise. USE runs the font's `rphf`
+    feature alone, as a stage of its own, and then asks which glyph the font
+    rewrote; `pref` is treated the same way and a glyph it rewrote becomes a
+    pre-base vowel. Neither question can be answered without having run the
+    lookup, which is why `SubGlyph::substituted` exists.
+  - *The positional forms are per **cluster**, not per letter.* For most USE
+    scripts `isol`/`init`/`medi`/`fina` are not cursive joining at all: they are
+    handed out by asking whether the *previous cluster* joined. The eleven USE
+    scripts that really do join cursively take the ordinary `joining` path.
+
+* **The corpus, and why it is the host's real fonts this time.** Unlike Khmer
+  and Myanmar — where §431 of `design-decisions.md` forced a synthesized probe
+  because the host could not falsify the pass — `script_survey.py` reports faces
+  declaring `tibt`, `java`, `bali`, `sinh`, `tfng`, `cham` and `bugi`. Seven
+  scripts is not eighty-eight, but between them they cover the three things the
+  engine actually does: cluster the run, move a pre-base vowel, and give a broken
+  cluster a dotted circle. `tools/use-corpus.txt` is 58 strings, one per edge,
+  and lines in scripts no installed face declares are kept deliberately — they
+  shape to boxes on both sides today and are the regression test for the day a
+  face for them is installed.
+
+* **Measured: 556 faces × 58 strings — `agree 32203`, `reordered 0`,
+  `misplaced 40`, `differ 0`, `mixed 5`.** No unexplained disagreement remains.
+  The 40 `misplaced` are the pre-existing ignorable-caret divergence recorded
+  under `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES` — they predate USE and are
+  not USE's. The 5 `mixed` are the *itemizer*, not the shaper: two corpus lines
+  run more than one script, HarfBuzz guesses a single script for the whole
+  buffer where we itemize, and the difference that comes back is not a question
+  the two halves can be asked the same way. They are counted apart because of it
+  (a leading `!` on a corpus line, which `read_corpus` now reads — the marker
+  lives next to the string it describes rather than in a second list in another
+  file that would go stale the first time a corpus line was edited). The full
+  89-string host sweep is byte-identical before and after: `agree 48087`,
+  `reordered 0`, `misplaced 170`, `differ 1178`, `mixed 49`. Khmer probe 45/45,
+  Myanmar probe 48/48, both unchanged.
+
+* **What it found, and it was not in the shaper: we were recomposing split
+  vowels.** A dozen scripts spell one vowel as a single character that is *drawn*
+  as two marks on opposite sides of its consonant, and Unicode records the
+  canonical decomposition. `norm::pieces` was gluing the two halves back into one
+  character before the shaper ever saw them, so the pre-base half could not be
+  moved — the Sinhala line `\u0D9A\u0DDC` was wrong on every face that can draw
+  it. HarfBuzz covers this by name: `compose_use` and `compose_indic` are both
+  the plain Unicode composition guarded by `/* Avoid recomposing split matras. */
+  if (HB_UNICODE_GENERAL_CATEGORY_IS_MARK (general_category (a))) return false;`.
+  We take it as one switch on the normalizer rather than a hook per shaper,
+  having first enumerated the affected set exhaustively: of every canonical
+  two-part decomposition in Unicode 16 whose first half is `Mn|Mc|Me` there are
+  59, 12 are composition exclusions that never recompose, and the remaining
+  **47 all belong to scripts shaped by Indic or USE**. A test walks the table and
+  asserts both the predicate and the count, so a regeneration that adds a script
+  outside the two engines fails the build.
+
+* **And the correction that cost the most: HarfBuzz's decomposition is
+  font-aware, and ours was not.** Splitting unconditionally regressed the sweep
+  to `differ 555` — one per face, `ours [0,0,0] vs harfbuzz [0,0]` — on faces
+  with no Sinhala coverage whatsoever. Reading `hb-ot-shape-normalize.cc` gives
+  the reason: `decompose()` refuses outright when the *second* half has no glyph,
+  and falls back to the whole character when the first half has no glyph and does
+  not decompose further. So on a face that can draw none of it HarfBuzz emits one
+  notdef box and we were emitting two. `norm::rejoin_split_vowels` is the font
+  half of the rule — rejoin an adjacent pair when the first is a mark, the two
+  share a cluster offset, and the face cannot draw **both** halves. Sharing a
+  cluster offset is the provenance test that keeps this from becoming a second
+  composition pass: halves at the same offset came from one character this crate
+  took apart, halves at different offsets were two characters the author typed,
+  and only the former may be put back. It runs *after* `fit_to_face` and not
+  before, because the two would otherwise fight. See `design-decisions.md` §439.
+
+* **Zeroing.** As the note left by step 3 predicted, USE zeroes mark advances
+  *before* `GPOS` rather than after, so its script tags join `mym2` in
+  `fallback::Zeroing::BeforeGpos`.
+
+**What is deliberately not here.** *Vowel constraints* — HarfBuzz's
+`preprocess_text_use` inserts a dotted circle between a consonant and an
+independent vowel Unicode says may not follow it. That is a table of its own and
+a separate pass, and this crate has neither, for USE or for Indic. It is a
+missing *diagnostic*, not a missing shaping rule: text that triggers it is
+ill-formed either way, and the divergence is that HarfBuzz marks the error
+visibly and we render it silently.
+
+**One thing worth doing later, not blocking.** Per §431, the host declares only
+seven of the eighty-eight scripts, and none for Tai Tham, Batak, Brahmi or the
+Egyptian hieroglyphs the corpus exercises — those lines agree because both sides
+draw boxes. A `gen_use_probe.py` on the pattern of `gen_khmer_probe.py` would
+turn that agreement into a measurement. Tracked in `todo.txt`.
+
+---

@@ -774,10 +774,22 @@ Roadmap:
   baseline. It also forced the mark-positioning fallback open: HarfBuzz's
   *two* mark-advance-zeroing routes had been fused into one here, and a
   combining mark of class zero was being mistaken for a cluster base (§435,
-  §436). **USE is the only shaper left**
-  (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`, step 3 of 3 done); after it, the
-  ignorable fix and device tables in `ValueRecord`. Vello itself waits on
-  `[A]`'s GPU driver.
+  §436). **USE done — every complex shaper now exists**, and
+  `TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE` is closed. One engine for
+  eighty-eight scripts, generated (categories from Unicode + HarfBuzz's `ms-use`
+  overrides, the cluster DFA from the ragel grammar) rather than transcribed,
+  and unlike the other three it reads a *filtered* view of the run, asks the
+  **font** what a repha is by running `rphf` alone and seeing what changed, and
+  hands out `isol`/`init`/`medi`/`fina` per *cluster* rather than per letter.
+  Sweep against the host's seven USE-declaring faces, 556 × 58: `agree 32203`,
+  `differ 0`, the 40 `misplaced` being the ignorable-caret baseline and the 5
+  `mixed` the itemizer rather than the shaper. What it found was in the
+  *normalizer*, not the shaper: a two-part vowel — one character drawn as two
+  marks either side of its consonant, in 47 characters across a dozen scripts —
+  was being recomposed before the shaper could move the front half, and undoing
+  that naively cost 555 faces because HarfBuzz's decomposition is font-aware and
+  ours was not (§439). Next: the ignorable fix and device tables in
+  `ValueRecord`. Vello itself waits on `[A]`'s GPU driver.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
   (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it

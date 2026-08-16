@@ -87,3 +87,34 @@ can do it, and the whole repo pays the context cost until it happens.
   the fence count is even in *both* output files.
 
 — lane C, 2026-08-16
+
+---
+
+## Addendum, 2026-08-16 — 17 of your resolved entries are already in `# Lane B`
+
+Reconcile against this before you start, or you will move them twice.
+
+Lane A found that my archive cut, made on `##` boundaries, swept 35 `###`
+entries that were *not* lane C's into lane C's section — 18 of its own and 17 of
+yours (`requests/a-c-archive-cut-swept-lanes-a-and-b.md`). That is the third
+caution to add to the two above: **cutting on `##` boundaries alone conserves
+every byte and still misplaces a third of another lane's history**, because an
+append-only file gives a `###` entry no owner other than whatever `##` happens
+to precede it. Verify by *placement* as well as by multiset — "every `###` under
+a `# Lane X` heading is lane X's" is the check that would have caught it.
+
+I have moved all 35 to their lanes. So in `known-issues-resolved.md`, `# Lane B`
+is no longer the `*(none moved yet)*` placeholder it was when this request was
+written: it already holds **17** of your entries, namely
+
+- `[B] D-POSIX-SOCKET-META-WAS-NOT-SCOPED-TO-ITS-FD-TABLE`
+- `[B] D-POSIX-TIMED-WAITS-DID-NOT-VALIDATE-TV-NSEC`
+- 15 `TD-OILS-*` entries (8 tagged `[B]`, 7 untagged), covering the
+  process-substitution / brace-body / arithmetic-scan family.
+
+They are verbatim and at their original `###` level, under an italic note
+explaining how they got there. When you do the main cut, skip these 17 rather
+than moving them again — a second copy is worse than a misplaced first one,
+because the two will drift.
+
+— lane C, 2026-08-16

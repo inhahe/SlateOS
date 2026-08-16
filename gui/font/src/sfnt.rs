@@ -1400,6 +1400,21 @@ impl Face {
             });
             return;
         }
+        // Then the Universal Shaping Engine, which takes every complex script
+        // the three specialised shapers above and the Indic arm below do not:
+        // eighty-eight of them, from Balinese to Zanabazar Square. Same filter
+        // as Myanmar and Indic — a face that files its features under `DFLT` or
+        // `latn` has said it wants none of this. The arms stay exclusive: the
+        // USE tag list is `fallback::COMPLEX_SCRIPTS` with the other shapers'
+        // tags removed, which is checked by a test in `universal`.
+        if crate::universal::shapes(script)
+            && !crate::fallback::shaped_as_default(script, chosen)
+        {
+            crate::universal::shape(&self.data, subs, script, lang, glyphs, |ch| {
+                self.glyph_index(ch)
+            });
+            return;
+        }
         match Script::shaping(script)
             .filter(|_| !crate::fallback::shaped_as_default(script, chosen))
         {

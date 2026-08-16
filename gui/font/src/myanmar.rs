@@ -57,7 +57,7 @@
 use alloc::vec::Vec;
 
 use crate::gsub::{ALL_FEATURES, Staging, SubGlyph, Substitutions, feature_bits};
-use crate::indic::{Category, Position};
+use crate::indic::{Category, Char, Position};
 use crate::lang::Lang;
 use crate::myanmar_machine::{ACCEPTS, TRANSITIONS};
 use crate::script::ScriptTags;
@@ -348,7 +348,12 @@ fn reorder(glyphs: &mut Vec<SubGlyph>, dotted: Option<u16>) {
     syllabic::insert_dotted_circles(
         glyphs,
         dotted,
-        Category::DottedCircle,
+        |g| {
+            g.indic = Char {
+                category: Category::DottedCircle,
+                position: Position::End,
+            };
+        },
         |stamp| Syllable::from_code(stamp) == Syllable::Broken,
         // No skip. Indic's circle goes after a repha, which is drawn above the
         // letter that follows and so needs a letter to follow; Myanmar's kinzi

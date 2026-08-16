@@ -25,13 +25,61 @@
 //! There is no `Add`/`Mul` operator implementation, on purpose: every method
 //! here allocates, and an infix `a * b` in a loop hides that in a way
 //! `a.mul(&b)` does not. Division by zero is the caller's to check — `divmod`
-//! returns zero for it rather than panicking, because the callers all need to
-//! report it in their own words and with their own exit status.
+//! and [`BigInt::div_limb`] return zero for it rather than panicking, because
+//! the callers all need to report it in their own words and with their own exit
+//! status.
+//!
+//! ## No operation here can panic
+//!
+//! That is a requirement, not an aspiration: `expr "$a" + "$b"` and
+//! `bc <<< "$x"` both put a value the user chose directly into this arithmetic,
+//! so an index out of range or an overflow is a denial of service on whatever
+//! script is running. Every read of a limb goes through [`limb`], which reads a
+//! missing one as the zero it logically is, and every accumulator uses a
+//! saturating or checked operation.
+//!
+//! None of those saturations can actually be reached — the invariant below says
+//! why — so they cost a branch that never taken and buy the guarantee that a
+//! bug in one of them degrades an answer rather than killing the process.
+//!
+//! ## The invariant every limb operation relies on
+//!
+//! **Every limb is in `0..LIMB_BASE`**, i.e. below 10^9, and `normalize` is
+//! called before any `BigInt` is handed back. Two consequences are used
+//! throughout:
+//!
+//! * a limb product plus two carries is at most
+//!   `(10^9-1)^2 + 2*(10^9-1)` ≈ 10^18, which fits in a `u64` with a factor of
+//!   18 to spare — this is exactly why the base is 10^9 and not 10^18;
+//! * `carry * LIMB_BASE + limb` is likewise below 10^18 whenever `carry` is
+//!   itself limb-sized, which is what long division needs.
 
 /// Base for each limb -- 10^9 fits comfortably in u32 and makes
 /// decimal conversion trivial (each limb is exactly 9 decimal digits).
 pub const LIMB_BASE: u64 = 1_000_000_000;
 pub const LIMB_DIGITS: usize = 9;
+
+/// Limb `i` of `s`, or zero past its end.
+///
+/// A shorter operand is the same number as one zero-extended to any length, so
+/// reading off the end is meaningful rather than an error — which is what lets
+/// every loop below run over the longer of two operands without a bounds check
+/// or a panic.
+#[inline]
+fn limb(s: &[u32], i: usize) -> u64 {
+    s.get(i).copied().map_or(0, u64::from)
+}
+
+/// Split an accumulator into the carry out and the limb it leaves behind.
+///
+/// `LIMB_BASE` is a non-zero constant, so neither division can trap; saying so
+/// once here keeps the twenty call sites from each repeating the argument.
+#[inline]
+fn split(v: u64) -> (u64, u32) {
+    let carry = v.checked_div(LIMB_BASE).unwrap_or(0);
+    let low = v.checked_rem(LIMB_BASE).unwrap_or(0);
+    (carry, low as u32)
+}
 
 /// Arbitrary-precision signed integer stored as a sign flag and a
 /// vector of base-10^9 limbs in little-endian order (limbs[0] is the
@@ -62,27 +110,28 @@ impl BigInt {
         self.limbs.iter().all(|&l| l == 0)
     }
 
-    pub fn from_i64(mut v: i64) -> Self {
-        let negative = v < 0;
-        if negative {
-            v = v.wrapping_neg();
-        }
-        let mut uv = v as u64;
+    pub fn from_i64(v: i64) -> Self {
+        // `unsigned_abs`, not `-v`: `i64::MIN` has no positive counterpart, and
+        // negating it is the one input that would overflow.
+        let mut uv = v.unsigned_abs();
         let mut limbs = Vec::new();
-        if uv == 0 {
-            limbs.push(0);
-        } else {
-            while uv > 0 {
-                limbs.push((uv % LIMB_BASE) as u32);
-                uv /= LIMB_BASE;
+        loop {
+            let (carry, low) = split(uv);
+            limbs.push(low);
+            uv = carry;
+            if uv == 0 {
+                break;
             }
         }
-        Self { negative, limbs }
+        Self {
+            negative: v < 0,
+            limbs,
+        }
     }
 
     /// Remove leading zero limbs, keeping at least one.
     pub fn normalize(&mut self) {
-        while self.limbs.len() > 1 && *self.limbs.last().unwrap_or(&1) == 0 {
+        while self.limbs.len() > 1 && self.limbs.last() == Some(&0) {
             self.limbs.pop();
         }
         if self.is_zero() {
@@ -91,15 +140,18 @@ impl BigInt {
     }
 
     /// Compare magnitudes: 1 if |self| > |other|, -1 if <, 0 if equal.
+    ///
+    /// Both operands are normalized, so a longer limb vector is a larger
+    /// magnitude and only equal lengths need comparing limb by limb — from the
+    /// most significant end, which is where the first difference decides.
     pub fn cmp_mag(&self, other: &Self) -> i32 {
-        let a = &self.limbs;
-        let b = &other.limbs;
+        let (a, b) = (&self.limbs, &other.limbs);
         if a.len() != b.len() {
             return if a.len() > b.len() { 1 } else { -1 };
         }
-        for i in (0..a.len()).rev() {
-            if a[i] != b[i] {
-                return if a[i] > b[i] { 1 } else { -1 };
+        for (x, y) in a.iter().rev().zip(b.iter().rev()) {
+            if x != y {
+                return if x > y { 1 } else { -1 };
             }
         }
         0
@@ -107,15 +159,16 @@ impl BigInt {
 
     /// Add magnitudes, result is unsigned (caller sets sign).
     pub fn add_mag(a: &[u32], b: &[u32]) -> Vec<u32> {
-        let mut result = Vec::with_capacity(a.len().max(b.len()) + 1);
-        let mut carry: u64 = 0;
         let len = a.len().max(b.len());
+        let mut result = Vec::with_capacity(len.saturating_add(1));
+        let mut carry: u64 = 0;
         for i in 0..len {
-            let va = if i < a.len() { a[i] as u64 } else { 0 };
-            let vb = if i < b.len() { b[i] as u64 } else { 0 };
-            let sum = va + vb + carry;
-            result.push((sum % LIMB_BASE) as u32);
-            carry = sum / LIMB_BASE;
+            // Two limbs and a carry are each below 10^9, so this is below
+            // 3*10^9 and the saturation is unreachable.
+            let sum = limb(a, i).saturating_add(limb(b, i)).saturating_add(carry);
+            let (next, low) = split(sum);
+            result.push(low);
+            carry = next;
         }
         if carry > 0 {
             result.push(carry as u32);
@@ -124,15 +177,22 @@ impl BigInt {
     }
 
     /// Subtract magnitudes (|a| >= |b| required).
+    ///
+    /// The precondition is the caller's — [`BigInt::add`] establishes it with
+    /// [`BigInt::cmp_mag`] before every call — but violating it cannot panic:
+    /// the borrow simply propagates off the end and the result is the
+    /// two's-complement-like wrap, which `normalize` then reduces.
     pub fn sub_mag(a: &[u32], b: &[u32]) -> Vec<u32> {
         let mut result = Vec::with_capacity(a.len());
         let mut borrow: i64 = 0;
         for i in 0..a.len() {
-            let va = a[i] as i64;
-            let vb = if i < b.len() { b[i] as i64 } else { 0 };
-            let mut diff = va - vb - borrow;
+            // Both limbs are below 10^9 and the borrow is 0 or 1, so this stays
+            // inside ±10^9 and the saturations are unreachable.
+            let mut diff = (limb(a, i) as i64)
+                .saturating_sub(limb(b, i) as i64)
+                .saturating_sub(borrow);
             if diff < 0 {
-                diff += LIMB_BASE as i64;
+                diff = diff.saturating_add(LIMB_BASE as i64);
                 borrow = 1;
             } else {
                 borrow = 0;
@@ -181,23 +241,38 @@ impl BigInt {
     }
 
     /// Schoolbook multiplication.
+    ///
+    /// The accumulator is `u64` rather than `u32` because each slot holds a
+    /// limb product plus what was already there plus a carry; the base is 10^9
+    /// precisely so that sum stays under 10^18 and needs no splitting.
     pub fn mul(&self, other: &Self) -> Self {
-        let a = &self.limbs;
-        let b = &other.limbs;
-        let mut result = vec![0u64; a.len() + b.len()];
-        for i in 0..a.len() {
+        let (a, b) = (&self.limbs, &other.limbs);
+        let mut result = vec![0u64; a.len().saturating_add(b.len())];
+        for (i, &av) in a.iter().enumerate() {
             let mut carry: u64 = 0;
-            for j in 0..b.len() {
-                let prod = a[i] as u64 * b[j] as u64 + result[i + j] + carry;
-                result[i + j] = prod % LIMB_BASE;
-                carry = prod / LIMB_BASE;
+            for (j, &bv) in b.iter().enumerate() {
+                // `i + j < a.len() + b.len()`, so the slot is always there.
+                let Some(slot) = i.checked_add(j).and_then(|k| result.get_mut(k)) else {
+                    continue;
+                };
+                let product = u64::from(av)
+                    .saturating_mul(u64::from(bv))
+                    .saturating_add(*slot)
+                    .saturating_add(carry);
+                let (next, low) = split(product);
+                *slot = u64::from(low);
+                carry = next;
             }
-            result[i + b.len()] += carry;
+            // The slot one past the inner loop has never been written — the
+            // next outer round is the first to reduce it — so this leaves it
+            // holding a single carry, itself below `LIMB_BASE`.
+            if let Some(slot) = i.checked_add(b.len()).and_then(|k| result.get_mut(k)) {
+                *slot = slot.saturating_add(carry);
+            }
         }
-        let limbs: Vec<u32> = result.iter().map(|&v| v as u32).collect();
         let mut r = Self {
             negative: self.negative != other.negative,
-            limbs,
+            limbs: result.iter().map(|&v| v as u32).collect(),
         };
         r.normalize();
         r
@@ -205,12 +280,15 @@ impl BigInt {
 
     /// Multiply by a single limb.
     pub fn mul_limb(&self, v: u32) -> Self {
-        let mut result = Vec::with_capacity(self.limbs.len() + 1);
+        let mut result = Vec::with_capacity(self.limbs.len().saturating_add(1));
         let mut carry: u64 = 0;
         for &l in &self.limbs {
-            let prod = l as u64 * v as u64 + carry;
-            result.push((prod % LIMB_BASE) as u32);
-            carry = prod / LIMB_BASE;
+            let product = u64::from(l)
+                .saturating_mul(u64::from(v))
+                .saturating_add(carry);
+            let (next, low) = split(product);
+            result.push(low);
+            carry = next;
         }
         if carry > 0 {
             result.push(carry as u32);
@@ -224,13 +302,22 @@ impl BigInt {
     }
 
     /// Divide self by a single limb, returning (quotient, remainder).
+    ///
+    /// A zero divisor yields `(0, 0)`, as [`BigInt::divmod`] does and for the
+    /// same reason: the caller reports it, in its own words.
     pub fn div_limb(&self, d: u32) -> (Self, u32) {
+        if d == 0 {
+            return (Self::zero(), 0);
+        }
         let mut quotient = vec![0u32; self.limbs.len()];
         let mut rem: u64 = 0;
-        for i in (0..self.limbs.len()).rev() {
-            let cur = rem * LIMB_BASE + self.limbs[i] as u64;
-            quotient[i] = (cur / d as u64) as u32;
-            rem = cur % d as u64;
+        // Most significant limb first: each step divides the previous remainder
+        // shifted up by one limb, plus this limb. `rem < d < 10^9`, so the
+        // shifted value stays under 10^18.
+        for (slot, &l) in quotient.iter_mut().zip(self.limbs.iter()).rev() {
+            let cur = rem.saturating_mul(LIMB_BASE).saturating_add(u64::from(l));
+            *slot = cur.checked_div(u64::from(d)).unwrap_or(0) as u32;
+            rem = cur.checked_rem(u64::from(d)).unwrap_or(0);
         }
         let mut q = Self {
             negative: self.negative,
@@ -240,7 +327,16 @@ impl BigInt {
         (q, rem as u32)
     }
 
-    /// Long division: returns (quotient, remainder).  Panics on zero divisor.
+    /// Long division: returns (quotient, remainder).
+    ///
+    /// Truncating toward zero, as C and every caller's specification require:
+    /// `-7 / 2` is `-3` with remainder `-1`, not `-4` with remainder `1`. The
+    /// remainder takes the *dividend's* sign, which is what keeps
+    /// `a/b*b + a%b == a` true.
+    ///
+    /// A zero divisor yields `(0, 0)` rather than panicking — see the module
+    /// docs.
+    #[allow(clippy::too_many_lines)] // Knuth's algorithm D is one procedure; splitting it would hide the loop's invariants.
     pub fn divmod(&self, other: &Self) -> (Self, Self) {
         if other.is_zero() {
             // bc prints an error and returns 0 on division by zero.
@@ -258,120 +354,132 @@ impl BigInt {
         }
 
         // For single-limb divisor use the fast path.
-        if other.limbs.len() == 1 {
-            let (mut q, r) = self.div_limb(other.limbs[0]);
+        if let [d] = other.limbs.as_slice() {
+            let (mut q, r) = self.div_limb(*d);
             q.negative = self.negative != other.negative;
             q.normalize();
-            let mut rem = Self::from_i64(r as i64);
+            let mut rem = Self::from_i64(i64::from(r));
             rem.negative = self.negative;
             rem.normalize();
             return (q, rem);
         }
 
-        // Knuth Algorithm D (simplified).
+        // Knuth Algorithm D (simplified). `cmp > 0` above means `self` has at
+        // least as many limbs as `other`, so this subtraction cannot wrap.
         let n = other.limbs.len();
-        let m = self.limbs.len() - n;
+        let m = self.limbs.len().saturating_sub(n);
 
-        // Normalize: scale both so that divisor's top limb >= LIMB_BASE/2.
-        let d_top = *other.limbs.last().unwrap_or(&1) as u64;
-        let scale = (LIMB_BASE / (d_top + 1)) as u32;
+        // Scale both so the divisor's top limb is at least LIMB_BASE/2, which is
+        // what bounds the error in the quotient estimate below to one.
+        // `other` is normalized and non-zero, so its top limb is in
+        // `1..LIMB_BASE` and `scale` is in `1..=LIMB_BASE/2`.
+        let d_top = other.limbs.last().copied().map_or(1, u64::from);
+        let scale = LIMB_BASE
+            .checked_div(d_top.saturating_add(1))
+            .unwrap_or(1)
+            .max(1) as u32;
 
         let u = self.mul_limb(scale);
         let v = other.mul_limb(scale);
 
         let mut u_limbs = u.limbs.clone();
-        while u_limbs.len() <= m + n {
+        while u_limbs.len() <= m.saturating_add(n) {
             u_limbs.push(0);
         }
 
-        let v_top = *v.limbs.last().unwrap_or(&1) as u64;
-        let mut q_limbs = vec![0u32; m + 1];
+        // Non-zero, because `v` is `other` scaled by at least 1 and normalized.
+        let v_top = v.limbs.last().copied().map_or(1, u64::from);
+        // The two limbs below the top, used to refine the estimate. Reading a
+        // missing one as zero is correct: the divisor has at least two limbs
+        // here, and a shorter dividend prefix really is zero-extended.
+        let v_second = v.limbs
+            .len()
+            .checked_sub(2)
+            .map_or(0, |k| limb(&v.limbs, k));
+        let mut q_limbs = vec![0u32; m.saturating_add(1)];
 
         for j in (0..=m).rev() {
-            // Estimate q_hat.
-            let idx = j + n;
-            let u_hi = if idx < u_limbs.len() {
-                u_limbs[idx] as u64
-            } else {
-                0
-            };
-            let u_mid = if idx >= 1 && idx - 1 < u_limbs.len() {
-                u_limbs[idx - 1] as u64
-            } else {
-                0
-            };
-            let dividend = u_hi * LIMB_BASE + u_mid;
-            let mut q_hat = dividend / v_top;
-            let mut r_hat = dividend % v_top;
+            // Estimate one quotient limb from the top two limbs of what is left
+            // of the dividend. `u_hi < LIMB_BASE`, so `dividend < 10^18`.
+            let idx = j.saturating_add(n);
+            let u_hi = limb(&u_limbs, idx);
+            let u_mid = idx.checked_sub(1).map_or(0, |k| limb(&u_limbs, k));
+            let u_third = idx.checked_sub(2).map_or(0, |k| limb(&u_limbs, k));
+            let dividend = u_hi.saturating_mul(LIMB_BASE).saturating_add(u_mid);
+            let mut q_hat = dividend.checked_div(v_top).unwrap_or(0);
+            let mut r_hat = dividend.checked_rem(v_top).unwrap_or(0);
 
-            let v_second = if v.limbs.len() >= 2 {
-                v.limbs[v.limbs.len() - 2] as u64
-            } else {
-                0
-            };
-            let u_third = if idx >= 2 && idx - 2 < u_limbs.len() {
-                u_limbs[idx - 2] as u64
-            } else {
-                0
-            };
-
+            // Knuth's correction: while the estimate is provably too large,
+            // walk it down. It runs at most twice.
             loop {
-                if q_hat >= LIMB_BASE || q_hat * v_second > LIMB_BASE * r_hat + u_third {
-                    q_hat -= 1;
-                    r_hat += v_top;
-                    if r_hat < LIMB_BASE {
-                        continue;
-                    }
+                let too_big = q_hat >= LIMB_BASE
+                    || q_hat.saturating_mul(v_second)
+                        > r_hat.saturating_mul(LIMB_BASE).saturating_add(u_third);
+                if !too_big {
+                    break;
                 }
-                break;
+                q_hat = q_hat.saturating_sub(1);
+                r_hat = r_hat.saturating_add(v_top);
+                if r_hat >= LIMB_BASE {
+                    break;
+                }
             }
 
-            // Multiply and subtract.
+            // Multiply the divisor by the estimate and subtract it out.
             let mut borrow: i64 = 0;
             for i in 0..n {
-                let prod = q_hat * v.limbs[i] as u64;
-                let idx2 = j + i;
-                if idx2 < u_limbs.len() {
-                    let cur = u_limbs[idx2] as i64 - (prod % LIMB_BASE) as i64 - borrow;
-                    if cur < 0 {
-                        u_limbs[idx2] = (cur + LIMB_BASE as i64) as u32;
-                        borrow = prod as i64 / LIMB_BASE as i64 + 1;
-                    } else {
-                        u_limbs[idx2] = cur as u32;
-                        borrow = prod as i64 / LIMB_BASE as i64;
-                    }
+                let product = q_hat.saturating_mul(limb(&v.limbs, i));
+                let (product_hi, product_lo) = split(product);
+                let Some(slot) = j.checked_add(i).and_then(|k| u_limbs.get_mut(k)) else {
+                    continue;
+                };
+                let cur = i64::from(*slot)
+                    .saturating_sub(i64::from(product_lo))
+                    .saturating_sub(borrow);
+                if cur < 0 {
+                    *slot = cur.saturating_add(LIMB_BASE as i64) as u32;
+                    borrow = (product_hi as i64).saturating_add(1);
+                } else {
+                    *slot = cur as u32;
+                    borrow = product_hi as i64;
                 }
             }
-            if j + n < u_limbs.len() {
-                let cur = u_limbs[j + n] as i64 - borrow;
+
+            // If the subtraction went negative the estimate was one too large:
+            // give a unit back and add the divisor in again.
+            let top = j.saturating_add(n);
+            if let Some(slot) = u_limbs.get_mut(top) {
+                let cur = i64::from(*slot).saturating_sub(borrow);
                 if cur < 0 {
-                    u_limbs[j + n] = (cur + LIMB_BASE as i64) as u32;
-                    // Need to add back.
-                    q_hat -= 1;
+                    *slot = cur.saturating_add(LIMB_BASE as i64) as u32;
+                    q_hat = q_hat.saturating_sub(1);
                     let mut carry: u64 = 0;
                     for i in 0..n {
-                        let idx2 = j + i;
-                        if idx2 < u_limbs.len() {
-                            let sum = u_limbs[idx2] as u64 + v.limbs[i] as u64 + carry;
-                            u_limbs[idx2] = (sum % LIMB_BASE) as u32;
-                            carry = sum / LIMB_BASE;
-                        }
+                        let vi = limb(&v.limbs, i);
+                        let Some(slot) = j.checked_add(i).and_then(|k| u_limbs.get_mut(k)) else {
+                            continue;
+                        };
+                        let sum = u64::from(*slot).saturating_add(vi).saturating_add(carry);
+                        let (next, low) = split(sum);
+                        *slot = low;
+                        carry = next;
                     }
-                    if j + n < u_limbs.len() {
-                        u_limbs[j + n] = (u_limbs[j + n] as u64 + carry) as u32;
+                    if let Some(slot) = u_limbs.get_mut(top) {
+                        *slot = (u64::from(*slot).saturating_add(carry)) as u32;
                     }
                 } else {
-                    u_limbs[j + n] = cur as u32;
+                    *slot = cur as u32;
                 }
             }
-            q_limbs[j] = q_hat as u32;
+            if let Some(slot) = q_limbs.get_mut(j) {
+                *slot = q_hat as u32;
+            }
         }
 
         // Unscale remainder.
-        let rem_limbs: Vec<u32> = u_limbs[..n].to_vec();
         let rem_big = Self {
             negative: false,
-            limbs: rem_limbs,
+            limbs: u_limbs.get(..n).unwrap_or(&u_limbs).to_vec(),
         };
         let (mut remainder, _) = rem_big.div_limb(scale);
         remainder.negative = self.negative;
@@ -390,6 +498,11 @@ impl BigInt {
     /// Anything that is not a digit is skipped, so this is a *lenient* parse
     /// and the caller must have validated the string first. `expr` does, and
     /// has to: `expr abc + 1` is an error there, not `1`.
+    // Not `FromStr`: that trait's `Result` promises the parse validates, and
+    // this one deliberately does not — it is the fast path for a string a
+    // lexer has already checked. Giving it a `Result<Self, Infallible>` to
+    // satisfy the lint would advertise an error case that does not exist.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         Self::from_str_radix(s, 10)
     }
@@ -413,13 +526,17 @@ impl BigInt {
         if radix == 10 {
             let bytes = digits.as_bytes();
             let mut limbs = Vec::new();
+            // Nine digits at a time from the least significant end — the whole
+            // reason the base is a power of ten.
             let mut i = bytes.len();
             while i > 0 {
                 let start = i.saturating_sub(LIMB_DIGITS);
-                let chunk = &bytes[start..i];
                 let mut val: u32 = 0;
-                for &b in chunk {
-                    val = val * 10 + (b.wrapping_sub(b'0')) as u32;
+                for &b in bytes.get(start..i).unwrap_or_default() {
+                    // At most nine digits, so this stays under 10^9.
+                    val = val
+                        .saturating_mul(10)
+                        .saturating_add(u32::from(b.wrapping_sub(b'0')));
                 }
                 limbs.push(val);
                 i = start;
@@ -431,10 +548,10 @@ impl BigInt {
 
         // General radix: multiply-and-add.
         let mut result = Self::zero();
-        let base_big = Self::from_i64(radix as i64);
+        let base_big = Self::from_i64(i64::from(radix));
         for &b in digits.as_bytes() {
             let d = char_to_digit(b);
-            result = result.mul(&base_big).add(&Self::from_i64(d as i64));
+            result = result.mul(&base_big).add(&Self::from_i64(i64::from(d)));
         }
         result.negative = negative;
         result.normalize();
@@ -453,14 +570,11 @@ impl BigInt {
         let mut digits = Vec::new();
         let mut tmp = self.clone();
         tmp.negative = false;
-        let base_big = Self::from_i64(radix as i64);
+        let base_big = Self::from_i64(i64::from(radix));
         while !tmp.is_zero() {
             let (q, r) = tmp.divmod(&base_big);
-            let d = if r.is_zero() {
-                0u32
-            } else {
-                r.limbs[0]
-            };
+            // The remainder is below the radix, so it is one limb.
+            let d = r.limbs.first().copied().unwrap_or(0);
             digits.push(digit_to_char(d));
             tmp = q;
         }
@@ -475,14 +589,14 @@ impl BigInt {
         if self.is_zero() {
             return "0".to_string();
         }
-        let mut s = String::new();
-        // Top limb: no leading zeros.
-        let top = self.limbs.len() - 1;
-        s.push_str(&self.limbs[top].to_string());
-        // Remaining limbs: zero-padded to LIMB_DIGITS.
-        for i in (0..top).rev() {
-            let chunk = format!("{:0>width$}", self.limbs[i], width = LIMB_DIGITS);
-            s.push_str(&chunk);
+        let Some((top, rest)) = self.limbs.split_last() else {
+            return "0".to_string();
+        };
+        // The most significant limb prints without padding; every one below it
+        // is exactly nine digits, because that is what a limb holds.
+        let mut s = top.to_string();
+        for l in rest.iter().rev() {
+            s.push_str(&format!("{l:0>LIMB_DIGITS$}"));
         }
         if self.negative && !self.is_zero() {
             s.insert(0, '-');
@@ -537,17 +651,23 @@ impl BigInt {
         if self.cmp_mag(&Self::one()) == 0 {
             return Self::one();
         }
-        // Initial guess: half the number of digits.
-        let digit_count = (self.limbs.len() - 1) * LIMB_DIGITS
-            + self.limbs.last().map_or(1, |l| {
+        // Initial guess: half the number of digits. Every limb below the top
+        // contributes exactly LIMB_DIGITS; the top one contributes however many
+        // it is written with.
+        let digit_count = self
+            .limbs
+            .len()
+            .saturating_sub(1)
+            .saturating_mul(LIMB_DIGITS)
+            .saturating_add(self.limbs.last().map_or(1, |l| {
                 let mut d = 0usize;
                 let mut v = *l;
                 while v > 0 {
-                    d += 1;
-                    v /= 10;
+                    d = d.saturating_add(1);
+                    v = v.checked_div(10).unwrap_or(0);
                 }
                 d.max(1)
-            });
+            }));
         let half_digits = digit_count.div_ceil(2);
         // Start with 10^half_digits as initial guess.
         let mut guess = Self::one().shift_left_decimal(half_digits);
@@ -568,21 +688,27 @@ impl BigInt {
     }
 }
 
+/// A digit's value in bases up to 16, or `0` for a byte that is not one.
+///
+/// The lenient `0` matches [`BigInt::from_str_radix`]'s contract: the caller has
+/// already decided the string is a number.
 pub fn char_to_digit(b: u8) -> u32 {
     match b {
-        b'0'..=b'9' => (b - b'0') as u32,
-        b'A'..=b'F' => (b - b'A' + 10) as u32,
-        b'a'..=b'f' => (b - b'a' + 10) as u32,
+        b'0'..=b'9' => u32::from(b.wrapping_sub(b'0')),
+        b'A'..=b'F' => u32::from(b.wrapping_sub(b'A')).saturating_add(10),
+        b'a'..=b'f' => u32::from(b.wrapping_sub(b'a')).saturating_add(10),
         _ => 0,
     }
 }
 
+/// The digit for a value in bases up to 16, upper case.
 pub fn digit_to_char(d: u32) -> char {
-    if d < 10 {
-        (b'0' + d as u8) as char
+    let ascii = if d < 10 {
+        b'0'.saturating_add(d as u8)
     } else {
-        (b'A' + (d - 10) as u8) as char
-    }
+        b'A'.saturating_add(d.saturating_sub(10) as u8)
+    };
+    char::from(ascii)
 }
 
 #[cfg(test)]
@@ -739,6 +865,77 @@ mod tests {
         assert_eq!(z.to_string_base10(), "0");
         let z2 = BigInt::from_str("5").mul(&BigInt::from_str("0"));
         assert_eq!(z2.to_string_base10(), "0");
+    }
+
+    /// The property that defines division, over a deterministic sweep of
+    /// multi-limb operands.
+    ///
+    /// The single-limb divisor takes a fast path; everything wider goes through
+    /// Knuth's algorithm D, which is where the estimate-and-correct step lives
+    /// and where a bignum's division bugs are. The named tests above only ever
+    /// reach it with round numbers, so this walks a few hundred shapes instead
+    /// — different limb counts on each side, values that straddle the limb
+    /// boundary, and both signs.
+    #[test]
+    fn division_reconstructs_its_dividend() {
+        // A 64-bit xorshift, so the sweep is the same on every machine and a
+        // failure is reproducible from the seed alone.
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut digits = |n: usize, rng: &mut dyn FnMut() -> u64| {
+            let mut s = String::new();
+            while s.len() < n {
+                s.push_str(&format!("{:019}", rng()));
+            }
+            s.truncate(n);
+            // A leading zero would make the value narrower than intended.
+            s.replace_range(0..1, "1234567890".get(n % 10..).unwrap_or("9").get(..1).unwrap_or("9"));
+            s
+        };
+
+        for a_len in [1usize, 8, 9, 10, 17, 18, 19, 27, 40] {
+            for b_len in [1usize, 9, 10, 18, 19, 25] {
+                if b_len > a_len {
+                    continue;
+                }
+                for signs in [(false, false), (true, false), (false, true), (true, true)] {
+                    let (an, bn) = (digits(a_len, &mut next), digits(b_len, &mut next));
+                    let a = BigInt::from_str(&format!("{}{an}", if signs.0 { "-" } else { "" }));
+                    let b = BigInt::from_str(&format!("{}{bn}", if signs.1 { "-" } else { "" }));
+                    let (q, r) = a.divmod(&b);
+
+                    let back = q.mul(&b).add(&r);
+                    assert_eq!(
+                        back.to_string_base10(),
+                        a.to_string_base10(),
+                        "q*b + r != a for {} / {}",
+                        a.to_string_base10(),
+                        b.to_string_base10()
+                    );
+                    // |r| < |b|, and r takes the dividend's sign.
+                    assert!(
+                        r.cmp_mag(&b) < 0,
+                        "|r| >= |b| for {} / {}",
+                        a.to_string_base10(),
+                        b.to_string_base10()
+                    );
+                    if !r.is_zero() {
+                        assert_eq!(
+                            r.negative,
+                            a.negative,
+                            "remainder sign for {} / {}",
+                            a.to_string_base10(),
+                            b.to_string_base10()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

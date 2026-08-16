@@ -295,6 +295,34 @@ CORPUS = [
     #
     # Scriptless text, which selects the font's default features.
     "123 456",
+    # --- characters shared between scripts (UAX #24 Script_Extensions) ---
+    #
+    # A character's `Script` says which script it belongs to; its
+    # `Script_Extensions` says which scripts *use* it, and the two differ for
+    # 669 characters. The run splitter resolves through the second, and these
+    # are the strings where that decides which features a run is shaped with.
+    #
+    # THAANA HAA, ARABIC-INDIC DIGIT ZERO, THAANA HAA. The digit's script is
+    # Arabic, but Thaana writes its numbers with it: resolving on `Script`
+    # alone cut this into three runs and asked the face for Arabic features in
+    # the middle of a Thaana word. `mvboli.ttf` is the face that answers.
+    "\\u0780\\u0660\\u0780",
+    # BENGALI KA, DANDA, BENGALI KA. The danda is `Common` and twenty-one
+    # Brahmic scripts use it; between two Bengali words it is Bengali.
+    "\\u0995\\u0964\\u0995",
+    # SYRIAC ALAPH, ARABIC TATWEEL, SYRIAC BETH. Tatweel is `Common` and nine
+    # scripts use it, Syriac among them, so this is one Syriac run and the
+    # joining forms have to carry across it.
+    "\\u0710\\u0640\\u0715",
+    # HIRAGANA A, PROLONGED SOUND MARK, KATAKANA A. Two Unicode scripts, one
+    # OpenType tag (`kana`), and therefore one run -- a splitter that worked
+    # in Unicode scripts rather than in tags would cut Japanese here for a
+    # difference no font can act on.
+    "\\u3042\\u30fc\\u30a2",
+    # HEBREW ALEF with a COMBINING ACUTE, which is used by eight scripts and
+    # not by Hebrew. The mark shares nothing with its base and must still stay
+    # in its run: a mark alone in a run is a mark that never gets attached.
+    "\\u05d0\\u0301",
     # --- default ignorables, which shape and are then erased ---
     #
     # A joiner, a soft hyphen, a bidi control and a variation selector are

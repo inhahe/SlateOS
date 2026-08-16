@@ -17129,7 +17129,73 @@ mark-to-ligature lands.
 `gui/font/src/kern.rs`; `gui/font/src/mark.rs`;
 `ScaledFont::kern` in `gui/font/src/scaled.rs`.
 
+**Status: FIXED** (2026-08-16, verified rather than implemented). The entry
+predicted its own fix correctly -- "a whole-run positioning pass ... is the
+better shape and should be done when mark-to-ligature lands" -- and that is
+what happened, in the type-5/7/8 work, without this entry being revisited.
+Checked line by line today:
+
+* `gui/font/src/gpos.rs` builds a `ByScript`, and `Positioning::apply` walks
+  only `self.lookups.for_script(run.script, run.lang)`. Every lookup that moves
+  a glyph in shaped text -- pair kerning, cursive, all three mark types,
+  contextual -- is selected by the run's script and language, with the same
+  fallback chain `GSUB` uses.
+* `gui/font/src/kern.rs`'s union is reached from shaped text only for the
+  *legacy* `kern` table, which has no script systems in it to select among.
+  `scaled.rs` gates it on `!self.face.gpos_kerns(segment.script, lang)`, so a
+  run whose script does reach a `GPOS` `kern` feature never takes it.
+* The two surviving `feature_subtables` calls are in `MarkPositioning::parse`,
+  and everything they feed is `MarkPositioning::is_mark` -- "is this glyph a
+  combining mark", which is a property of the glyph and not of the run. The
+  union is the *right* answer there: a face's Arabic anchors identify Arabic
+  marks whatever script is being shaped, and narrowing it by script would make
+  `is_mark` say no to a mark whose only mention is under another script's
+  `mark` feature.
+
+What is left is the entry's own stated reason for filing, unchanged and
+harmless: `ScaledFont::kern(left, right)` takes two glyph ids with no run, so
+it cannot select and does not. It is public API with no caller in this tree
+(the compositor draws through `ShapedRun`), it is documented as the answer for
+a caller that has no script, and the overlap case the entry describes -- two
+scripts' `kern` coverage sets intersecting -- is still not observed on any of
+the 556 host faces. Narrowing it would mean re-signaturing a public method to
+serve nobody, so this closes as verified rather than as further work.
+
 ## TD-FONT-SCRIPT-RUNS-IGNORE-SCRIPT-EXTENSIONS
+
+**Status: FIXED** (2026-08-16, lane C). `gen_script_tables.py` now emits
+`SCRIPT_EXT_RANGES` / `SCRIPT_EXT_POOL` — the `Script_Extensions` property
+wherever it says something `Script` does not, which on Unicode 16.0.0 is 669
+characters in 177 ranges, 119 distinct sets, widest 23, stored in 452 pooled
+rows because a set that appears verbatim inside a longer one is stored once.
+`script::runs` carries the intersection of the open run's set with each new
+character's, exactly as the proper fix below asked.
+
+Three things the fix had to settle that the entry did not anticipate:
+
+* **`SCRIPT_TAGS` is now one row per OpenType *tag pair*, not per Unicode
+  script.** `kana` is the only pair two scripts share, and it is the one that
+  matters: comparing scripts rather than rows would cut Japanese at every
+  change between hiragana and katakana, for a difference no font can act on.
+* **A character with no `Script` of its own may narrow a run but never end
+  one** — it has an affinity, not an identity. Without this, U+0301 COMBINING
+  ACUTE (used by eight scripts, none of them Hebrew) starts a run of its own
+  after a Hebrew letter, and a mark in its own run is a mark whose base's
+  `GPOS` never attaches it.
+* **Script is resolved over the whole text first, and the direction boundaries
+  are cut into that answer afterwards** (`by_script`, then `runs`). Resolving
+  per directional run instead re-derives the script of `"ހ٠ހ"`'s middle piece,
+  which bidi rule I2 makes a run of its own, as Arabic — measured as a real
+  disagreement with HarfBuzz on `SansSerifCollection.ttf`, which has an Arabic
+  `locl` and no Thaana one. The one exception is a character with no script at
+  all: it belongs to the directional run it is *drawn* in, so the space in
+  `"hello שלום world"` joins the Latin after it rather than trailing the
+  Hebrew before it.
+
+Measured against HarfBuzz over 556 faces × 95 strings: `agree` 51422 → 51423,
+`differ` 1179 → 1178, `misplaced` and `reordered` unchanged. 711 unit tests and
+18 host-font tests pass. Kept here (not archived) until it has survived a boot
+on `main`.
 
 **What.** `script::runs` resolves a character's script from the Unicode
 `Script` property alone. UAX #24 defines the real algorithm over

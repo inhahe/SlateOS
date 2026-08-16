@@ -826,9 +826,24 @@ Roadmap:
   the format word is read before the size range.
   `harfbuzz_sweep.py --ppem N` is the new measurement: at 11 ppem `micross.ttf`
   drops a fatha from y=380 to y=8 and HarfBuzz says 8 too, while the full
-  556-face sweep at that size is byte-for-byte the sizeless one. **Next:
-  right-to-left reordering** (`TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT`).
-  Vello itself waits on `[A]`'s GPU driver.
+  556-face sweep at that size is byte-for-byte the sizeless one. (The line
+  this replaces said right-to-left reordering was next; it was already done on
+  2026-08-14 and the line had gone stale.
+  `TD-GPOS-APPLIES-EVERY-SCRIPTS-FEATURES` closed the same day, on inspection
+  rather than on work -- the unified positioning pass had already fixed it.)
+  **UAX #24 script extensions are done too** (§441;
+  `TD-FONT-SCRIPT-RUNS-IGNORE-SCRIPT-EXTENSIONS` closed). `script::runs` now
+  carries the intersection of the open run's script set with each new
+  character's, off a generated `Script_Extensions` table (669 characters, 119
+  sets, widest 23), so an Arabic-Indic digit no longer cuts a Thaana word in
+  three and a danda between two Bengali words resolves to Bengali. Script is
+  resolved over the whole text and the direction boundaries cut in afterwards,
+  which is what stops bidi rule I2 turning that digit into a one-character
+  Arabic run. Sweep: `agree` 51422 → 51423, `differ` 1179 → 1178.
+  **Next: the paragraph direction and bidirectional carets the bidi work left
+  open** (`TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION`,
+  `TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL`). Vello itself waits on `[A]`'s GPU
+  driver.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
   (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it

@@ -19,7 +19,11 @@ set -x
 # identical bug with worse consequences; see scripts/lib/worktree.sh.
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/worktree.sh" || exit 1
 
-VER=2.3.0
+# The version lives in worktree.sh next to its sha256, so the two cannot drift
+# apart — a version bumped here without the hash there is the one edit that
+# would turn the pin into a permanent build failure, and the one edit that
+# looks harmless.
+VER="$SLATE_PKGCONF_VERSION"
 SYSROOT="$SLATE_SYSROOT"
 # Scratch dirs are keyed by worktree so two lanes building at once cannot write
 # each other's objects or sysroot copy.
@@ -33,9 +37,24 @@ SPIKE_LIBS="/tmp/slate-sysroot2-$SLATE_LANE"
 # handles the $CC-must-not-contain-spaces trap.
 slate_make_zig_wrappers || exit 1
 
+# Fetch-and-verify, rather than the bare `[ -f ] || curl -sSLO` this used to do.
+# That form has no --fail and no .part file, so a 404 body or a cut connection
+# was written straight to the final name and cached as the source forever after.
+# See slate_ensure_pkgconf_src in scripts/lib/worktree.sh.
+slate_ensure_pkgconf_src || exit 1
+
 mkdir -p "$WORK" && cd "$WORK"
-[ -f "pkgconf-$VER.tar.xz" ] || curl -sSLO "https://distfiles.ariadne.space/pkgconf/pkgconf-$VER.tar.xz"
-[ -d "pkgconf-$VER" ] || tar xf "pkgconf-$VER.tar.xz"
+# Always re-extract, and from $SLATE_PKGCONF_TARBALL — a path the hash check
+# just vouched for — rather than from a filename in $WORK.
+#
+# The old `[ -d "pkgconf-$VER" ] || tar xf ...` would have left the pin with a
+# hole exactly the size of the problem it closes: a tree unpacked by an earlier
+# run from an unverified tarball satisfies `[ -d ]`, so verifying the tarball
+# would have changed nothing on any machine that had already run this script
+# once. Re-extracting costs a second and is not even a rebuild — configure and
+# make below run unconditionally regardless.
+rm -rf "pkgconf-$VER"
+tar xf "$SLATE_PKGCONF_TARBALL"
 cd "pkgconf-$VER"
 
 export CC="$SLATE_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"

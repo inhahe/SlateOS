@@ -23421,6 +23421,42 @@ Chet Ramey's signature via GNU's own keyring before the hash was written down.
 `run.sh` extracts on demand from the same pinned tarball rather than assuming
 `build/spike/bash-5.2/` exists.
 
+### And the third one, found by looking rather than by being bitten
+
+Having pinned zig and bash on the same day, the obvious question was which
+other third-party source this tree compiles into a shipped binary. There was
+exactly one left: `scripts/pkgconf-spike/run.sh` fetched upstream pkgconf with
+
+```sh
+[ -f "pkgconf-$VER.tar.xz" ] || curl -sSLO "https://distfiles.ariadne.space/..."
+```
+
+That is a worse failure than either of the other two were, and worth stating
+precisely rather than filing under "no hash". `curl -O` **without `--fail`
+writes the response body on an HTTP error**, and without a `.part` file it
+writes it under the final name. So a 404 page, or a connection cut halfway,
+leaves a file that satisfies `[ -f ]` from then on. The next run does not
+retry — it is *cached*. It untars whatever arrived and, if tar happens to
+succeed, compiles it into `pkgconf-slateos.elf` and stages it in the image.
+Neither the zig nor the bash gap could do that: those failed loudly by being
+absent. This one fails quietly by being present and wrong.
+
+Now `slate_ensure_pkgconf_src` in `scripts/lib/worktree.sh`, pinned at 2.3.0 /
+`3a9080ac51d03615e7c1910a0a2a8df08424892b5f13b0628a204d3fcce0ea8b`, with
+`--fail` and a `.part` file so an interrupted download is loud instead of
+sticky. The hash was cross-checked against two independent packagers rather
+than the distfiles server — asking a server to vouch for its own bytes is not
+a check — and both also agree on the 316160-byte size: OpenBSD ports' distinfo
+(base64 `OpCArFHQNhXnwZEKCiqN8IQkiStfE7BiiiBNP8zg6os=`, which decodes to that
+hex) and OpenEmbedded-core's recipe.
+
+`run.sh` also now **re-extracts unconditionally** instead of `[ -d
+"pkgconf-$VER" ] ||`. That guard would have left the pin with a hole its own
+size: a tree unpacked by an earlier run from an unverified tarball satisfies
+`[ -d ]`, so on any machine that had already run the script once, verifying the
+tarball would have changed nothing at all. It costs a second and is not even a
+rebuild, since `configure` and `make` below run unconditionally regardless.
+
 ## B-POSIX-CAP-KILL-IS-PROJECTED-FROM-A-PER-CHILD-GRANT, SO EVERY PROCESS THAT HAS FORKED REPORTS IT (lane B, 2026-08-16)
 
 **Status: open, deliberately.** The fix depends on a convention only lane A can

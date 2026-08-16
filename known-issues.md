@@ -24312,9 +24312,37 @@ thing v2 changes is the rule. Afterwards, the v2 hashes were confirmed to match
 the *other* worktree's copies of `build.py` and `main.c` for all nine fixtures
 — the property that was missing all along.
 
-### What this does not fix
+### Verified end to end, across the boundary that broke
 
-The `os` integration worktree still fails `check` on `toolchain/sysroot/lib/libc.a`
-(`on disk 4b14549d…`, recorded `e322989b…`). That one is real and local: the
-sysroot is gitignored, so that worktree simply holds an older build. `powershell
--File toolchain/build-sysroot.ps1` is the repair, and it is the correct report.
+After the fix the `os` integration worktree still failed — on
+`toolchain/sysroot/lib/libc.a` alone (`on disk 4b14549d…`, recorded
+`e322989b…`), with the `build.py` line gone. That remainder was real and local:
+the sysroot is gitignored, so that worktree simply held an older build. Running
+`powershell -File toolchain/build-sysroot.ps1` there (100 s) and re-checking
+gave **`ok` for all nine, in the LF worktree, against stamps written in the CRLF
+one.** That crossing is the property the v1 stamp never had, and it is now the
+acceptance test for any future change to how inputs are hashed.
+
+Worth keeping: after the fix, the surviving failure was the *correct* one. A
+check that reports exactly the one thing that is genuinely wrong, and nothing
+else, is the whole point of naming drifted inputs individually.
+
+### How widespread the CRLF is, since the next reader will ask
+
+Surveyed across all 13,145 tracked text files in lane B's worktree: **70 carry
+CRLF, and every one is a `services/*/build.py`** — the nine `ctest-*` plus ~61
+`fastpy-*`. Every committed blob is LF (`git show HEAD:…` on a sample counts
+zero), so this is purely a worktree artifact of whatever generated those files
+in text mode, not anything in history.
+
+Only the nine `ctest-*` copies were ever hashed. The `fastpy-*` ones are an
+input to nothing: `STAGED_GLOBS` fingerprints their **ELFs**, which are binary
+and hashed byte-for-byte, correctly. So the exposure was exactly the nine, and
+it is closed.
+
+**No `.gitattributes` was added, deliberately.** It would not help: git already
+checks these out as LF under `autocrlf=input`; the CRLF arrives *after*
+checkout, written by a tool. A config that governs checkout cannot fix a file
+rewritten post-checkout, which is precisely why the durable fix belongs in the
+hash rule and not in git configuration — and why the fix works for any future
+tool that does the same thing without anyone having to notice.

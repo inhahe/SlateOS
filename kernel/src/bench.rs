@@ -991,6 +991,120 @@ fn measure_access_cost() -> (Option<u64>, u64, u64) {
     measure_access_at(CANARY_STORES_PER_WINDOW)
 }
 
+/// Bytes the scattered-access reference walks. 512 KiB is 128 guest pages,
+/// comfortably past TCG's softmmu TLB (256 entries, shared with everything else
+/// running), so consecutive iterations miss it rather than replaying one
+/// resolved entry.
+const SCATTER_BYTES: usize = 512 * 1024;
+
+/// Stride between scattered stores: one 4 KiB *guest* page.
+///
+/// Guest page, not our 16 KiB page: the quantity being defeated is TCG's
+/// per-guest-page softmmu TLB entry, and that is sized by the emulated
+/// architecture, not by the page size this kernel happens to map with.
+const SCATTER_STRIDE: usize = 4096;
+
+/// Scratch for [`measure_scattered_access_cost`]. `.bss` only -- it costs
+/// nothing in the image and is never read, only written.
+static SCATTER_BUF: SyncUnsafeScatterBuf = SyncUnsafeScatterBuf(
+    core::cell::UnsafeCell::new([0u8; SCATTER_BYTES]),
+);
+
+/// Wrapper making the scratch buffer a legal `static`.
+///
+/// SAFETY (type-level): the buffer is written only by
+/// `measure_scattered_access_cost`, which runs once per boot on the boot CPU
+/// inside the benchmark suite, and its contents are never read by anything.
+/// There is therefore no observer for a race to be observable by.
+struct SyncUnsafeScatterBuf(core::cell::UnsafeCell<[u8; SCATTER_BYTES]>);
+// SAFETY: see the type's doc comment -- single writer, no readers, no
+// invariants carried in the bytes.
+unsafe impl Sync for SyncUnsafeScatterBuf {}
+
+/// Cost of one *scattered* guest memory access, in centicycles.
+///
+/// # Why a second reference measurement exists
+///
+/// [`measure_access_cost`] stores to one `static` byte in a tight loop. That is
+/// the right instrument for asking "did the harness itself change?" -- it is
+/// maximally repeatable -- but it measures the **best case** access: one guest
+/// address, one softmmu TLB entry resolved once and replayed 1024 times, one
+/// host cache line. It reads ~5 cycles.
+///
+/// The two budgets calibrated against it are not about that access. They are
+/// about the accesses an allocator makes: scattered across frames, each a
+/// distinct guest page, each its own softmmu lookup. Those cost one to two
+/// orders of magnitude more under TCG, which is why both budgets had to be
+/// hand-corrected upward -- `page_alloc_free_owner_ab` to 150 "accesses" for a
+/// 16-access operation, and `access_floor` itself to a hard `max(..., 100)`
+/// that silently overrode the 5-cycle measurement on **every** run. Two fudge
+/// factors, in opposite places, compensating for one wrong primitive. See
+/// known-issues.md
+/// B-BENCH-THE-ACCESS-FLOOR-CLAMP-BINDS-ON-EVERY-RUN-AND-SAYS-IT-MEASURED-SOMETHING.
+///
+/// Striding a page at a time through 512 KiB measures the access the budgets
+/// are actually counting, so the budgets can be stated in accesses and *mean*
+/// it. The A/B, the opaque trip count and the `Option` all work exactly as in
+/// [`measure_access_at`], and for the same reasons -- the nop arm here strides
+/// the identical index sequence without storing, so the address arithmetic
+/// cancels in the subtraction and only the store's softmmu cost is left.
+fn measure_scattered_access_cost() -> (Option<u64>, u64, u64) {
+    measure_scattered_at(SCATTER_STORES)
+}
+
+/// Scattered stores per timed window: one per page of [`SCATTER_BYTES`].
+const SCATTER_STORES: u64 = (SCATTER_BYTES / SCATTER_STRIDE) as u64;
+
+/// One scattered A/B at a given trip count. Split out for the same reason
+/// [`measure_access_at`] is: so the scale-invariance check can run it at two
+/// scales. Halving the count walks half the buffer, which is still all
+/// distinct pages, so a physical per-access cost must not move.
+fn measure_scattered_at(count: u64) -> (Option<u64>, u64, u64) {
+    let base = SCATTER_BUF.0.get().cast::<u8>();
+    let n = core::hint::black_box(core::cmp::min(count, SCATTER_STORES));
+    let stride = core::hint::black_box(SCATTER_STRIDE as u64);
+    let (nop, store) = ab_interleaved(
+        CANARY_ROUNDS,
+        || {
+            timed(|| {
+                let mut i = 0u64;
+                while i < n {
+                    // Same index arithmetic as the store arm, no store. What
+                    // is left in the difference is the access, not the loop.
+                    core::hint::black_box(i.wrapping_mul(stride));
+                    i = i.wrapping_add(1);
+                }
+            })
+        },
+        || {
+            timed(|| {
+                let mut i = 0u64;
+                while i < n {
+                    let offset = core::hint::black_box(i.wrapping_mul(stride));
+                    // SAFETY: `offset` is `i * SCATTER_STRIDE` for
+                    // `i < SCATTER_BYTES / SCATTER_STRIDE`, so it is strictly
+                    // less than `SCATTER_BYTES` and the resulting pointer is
+                    // inside `SCATTER_BUF`. The buffer is `'static`, a byte
+                    // store cannot tear, and nothing else in the kernel touches
+                    // it (see `SyncUnsafeScatterBuf`).
+                    unsafe {
+                        core::ptr::write_volatile(
+                            base.add(offset as usize),
+                            core::hint::black_box(1u8),
+                        );
+                    }
+                    i = i.wrapping_add(1);
+                }
+            })
+        },
+    );
+    let measured = store
+        .checked_sub(nop)
+        .filter(|delta| *delta >= n.saturating_mul(CANARY_MIN_RESOLVABLE))
+        .map(|delta| delta.saturating_mul(CENTI) / n);
+    (measured, nop, store)
+}
+
 /// One A/B reference measurement at a given trip count.
 ///
 /// Split out from [`measure_access_cost`] so the calibration path can run it at
@@ -1105,6 +1219,57 @@ fn scale_invariance_check(base: u64) -> bool {
         "[bench]   canary scale check: OK — {}.{} cycles/store at N={}, {}.{} at N={} ({}% apart, \
          tolerance {}%), so the delta scales with the store count and not with the loop.",
         a_c, a_t, base, b_c, b_t, base.saturating_mul(2), diff_pct, CANARY_TOLERANCE_PCT
+    );
+    true
+}
+
+/// The same scale check, for the scattered reference the budgets use.
+///
+/// It needs its own because the two measurements can fail independently and
+/// for different reasons: the hot one is defeated by the optimiser treating the
+/// two arms asymmetrically, the scattered one additionally by the buffer being
+/// small enough that TCG's softmmu TLB still holds every page (which would make
+/// it a slower copy of the hot measurement rather than a different quantity).
+/// Both show up here as a per-access cost that moves with the trip count.
+///
+/// Halving the count is the perturbation rather than doubling it, because
+/// doubling would walk past [`SCATTER_BYTES`] and wrap onto pages already
+/// resident -- which is itself scale-dependence, introduced by the test.
+fn scatter_scale_invariance_check() -> bool {
+    let (half, _, _) = measure_scattered_at(SCATTER_STORES / 2);
+    let (full, _, _) = measure_scattered_at(SCATTER_STORES);
+    let (Some(a), Some(b)) = (half, full) else {
+        serial_println!(
+            "[bench]   scatter scale check: UNMEASURABLE at N={} ({:?}) or N={} ({:?}) — \
+             the arms did not separate, so scale-invariance cannot be assessed.",
+            SCATTER_STORES / 2, half, SCATTER_STORES, full
+        );
+        return false;
+    };
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let (a_c, a_t) = centi_parts(a);
+    let (b_c, b_t) = centi_parts(b);
+    let diff_pct = if lo > 0 {
+        hi.saturating_sub(lo).saturating_mul(100) / lo
+    } else {
+        100
+    };
+    if diff_pct > CANARY_TOLERANCE_PCT {
+        serial_println!(
+            "[bench]   scatter scale check: FAILED — {}.{} cycles/scattered store at N={} \
+             but {}.{} at N={} ({}% apart, tolerance {}%). A physical per-access cost \
+             cannot depend on how many pages the loop walks, so this run's budget \
+             calibration is not a physical quantity.",
+            a_c, a_t, SCATTER_STORES / 2, b_c, b_t, SCATTER_STORES, diff_pct,
+            CANARY_TOLERANCE_PCT
+        );
+        return false;
+    }
+    serial_println!(
+        "[bench]   scatter scale check: OK — {}.{} cycles/scattered store at N={}, {}.{} \
+         at N={} ({}% apart, tolerance {}%).",
+        a_c, a_t, SCATTER_STORES / 2, b_c, b_t, SCATTER_STORES, diff_pct,
+        CANARY_TOLERANCE_PCT
     );
     true
 }
@@ -1407,7 +1572,7 @@ pub fn run_all() {
     // The mechanics live in `measure_access_cost` because this exact
     // measurement is taken a second time at the end of the suite, as the
     // contamination canary (see `report_canary`).
-    let (access_floor, canary_start) = {
+    let calibration = {
         // Before trusting the number, check that it *is* a number: a per-store
         // cost that changes when the loop length changes is measuring the loop,
         // not the store. Costs two extra A/B runs, once per boot.
@@ -1418,7 +1583,27 @@ pub fn run_all() {
         // "UNMEASURED" reporting path the arms-did-not-separate case uses --
         // both mean "the instrument failed", which is not "the code is fine".
         let measured = if scale_ok { measured } else { None };
-        // UNIT CHANGE: `measured` is centicycles (see CENTI), but every consumer
+
+        // Everything below this point -- every budget, and every "N accesses"
+        // figure -- is calibrated against the SCATTERED access, not the hot one
+        // measured just above.
+        //
+        // The hot measurement stays, but only as the contamination canary's
+        // reference: there, repeatability is the entire requirement and realism
+        // is beside the point, because the canary compares the number to itself
+        // at the end of the suite. It is a bad calibration constant for
+        // everything else, because it measures one guest address replayed 1024
+        // times -- one softmmu TLB entry, one host cache line -- and reads ~5
+        // cycles, while every access the budgets are about (allocator
+        // bookkeeping, owner tags, page zeroing) touches a different frame each
+        // time and so pays a fresh softmmu lookup. Calibrating a 150-access
+        // budget against a 5-cycle best-case access is what forced the two
+        // compensating fudge factors this block used to carry, and what made
+        // the clamp below bind on 100% of recorded runs.
+        let scatter_scale_ok = scatter_scale_invariance_check();
+        let (scattered, s_nop, s_store) = measure_scattered_access_cost();
+        let scattered = if scatter_scale_ok { scattered } else { None };
+        // UNIT CHANGE: `scattered` is centicycles (see CENTI), but every consumer
         // of `access_floor` multiplies it against a raw cycle delta
         // (`access_floor * 4`, `access_floor * OWNER_TAG_BUDGET_ACCESSES`), so the
         // floor must be *cycles*. Converting here rather than at those sites keeps
@@ -1426,17 +1611,37 @@ pub fn run_all() {
         // wrong would inflate both budget verdicts 100x while every printed number
         // still looked plausible — the same silent-units failure as the debug/
         // release profile mix-up that made P11 and P13 miss.
-        let measured_cycles = measured.map(|c| c / CENTI);
-        // Still clamped: if the two arms land equal the budgets below must not
-        // all collapse to 0 and turn every check into a guaranteed failure.
-        let floor = core::cmp::max(measured_cycles.unwrap_or(0), 100);
-        match measured {
-            Some(value) => serial_println!(
-                "[bench]   memory_access_floor: {} cycles/guest byte-store (measured={}.{} \
-                 over {} stores/window: nop={} store={}, {} interleaved rounds) — budgets \
-                 below are multiples of this",
+        let scattered_cycles = scattered.map(|c| c / CENTI);
+        // The clamp survives only as a guard against the degenerate case its
+        // comment always claimed it was for -- and now it announces itself
+        // instead of silently overriding a good measurement, which it did on
+        // every recorded run.
+        const FLOOR_FALLBACK: u64 = 100;
+        let clamped = scattered_cycles.is_none_or(|c| c < FLOOR_FALLBACK);
+        let floor = core::cmp::max(scattered_cycles.unwrap_or(0), FLOOR_FALLBACK);
+        match scattered {
+            Some(value) if !clamped => serial_println!(
+                "[bench]   memory_access_floor: {} cycles/scattered guest byte-store \
+                 (measured={}.{} over {} stores at {} B stride: nop={} store={}, {} \
+                 interleaved rounds) — budgets below are multiples of this",
                 floor, centi_parts(value).0, centi_parts(value).1,
-                CANARY_STORES_PER_WINDOW, nop, store, CANARY_ROUNDS
+                SCATTER_BYTES / SCATTER_STRIDE, SCATTER_STRIDE, s_nop, s_store,
+                CANARY_ROUNDS
+            ),
+            // Measured, believed, and then overridden anyway. This is NOT the
+            // same as the UNMEASURED case below and must not print like it: the
+            // instrument worked, so the run is diagnostic, but the budgets are
+            // multiples of a constant rather than of the measurement and cannot
+            // be read as calibrated.
+            Some(value) => serial_println!(
+                "[bench]   memory_access_floor: CLAMPED — measured {}.{} cycles/scattered \
+                 guest byte-store (over {} stores at {} B stride: nop={} store={}, {} \
+                 interleaved rounds), which is under the {} cycle fallback, so the \
+                 fallback is what the budgets below use. They are therefore LOOSER than \
+                 this machine warrants: a PASS is weak evidence, a SLOW still counts.",
+                centi_parts(value).0, centi_parts(value).1,
+                SCATTER_BYTES / SCATTER_STRIDE, SCATTER_STRIDE, s_nop, s_store,
+                CANARY_ROUNDS, FLOOR_FALLBACK
             ),
             // The clamp used to absorb this silently, and did so on all nine
             // release-profile runs while its own comment said it should never
@@ -1445,20 +1650,58 @@ pub fn run_all() {
             // verdict in this run is not evidence about the code.
             None => serial_println!(
                 "[bench]   memory_access_floor: UNMEASURED — {} (nop={} store={} over {} \
-                 stores/window, {} interleaved rounds). Falling back to the arbitrary \
-                 clamp of {} cycles: budget-based verdicts below are NOT calibrated to \
-                 this machine and must not be read as findings.",
+                 stores at {} B stride, {} interleaved rounds). Falling back to the \
+                 arbitrary clamp of {} cycles: budget-based verdicts below are NOT \
+                 calibrated to this machine and must not be read as findings.",
+                if scatter_scale_ok {
+                    "the A/B arms did not separate; the store arm must be the dearer of the two"
+                } else {
+                    "the scale check rejected the measurement, so the delta is not \
+                     attributable to the store"
+                },
+                s_nop, s_store, SCATTER_BYTES / SCATTER_STRIDE, SCATTER_STRIDE,
+                CANARY_ROUNDS, floor
+            ),
+        }
+        // The hot per-access cost is reported alongside rather than replaced.
+        // Its ratio to the scattered cost is the whole reason the budgets used
+        // to need hand-correction, so printing both every run is what stops the
+        // next reader re-deriving that ratio -- or, worse, re-introducing the
+        // fudge factors. It is also still the canary's reference, so it has to
+        // be printed whatever the budgets use.
+        match measured {
+            Some(value) => serial_println!(
+                "[bench]   memory_access_hot: {}.{} cycles/guest byte-store to ONE address \
+                 ({} stores/window, {} interleaved rounds; nop={} store={}) — the \
+                 contamination canary's reference only; NOT the budget calibration and NOT \
+                 the divisor for the \"N accesses\" figures below",
+                centi_parts(value).0, centi_parts(value).1,
+                CANARY_STORES_PER_WINDOW, CANARY_ROUNDS, nop, store
+            ),
+            None => serial_println!(
+                "[bench]   memory_access_hot: UNMEASURED — {} (nop={} store={} over {} \
+                 stores/window, {} interleaved rounds). The contamination canary has no \
+                 reference this run; the budgets above are unaffected.",
                 if scale_ok {
                     "the A/B arms did not separate; the store arm must be the dearer of the two"
                 } else {
                     "the scale check above rejected the measurement, so the delta is not \
                      attributable to the store"
                 },
-                nop, store, CANARY_STORES_PER_WINDOW, CANARY_ROUNDS, floor
+                nop, store, CANARY_STORES_PER_WINDOW, CANARY_ROUNDS
             ),
         }
         (floor, measured)
     };
+    // `access_floor` is the SCATTERED cost from here down -- both the budgets
+    // and the "N accesses" figures, because both are talking about the accesses
+    // allocator code actually makes. `canary_start` keeps the HOT cost, because
+    // the contamination canary re-measures that same quantity at the end of the
+    // suite and compares the two. One variable was serving both roles, and that
+    // is what hid the problem: the hot number is ~5 cycles, so every budget
+    // derived from it fell under the 100-cycle clamp and the clamp -- not the
+    // measurement -- was silently the answer on every run ever recorded.
+    let (access_floor, canary_start) = calibration;
 
     // --- CPU index lookup (the per-CPU-data primitive under every hot path) ---
     //
@@ -1510,6 +1753,18 @@ pub fn run_all() {
         // regression it had just been added to prove was fixed. Four accesses
         // sits clear of the noise while still being far under an MMIO
         // round-trip.
+        //
+        // PENDING RE-DERIVATION: the `4` was chosen while `access_floor` was
+        // the *hot* access, which on every recorded run fell under the 100-cycle
+        // clamp — so "4 accesses" has always meant a flat 400 cycles, and the 4
+        // was absorbing the gap between a 5-cycle hot access and the ~few-
+        // hundred-cycle scattered one. Now that the floor is the scattered cost,
+        // the same observed-healthy 274-282 cycles is about *one* access, which
+        // is exactly what the paragraph above says it should be. The constant
+        // should come down accordingly once a boot has printed the measured
+        // floor; until then it is merely loose, which cannot manufacture a false
+        // alarm. Tracked in known-issues.md under
+        // B-BENCH-THE-ACCESS-FLOOR-CLAMP-BINDS-ON-EVERY-RUN.
         let mmio_suspicion = access_floor.saturating_mul(4);
         if cost <= mmio_suspicion {
             serial_println!(
@@ -1654,6 +1909,13 @@ pub fn run_all() {
         // cycles-each, against a budget sized for real hardware. The whole
         // investigation is written up in known-issues.md under
         // TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT.
+        // PENDING RE-DERIVATION, same cause as `mmio_suspicion` above: 150 was
+        // sized against a floor that was really the 100-cycle clamp, so it has
+        // always meant a flat 15000 cycles. The paragraph above already does the
+        // arithmetic that gives the honest answer — 7660-11288 observed is "~16
+        // accesses at TCG's few-hundred-cycles-each", i.e. it was reasoning in
+        // *scattered* accesses all along while the code divided by a hot one.
+        // Re-derive from a boot that prints the measured scattered floor.
         const OWNER_TAG_BUDGET_ACCESSES: u64 = 150; // From baselines.toml
         let budget = access_floor.saturating_mul(OWNER_TAG_BUDGET_ACCESSES);
         let delta = min_on.saturating_sub(min_off);

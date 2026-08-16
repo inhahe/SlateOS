@@ -9,37 +9,38 @@
 
 set -x
 SPIKE="$SLATE_SPIKE"
-BUILD="/tmp/bash-cross"
+# Lane-keyed: cross2.sh writes this tree and slatelink.sh reads it, so two lanes
+# sharing one /tmp/bash-cross would relink one lane's objects into the other's
+# shipped bash-slateos.elf. Keep this name in step with cross3.sh and
+# slatelink.sh, which must agree on it.
+BUILD="/tmp/bash-cross-$SLATE_LANE"
 
-command -v "$SPIKE/zig/zig" >/dev/null || { echo "NO_ZIG"; exit 1; }
-"$SPIKE/zig/zig" version || exit 1
-
-# Wrapper on a spaceless path so `$CC conftest.c` survives word splitting.
-cat > /tmp/zigcc <<WRAP
-#!/bin/sh
-exec "$SPIKE/zig/zig" cc --target=x86_64-linux-musl "\$@"
-WRAP
-cat > /tmp/zigar <<WRAP
-#!/bin/sh
-exec "$SPIKE/zig/zig" ar "\$@"
-WRAP
-cat > /tmp/zigranlib <<WRAP
-#!/bin/sh
-exec "$SPIKE/zig/zig" ranlib "\$@"
-WRAP
-chmod +x /tmp/zigcc /tmp/zigar /tmp/zigranlib
-/tmp/zigcc --version || exit 1
+# The toolchain comes from slate_make_zig_wrappers, which resolves the pinned,
+# hash-verified zig (per-worktree copy, else the shared cache, else download).
+#
+# This script used to require zig at "$SPIKE/zig/zig" and then hand-roll its own
+# /tmp/zigcc wrappers. Both halves were wrong once worktree.sh started pinning
+# the toolchain on 2026-08-16, and the fix that day only converted the *path*
+# derivation here, not the provisioning -- so this script still demanded a
+# hand-placed per-worktree zig and still wrote un-lane-keyed wrappers naming it.
+# The stale /tmp/zigcc left over from 2026-08-14 pointed at
+# `os/build/spike/zig/zig`, so a lane running this relinked a *shipped* artifact
+# (design-decisions.md §305) with another worktree's unrecorded, unverified
+# compiler -- the exact defect that day's work was supposed to close.
+slate_make_zig_wrappers || exit 1
+"$SLATE_ZIG" version || exit 1
+"$SLATE_CC" --version || exit 1
 
 # Sanity: can the wrapper build a hello-world at all?
-echo 'int main(void){return 0;}' > /tmp/t.c
-/tmp/zigcc /tmp/t.c -o /tmp/t.out && echo "WRAPPER_LINKS_OK" || { echo "WRAPPER_BROKEN"; exit 1; }
+echo 'int main(void){return 0;}' > "$SLATE_TMP/t.c"
+"$SLATE_CC" "$SLATE_TMP/t.c" -o "$SLATE_TMP/t.out" && echo "WRAPPER_LINKS_OK" || { echo "WRAPPER_BROKEN"; exit 1; }
 
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
 tar xzf "$SPIKE/bash-5.2.tar.gz" -C "$BUILD" --strip-components=1 || exit 1
 cd "$BUILD" || exit 1
 
-export CC=/tmp/zigcc AR=/tmp/zigar RANLIB=/tmp/zigranlib
+export CC="$SLATE_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
 # --disable-readline drops termcap (9 of the 23 unresolved symbols); a spike only
 # needs `bash -c` and script execution to prove the port is real.
 ./configure --host=x86_64-linux-musl --build=x86_64-pc-linux-gnu \

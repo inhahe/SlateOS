@@ -17,16 +17,30 @@ set -x
 # silently no-op `self_test_bash_on_slateos_libc` while only `main` ever
 # actually runs bash. See known-issues.md ->
 # B-BASH-SLATEOS-ELF-WAS-EXEMPT-FROM-THE-STALENESS-GATE.
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || exit 1
-SPIKE="$ROOT/build/spike"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/worktree.sh" || exit 1
+ROOT="$SLATE_ROOT"
+SPIKE="$SLATE_SPIKE"
 SYSROOT="$ROOT/toolchain/sysroot/lib"
 
 # Scratch dirs are keyed by worktree name (os, os-lane-a, os-lane-b, …) so two
 # lanes relinking at once cannot write each other's objects or sysroot copy.
 # The boot lock serialises QEMU, not this.
-LANE="$(basename "$ROOT")"
-BUILD="/tmp/bash-cross"
-SLATE_SYSROOT="/tmp/slate-sysroot-$LANE"
+LANE="$SLATE_LANE"
+# Must match cross2.sh/cross3.sh. This was `/tmp/bash-cross` — unkeyed — while
+# the sysroot copy beside it was keyed, so two lanes relinking concurrently
+# shared one object tree and produced each other's bash-slateos.elf.
+BUILD="/tmp/bash-cross-$LANE"
+SLATE_SYSROOT_COPY="/tmp/slate-sysroot-$LANE"
+
+# The pinned, hash-verified cross-toolchain. This script previously invoked a
+# bare `/tmp/zigcc`, which nothing here created: it was left behind by an old
+# run of cross2.sh and named `os/build/spike/zig/zig` — a gitignored,
+# hand-placed compiler in *another* worktree. So the link step for a shipped
+# product (design-decisions.md §305) depended on a stale file in /tmp pointing
+# into a tree this script does not own, and would simply fail on any machine
+# that had not run the old cross2.sh. See known-issues.md ->
+# B-THE-BASH-BUILD-RECIPE-DEPENDED-ON-AN-UNRECORDED-ZIG-INSTALLED-BY-HAND.
+slate_make_zig_wrappers || exit 1
 
 if [ ! -d "$BUILD" ]; then
     echo "ERROR: $BUILD does not exist — bash's objects have not been compiled yet."
@@ -39,9 +53,9 @@ mkdir -p "$SPIKE" || exit 1
 
 # Copy the sysroot off /mnt/d — the linker reads these archives heavily and
 # the 9p mount is slow.
-mkdir -p "$SLATE_SYSROOT"
-cp "$SYSROOT"/libc.a "$SYSROOT"/libstubs.a "$SYSROOT"/libunwind.a "$SLATE_SYSROOT"/ || exit 1
-ls -l "$SLATE_SYSROOT"
+mkdir -p "$SLATE_SYSROOT_COPY"
+cp "$SYSROOT"/libc.a "$SYSROOT"/libstubs.a "$SYSROOT"/libunwind.a "$SLATE_SYSROOT_COPY"/ || exit 1
+ls -l "$SLATE_SYSROOT_COPY"
 
 OBJS="shell.o eval.o y.tab.o general.o make_cmd.o print_cmd.o dispose_cmd.o \
 execute_cmd.o variables.o copy_cmd.o error.o expr.o flags.o jobs.o subst.o \
@@ -65,11 +79,11 @@ pcomplete.o pcomplib.o syntax.o xmalloc.o signames.o"
 # and nothing else. If this fails to find them, re-run
 # toolchain/build-sysroot.ps1; scripts/bash-spike/checksyms.sh confirms they
 # are present in the archive.
-/tmp/zigcc -static -nostdlib -o bash-slateos $OBJS \
+"$SLATE_CC" -static -nostdlib -o bash-slateos $OBJS \
     -L./builtins -L./lib/glob -L./lib/tilde -L./lib/sh -L./lib/readline \
     -lbuiltins -lglob -lsh -ltilde -lhistory \
-    "$SLATE_SYSROOT"/libc.a "$SLATE_SYSROOT"/libc.a \
-    "$SLATE_SYSROOT"/libunwind.a \
+    "$SLATE_SYSROOT_COPY"/libc.a "$SLATE_SYSROOT_COPY"/libc.a \
+    "$SLATE_SYSROOT_COPY"/libunwind.a \
     2>slate-link.log
 echo "SLATE_LINK_EXIT=$?"
 

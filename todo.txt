@@ -54167,3 +54167,70 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## on what "agree" is worth, it does not patch a known divergence.
 ##
 ## Where: gui/font/tools/gen_use_probe.py (new), harfbuzz_sweep.py --fonts.
+
+## ---------------------------------------------------------------------------
+## [B] 2026-08-16 -- pthread_kill delivers process-directed, not thread-directed
+## ---------------------------------------------------------------------------
+## posix/src/pthread.rs::pthread_kill validates the target thread and the signal
+## number exactly as Linux does, but the delivery it performs for a *peer* thread
+## is SYS_SIGNAL_SEND(getpid(), sig) -- process-directed. The kernel's signal
+## syscall takes a pid, not a task id, and there is no per-thread pending set for
+## it to target.
+##
+## What that means in practice: pthread_kill(peer, SIGUSR1) does wake *a* thread
+## in the process, which is enough for the overwhelmingly common uses (the
+## pthread_kill(main, SIGTERM) shutdown idiom, and pthread_kill(t, 0) as an
+## existence probe -- both correct today). What is wrong is the case where the
+## caller depends on *which* thread runs the handler: a library that installs a
+## per-thread handler and signals a specific worker gets its handler run on some
+## other thread's stack. CPython's signal module does not do this (it forces all
+## delivery onto the main thread anyway), which is why this is acceptable for the
+## CPython port, but it is not correct POSIX.
+##
+## THE PROPER FIX, in order:
+##   1. Kernel (lane A): a per-task pending signal set alongside the per-process
+##      one, and a syscall that targets a task id -- the natural shape is
+##      SYS_SIGNAL_SEND gaining a "target is a task id" flag rather than a
+##      second syscall, since the delivery path after enqueue is identical.
+##      This needs a requests/b-a-*.md.
+##   2. posix/src/pthread.rs: swap the peer branch to the task-directed call and
+##      delete the paragraph in pthread_kill's doc comment that documents the
+##      degradation.
+##   3. posix/src/signal.rs: sigprocmask/pthread_sigmask must then diverge --
+##      pthread_sigmask masks the calling thread only, which is currently
+##      indistinguishable from sigprocmask because there is only one mask.
+##
+## Not blocking anything: found while implementing pthread_kill for the CPython
+## link (scripts/cpython-spike/), which links and runs without it.
+
+## ---------------------------------------------------------------------------
+## [B] 2026-08-16 -- syscall() deliberately refuses the libc-bypass numbers
+## ---------------------------------------------------------------------------
+## posix/src/sys_syscall.rs::syscall translates a Linux syscall number to the
+## corresponding function in this crate. Its table covers the numbers portable
+## code actually reaches syscall() for -- gettid, getrandom, pidfd_open,
+## pidfd_send_signal, the get*id family, gettimeofday, sched_yield -- because
+## those are the ones glibc either never wrapped or wrapped too recently to rely
+## on.
+##
+## It deliberately does NOT map read/write/close/fork/execve/exit, even though
+## their numbers are defined in the same module. A caller reaching those through
+## syscall() is doing it precisely to bypass libc: inside a fork child before
+## exec, or in a signal handler, where the wrapper's fdtable bookkeeping and
+## errno write are the things being avoided. Routing such a call back into the
+## wrapper would defeat the caller's intent silently, so they return ENOSYS --
+## which that same code already handles, being written to cope with old kernels.
+## test_bypass_syscalls_are_not_silently_wrapped pins this.
+##
+## WHEN TO REVISIT: if a real port turns up that needs one of them (a
+## posix_spawn implementation written against raw syscalls, say), the answer is
+## NOT to add it to the table. It is to add a genuinely-bypassing path -- a
+## direct SlateOS syscall issued from this module with our own numbers, chosen
+## per Linux number -- so the caller gets what it asked for. Adding it to the
+## table would be the silent-wrong-answer version.
+##
+## Related: the module no longer does `pub use crate::syscall::*`. That glob made
+## sys_syscall::SYS_EXIT mean SlateOS's 1 (which is Linux's *write*) and forced
+## the awkward SYS_EXIT_LINUX alias. Nothing consumed either; both are gone. Do
+## not reintroduce the glob -- the two number spaces are unrelated and mixing
+## them in one namespace is how a getpid becomes a getrandom.

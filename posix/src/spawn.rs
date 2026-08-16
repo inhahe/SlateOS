@@ -581,17 +581,64 @@ pub const POSIX_SPAWN_VALID_FLAGS: i16 = POSIX_SPAWN_RESETIDS
 
 /// Spawn attributes object.
 ///
-/// Stores flags and optional process group.  Signal mask and signal
-/// defaults are stored for API compatibility but not yet applied
-/// (our OS doesn't have POSIX signals).
+/// # Layout
+///
+/// The size and field order match musl's `posix_spawnattr_t`
+/// (`include/spawn.h`), which is the ABI our cross-toolchain compiles
+/// against:
+///
+/// ```c
+/// typedef struct {
+///     int __flags;  pid_t __pgrp;
+///     sigset_t __def, __mask;
+///     int __prio, __pol;  void *__fn;
+///     char __pad[64-sizeof(void *)];
+/// } posix_spawnattr_t;
+/// ```
+///
+/// That is 336 bytes at 8-byte alignment, and so is this — the trailing
+/// `_reserved` array absorbs musl's `__fn` and `__pad`, which no caller
+/// may inspect.  `flags` is `i16` rather than musl's `int` because POSIX
+/// types `posix_spawnattr_setflags`'s second parameter as `short`; the
+/// field is private to this file, so the narrower storage is invisible
+/// across the ABI and the following `pgroup` sits at offset 4 either way.
+/// [`test_spawnattr_matches_musl_layout`] asserts the size and every
+/// offset, so a future field addition cannot silently break the ABI.
+///
+/// # What is stored versus what is applied
+///
+/// Every field is *recorded* faithfully, and each `posix_spawnattr_get*`
+/// returns exactly what the matching setter stored — a caller that
+/// round-trips an attribute object gets its own value back.  Whether the
+/// spawn path then *acts* on a field is a separate question, and today
+/// `sigdefault`, `sigmask`, `schedpriority` and `schedpolicy` are
+/// recorded but not applied: we have no POSIX signal delivery to reset
+/// or block, and no per-process scheduler policy to install at spawn
+/// time.
+///
+/// Recording them anyway is not busywork.  A `posix_spawnattr_setsigmask`
+/// that returned `ENOSYS` would push every caller onto a `fork`/`exec`
+/// fallback — CPython's `os.posix_spawn` does exactly that — which is a
+/// worse outcome than a spawn that ignores a mask the child would have
+/// inherited as empty regardless.  When signal delivery and scheduler
+/// policies land, the spawn path reads these fields and no caller
+/// changes.
 #[repr(C)]
 pub struct PosixSpawnattrT {
     /// Attribute flags (bitwise OR of POSIX_SPAWN_* constants).
     flags: i16,
     /// Process group ID (used if POSIX_SPAWN_SETPGROUP is set).
     pgroup: PidT,
-    /// Padding for ABI compatibility.
-    _pad: [u8; 328],
+    /// Signals to reset to `SIG_DFL` (used if POSIX_SPAWN_SETSIGDEF).
+    sigdefault: crate::signal::SigsetT,
+    /// Signal mask to install (used if POSIX_SPAWN_SETSIGMASK).
+    sigmask: crate::signal::SigsetT,
+    /// Scheduling priority (used if POSIX_SPAWN_SETSCHEDPARAM).
+    schedpriority: i32,
+    /// Scheduling policy (used if POSIX_SPAWN_SETSCHEDULER).
+    schedpolicy: i32,
+    /// Padding out to musl's 336-byte object.  Never read.
+    _reserved: [u8; 64],
 }
 
 /// Initialize a spawn attributes object.
@@ -604,6 +651,16 @@ pub extern "C" fn posix_spawnattr_init(attr: *mut PosixSpawnattrT) -> i32 {
     unsafe {
         (*attr).flags = 0;
         (*attr).pgroup = 0;
+        // POSIX leaves the *values* of unset attributes unspecified, but
+        // an object whose signal sets are uninitialised stack garbage is
+        // a trap for the getters: `posix_spawnattr_getsigmask` on a
+        // freshly-`init`ed object would hand back whatever was on the
+        // stack.  glibc's `__spawnattr_init` memsets the whole struct
+        // for the same reason.
+        (*attr).sigdefault = crate::signal::SigsetT::EMPTY;
+        (*attr).sigmask = crate::signal::SigsetT::EMPTY;
+        (*attr).schedpriority = 0;
+        (*attr).schedpolicy = 0;
     }
     0
 }
@@ -687,6 +744,191 @@ pub extern "C" fn posix_spawnattr_getpgroup(
     // SAFETY: both pointers are non-null (checked above).
     unsafe {
         *pgroup = (*attr).pgroup;
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// posix_spawnattr signal-set and scheduling attributes
+//
+// These four setters are the ones CPython 3.12's `os.posix_spawn` calls
+// (Modules/posixmodule.c `py_posix_spawn`), and their absence was 4 of the
+// 13 symbols that stopped CPython linking against our libc — see
+// scripts/cpython-spike/README.md.
+//
+// They report errors the way the rest of the `posix_spawnattr_*` family in
+// this file does: a `0`/errno return value, never `errno` + `-1`.  That is
+// POSIX's convention for this family and glibc's actual behaviour.
+//
+// Note the deliberate asymmetry with `posix_spawnattr_setflags` above: that
+// function validates the *value* before the pointer because glibc's
+// implementation has no NULL check at all and decides the flag word while
+// the pointer is untouched (design-decisions.md §303).  The functions below
+// have no value to validate — every `sigset_t`, every priority, and (per
+// POSIX) every policy is accepted here, with an invalid policy surfacing
+// later from the spawn itself — so the NULL check is the only check, and it
+// comes first.
+// ---------------------------------------------------------------------------
+
+/// Set the signal set to reset to `SIG_DFL` in the child.
+///
+/// Takes effect only if `POSIX_SPAWN_SETSIGDEF` is among the attribute
+/// flags.  The set is stored verbatim; see [`PosixSpawnattrT`] for why it
+/// is recorded even though nothing applies it yet.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_spawnattr_setsigdefault(
+    attr: *mut PosixSpawnattrT,
+    sigdefault: *const crate::signal::SigsetT,
+) -> i32 {
+    if attr.is_null() || sigdefault.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: both pointers are non-null (checked above).  `SigsetT` is a
+    // plain `[u64; 16]`, so a by-value read is a 128-byte copy with no
+    // interior pointers; `read_unaligned` because the caller's object is
+    // only guaranteed to satisfy the C ABI's alignment, not Rust's.
+    unsafe {
+        (*attr).sigdefault = core::ptr::read_unaligned(sigdefault);
+    }
+    0
+}
+
+/// Get the `SIG_DFL`-reset signal set from a spawn attributes object.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_spawnattr_getsigdefault(
+    attr: *const PosixSpawnattrT,
+    sigdefault: *mut crate::signal::SigsetT,
+) -> i32 {
+    if attr.is_null() || sigdefault.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: both pointers are non-null (checked above).
+    unsafe {
+        core::ptr::write_unaligned(sigdefault, (*attr).sigdefault);
+    }
+    0
+}
+
+/// Set the signal mask to install in the child.
+///
+/// Takes effect only if `POSIX_SPAWN_SETSIGMASK` is among the attribute
+/// flags.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_spawnattr_setsigmask(
+    attr: *mut PosixSpawnattrT,
+    sigmask: *const crate::signal::SigsetT,
+) -> i32 {
+    if attr.is_null() || sigmask.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: both pointers are non-null (checked above).  See
+    // `posix_spawnattr_setsigdefault` for why the read is unaligned.
+    unsafe {
+        (*attr).sigmask = core::ptr::read_unaligned(sigmask);
+    }
+    0
+}
+
+/// Get the child signal mask from a spawn attributes object.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_spawnattr_getsigmask(
+    attr: *const PosixSpawnattrT,
+    sigmask: *mut crate::signal::SigsetT,
+) -> i32 {
+    if attr.is_null() || sigmask.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: both pointers are non-null (checked above).
+    unsafe {
+        core::ptr::write_unaligned(sigmask, (*attr).sigmask);
+    }
+    0
+}
+
+/// Set the scheduling policy to apply to the child.
+///
+/// Takes effect only if `POSIX_SPAWN_SETSCHEDULER` is among the attribute
+/// flags.
+///
+/// The policy is **not** validated here.  POSIX specifies `EINVAL` for
+/// `posix_spawnattr_setschedpolicy` only "if the value of the attribute
+/// being set is not valid", and both glibc
+/// (`sysdeps/posix/spawnattr_setschedpolicy.c`) and musl store the value
+/// unconditionally, leaving an unsupported policy to surface from the
+/// spawn as a failed `sched_setscheduler`.  Rejecting here would make us
+/// stricter than the platform we are emulating, and — because our
+/// scheduler does not yet consume the field at all — the rejection would
+/// be based on a policy table we have not written.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_spawnattr_setschedpolicy(attr: *mut PosixSpawnattrT, policy: i32) -> i32 {
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: attr is non-null (checked above).
+    unsafe {
+        (*attr).schedpolicy = policy;
+    }
+    0
+}
+
+/// Get the scheduling policy from a spawn attributes object.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_spawnattr_getschedpolicy(
+    attr: *const PosixSpawnattrT,
+    policy: *mut i32,
+) -> i32 {
+    if attr.is_null() || policy.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: both pointers are non-null (checked above).
+    unsafe {
+        *policy = (*attr).schedpolicy;
+    }
+    0
+}
+
+/// Set the scheduling parameters to apply to the child.
+///
+/// Takes effect only if `POSIX_SPAWN_SETSCHEDPARAM` or
+/// `POSIX_SPAWN_SETSCHEDULER` is among the attribute flags.
+///
+/// `struct sched_param` is a single `int sched_priority` on Linux, so only
+/// that field is stored.  The priority is not range-checked for the same
+/// reason the policy is not: the valid range depends on the policy, glibc
+/// and musl both store it unconditionally, and an out-of-range value
+/// surfaces from the spawn rather than from the attribute object.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_spawnattr_setschedparam(
+    attr: *mut PosixSpawnattrT,
+    schedparam: *const crate::sched::SchedParam,
+) -> i32 {
+    if attr.is_null() || schedparam.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: both pointers are non-null (checked above).
+    unsafe {
+        (*attr).schedpriority = core::ptr::read_unaligned(schedparam).sched_priority;
+    }
+    0
+}
+
+/// Get the scheduling parameters from a spawn attributes object.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_spawnattr_getschedparam(
+    attr: *const PosixSpawnattrT,
+    schedparam: *mut crate::sched::SchedParam,
+) -> i32 {
+    if attr.is_null() || schedparam.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: both pointers are non-null (checked above).
+    unsafe {
+        core::ptr::write_unaligned(
+            schedparam,
+            crate::sched::SchedParam {
+                sched_priority: (*attr).schedpriority,
+            },
+        );
     }
     0
 }
@@ -1621,6 +1863,160 @@ pub extern "C" fn execvpe(file: *const u8, argv: *const *const u8, envp: *const 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- posix_spawnattr_t ABI and round-tripping --
+
+    /// The attribute object crosses the C ABI, so its size is a contract
+    /// with every object our cross-toolchain compiled against musl's
+    /// `<spawn.h>`.  Adding a field without shrinking `_reserved` would
+    /// enlarge the struct and let `posix_spawnattr_init` write past the
+    /// end of a caller's 336-byte stack slot — a stack smash that no
+    /// compiler warning would catch, because the two sides are compiled
+    /// from different headers.
+    #[test]
+    fn test_spawnattr_matches_musl_layout() {
+        use core::mem::{align_of, size_of};
+        assert_eq!(size_of::<PosixSpawnattrT>(), 336, "musl posix_spawnattr_t");
+        assert_eq!(align_of::<PosixSpawnattrT>(), 8);
+        // Field offsets, against musl's declaration order:
+        //   __flags 0, __pgrp 4, __def 8, __mask 136, __prio 264, __pol 268
+        let a = PosixSpawnattrT {
+            flags: 0,
+            pgroup: 0,
+            sigdefault: crate::signal::SigsetT::EMPTY,
+            sigmask: crate::signal::SigsetT::EMPTY,
+            schedpriority: 0,
+            schedpolicy: 0,
+            _reserved: [0; 64],
+        };
+        let base = (&raw const a).cast::<u8>() as usize;
+        let off = |p: usize| p - base;
+        assert_eq!(off((&raw const a.flags).cast::<u8>() as usize), 0);
+        assert_eq!(off((&raw const a.pgroup).cast::<u8>() as usize), 4);
+        assert_eq!(off((&raw const a.sigdefault).cast::<u8>() as usize), 8);
+        assert_eq!(off((&raw const a.sigmask).cast::<u8>() as usize), 136);
+        assert_eq!(off((&raw const a.schedpriority).cast::<u8>() as usize), 264);
+        assert_eq!(off((&raw const a.schedpolicy).cast::<u8>() as usize), 268);
+    }
+
+    /// Every setter's value must come back out of its getter unchanged.
+    /// A setter that silently dropped its argument would still let CPython
+    /// link and would still let `os.posix_spawn` "succeed" — the failure
+    /// would only appear as a child running with the wrong signal mask,
+    /// which is exactly the kind of bug that is impossible to attribute
+    /// after the fact.
+    #[test]
+    fn test_spawnattr_attributes_round_trip() {
+        let mut attr = core::mem::MaybeUninit::<PosixSpawnattrT>::uninit();
+        assert_eq!(posix_spawnattr_init(attr.as_mut_ptr()), 0);
+        // SAFETY: posix_spawnattr_init returned 0, so every field is
+        // initialised.
+        let attr = unsafe { attr.assume_init_mut() };
+
+        let mut def = crate::signal::SigsetT::EMPTY;
+        def.bits[0] = 0x0000_0000_0000_00ff;
+        def.bits[15] = 0x8000_0000_0000_0000;
+        let mut mask = crate::signal::SigsetT::EMPTY;
+        mask.bits[1] = 0xdead_beef_cafe_f00d;
+
+        assert_eq!(posix_spawnattr_setsigdefault(attr, &raw const def), 0);
+        assert_eq!(posix_spawnattr_setsigmask(attr, &raw const mask), 0);
+        assert_eq!(posix_spawnattr_setschedpolicy(attr, crate::sched::SCHED_RR), 0);
+        let param = crate::sched::SchedParam { sched_priority: 42 };
+        assert_eq!(posix_spawnattr_setschedparam(attr, &raw const param), 0);
+
+        let mut got_def = crate::signal::SigsetT::EMPTY;
+        let mut got_mask = crate::signal::SigsetT::EMPTY;
+        let mut got_pol = 0_i32;
+        let mut got_param = crate::sched::SchedParam { sched_priority: 0 };
+        assert_eq!(posix_spawnattr_getsigdefault(attr, &raw mut got_def), 0);
+        assert_eq!(posix_spawnattr_getsigmask(attr, &raw mut got_mask), 0);
+        assert_eq!(posix_spawnattr_getschedpolicy(attr, &raw mut got_pol), 0);
+        assert_eq!(posix_spawnattr_getschedparam(attr, &raw mut got_param), 0);
+
+        assert_eq!(got_def, def);
+        assert_eq!(got_mask, mask);
+        assert_eq!(got_pol, crate::sched::SCHED_RR);
+        assert_eq!(got_param.sched_priority, 42);
+
+        // Setting one attribute must not disturb its neighbours.  The
+        // failure mode of a mis-declared struct is that two fields
+        // overlap, and only a cross-check like this catches it: `flags`
+        // and `pgroup` sit immediately before the signal sets, so a
+        // 128-byte `sigdefault` written at the wrong offset lands on
+        // them.
+        let mut got_flags = -1_i16;
+        let mut got_pgrp: PidT = -1;
+        assert_eq!(posix_spawnattr_getflags(attr, &raw mut got_flags), 0);
+        assert_eq!(posix_spawnattr_getpgroup(attr, &raw mut got_pgrp), 0);
+        assert_eq!(got_flags, 0, "flags clobbered by a neighbouring setter");
+        assert_eq!(got_pgrp, 0, "pgroup clobbered by a neighbouring setter");
+    }
+
+    /// A freshly-initialised object must read back as zeroed, not as
+    /// whatever was on the caller's stack.
+    #[test]
+    fn test_spawnattr_init_clears_signal_sets() {
+        // Fill the storage with a non-zero pattern first, so a missing
+        // assignment in `posix_spawnattr_init` shows up as that pattern.
+        // The buffer must be a `MaybeUninit<PosixSpawnattrT>` rather than
+        // a `[u8; 336]`: the latter is 1-byte aligned, and casting it to
+        // an 8-byte-aligned struct is UB that Rust's debug runtime traps.
+        let mut storage = core::mem::MaybeUninit::<PosixSpawnattrT>::uninit();
+        let attr = storage.as_mut_ptr();
+        // SAFETY: `attr` points at 336 uninitialised but allocated bytes
+        // with the struct's own alignment; writing a byte pattern over
+        // them leaves the object initialised for every field type here
+        // (integers and `[u64; 16]`, all valid for any bit pattern).
+        unsafe {
+            core::ptr::write_bytes(attr.cast::<u8>(), 0xa5, core::mem::size_of::<PosixSpawnattrT>());
+        }
+        assert_eq!(posix_spawnattr_init(attr), 0);
+        let mut got = crate::signal::SigsetT { bits: [0xdead; 16] };
+        assert_eq!(posix_spawnattr_getsigdefault(attr, &raw mut got), 0);
+        assert_eq!(got, crate::signal::SigsetT::EMPTY);
+        assert_eq!(posix_spawnattr_getsigmask(attr, &raw mut got), 0);
+        assert_eq!(got, crate::signal::SigsetT::EMPTY);
+        let mut pol = -1_i32;
+        assert_eq!(posix_spawnattr_getschedpolicy(attr, &raw mut pol), 0);
+        assert_eq!(pol, 0);
+    }
+
+    /// NULL on either side is `EFAULT`, returned (not set in `errno`) —
+    /// this family reports errors through its return value.
+    #[test]
+    fn test_spawnattr_null_arguments_report_efault() {
+        let set = crate::signal::SigsetT::EMPTY;
+        let param = crate::sched::SchedParam { sched_priority: 0 };
+        assert_eq!(
+            posix_spawnattr_setsigmask(core::ptr::null_mut(), &raw const set),
+            errno::EFAULT
+        );
+        assert_eq!(
+            posix_spawnattr_setsigdefault(core::ptr::null_mut(), &raw const set),
+            errno::EFAULT
+        );
+        assert_eq!(
+            posix_spawnattr_setschedparam(core::ptr::null_mut(), &raw const param),
+            errno::EFAULT
+        );
+        assert_eq!(
+            posix_spawnattr_setschedpolicy(core::ptr::null_mut(), 0),
+            errno::EFAULT
+        );
+        // A valid object with a NULL value pointer is equally EFAULT: the
+        // setter would otherwise read from address zero.
+        let mut attr = core::mem::MaybeUninit::<PosixSpawnattrT>::uninit();
+        assert_eq!(posix_spawnattr_init(attr.as_mut_ptr()), 0);
+        assert_eq!(
+            posix_spawnattr_setsigmask(attr.as_mut_ptr(), core::ptr::null()),
+            errno::EFAULT
+        );
+        assert_eq!(
+            posix_spawnattr_getsigmask(attr.as_ptr(), core::ptr::null_mut()),
+            errno::EFAULT
+        );
+    }
 
     // -- fd handle-type <-> HandleKind mapping --
 

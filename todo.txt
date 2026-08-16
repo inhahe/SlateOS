@@ -54234,3 +54234,26 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## the awkward SYS_EXIT_LINUX alias. Nothing consumed either; both are gone. Do
 ## not reintroduce the glob -- the two number spaces are unrelated and mixing
 ## them in one namespace is how a getpid becomes a getrandom.
+
+## ---------------------------------------------------------------------------
+## [C] 2026-08-16 -- Bookmark outline recursion in apps/pdfviewer is unbounded
+## ---------------------------------------------------------------------------
+## Bookmark::total_count and Bookmark::flatten in apps/pdfviewer/src/main.rs walk
+## the PDF outline tree by plain recursion, with no depth cap. A PDF outline is
+## attacker-supplied structure: nothing in the format stops a file nesting
+## bookmarks thousands deep, and a hostile (or merely generated) one would blow
+## the stack in either function. There is no cycle guard either, and a PDF
+## outline is a graph of object references, not a tree -- a document whose
+## outline points back at an ancestor recurses forever.
+##
+## Harmless TODAY, which is why this is a note and not a fix: there is no PDF
+## parser yet. The only constructors are Bookmark::new and the hand-built tree in
+## PdfDocument::create_sample, so every outline in existence is one this crate
+## wrote itself and is three levels deep.
+##
+## WHEN TO REVISIT: the moment a real loader lands -- i.e. as soon as anything
+## builds a Bookmark from file bytes rather than from a literal. The fix is to
+## make both functions iterative over an explicit worklist (a Vec used as a
+## stack), and to bound the work by the number of bookmarks already seen rather
+## than by depth, since that bounds the cyclic case too. Do not "fix" it with a
+## depth limit alone: a cycle at depth 3 is still infinite.

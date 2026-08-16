@@ -443,6 +443,21 @@ impl ContactGroup {
 // Birthday
 // ============================================================================
 
+/// The length of each month, index 0 = January, February in a common year.
+///
+/// One table, used both to reject a date that does not exist and to count the
+/// days before a month. Those were two separate statements of the calendar
+/// before -- a flat `1..=31` day check and a table of cumulative offsets -- and
+/// two copies of the same knowledge can disagree, which is exactly what let
+/// "31 February" through.
+const MONTH_LENGTHS: [u8; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/// The Gregorian leap rule in full: every fourth year, except centuries, except
+/// every fourth century. 1900 was not a leap year; 2000 was.
+fn is_leap_year(year: u16) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
 /// A simple date representation for birthdays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SimpleDate {
@@ -452,27 +467,78 @@ pub struct SimpleDate {
 }
 
 impl SimpleDate {
+    /// Construct a date, returning `None` for one that never happened.
+    ///
+    /// The day is checked against the length of *that* month rather than
+    /// against a flat `1..=31`, so 31 February -- which this used to accept --
+    /// is now rejected. It matters because a birthday is typed by hand and
+    /// imported from other people's address books, and an impossible one was
+    /// stored, displayed back verbatim as though it were fine, and counted as a
+    /// day of the year lying past the real end of February, so the "upcoming
+    /// birthdays" list put it in the wrong place.
     pub fn new(year: u16, month: u8, day: u8) -> Option<Self> {
-        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-            return None;
+        let length = Self::days_in_month(year, month)?;
+        if (1..=length).contains(&day) {
+            Some(Self { year, month, day })
+        } else {
+            None
         }
-        Some(Self { year, month, day })
+    }
+
+    /// How many days `month` has in `year`, or `None` if there is no such
+    /// month.
+    ///
+    /// Leap-aware, because the year is right there and 29 February is a real
+    /// birthday for anyone born in 1988 and an impossible one for anyone born
+    /// in 1989. Rejecting it outright would turn away a genuine date; accepting
+    /// it always would keep a typo.
+    fn days_in_month(year: u16, month: u8) -> Option<u8> {
+        // `checked_sub` rather than a `month >= 1` guard: month zero does not
+        // exist in the 1-based numbering every caller writes in, and failing the
+        // subtraction *is* that case.
+        let index = usize::from(month.checked_sub(1)?);
+        let length = *MONTH_LENGTHS.get(index)?;
+        if month == 2 && is_leap_year(year) {
+            Some(length.saturating_add(1))
+        } else {
+            Some(length)
+        }
     }
 
     pub fn format_display(&self) -> String {
         format!("{:04}-{:02}-{:02}", self.year, self.month, self.day)
     }
 
-    /// Parse from ISO date string (YYYY-MM-DD).
+    /// Parse an ISO 8601 date in either the extended form `YYYY-MM-DD` or the
+    /// basic form `YYYYMMDD`.
+    ///
+    /// Both forms, because this is what vCard `BDAY` properties actually
+    /// contain in the wild: vCard 4.0 specifies the basic form, and the address
+    /// books that emit it -- phones, mail clients -- write `19901225`. Only the
+    /// extended form was accepted here, so importing such a card silently
+    /// dropped the birthday and the contact arrived looking as though it had
+    /// never had one. Export still writes the extended form, which every reader
+    /// accepts.
+    ///
+    /// A partial date with no year (`--MMDD`, vCard's way of saying "I know the
+    /// day but not the year") is still rejected; see `known-issues.md`, as
+    /// storing one needs a representation this type does not have.
     pub fn parse(s: &str) -> Option<Self> {
-        let parts: Vec<&str> = s.split('-').collect();
-        if parts.len() != 3 {
+        let (year, month, day) = if let Some((y, rest)) = s.split_once('-') {
+            let (m, d) = rest.split_once('-')?;
+            (y, m, d)
+        } else if s.len() == 8 && s.bytes().all(|b| b.is_ascii_digit()) {
+            // All-ASCII-digit is checked first, so these byte offsets are also
+            // character boundaries.
+            (s.get(..4)?, s.get(4..6)?, s.get(6..)?)
+        } else {
             return None;
-        }
-        let year = parts.first()?.parse::<u16>().ok()?;
-        let month = parts.get(1)?.parse::<u8>().ok()?;
-        let day = parts.get(2)?.parse::<u8>().ok()?;
-        Self::new(year, month, day)
+        };
+        Self::new(
+            year.parse::<u16>().ok()?,
+            month.parse::<u8>().ok()?,
+            day.parse::<u8>().ok()?,
+        )
     }
 
     /// Check if this birthday is "upcoming" within the given number of days
@@ -491,11 +557,27 @@ impl SimpleDate {
     }
 }
 
-/// Approximate day of year (ignoring leap year -- good enough for birthday proximity).
+/// Day of the year, counting 1 for 1 January, in a uniform 365-day year.
+///
+/// Deliberately leap-agnostic even though [`SimpleDate`] knows its year: the
+/// only caller compares a birthday against *today*, and those two fall in
+/// different years. Applying each side's own leap rule would move one of them by
+/// a day and not the other, which is a worse answer than moving neither. One
+/// day of slack is well inside the tolerance a "birthdays coming up" list is
+/// asking about.
 fn day_of_year(month: u8, day: u8) -> u16 {
-    let days_before: [u16; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-    let m = (month.saturating_sub(1) as usize).min(11);
-    days_before[m].saturating_add(u16::from(day))
+    // `take` rather than an index into a table of cumulative offsets: the months
+    // before this one are exactly the ones the iterator yields, so a month past
+    // December can only mean "all of them" and can never panic. The previous
+    // version wrote the table's length out a second time as `.min(11)` -- the
+    // same bound in two places, of the kind that stops agreeing the moment
+    // someone edits the table.
+    let before: u16 = MONTH_LENGTHS
+        .iter()
+        .take(usize::from(month.saturating_sub(1)))
+        .map(|&d| u16::from(d))
+        .sum();
+    before.saturating_add(u16::from(day))
 }
 
 // ============================================================================
@@ -3208,6 +3290,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // -----------------------------------------------------------------------
@@ -3633,6 +3726,133 @@ mod tests {
     fn test_simple_date_new_invalid_day() {
         assert!(SimpleDate::new(2000, 6, 0).is_none());
         assert!(SimpleDate::new(2000, 6, 32).is_none());
+    }
+
+    /// A day past the end of its own month is not a date, even though it is
+    /// within `1..=31`.
+    ///
+    /// The flat range check this replaces accepted every one of these, so a
+    /// mistyped or badly-exported birthday was stored and shown back as if it
+    /// were real. Each month here is checked one day past its length and on its
+    /// last day, so the test also catches the table being off by one in either
+    /// direction rather than merely being consulted.
+    #[test]
+    fn a_day_past_the_end_of_its_month_is_not_a_date() {
+        let lengths = [
+            (1, 31),
+            (2, 28),
+            (3, 31),
+            (4, 30),
+            (5, 31),
+            (6, 30),
+            (7, 31),
+            (8, 31),
+            (9, 30),
+            (10, 31),
+            (11, 30),
+            (12, 31),
+        ];
+        for (month, length) in lengths {
+            assert!(
+                SimpleDate::new(2001, month, length).is_some(),
+                "month {month} should have a day {length}"
+            );
+            assert!(
+                SimpleDate::new(2001, month, length + 1).is_none(),
+                "month {month} has no day {}",
+                length + 1
+            );
+        }
+    }
+
+    /// 29 February exists in a leap year and not otherwise, and the century
+    /// rules are part of that.
+    ///
+    /// 1900 and 2000 are the pair that separates a real leap rule from
+    /// `year % 4`: both are divisible by four, only one is a leap year.
+    #[test]
+    fn the_twenty_ninth_of_february_follows_the_leap_rule() {
+        assert!(
+            SimpleDate::new(1988, 2, 29).is_some(),
+            "1988 was a leap year"
+        );
+        assert!(SimpleDate::new(1989, 2, 29).is_none(), "1989 was not");
+        assert!(
+            SimpleDate::new(2000, 2, 29).is_some(),
+            "2000 was, by the 400 rule"
+        );
+        assert!(
+            SimpleDate::new(1900, 2, 29).is_none(),
+            "1900 was not, by the 100 rule"
+        );
+        // 30 February is not a date in any year.
+        assert!(SimpleDate::new(2000, 2, 30).is_none());
+    }
+
+    /// vCard's basic date form must import, not vanish.
+    ///
+    /// vCard 4.0 writes `BDAY:19901225` with no separators, and that is what
+    /// phones and mail clients export. Accepting only the extended form meant
+    /// such a card imported with its birthday silently missing -- indistinguish-
+    /// able, to the person looking at the contact afterwards, from a card that
+    /// never carried one.
+    #[test]
+    fn a_vcard_basic_format_birthday_is_not_dropped() {
+        let d = SimpleDate::parse("19901225").expect("basic ISO form should parse");
+        assert_eq!((d.year, d.month, d.day), (1990, 12, 25));
+        assert_eq!(
+            d,
+            SimpleDate::parse("1990-12-25").expect("extended form should parse"),
+            "the two spellings of one date must produce one date"
+        );
+
+        let vcard =
+            "BEGIN:VCARD\r\nVERSION:4.0\r\nN:;Jane;;;\r\nFN:Jane\r\nBDAY:19880229\r\nEND:VCARD";
+        let imported = Contact::from_vcard(vcard, 1).expect("card should import");
+        assert_eq!(
+            imported.birthday,
+            SimpleDate::new(1988, 2, 29),
+            "the birthday came through as {:?}",
+            imported.birthday
+        );
+    }
+
+    /// Eight digits that are not a date are still not a date.
+    ///
+    /// The basic form is recognised by shape alone -- eight ASCII digits -- so
+    /// the validation in `new` is the only thing standing between that shape
+    /// and nonsense getting through.
+    #[test]
+    fn eight_digits_alone_do_not_make_a_date() {
+        assert!(SimpleDate::parse("19901325").is_none(), "month 13");
+        assert!(SimpleDate::parse("19900230").is_none(), "30 February");
+        assert!(SimpleDate::parse("1990122").is_none(), "seven digits");
+        assert!(SimpleDate::parse("199012255").is_none(), "nine digits");
+        assert!(SimpleDate::parse("1990DEC25").is_none(), "not all digits");
+    }
+
+    /// Day-of-year must agree with the month-length table it is derived from.
+    ///
+    /// The two used to be independent -- a table of cumulative offsets beside a
+    /// separate day range -- and this is the property that a single table makes
+    /// true by construction: the first day of each month is one past the last
+    /// day of the one before it, with no gap and no overlap.
+    #[test]
+    fn the_day_of_year_has_no_gaps_between_months() {
+        let mut expected = 1;
+        for (index, length) in MONTH_LENGTHS.iter().enumerate() {
+            let month = u8::try_from(index).expect("twelve months fit in a u8") + 1;
+            assert_eq!(
+                day_of_year(month, 1),
+                expected,
+                "the first of month {month} is not the day after the last of the month before"
+            );
+            expected += u16::from(*length);
+        }
+        assert_eq!(
+            expected, 366,
+            "a common year has 365 days, so day 366 is next"
+        );
     }
 
     #[test]

@@ -911,12 +911,48 @@ CTEST_STALE=0
 for elf in "$ROOT_DIR"/services/ctest-*/*.elf; do
     [ -e "$elf" ] || continue
     name="$(basename "$elf" .elf)"          # e.g. ctest-tls-thread
+    stale=0                                 # counts FIXTURES, not findings: one
+                                            # ELF can be stale both ways at once
     if [ -e "$LIBC_A" ] && [ "$LIBC_A" -nt "$elf" ]; then
         echo "[rootfs] WARNING: $name.elf is OLDER than the sysroot libc.a — it links a stale"
         echo "[rootfs]          libc and proves nothing about the current one. Rebuild it:"
         echo "[rootfs]            PYTHONPATH=<fastpy> python services/$name/build.py"
-        CTEST_STALE=$((CTEST_STALE + 1))
+        stale=1
     fi
+    # ... and older than its OWN source, which is the same false-green arriving
+    # from the other direction and went uncaught until 2026-08-16.  The libc
+    # check above asks "does this ELF link the current library"; nothing asked
+    # "does this ELF contain the current test".  That morning lane B added 33
+    # waitid checks to services/ctest-jobctl/main.c; the .elf beside it was two
+    # days old and the libc had not moved, so the image would have staged a
+    # fixture that exits 42 without running one of the new checks — and lane A
+    # was one step from merging to main on the strength of that green.
+    #
+    # A fixture's sources are its own directory: main.c, any headers beside it,
+    # and build.py (which carries the compiler flags).  A change anywhere in
+    # there means rebuild, so it is enough to find any one of them newer than
+    # the ELF; there is no need to rank them.
+    #
+    # Compare with a plain loop, NOT `ls -t ... | head -1`.  This script runs
+    # under `set -euo pipefail` (line 34), and most fixture directories have no
+    # *.h: the unmatched glob makes `ls` exit nonzero, `pipefail` promotes that
+    # to the pipeline's status, and `set -e` then kills the script from inside
+    # the command substitution.  When that happened on 2026-08-16 the symptom
+    # was not an error — it was the rootfs build stopping silently partway
+    # through the fixture loop, writing no image, and still exiting 0.  A guard
+    # against false greens must not itself be able to produce one.
+    src_dir="$(dirname "$elf")"
+    for src in "$src_dir"/*.c "$src_dir"/*.h "$src_dir"/build.py; do
+        [ -e "$src" ] || continue          # unmatched glob expands to itself
+        [ "$src" -nt "$elf" ] || continue
+        echo "[rootfs] WARNING: $name.elf is OLDER than $(basename "$src") — it was built"
+        echo "[rootfs]          from a previous version of the test and cannot exercise any"
+        echo "[rootfs]          check added since. Rebuild it:"
+        echo "[rootfs]            PYTHONPATH=<fastpy> python services/$name/build.py"
+        stale=1
+        break                              # one report per fixture is enough
+    done
+    [ "$stale" -eq 0 ] || CTEST_STALE=$((CTEST_STALE + 1))
     cp -L "$elf" "$STAGE/tests/$name.elf"
     CTEST_COUNT=$((CTEST_COUNT + 1))
 done
@@ -928,10 +964,11 @@ if [ "$CTEST_COUNT" -gt 0 ]; then
                  "continuing because ALLOW_STALE_FIXTURES=1"
         else
             echo "[rootfs] ERROR: $CTEST_STALE of $CTEST_COUNT native C fixtures are STALE."
-            echo "[rootfs]        They link an older libc.a than the one in the sysroot, so"
-            echo "[rootfs]        they would report a green result about code that is no"
-            echo "[rootfs]        longer in the build. Rebuild them (commands above), or set"
-            echo "[rootfs]        ALLOW_STALE_FIXTURES=1 to build the image anyway."
+            echo "[rootfs]        Each either links an older libc.a than the sysroot's or was"
+            echo "[rootfs]        built from an older source than the one on disk (see which,"
+            echo "[rootfs]        above). Either way it would report a green result about code"
+            echo "[rootfs]        that is not what would run. Rebuild them (commands above),"
+            echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
             exit 1
         fi
     fi

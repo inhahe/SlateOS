@@ -136,6 +136,7 @@
 use crate::error::KernelError;
 use crate::fs::path::{Path, PathBuf};
 use crate::proc::pcb;
+use crate::syscall::wait;
 
 use super::dispatch::{SyscallArgs, SyscallResult};
 use super::handlers;
@@ -42085,27 +42086,30 @@ struct WaitidFound {
     si_pid: u64,
     si_uid: u32,
     si_status: i32,
+    /// The child's usage, snapshotted before the reap for `waitid`'s optional
+    /// `rusage` argument. Carried here rather than fetched at the write site
+    /// because by then the PCB is gone and there is no one left to ask.
+    usage: crate::proc::thread::ProcessUsage,
 }
 
 /// One non-blocking pass of `waitid`'s child-selection logic.
 ///
-/// `target` is `Some(pid)` for `P_PID`/`P_PIDFD` (a specific child) or
-/// `None` for `P_ALL`/`P_PGID` (any child).  For `P_PGID`, `pgid_filter`
-/// is `Some(g)` and only children whose process group is `g` are eligible
-/// (both for the ECHILD gate and the transition scan); `P_ALL` passes
-/// `None` (any child).  `pgid_filter` is only consulted on the any-child
-/// (`target == None`) path.  Returns:
-///   * `Ok(Some(found))` — a matching transition (consumed unless
-///     `nowait`); caller encodes the `siginfo` and returns success.
-///   * `Ok(None)` — eligible children exist but none have a matching
-///     unconsumed transition; caller blocks (or returns 0 for `WNOHANG`).
-///   * `Err(NoChildProcess | NoSuchProcess | PermissionDenied)` — no
-///     eligible child; caller maps to `ECHILD`.
+/// A thin adapter over [`wait::scan_once`], which is where the selection
+/// itself lives: `waitid`, `wait4` and the native `SYS_PROCESS_WAIT_STATUS`
+/// read the same kernel records, so they must agree about which child a
+/// selector names and whether a report was consumed. This function's whole
+/// job is the *marshalling* difference — `waitid` reports a `siginfo_t`
+/// where the other two report a `wstatus` word.
 ///
-/// `WEXITED` zombies are reaped (or peeked for `WNOWAIT`); `WSTOPPED`/
-/// `WCONTINUED` reports reuse the same [`pcb::jc_report_for_child`] /
-/// [`pcb::jc_report_any_child`] helpers `wait4` uses, so the two wait
-/// syscalls share one job-control reporting path.
+/// `target` is `Some(pid)` for `P_PID`/`P_PIDFD` (a specific child) or
+/// `None` for `P_ALL`/`P_PGID`; for `P_PGID`, `pgid_filter` is `Some(g)` and
+/// only children in group `g` are eligible. Returns `Ok(None)` when eligible
+/// children exist but none has a matching unconsumed transition, and
+/// `Err(NoChildProcess | NoSuchProcess | PermissionDenied)` when there is no
+/// eligible child at all — all three of which the caller maps to `ECHILD`.
+///
+/// It also carries out the child's resource usage, which `waitid`'s optional
+/// `rusage` argument needs and which cannot be recovered after the reap.
 fn waitid_scan(
     parent_pid: crate::proc::pcb::ProcessId,
     target: Option<u64>,
@@ -42115,105 +42119,36 @@ fn waitid_scan(
     want_continued: bool,
     nowait: bool,
 ) -> crate::error::KernelResult<Option<WaitidFound>> {
-    use crate::proc::pcb;
-    let want_jc = want_stopped || want_continued;
-    match target {
-        Some(pid) => {
-            if want_exited {
-                match pcb::peek_exit(parent_pid, pid) {
-                    Ok(Some((info, uid))) => {
-                        if !nowait {
-                            // Reap the zombie; the exit info is identical to
-                            // the peek, so we keep `info` for encoding.
-                            pcb::try_reap(parent_pid, pid)?;
-                        }
-                        let (code, status) = waitid_si_from_exit(&info);
-                        return Ok(Some(WaitidFound {
-                            si_code: code,
-                            si_pid: pid,
-                            si_uid: uid,
-                            si_status: status,
-                        }));
-                    }
-                    Ok(None) => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            if want_jc {
-                if let Some(ev) = pcb::jc_report_for_child(
-                    parent_pid,
-                    pid,
-                    want_stopped,
-                    want_continued,
-                    !nowait,
-                )? {
-                    let uid = pcb::process_uid(pid).unwrap_or(0);
-                    let (code, status) = waitid_si_from_jc(&ev);
-                    return Ok(Some(WaitidFound {
-                        si_code: code,
-                        si_pid: pid,
-                        si_uid: uid,
-                        si_status: status,
-                    }));
-                }
-            }
-            Ok(None)
-        }
-        None => {
-            if want_exited {
-                // P_PGID restricts the exit scan to group members; P_ALL
-                // (pgid_filter == None) considers any child.
-                let peek = match pgid_filter {
-                    Some(g) => pcb::peek_exit_group(parent_pid, g),
-                    None => pcb::peek_exit_any(parent_pid),
-                };
-                match peek {
-                    Ok(Some((cpid, info, uid))) => {
-                        if !nowait {
-                            pcb::try_reap(parent_pid, cpid)?;
-                        }
-                        let (code, status) = waitid_si_from_exit(&info);
-                        return Ok(Some(WaitidFound {
-                            si_code: code,
-                            si_pid: cpid,
-                            si_uid: uid,
-                            si_status: status,
-                        }));
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        // No children for the exit scan.  If a job-control
-                        // class is also requested, fall through to its scan
-                        // (which yields the same NoChildProcess); otherwise
-                        // surface ECHILD now.
-                        if !want_jc {
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-            if want_jc {
-                let jc = match pgid_filter {
-                    Some(g) => {
-                        pcb::jc_report_group(parent_pid, g, want_stopped, want_continued, !nowait)
-                    }
-                    None => {
-                        pcb::jc_report_any_child(parent_pid, want_stopped, want_continued, !nowait)
-                    }
-                };
-                if let Some((cpid, ev)) = jc? {
-                    let uid = pcb::process_uid(cpid).unwrap_or(0);
-                    let (code, status) = waitid_si_from_jc(&ev);
-                    return Ok(Some(WaitidFound {
-                        si_code: code,
-                        si_pid: cpid,
-                        si_uid: uid,
-                        si_status: status,
-                    }));
-                }
-            }
-            Ok(None)
-        }
+    let wait_target = match (target, pgid_filter) {
+        (Some(pid), _) => wait::WaitTarget::Pid(pid),
+        (None, Some(g)) => wait::WaitTarget::Pgid(g),
+        (None, None) => wait::WaitTarget::Any,
+    };
+    let req = wait::WaitRequest {
+        target: wait_target,
+        classes: wait::WaitClasses {
+            exited: want_exited,
+            stopped: want_stopped,
+            continued: want_continued,
+        },
+        nohang: true,
+        nowait,
+    };
+    Ok(wait::scan_once(parent_pid, req)?.map(|f| waitid_found_from(&f)))
+}
+
+/// Marshal a shared [`wait::FoundEvent`] into `waitid`'s `siginfo` fields.
+fn waitid_found_from(found: &wait::FoundEvent) -> WaitidFound {
+    let (si_code, si_status) = match &found.event {
+        wait::ChildEvent::Exited(info) => waitid_si_from_exit(info),
+        wait::ChildEvent::JobControl(ev) => waitid_si_from_jc(ev),
+    };
+    WaitidFound {
+        si_code,
+        si_pid: found.pid,
+        si_uid: found.uid,
+        si_status,
+        usage: found.usage,
     }
 }
 
@@ -42224,6 +42159,26 @@ fn waitid_scan(
 fn waitid_siginfo(found: &WaitidFound) -> WaitidSiginfo {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let si_pid = found.si_pid as i32;
+
+    // `_rest` begins at offset 28, so the two `clock_t` fields the SIGCHLD
+    // arm of Linux's `_sifields` puts at 32 and 40 land at `_rest[4..12]` and
+    // `_rest[12..20]`.  (28..32 is the padding the compiler inserts to align
+    // an 8-byte `clock_t` after the 4-byte `si_status`; it stays zero.)
+    // Linux measures these in USER_HZ ticks — `nsec_to_clock_t` in
+    // `wait_task_zombie` — which is exactly what `ProcessUsage` stores, so
+    // no conversion is right here and any conversion would be wrong.
+    let mut rest = [0u8; 100];
+    #[allow(clippy::cast_possible_wrap)]
+    let utime = found.usage.user_ticks as i64;
+    #[allow(clippy::cast_possible_wrap)]
+    let stime = found.usage.sys_ticks as i64;
+    if let Some(slot) = rest.get_mut(4..12) {
+        slot.copy_from_slice(&utime.to_ne_bytes());
+    }
+    if let Some(slot) = rest.get_mut(12..20) {
+        slot.copy_from_slice(&stime.to_ne_bytes());
+    }
+
     WaitidSiginfo {
         si_signo: 17, // SIGCHLD
         si_errno: 0,
@@ -42232,7 +42187,7 @@ fn waitid_siginfo(found: &WaitidFound) -> WaitidSiginfo {
         si_pid,
         si_uid: found.si_uid,
         si_status: found.si_status,
-        _rest: [0u8; 100],
+        _rest: rest,
     }
 }
 
@@ -42265,19 +42220,49 @@ fn clear_waitid_siginfo(infop: u64) -> crate::error::KernelResult<()> {
     crate::mm::user::write_user_value::<[u8; 128]>(infop, [0u8; 128])
 }
 
-/// Zero a user `struct rusage` (144 bytes on x86_64).
+/// Write a reaped child's resource usage into a user `struct rusage`.
 ///
-/// We do not track per-process resource usage yet, so every wait-family
-/// syscall reports an all-zero struct rather than leaving the caller's
-/// buffer untouched (which would let it read stale stack contents as if
-/// they were accounting data).  A zero `rusage` is a no-op.
-fn clear_user_rusage(rusage: u64) -> crate::error::KernelResult<()> {
+/// Used by `wait4` and `waitid`. Until 2026-08-16 both wrote 144 zero bytes
+/// here, which is not merely incomplete — it is a *false* answer, because
+/// `ru_utime == 0` is indistinguishable from "this child used no CPU". The
+/// accounting to fill it in has existed the whole time (`sys_getrusage` reads
+/// the same counters); nothing was reading it at the wait boundary.
+///
+/// The layout is Linux's x86_64 `struct rusage`: eighteen longs, of which we
+/// fill the two timevals and the four counters we actually track. The rest
+/// (`ru_maxrss`, `ru_ixrss`, …) stay zero, which for those fields *is* the
+/// honest answer — Linux itself leaves most of them zero.
+///
+/// The usage is `RUSAGE_BOTH` — the child's own plus that of descendants it
+/// had already reaped — snapshotted by the wait *before* the reap destroyed
+/// the PCB. There is no way to recover it afterwards, which is why it is
+/// carried on [`wait::FoundEvent`] rather than fetched here.
+fn write_user_rusage(
+    rusage: u64,
+    usage: &crate::proc::thread::ProcessUsage,
+) -> crate::error::KernelResult<()> {
     const RUSAGE_SIZE: usize = 144;
     if rusage == 0 {
         return Ok(());
     }
+    let mut buf = [0u8; RUSAGE_SIZE];
+    // ru_utime @ 0, ru_stime @ 16 — same encoder as `sys_getrusage`, so the
+    // two syscalls cannot disagree about what a tick is worth.
+    write_rusage_timeval(&mut buf, 0, usage.user_ticks);
+    write_rusage_timeval(&mut buf, 16, usage.sys_ticks);
+    let mut put = |off: usize, v: u64| {
+        #[allow(clippy::cast_possible_wrap)]
+        let signed = v as i64;
+        if let Some(slot) = buf.get_mut(off..off.saturating_add(8)) {
+            slot.copy_from_slice(&signed.to_ne_bytes());
+        }
+    };
+    put(64, usage.min_flt); // ru_minflt
+    put(72, usage.maj_flt); // ru_majflt
+    put(128, usage.nvcsw); // ru_nvcsw
+    put(136, usage.nivcsw); // ru_nivcsw
     // Through the bounce: see `write_waitid_siginfo`.
-    crate::mm::user::write_user_value::<[u8; RUSAGE_SIZE]>(rusage, [0u8; RUSAGE_SIZE])
+    crate::mm::user::write_user_value::<[u8; RUSAGE_SIZE]>(rusage, buf)
 }
 
 /// Boot self-test for the real `waitid` child-selection and `siginfo`
@@ -42470,11 +42455,20 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     // and would reject a kernel stack address.
     const _: () = assert!(core::mem::size_of::<WaitidSiginfo>() == 128);
     let mut buf = [0u8; 128];
+    // Non-zero CPU times so the si_utime/si_stime slots (siginfo offsets 32
+    // and 40) are distinguishable from the zero-fill around them.  These are
+    // USER_HZ ticks on the wire, exactly as Linux's `nsec_to_clock_t` leaves
+    // them, so the encoder must pass them through unscaled.
     let probe = WaitidFound {
         si_code: CLD_EXITED,
         si_pid: 0x1234,
         si_uid: 7,
         si_status: 99,
+        usage: crate::proc::thread::ProcessUsage {
+            user_ticks: 31,
+            sys_ticks: 42,
+            ..crate::proc::thread::ProcessUsage::default()
+        },
     };
     let encoded = waitid_siginfo(&probe);
     // SAFETY: `WaitidSiginfo` is `#[repr(C)]` and exactly 128 bytes (asserted
@@ -42498,6 +42492,15 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
         serial_println!("[syscall/linux]   FAIL: waitid siginfo byte layout");
         return Err(KernelError::InternalError);
     }
+    // si_utime@32 / si_stime@40 are `clock_t` (long, 8 bytes) in ticks.
+    let rd64 = |s: Option<&[u8]>| -> Option<u64> {
+        s.and_then(|b| <[u8; 8]>::try_from(b).ok())
+            .map(u64::from_ne_bytes)
+    };
+    if rd64(buf.get(32..40)) != Some(31) || rd64(buf.get(40..48)) != Some(42) {
+        serial_println!("[syscall/linux]   FAIL: waitid siginfo si_utime/si_stime");
+        return Err(KernelError::InternalError);
+    }
 
     serial_println!("[syscall/linux]   waitid scan/siginfo: OK");
     Ok(())
@@ -42513,16 +42516,21 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
 /// {WEXITED, WSTOPPED=2, WCONTINUED} must be set per Linux's contract.
 ///
 /// On a matching child state change we fill the `siginfo_t` (si_signo =
-/// SIGCHLD, si_code = CLD_*, si_pid/si_uid/si_status) and return 0.
-/// WEXITED reaps zombie children (peeked, not reaped, for WNOWAIT);
-/// WSTOPPED/WCONTINUED report job-control transitions using the same
-/// `pcb::jc_report_*` helpers wait4 uses.  WNOHANG with no pending change
-/// returns 0 with a zeroed siginfo (si_pid == 0); a blocking call with no
-/// eligible child returns ECHILD.  The child-selection core
-/// ([`waitid_scan`]) is factored out so the boot self-test can drive it
+/// SIGCHLD, si_code = CLD_*, si_pid/si_uid/si_status, plus si_utime and
+/// si_stime in USER_HZ ticks) and return 0.  WEXITED reaps zombie children
+/// (peeked, not reaped, for WNOWAIT); WSTOPPED/WCONTINUED report
+/// job-control transitions.  WNOHANG with no pending change returns 0 with
+/// a zeroed siginfo (si_pid == 0); a blocking call with no eligible child
+/// returns ECHILD.
+///
+/// The child selection, the reap, and the blocking loop all live in
+/// [`crate::syscall::wait`], shared verbatim with `wait4` and the native
+/// `SYS_PROCESS_WAIT_STATUS`; this function only marshals arguments in and
+/// a `siginfo_t` out.  Before that unification this loop had *no* signal
+/// handling at all — see `wait::wait_for_child_event`.  [`waitid_scan`]
+/// remains as a thin adapter so the boot self-test can drive selection
 /// against synthetic PCBs.
 fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::pcb;
     // Linux signature: `SYSCALL_DEFINE5(waitid, int, which, pid_t,
     // upid, struct siginfo __user *, infop, int, options, struct
     // rusage __user *, ru)`.  `which`, `upid`, and `options` are all
@@ -42683,87 +42691,56 @@ fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    loop {
-        match waitid_scan(
-            parent_pid,
-            target,
-            pgid_filter,
-            want_exited,
-            want_stopped,
-            want_continued,
-            nowait,
-        ) {
-            Ok(Some(found)) => {
-                // The child is already reaped at this point, so a faulting
-                // `infop`/`rusage` costs the caller the notification.  Linux
-                // has the same ordering (kernel/exit.c fills siginfo after
-                // the release_task) and likewise returns EFAULT.
-                if let Err(e) = write_waitid_siginfo(infop, &found) {
-                    return linux_err(linux_errno_for(e));
-                }
-                if let Err(e) = clear_user_rusage(rusage) {
-                    return linux_err(linux_errno_for(e));
-                }
-                return SyscallResult::ok(0);
-            }
-            Ok(None) => {}
-            Err(e) => return scan_err(e),
-        }
-        if nohang {
-            // No state change: zero the siginfo so userspace sees
-            // si_pid == 0 (Linux convention for "nothing to report").
+    // The blocking loop itself is `wait::wait_for_child_event`, shared with
+    // `wait4` and the native wait.  Before that unification this loop had *no
+    // signal handling at all* — no pending-signal check, no ERESTARTSYS, no
+    // signalfd registration, just `block_current()` — so a `waitid` with no
+    // ready child was uninterruptible: a SIGINT to a shell blocked in
+    // `waitid` was noticed only once some child happened to change state.
+    // `wait4` next door had all three. That is the concrete cost of two
+    // copies of one primitive, and fixing it here required no new code.
+    let req = wait::WaitRequest {
+        target: match (target, pgid_filter) {
+            (Some(pid), _) => wait::WaitTarget::Pid(pid),
+            (None, Some(g)) => wait::WaitTarget::Pgid(g),
+            (None, None) => wait::WaitTarget::Any,
+        },
+        classes: wait::WaitClasses {
+            exited: want_exited,
+            stopped: want_stopped,
+            continued: want_continued,
+        },
+        nohang,
+        nowait,
+    };
+    let found = match wait::wait_for_child_event(parent_pid, task_id, req) {
+        Ok(wait::WaitOutcome::Changed(f)) => waitid_found_from(&f),
+        Ok(wait::WaitOutcome::NoHang) => {
+            // No state change: zero the siginfo so userspace sees si_pid == 0
+            // (Linux's convention for "nothing to report"), and leave the
+            // rusage alone — there is no child whose usage it would describe.
             if let Err(e) = clear_waitid_siginfo(infop) {
                 return linux_err(linux_errno_for(e));
             }
             return SyscallResult::ok(0);
         }
-        // Block until a child changes state (lost-wakeup-safe: register
-        // the waiter, re-scan, then block).  A stop/continue/exit wakes
-        // this task through the same parent waiters wait4 uses.
-        match target {
-            Some(pid) => {
-                if let Err(e) = pcb::set_wait_task(pid, task_id) {
-                    return linux_err(linux_errno_for(e));
-                }
-            }
-            None => {
-                if let Err(e) = pcb::set_wait_any_task(parent_pid, task_id) {
-                    pcb::clear_wait_any_task(parent_pid, task_id);
-                    return scan_err(e);
-                }
-            }
+        Ok(wait::WaitOutcome::Restart) => {
+            return restart::restart_result(restart::ERESTARTSYS);
         }
-        match waitid_scan(
-            parent_pid,
-            target,
-            pgid_filter,
-            want_exited,
-            want_stopped,
-            want_continued,
-            nowait,
-        ) {
-            Ok(Some(found)) => {
-                if target.is_none() {
-                    pcb::clear_wait_any_task(parent_pid, task_id);
-                }
-                if let Err(e) = write_waitid_siginfo(infop, &found) {
-                    return linux_err(linux_errno_for(e));
-                }
-                if let Err(e) = clear_user_rusage(rusage) {
-                    return linux_err(linux_errno_for(e));
-                }
-                return SyscallResult::ok(0);
-            }
-            Ok(None) => {}
-            Err(e) => {
-                if target.is_none() {
-                    pcb::clear_wait_any_task(parent_pid, task_id);
-                }
-                return scan_err(e);
-            }
-        }
-        crate::sched::block_current();
+        Err(e) => return scan_err(e),
+    };
+
+    // The child is already reaped at this point, so a faulting `infop`/
+    // `rusage` costs the caller the notification.  Linux has the same
+    // ordering (kernel/exit.c fills siginfo after release_task) and likewise
+    // returns EFAULT.
+    if let Err(e) = write_waitid_siginfo(infop, &found) {
+        return linux_err(linux_errno_for(e));
     }
+    if let Err(e) = write_user_rusage(rusage, &found.usage) {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
 }
 
 /// Validate the `(iov, iovcnt)` portion of a (p)readv/(p)writev call.
@@ -45429,8 +45406,8 @@ fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
 ///     Linux signal (SIGFPE for divide error, SIGILL for invalid op,
 ///     etc.) by consulting `CrashInfo`.
 ///
-/// `options`: `WNOHANG` (1) routes to the non-blocking
-/// [`pcb::try_reap`] / [`pcb::try_reap_any`]; the caller sees a
+/// `options`: `WNOHANG` (1) routes to a single non-blocking
+/// [`crate::syscall::wait::scan_once`]; the caller sees a
 /// "0 returned, no status written" result when no child is ready.
 /// `WUNTRACED` (2) reports a child that has been stopped for job control
 /// (status `(sig << 8) | 0x7f`, `WIFSTOPPED`) without reaping it;
@@ -45549,33 +45526,36 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
 
     // The selector resolution, the reap/stop/continue scan order, the
     // lost-wakeup-safe park and the wstatus encoding all live in
-    // `handlers::wait_for_child_event`, shared with the native
-    // `SYS_PROCESS_WAIT_STATUS`.  Both ABIs read the same kernel records, so
-    // they must not drift; see that function's doc comment.  wait4 has no
-    // WNOWAIT, so a reported job-control transition is always consumed.
+    // `crate::syscall::wait`, shared with the native `SYS_PROCESS_WAIT_STATUS`
+    // and with `waitid`.  All three read the same kernel records, so they must
+    // not drift; see that module's docs.  wait4 has no WNOWAIT, so a reported
+    // job-control transition is always consumed.
     //
     // __WNOTHREAD/__WALL/__WCLONE are accepted and ignored: we have no
     // clone-vs-fork child distinction to filter on, so every child is
     // already "all children".
-    let outcome = crate::syscall::handlers::wait_for_child_event(
-        parent_pid,
-        task_id,
-        pid_arg,
+    let req = wait::WaitRequest {
+        target: wait::WaitTarget::from_posix_selector(pid_arg, parent_pid),
+        classes: wait::WaitClasses {
+            exited: true,
+            stopped: (options & WUNTRACED) != 0,
+            continued: (options & WCONTINUED) != 0,
+        },
         nohang,
-        (options & WUNTRACED) != 0,
-        (options & WCONTINUED) != 0,
-    );
-    let (child_pid, wstatus): (u64, i32) = match outcome {
-        Ok(crate::syscall::handlers::WaitOutcome::Changed(pid, ws)) => (pid, ws),
-        Ok(crate::syscall::handlers::WaitOutcome::NoHang) => return SyscallResult::ok(0),
-        Ok(crate::syscall::handlers::WaitOutcome::Restart) => {
+        nowait: false,
+    };
+    let found = match wait::wait_for_child_event(parent_pid, task_id, req) {
+        Ok(wait::WaitOutcome::Changed(f)) => f,
+        Ok(wait::WaitOutcome::NoHang) => return SyscallResult::ok(0),
+        Ok(wait::WaitOutcome::Restart) => {
             return restart::restart_result(restart::ERESTARTSYS);
         }
-        // POSIX reports both "not your child" and "no children" as ECHILD;
-        // the core already folds PermissionDenied/NoSuchProcess into
-        // NoChildProcess, so this maps the one remaining shape.
-        Err(e) => return linux_err(linux_errno_for(e)),
+        // POSIX reports both "not your child" and "no children" as ECHILD, so
+        // a caller cannot use wait4 to probe for processes it does not own.
+        Err(e) => return linux_err(linux_errno_for(wait::wait_err_to_echild(e))),
     };
+    let child_pid = found.pid;
+    let wstatus = found.to_wstatus();
 
     // Delivered through the bounce.  The `validate_user_write` at the top of
     // the function ran *before* `wait_for_child_event` blocked, so it says
@@ -45591,7 +45571,7 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
-    if let Err(e) = clear_user_rusage(rusage_ptr) {
+    if let Err(e) = write_user_rusage(rusage_ptr, &found.usage) {
         return linux_err(linux_errno_for(e));
     }
 
@@ -53787,9 +53767,15 @@ fn self_test_wait4_dispatch() -> crate::error::KernelResult<()> {
         }
 
         // wait-any WNOHANG from contextless test task.  parent_pid
-        // resolves to 0 (kernel) which has no children registered, so
-        // set_wait_any_task returns ECHILD.  The crucial assertion is
+        // resolves to 0 (kernel); `wait::scan_once` finds no eligible child
+        // of pid 0, so the scan reports ECHILD.  The crucial assertion is
         // that the call did NOT return -EINVAL or panic.
+        //
+        // This comment used to credit `set_wait_any_task` with the ECHILD.
+        // That was the old behaviour and it was a bug: registration fails
+        // because the *caller* has no process record, which says nothing
+        // about whether it has children.  The scan answers now — see the
+        // comment in `syscall/wait.rs`.
         let a = SyscallArgs {
             arg0: u64::MAX,
             arg1: 0,
@@ -53838,11 +53824,10 @@ fn self_test_wait4_dispatch() -> crate::error::KernelResult<()> {
 
         // (a) options = 0x1_0000_0001 (bit 32 + WNOHANG), pid = -1
         //     (wait-any).  Linux truncates options to WNOHANG, no
-        //     children -> ECHILD via set_wait_any_task.  Pre-batch:
-        //     EINVAL because bit 32 was outside VALID_OPTIONS.
-        //     The test only requires non-EINVAL — set_wait_any_task
-        //     in kernel context surfaces ECHILD (parent_pid=0 has
-        //     no children registered).
+        //     children -> ECHILD from the scan.  Pre-batch: EINVAL
+        //     because bit 32 was outside VALID_OPTIONS.  The test only
+        //     requires non-EINVAL — in kernel context `wait::scan_once`
+        //     finds pid 0 has no eligible child and surfaces ECHILD.
         let a = SyscallArgs {
             arg0: u64::MAX,
             arg1: 0,
@@ -53858,11 +53843,14 @@ fn self_test_wait4_dispatch() -> crate::error::KernelResult<()> {
         }
 
         // (b) options = 0x1_0000_0000 (bit 32 only), pid = -1.  Linux
-        //     truncates options to 0 (no WNOHANG, would block on a
-        //     real run).  In kernel context the wait-any path enters
-        //     set_wait_any_task first which fails with ECHILD before
-        //     any blocking, so the syscall returns immediately
-        //     -ECHILD.  Pre-batch: EINVAL via the unknown-bit gate.
+        //     truncates options to 0 — no WNOHANG, so a real run would
+        //     block.  This case is why `wait::wait_for_child_event`'s
+        //     any-child branch refuses to park a caller it could not
+        //     register: pid 0 has no process record and so no wake slot,
+        //     and a task that parks without one is hung for good.  It
+        //     returns immediately with -ECHILD instead.  Do not "fix"
+        //     that guard away — without it this line hangs the boot.
+        //     Pre-batch: EINVAL via the unknown-bit gate.
         let a = SyscallArgs {
             arg0: u64::MAX,
             arg1: 0,
@@ -53884,10 +53872,10 @@ fn self_test_wait4_dispatch() -> crate::error::KernelResult<()> {
         //     pid_arg as i64 was a large positive number, so we
         //     entered the wait-specific path for that bogus pid.
         //     Both paths return -ECHILD in kernel context (specific:
-        //     try_reap -> NoSuchProcess -> ECHILD; any:
-        //     set_wait_any_task -> ECHILD).  Externally indistinct
-        //     but the code path is now Linux-correct.  Assert
-        //     non-EINVAL.
+        //     peek_exit -> NoSuchProcess -> ECHILD; any: the scan finds
+        //     pid 0 has no eligible child -> ECHILD).  Externally
+        //     indistinct but the code path is now Linux-correct.
+        //     Assert non-EINVAL.
         let a = SyscallArgs {
             arg0: 0x1_0000_0000,
             arg1: 0,

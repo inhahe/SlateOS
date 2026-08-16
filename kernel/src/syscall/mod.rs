@@ -31,6 +31,7 @@ pub mod linux;
 pub mod number;
 pub mod profile;
 pub mod trace;
+pub mod wait;
 
 pub use dispatch::self_test;
 

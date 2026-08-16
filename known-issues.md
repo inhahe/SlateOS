@@ -464,7 +464,26 @@ artifacts, enumerate the set from the thing they have in common — here "links
 `libc.a`" — not from the directory that happened to hold them when the rule was
 written (`services/ctest-*`).
 
-### TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT. `waitid` cannot express process group 1, cannot honour `WNOWAIT`, and reports `si_uid` as 0 — all three because `SYS_PROCESS_WAIT_STATUS` is `waitpid`-shaped — LOGGED 2026-08-16 by lane B
+### TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT. `waitid` cannot express process group 1, cannot honour `WNOWAIT`, and reports `si_uid` as 0 — all three because `SYS_PROCESS_WAIT_STATUS` is `waitpid`-shaped — LOGGED 2026-08-16 by lane B — ✅ KERNEL SIDE FIXED 2026-08-16 by lane A; libc side still open
+
+**Status: the kernel half is done** (2026-08-16, lane A). All three gaps — and
+the `si_utime`/`si_stime`/`rusage` fourth one below, whose premise turned out to
+be false — are now expressible through the syscall. The entry stays open because
+**libc has not been changed to use any of it yet**: `waitid` still returns
+`ENOSYS` for the group-1 case, still ignores `WNOWAIT`, and still reports
+`si_uid` as 0, because it is still passing the old three arguments. What to
+change on the libc side is spelled out in
+`requests/a-b-wait-syscall-grew-wpgid-wnowait-and-a-waitinfo-struct.md`; the
+kernel rationale is `design-decisions.md` §206. Close this entry when
+`posix/src/process.rs` consumes the new ABI.
+
+**Correction to item 4 below ("there is no per-process CPU accounting").** That
+was already false when this entry was written. `pcb`'s `acct_*`/`child_*`
+counters and `thread::process_cpu_ticks`/`process_fault_counts`/
+`process_ctxsw_counts` were live, and `sys_getrusage` already encoded all 144
+bytes from them; `wait4`'s `clear_user_rusage` was a **false zero** — the data
+existed and the call threw it away. `wait4` now writes a real `rusage` and
+`waitid` fills `si_utime`/`si_stime` in USER_HZ ticks.
 
 **In short:** `waitid()` is the modern replacement for `waitpid()`, and it exists
 because `waitpid()`'s arguments cannot express some perfectly reasonable waits.
@@ -501,22 +520,31 @@ caller that asked for a group wait and got an arbitrary child has no way to
 detect the substitution and has lost the status of a child it was not managing.
 Refusing is recoverable; guessing is not.
 
-**Proper fix — all three are kernel-side**, and filed as
-`requests/b-a-waitid-needs-an-explicit-idtype-wait.md`:
+**Proper fix — all three were kernel-side, and all three landed** on
+2026-08-16 (lane A), exactly as this entry proposed:
 
-1. An option bit (e.g. `WPGID = 1 << 16`) that makes `arg0` an unsigned pgid,
-   bypassing `wait_pgid_filter`'s inference. Currently rejected by the mask, so
+1. ✅ **`WPGID = 1 << 16`** on `SYS_PROCESS_WAIT_STATUS` makes `arg0` an
+   unsigned pgid, so group 1 is nameable. Previously rejected by the mask, so
    no existing caller is affected.
-2. A `WNOWAIT` bit that finds the eligible child and encodes its `wstatus` but
-   skips the reap. `poll_any_child_event` already separates "find" from
-   "consume" for stop/continue; this applies the same split to exits.
-3. Return the child's uid — the PCB already carries it (`pcb.rs:88`). Widening
-   the `arg2` out-parameter from a bare `i32 wstatus` to a small struct is
-   probably cleaner than a second return register, and leaves room for the CPU
-   times if accounting ever lands.
+2. ✅ **`WNOWAIT = 1 << 24`** peeks: the zombie is left in place and the
+   job-control report is left unconsumed, so an identical second wait sees the
+   same event again.
+3. ✅ **The child's uid** rides out in a new `WaitInfo` out-parameter (`arg3`
+   pointer, `arg4` size, 72 bytes), which — as this entry predicted — also
+   carries the CPU times and four other counters. It is written under the
+   `clone3`/`sched_setattr` convention (`min(caller, kernel)` bytes, zero-filled
+   tail), so it can grow again without a new syscall number.
 
-Until then the divergences are documented on `waitid`'s doc comment, which is
-where someone debugging a `WNOWAIT` that reaped will actually look.
+One thing nobody asked for came out of the same work: **`sys_waitid` had no
+signal handling at all** — no pending-signal check, no `ERESTARTSYS`, no
+signalfd registration — so a process blocked in it could not be interrupted.
+`wait4` next door had all three. Unifying the three wait syscalls onto
+`kernel/src/syscall/wait.rs` fixed it, and it is the clearest evidence for why
+one primitive beats three copies.
+
+Until libc catches up, the divergences remain documented on `waitid`'s doc
+comment, which is where someone debugging a `WNOWAIT` that reaped will actually
+look — and that comment now needs a line saying the kernel *can* do it.
 
 **What *is* covered, so this entry is not mistaken for "waitid is untested."**
 Everything `waitid` can do is exercised on target by

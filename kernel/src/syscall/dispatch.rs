@@ -856,6 +856,8 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_wait_process_group_filter()?;
     test_dispatch_signal_stop_self_rejects_non_stop_signals()?;
     test_dispatch_wait_status_reports_job_control()?;
+    test_dispatch_wait_status_wpgid_and_wnowait()?;
+    test_dispatch_wait_info_layout()?;
 
     serial_println!("[syscall] Dispatch self-test PASSED");
     Ok(())
@@ -1454,8 +1456,9 @@ fn test_dispatch_tty_job_control() -> KernelResult<()> {
 /// wrong group where a glibc program got `ECHILD`.
 ///
 /// The decisive check is step (2): both children are zombies and
-/// `child_a < child_b` by PID, while `try_reap_any` deliberately picks the
-/// *lowest* PID. So asking for `child_b`'s group must yield `child_b`. An
+/// `child_a < child_b` by PID, while the any-child scan (`pcb::peek_exit_any`)
+/// deliberately picks the *lowest* PID. So asking for `child_b`'s group must
+/// yield `child_b`. An
 /// unfiltered implementation returns `child_a` and the test fails —
 /// which is exactly what the pre-fix code did.
 ///
@@ -1466,12 +1469,13 @@ fn test_dispatch_tty_job_control() -> KernelResult<()> {
 ///
 /// The `pid == 0` ("caller's own group") form is deliberately *not*
 /// exercised here. `caller_pid()` reports 0 for a bare kernel task, pid 0
-/// has no process record and so no pgid, so `wait_pgid_filter` degrades it
-/// to wait-any by design — calling it would be an unfiltered reap that
-/// could destroy an unrelated child of pid 0 and make a later self-test
-/// fail mysteriously. What this test pins down is the `< -1` form, and
-/// with it the shared `wait_pgid_filter`/`reap_any_filtered` path that the
-/// `== 0` form also goes through.
+/// has no process record and so no pgid, so `WaitTarget::from_posix_selector`
+/// degrades it to wait-any by design — calling it would be an unfiltered reap
+/// that could destroy an unrelated child of pid 0 and make a later self-test
+/// fail mysteriously. What this test pins down is the `< -1` form, and with
+/// it the shared [`crate::syscall::wait`] selection path that the `== 0` form
+/// also goes through — and that `wait4`, `waitid` and the native
+/// wait-with-status now all share, so this test covers all five entry points.
 fn test_dispatch_wait_process_group_filter() -> KernelResult<()> {
     use crate::proc::pcb;
 
@@ -1712,6 +1716,348 @@ fn test_dispatch_wait_status_reports_job_control() -> KernelResult<()> {
     }
 
     serial_println!("[syscall]   wait_status (1063) job-control reporting: OK");
+    Ok(())
+}
+
+/// Verify the two option bits `SYS_PROCESS_WAIT_STATUS` has that Linux's
+/// `waitpid` does not: `WPGID` (the selector is a bare unsigned pgid) and
+/// `WNOWAIT` (report the transition without consuming it).
+///
+/// Both come from lane B's request
+/// `requests/b-a-waitid-needs-an-explicit-idtype-wait.md`.
+///
+/// ## What makes the `WPGID` half decisive
+///
+/// `WPGID` exists because `waitpid`'s signed selector cannot name process
+/// group 1: that would be `-1`, which already means "any child". A kernel
+/// task cannot *itself* be put in group 1 — `pcb::create` makes every
+/// fixture a session leader, whose pgid is fixed by POSIX rule 3, and pid 0
+/// (what `caller_pid()` reports here) has no process record for `set_pgid`
+/// to check a session against — so the nameability of group 1 is not
+/// directly exercisable from a self-test. What *is* exercisable, and pins
+/// down the same thing, is that the two interpretations of one argument
+/// disagree and the bit picks between them:
+///
+/// | `arg0` | without `WPGID` | with `WPGID` |
+/// |---|---|---|
+/// | `-C` (as `i64`) | "group C" → reports C | a huge unsigned pgid → ECHILD |
+/// | `C` | "pid C" → reports C | "group C" → reports C |
+///
+/// The first row is the decisive one: a handler that ignored `WPGID` and
+/// fell through to `WaitTarget::from_posix_selector` would report C where
+/// this test demands ECHILD. That is exactly the bug the bit is there to
+/// prevent, and the group-1 case is the same code path with a different
+/// number in it.
+///
+/// ## What makes the `WNOWAIT` half decisive
+///
+/// A peek that silently reaped would still return the right pid the first
+/// time, so returning the pid is not evidence. The check is that the child
+/// is *still there afterwards* (`pcb::state` is `Some`) and is reported
+/// **again** by an identical second call — and, for the job-control half,
+/// that a stop report survives a peek and is then consumed exactly once by
+/// a wait without the bit.
+///
+/// ## A bug this test caught on its first run
+///
+/// It is the first self-test to reach the *blocking* wait's any-child/group
+/// branch (`test_dispatch_wait_process_group_filter` goes through
+/// `SYS_PROCESS_TRY_WAIT`, which calls `scan_once` directly, and
+/// `test_dispatch_wait_status_reports_job_control` names a pid, taking the
+/// other branch). That branch registered the waiter before scanning and
+/// returned the registration error as the answer — but registration fails
+/// when the *caller* has no process record, which conflated "you have no
+/// children" with "you are not a process". Every any-child and every group
+/// wait from a caller without a PCB reported ECHILD without scanning at all.
+/// Fixed in `wait.rs` by letting the scan answer first; see the comment
+/// there.
+///
+/// Every process created is destroyed on every exit path.
+fn test_dispatch_wait_status_wpgid_and_wnowait() -> KernelResult<()> {
+    use crate::proc::pcb;
+
+    // WNOHANG throughout: this runs on the boot thread, and a blocking wait
+    // on a fixture that has no task to ever exit would never return.
+    const WNOHANG: u64 = 0x0000_0001;
+    const WUNTRACED: u64 = 0x0000_0002;
+    const WPGID: u64 = 0x0001_0000;
+    const WNOWAIT: u64 = 0x0100_0000;
+    const WINFO: u64 = 0x0002_0000;
+    const SIGTSTP: u32 = 20;
+
+    let mk = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+
+    fn fail(msg: &str, pids: &[u64]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: wait opts: {}", msg);
+        for &p in pids {
+            crate::proc::pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+
+    // (a) An unknown option bit is EINVAL, not silently ignored. A caller
+    //     setting a bit this kernel has never heard of was compiled against
+    //     a newer one; giving it the old semantics under a name that
+    //     promises different ones is worse than refusing.
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(0, 0x0200_0000)).value
+        != i64::from(KernelError::InvalidArgument.code())
+    {
+        return fail("an unknown option bit should be InvalidArgument", &[]);
+    }
+    // ...while the two new bits are accepted (no child yet → ECHILD, which
+    // is a *different* answer from the EINVAL above, so this distinguishes
+    // "understood" from "rejected").
+    const NO_GROUP: u64 = 8_765_431;
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(NO_GROUP, WNOHANG | WPGID | WNOWAIT)).value
+        != i64::from(KernelError::NoChildProcess.code())
+    {
+        return fail("WPGID|WNOWAIT should be accepted option bits", &[]);
+    }
+
+    // --- WPGID ---------------------------------------------------------
+    // A zombie child of pid 0, leading its own group, so pgid == pid.
+    let c = pcb::create("waitopt-pg", 0);
+    let one = [c];
+    if pcb::set_running(c).is_err() || pcb::add_thread(c, 9990).is_err() {
+        return fail("could not start the WPGID fixture", &one);
+    }
+    if pcb::set_exit_code(c, 55).is_err() {
+        return fail("could not set the WPGID fixture exit code", &one);
+    }
+    match pcb::remove_thread(c, 9990, pcb::ThreadExitAccounting::default()) {
+        Ok((true, _, _)) => {}
+        _ => return fail("the WPGID fixture did not become a zombie", &one),
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    let c_i = c as i64;
+    // The exact bit pattern a caller writes when it means the selector `-C`.
+    // Said as a `u64` wrapping negation rather than a round trip through `i64`,
+    // so it is a bit operation on a value this test owns rather than signed
+    // arithmetic that clippy must take on trust.
+    let c_neg = c.wrapping_neg();
+
+    // (b) The decisive row: `-C` under WPGID is an unsigned pgid no process
+    //     holds, so ECHILD. Without the bit this same argument means
+    //     "group C" and reports C — see (d).
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(c_neg, WNOHANG | WPGID)).value
+        != i64::from(KernelError::NoChildProcess.code())
+    {
+        return fail(
+            "WPGID must read arg0 as an unsigned pgid, not a signed selector",
+            &one,
+        );
+    }
+    // (c) ...and that near-miss must not have consumed anything.
+    if pcb::state(c).is_none() {
+        return fail("a WPGID miss must not reap", &[]);
+    }
+    // (d) The same number, unsigned, names C's group and reports C. Peek
+    //     (WNOWAIT) so the fixture survives into the WNOWAIT half below.
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(c, WNOHANG | WPGID | WNOWAIT)).value != c_i {
+        return fail("WPGID with the child's own pgid should report it", &one);
+    }
+
+    // --- WNOWAIT -------------------------------------------------------
+    // (e) The peek above left the zombie in place...
+    if pcb::state(c).is_none() {
+        return fail("WNOWAIT must not reap the zombie", &[]);
+    }
+    // (f) ...so an identical call reports it again. A reaping implementation
+    //     answers ECHILD here.
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(c, WNOHANG | WPGID | WNOWAIT)).value != c_i {
+        return fail("a peeked zombie should be reported again", &one);
+    }
+    // (f2) Garbage in arg3/arg4 with no `WINFO` is not looked at.
+    //
+    //      This is the regression test for a bug that reached the ring-3
+    //      fixtures: `arg3`/`arg4` were read unconditionally, but every
+    //      caller that predates them invokes this syscall through a
+    //      three-argument wrapper (`posix`'s `syscall3` writes rdi/rsi/rdx
+    //      and stops), so `r10`/`r8` arrive holding stale caller values. The
+    //      kernel was validating — and would have written 72 bytes through —
+    //      a pointer userspace never supplied.
+    //
+    //      The address below is deliberately *non-canonical*, so if the gate
+    //      is ever removed this does not quietly corrupt whatever it hits: a
+    //      write faults immediately and takes the boot test with it. Note the
+    //      limit, though — `validate_user_write` documents a bypass for tasks
+    //      with no owning process, so a kernel task cannot observe the EFAULT
+    //      a real process would get here. The ring-3 fixtures
+    //      (`ctest-pgroup`/`ctest-jobctl`/`ctest-ctty`) are the test that
+    //      actually caught this, and they remain the authority.
+    const GARBAGE_PTR: u64 = 0xDEAD_BEEF_DEAD_0000;
+    let with_garbage = SyscallArgs {
+        arg0: c,
+        arg1: WNOHANG | WPGID | WNOWAIT,
+        arg2: 0,
+        arg3: GARBAGE_PTR,
+        arg4: 0xFFFF_FFFF,
+        arg5: 0,
+    };
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &with_garbage).value != c_i {
+        return fail(
+            "arg3/arg4 must be ignored entirely without WINFO — an old \
+             three-argument caller leaves garbage in those registers",
+            &one,
+        );
+    }
+    // ...and `WINFO` itself is an understood bit, not EINVAL. (Pointing it at
+    // nothing is the "I asked but have nowhere to put it" case, which is a
+    // skip, not an error — so this stays safe to run from a kernel task.)
+    let winfo_null = SyscallArgs {
+        arg0: c,
+        arg1: WNOHANG | WPGID | WNOWAIT | WINFO,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &winfo_null).value != c_i {
+        return fail("WINFO should be an accepted option bit", &one);
+    }
+
+    // (g) Dropping the bit consumes it: reported once...
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(c, WNOHANG | WPGID)).value != c_i {
+        return fail("a wait without WNOWAIT should reap the peeked zombie", &one);
+    }
+    // (h) ...and then it is gone, for good.
+    if pcb::state(c).is_some() {
+        return fail("the zombie should be reaped once WNOWAIT is dropped", &one);
+    }
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(c, WNOHANG | WPGID)).value
+        != i64::from(KernelError::NoChildProcess.code())
+    {
+        return fail("a reaped child's group should be NoChildProcess", &[]);
+    }
+
+    // --- WNOWAIT on a job-control report --------------------------------
+    // A stop is a *report*, not a corpse: consuming it clears a flag rather
+    // than destroying a PCB, so it is a genuinely separate code path
+    // (`jc_report_for_child`'s `consume` argument) and needs its own check.
+    let s = pcb::create("waitopt-jc", 0);
+    let js = [s];
+    if pcb::set_running(s).is_err() || pcb::add_thread(s, 9991).is_err() {
+        return fail("could not start the WNOWAIT job-control fixture", &js);
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    let s_i = s as i64;
+    let _ = pcb::record_jc_stopped(s, SIGTSTP);
+    // (i) Peeked twice, still pending both times.
+    for pass in 0..2 {
+        if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(s, WNOHANG | WUNTRACED | WNOWAIT)).value != s_i {
+            return fail(
+                if pass == 0 {
+                    "WNOWAIT should report a pending stop"
+                } else {
+                    "a peeked stop report should survive to be seen again"
+                },
+                &js,
+            );
+        }
+    }
+    // (j) Consumed exactly once without the bit.
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(s, WNOHANG | WUNTRACED)).value != s_i {
+        return fail("dropping WNOWAIT should report the stop", &js);
+    }
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(s, WNOHANG | WUNTRACED)).value != 0 {
+        return fail("a consumed stop report must not be reported twice", &js);
+    }
+    pcb::destroy(s);
+
+    serial_println!("[syscall]   wait_status WPGID / WNOWAIT: OK");
+    Ok(())
+}
+
+/// Pin down the on-wire byte layout of the `WaitInfo` out-parameter
+/// (`SYS_PROCESS_WAIT_STATUS` `arg3`/`arg4`).
+///
+/// These offsets are an ABI promise to lane B's libc: nothing in the kernel
+/// reads them back, so a transposed field would compile, boot, and hand
+/// userspace a UID where it expected a wstatus, forever. `handlers.rs`'s
+/// doc comment is the specification; this is the test that the code agrees
+/// with it.
+///
+/// Driven through [`handlers::wait_info_image`], the pure encoder, rather
+/// than `write_wait_info`, because the latter writes through
+/// `copy_to_user` and this self-test task has no user address space. The
+/// `min(caller, kernel)` truncation and the zero-filled tail live in the
+/// wrapper and are covered from ring 3 by the userspace test fixture.
+///
+/// The CPU-time check is the one worth stating twice: the counters are kept
+/// in USER_HZ ticks internally but this structure carries **microseconds**,
+/// so a `1` in must come out as `10_000`. A pass-through bug would look
+/// entirely plausible in a hex dump.
+fn test_dispatch_wait_info_layout() -> KernelResult<()> {
+    use crate::proc::pcb::ExitInfo;
+    use crate::proc::thread::ProcessUsage;
+    use crate::syscall::handlers::{wait_info_image, WAIT_INFO_SIZE};
+    use crate::syscall::wait::{ChildEvent, FoundEvent};
+
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: WaitInfo layout: {}", msg);
+        Err(KernelError::InternalError)
+    }
+
+    let found = FoundEvent {
+        pid: 0x1234_5678,
+        uid: 4242,
+        usage: ProcessUsage {
+            user_ticks: 3,
+            sys_ticks: 7,
+            min_flt: 101,
+            maj_flt: 102,
+            nvcsw: 103,
+            nivcsw: 104,
+        },
+        // exit_code 66 → wstatus (66 << 8) = 0x4200, per `ExitInfo::to_wstatus`.
+        event: ChildEvent::Exited(ExitInfo {
+            exit_code: 66,
+            crash: None,
+        }),
+    };
+    let img = wait_info_image(&found);
+
+    let rd64 = |off: usize| -> Option<u64> {
+        img.get(off..off.saturating_add(8))
+            .and_then(|b| <[u8; 8]>::try_from(b).ok())
+            .map(u64::from_le_bytes)
+    };
+
+    // The pad halves are checked too: a caller reading `uid` as a `u64`
+    // (or a future field landing at 12) must see zero, not stale bytes.
+    let expect: [(usize, u64, &str); 8] = [
+        (0, 0x1234_5678, "pid@0"),
+        (8, 4242, "uid@8 (+ zero pad @12)"),
+        (16, 0x4200, "wstatus@16 (+ zero pad @20)"),
+        (24, 30_000, "utime_us@24 (3 ticks = 30ms)"),
+        (32, 70_000, "stime_us@32 (7 ticks = 70ms)"),
+        (40, 101, "minflt@40"),
+        (48, 102, "majflt@48"),
+        (56, 103, "nvcsw@56"),
+    ];
+    for (off, want, what) in expect {
+        if rd64(off) != Some(want) {
+            return fail(what);
+        }
+    }
+    // The last field must be the last field: 64 + 8 == the whole structure.
+    // A compile-time assert, because a size change is a source edit, not a
+    // runtime possibility — and this way it fails the build rather than the
+    // boot.
+    const _: () = assert!(WAIT_INFO_SIZE == 64 + 8);
+    if rd64(64) != Some(104) {
+        return fail("nivcsw@64");
+    }
+
+    serial_println!("[syscall]   WaitInfo (1063 arg3) byte layout: OK");
     Ok(())
 }
 

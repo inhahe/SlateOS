@@ -1131,7 +1131,7 @@ pub struct Process {
 
     // --- Children CPU-time accounting (POSIX cutime/cstime) ---
     //
-    // When this process reaps a zombie child (`try_reap`/`try_reap_any`),
+    // When this process reaps a zombie child (`try_reap`),
     // the child's total CPU time *and* the child's own accumulated
     // children-time are credited here, mirroring Linux's
     // `wait_task_zombie` → `__exit_signal` accumulation into the parent's
@@ -4263,146 +4263,15 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
     }
 }
 
-/// Try to reap *any* zombie child of `parent_pid` (POSIX `waitpid(-1)`).
-///
-/// Scans the process table for children of `parent_pid`:
-/// - If a zombie child is found, it is reaped (returns
-///   `Ok(Some((child_pid, ExitInfo)))` and destroys the child).  When
-///   several zombies exist, the lowest PID is chosen for determinism.
-/// - If `parent_pid` has living (non-zombie) children but none are
-///   ready, returns `Ok(None)` — the caller should block and retry.
-/// - If `parent_pid` has no children at all, returns
-///   `Err(NoChildProcess)` (POSIX `ECHILD`).
-///
-/// Mirrors [`try_reap`] but without a known child PID.  Cleanup is done
-/// outside the `PROCESS_TABLE` lock (same two-phase pattern) to avoid
-/// lock-ordering hazards.
-pub fn try_reap_any(parent_pid: ProcessId) -> KernelResult<Option<(ProcessId, ExitInfo)>> {
-    reap_any_matching(parent_pid, None)
-}
-
-/// Like [`try_reap_any`], but restricted to children whose process group
-/// is `pgid`. Backs `wait4(-pgid)` / `waitid(P_PGID, pgid)`: reaps the
-/// lowest-PID zombie among the caller's children that belong to group
-/// `pgid`, and returns `NoChildProcess` (→ ECHILD) when the caller has no
-/// child in that group at all.
-pub fn try_reap_group(
-    parent_pid: ProcessId,
-    pgid: ProcessId,
-) -> KernelResult<Option<(ProcessId, ExitInfo)>> {
-    reap_any_matching(parent_pid, Some(pgid))
-}
-
-/// Shared body of [`try_reap_any`] / [`try_reap_group`]. When
-/// `pgid_filter` is `Some(g)`, only children with `pgid == g` count
-/// toward the ECHILD gate and are eligible to be reaped; `None` reaps any
-/// child.
-fn reap_any_matching(
-    parent_pid: ProcessId,
-    pgid_filter: Option<ProcessId>,
-) -> KernelResult<Option<(ProcessId, ExitInfo)>> {
-    #[allow(clippy::type_complexity)]
-    let reaped: Option<(
-        ProcessId,
-        ExitInfo,
-        u64,
-        Vec<(crate::cap::ResourceType, u64)>,
-        Vec<(i32, u8, u64)>,
-    )>;
-
-    {
-        let mut table = PROCESS_TABLE.lock();
-
-        // First pass: does this process have any children at all, and is
-        // there a zombie among them?  BTreeMap iterates in ascending key
-        // order, so the first zombie found has the lowest PID.
-        let mut has_child = false;
-        let mut zombie_child: Option<ProcessId> = None;
-        for proc in table.values() {
-            if proc.parent == parent_pid
-                && proc.pid != parent_pid
-                && pgid_filter.is_none_or(|g| proc.pgid == g)
-            {
-                has_child = true;
-                if proc.state == ProcessState::Zombie {
-                    zombie_child = Some(proc.pid);
-                    break;
-                }
-            }
-        }
-
-        if !has_child {
-            return Err(KernelError::NoChildProcess);
-        }
-
-        let Some(child_pid) = zombie_child else {
-            // Children exist but none are zombies yet — caller blocks.
-            return Ok(None);
-        };
-
-        // Extract the zombie's info and remove it from the table.
-        let (
-            exit_code,
-            crash,
-            pml4_phys,
-            child_user,
-            child_sys,
-            child_min,
-            child_maj,
-            child_nv,
-            child_niv,
-        ) = {
-            let proc = table.get(&child_pid).ok_or(KernelError::NoSuchProcess)?;
-            (
-                proc.exit_code.unwrap_or(0),
-                proc.crash_info,
-                proc.pml4_phys,
-                // Child CPU time + the child's own children-time, to credit
-                // the parent's cutime/cstime accumulator (see try_reap).
-                proc.acct_user_ticks.saturating_add(proc.child_user_ticks),
-                proc.acct_sys_ticks.saturating_add(proc.child_sys_ticks),
-                // Same carry-up for page faults.
-                proc.acct_min_flt.saturating_add(proc.child_min_flt),
-                proc.acct_maj_flt.saturating_add(proc.child_maj_flt),
-                // Same carry-up for context switches.
-                proc.acct_nvcsw.saturating_add(proc.child_nvcsw),
-                proc.acct_nivcsw.saturating_add(proc.child_nivcsw),
-            )
-        };
-
-        let mut removed = table.remove(&child_pid);
-        let ipc_handles = removed
-            .as_mut()
-            .map(|p| core::mem::take(&mut p.ipc_handles))
-            .unwrap_or_default();
-        let initial_fds = removed
-            .as_mut()
-            .map(|p| core::mem::take(&mut p.initial_fds))
-            .unwrap_or_default();
-
-        // Credit the parent's children-time accumulator (parent_pid is a
-        // distinct entry from the just-removed child).
-        if let Some(parent) = table.get_mut(&parent_pid) {
-            parent.child_user_ticks = parent.child_user_ticks.saturating_add(child_user);
-            parent.child_sys_ticks = parent.child_sys_ticks.saturating_add(child_sys);
-            parent.child_min_flt = parent.child_min_flt.saturating_add(child_min);
-            parent.child_maj_flt = parent.child_maj_flt.saturating_add(child_maj);
-            parent.child_nvcsw = parent.child_nvcsw.saturating_add(child_nv);
-            parent.child_nivcsw = parent.child_nivcsw.saturating_add(child_niv);
-        }
-
-        let info = ExitInfo { exit_code, crash };
-        reaped = Some((child_pid, info, pml4_phys, ipc_handles, initial_fds));
-    }
-    // PROCESS_TABLE lock dropped here.
-
-    if let Some((child_pid, info, pml4_phys, ipc_handles, initial_fds)) = reaped {
-        destroy_process_resources(child_pid, pml4_phys, &ipc_handles, &initial_fds);
-        Ok(Some((child_pid, info)))
-    } else {
-        Ok(None)
-    }
-}
+// NOTE: `try_reap_any` / `try_reap_group` / `reap_any_matching` used to live
+// here — a second copy of the child-selection rule (lowest-PID zombie, ECHILD
+// only when the caller has no eligible child at all) that the wait syscalls
+// called directly. `crate::syscall::wait` now selects with `peek_exit_any` /
+// `peek_exit_group` and then reaps the named child with [`try_reap`], which
+// leaves exactly one implementation of that rule in the tree; see
+// `design-decisions.md` §206 for why one is the right number. Anything that
+// wants "reap whichever child is ready" should compose the two the same way,
+// not reintroduce a fused version.
 
 /// Non-destructively inspect a child's exit status without reaping it.
 ///
@@ -8417,16 +8286,37 @@ fn test_reap_zombie() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 6: `try_reap_any` — POSIX `waitpid(-1)` semantics.
+/// Test 6: `peek_exit_any` + `try_reap` — POSIX `waitpid(-1)` semantics.
 ///
 /// Covers: no children → `NoChildProcess` (ECHILD); living children but
-/// no zombie → `None`; a zombie child is reaped and reported by PID;
-/// once all children are reaped → `NoChildProcess` again.
+/// no zombie → `None`; a zombie child is selected and reaped and reported
+/// by PID; once all children are reaped → `NoChildProcess` again.
+///
+/// This used to drive `try_reap_any`, a fused select-and-reap that has been
+/// deleted: it was a second copy of the selection rule, and a test of a
+/// second copy proves nothing about the copy the kernel actually runs. The
+/// pair below *is* the live path — `crate::syscall::wait::scan_once` composes
+/// exactly these two calls, in this order, for every wait-shaped syscall —
+/// so a regression here is a regression a program would see. The split also
+/// gives the test something the fused version could not check: that the
+/// selection step alone leaves the zombie in place, which is what makes
+/// `WNOWAIT` possible.
 fn test_reap_any() -> KernelResult<()> {
+    /// Select the lowest-PID ready child and reap it, i.e. what
+    /// `waitpid(-1)` does. Mirrors `syscall::wait::scan_once`'s any-child
+    /// arm: peek first (which is also the ECHILD gate), then reap by name.
+    fn reap_any(parent_pid: ProcessId) -> KernelResult<Option<(ProcessId, ExitInfo)>> {
+        let Some((child_pid, info, _uid)) = peek_exit_any(parent_pid)? else {
+            return Ok(None);
+        };
+        try_reap(parent_pid, child_pid)?;
+        Ok(Some((child_pid, info)))
+    }
+
     let parent_pid = create("reapany-parent", 0);
 
     // No children yet → ECHILD.
-    match try_reap_any(parent_pid) {
+    match reap_any(parent_pid) {
         Err(KernelError::NoChildProcess) => {} // Expected.
         other => {
             serial_println!(
@@ -8447,7 +8337,7 @@ fn test_reap_any() -> KernelResult<()> {
     add_thread(child_b, 961)?;
 
     // Children exist but none are zombies → None (would block).
-    match try_reap_any(parent_pid)? {
+    match reap_any(parent_pid)? {
         None => {} // Expected.
         Some((p, _)) => {
             serial_println!("[proc]   FAIL: reap_any should block (None), reaped {}", p);
@@ -8469,8 +8359,29 @@ fn test_reap_any() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // The selection step on its own must NOT reap — this is the property
+    // `WNOWAIT` is built on, and the fused `try_reap_any` could not express
+    // it. Peek twice: the second peek must still see child_b.
+    for pass in 0..2 {
+        match peek_exit_any(parent_pid)? {
+            Some((p, info, _uid)) if p == child_b && info.exit_code == 7 => {}
+            other => {
+                serial_println!(
+                    "[proc]   FAIL: peek {} should see child_b(={}) code=7 without reaping, got {:?}",
+                    pass,
+                    child_b,
+                    other.map(|(p, i, _)| (p, i.exit_code))
+                );
+                destroy(child_a);
+                destroy(child_b);
+                destroy(parent_pid);
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
     // reap_any should reap child_b (the only zombie) and report its PID.
-    match try_reap_any(parent_pid)? {
+    match reap_any(parent_pid)? {
         Some((reaped, info)) if reaped == child_b && info.exit_code == 7 => {}
         other => {
             serial_println!(
@@ -8485,7 +8396,7 @@ fn test_reap_any() -> KernelResult<()> {
     }
 
     // child_a still running → None again.
-    match try_reap_any(parent_pid)? {
+    match reap_any(parent_pid)? {
         None => {} // Expected.
         Some((p, _)) => {
             serial_println!(
@@ -8507,7 +8418,7 @@ fn test_reap_any() -> KernelResult<()> {
         destroy(parent_pid);
         return Err(KernelError::InternalError);
     }
-    match try_reap_any(parent_pid)? {
+    match reap_any(parent_pid)? {
         Some((reaped, _)) if reaped == child_a => {}
         other => {
             serial_println!(
@@ -8520,7 +8431,7 @@ fn test_reap_any() -> KernelResult<()> {
     }
 
     // All children reaped → ECHILD once more.
-    match try_reap_any(parent_pid) {
+    match reap_any(parent_pid) {
         Err(KernelError::NoChildProcess) => {} // Expected.
         other => {
             serial_println!(

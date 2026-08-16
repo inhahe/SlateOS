@@ -58,6 +58,7 @@ use alloc::vec::Vec;
 use crate::norm_tables::{
     COMBINES_BACKWARD, CCC, MARKS, NO_COMPOSE, PAIRS, PAIRS_BY_PARTS, SINGLETONS,
 };
+use crate::thai;
 
 /// The first Hangul syllable, and the counts that make its composition
 /// arithmetic rather than a table. See UAX #15 §16 "Hangul".
@@ -428,17 +429,41 @@ fn sort_marks(pieces: &mut [Piece], class: impl Fn(char) -> u8) {
 #[must_use]
 pub(crate) fn nfc(text: &str) -> Vec<Piece> {
     // NFC is NFC: a question about *text* gets the Unicode answer, Hangul
-    // included. Only the drawing path below asks for anything else.
-    normalize(text, Hangul::Normalize)
+    // included and SARA AM left whole. Only the drawing path below asks for
+    // anything else.
+    normalize(text, Hangul::Normalize, SaraAm::LeaveAlone)
 }
 
-/// [`nfc`], with the Hangul question left open.
+/// Whether Thai and Lao SARA AM comes apart before the marks are sorted.
 ///
-/// The whole of NFC except that `hangul` decides whether Hangul takes part.
-/// Split out so the drawing path can ask for NFC-of-everything-else without
-/// `nfc` itself ceasing to mean NFC.
+/// U+0E33 and U+0EB3 have no canonical decomposition, so as far as Unicode is
+/// concerned there is nothing here to decide and [`SaraAm::LeaveAlone`] is what
+/// NFC means. As far as a renderer is concerned there is: the character is
+/// drawn as two marks in two places, and one of them belongs in front of marks
+/// that were typed before it. [`thai::preprocess`](crate::thai::preprocess) is
+/// that pass, and this is the switch that lets the drawing path run it without
+/// [`nfc`] ceasing to be NFC.
+///
+/// It is a parameter of [`normalize`] rather than a step around it because
+/// *where* it runs is the whole question — between decomposition and the
+/// canonical sort, which is a place only `normalize` has.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SaraAm {
+    /// Split it, and move the upper half back over the marks it is drawn
+    /// beneath. What a renderer wants.
+    Decompose,
+    /// Leave it as the one character Unicode says it is. What NFC says.
+    LeaveAlone,
+}
+
+/// [`nfc`], with the Hangul and SARA AM questions left open.
+///
+/// The whole of NFC except that `hangul` decides whether Hangul takes part and
+/// `sara_am` decides whether Thai's two-part vowel does. Split out so the
+/// drawing path can ask for NFC-of-everything-else without `nfc` itself
+/// ceasing to mean NFC.
 #[must_use]
-fn normalize(text: &str, hangul: Hangul) -> Vec<Piece> {
+fn normalize(text: &str, hangul: Hangul, sara_am: SaraAm) -> Vec<Piece> {
     let mut pieces: Vec<Piece> = Vec::with_capacity(text.len());
     let mut cluster = 0usize;
     for (offset, ch) in text.char_indices() {
@@ -449,6 +474,15 @@ fn normalize(text: &str, hangul: Hangul) -> Vec<Piece> {
             cluster = offset;
         }
         decompose_into(ch, cluster, &mut pieces, 0, hangul);
+    }
+    if sara_am == SaraAm::Decompose {
+        // Before the sort and not after. The nikhahit is moved back over the
+        // marks *as typed*, and sorting first would have put a below-base
+        // vowel among them and stopped the scan one place early. See
+        // [`thai`](crate::thai). Safe to run after decomposition rather than
+        // before it, which is where HarfBuzz runs it, because no character
+        // decomposes to or from a Thai or Lao one.
+        crate::thai::preprocess(&mut pieces);
     }
     sort_marks(&mut pieces, combining_class);
     compose(&mut pieces, hangul);
@@ -523,16 +557,19 @@ fn compose(pieces: &mut Vec<Piece>, hangul: Hangul) {
 /// the string this stage describes is the same string, spelled for a renderer.
 #[must_use]
 pub(crate) fn pieces(text: &str, has_glyph: impl Fn(char) -> bool) -> Vec<Piece> {
-    // One question, asked once, gating both of the passes that only marks can
+    // Two questions, each asked once, gating the passes that only marks can
     // make work for: a string with no marks and nothing to decompose has
-    // nothing to reorder and nothing to take apart.
-    let work = needs_work(text);
+    // nothing to reorder and nothing to take apart. SARA AM is asked about
+    // separately and not folded into `needs_work`, because it is neither a
+    // mark nor decomposable and so `needs_work` is right to say no to it —
+    // it is a second reason to do the work, not a wider version of the first.
+    let work = needs_work(text) || thai::present(text);
     let mut out = if work {
         // Everything but Hangul. Which spelling of a Korean syllable to draw
         // depends on what the face covers, so it is `hangul::preprocess` that
         // decides it, a stage later — and it can only decide if the spelling
         // reaching it is still the text's own.
-        normalize(text, Hangul::LeaveAlone)
+        normalize(text, Hangul::LeaveAlone, SaraAm::Decompose)
     } else {
         // Already NFC by inspection, so the offsets are the string's own and
         // there is nothing to reorder or join.

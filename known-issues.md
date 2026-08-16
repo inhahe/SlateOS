@@ -62955,6 +62955,43 @@ order of how well the host can check the work:
 Each step needs its corpus strings added to `harfbuzz_sweep.py` first, or the
 sweep reports agreement it never tested.
 
+**Step 1 of 3 done — Thai/Lao, 2026-08-15** (`gui/font/src/thai.rs`, commits
+`48597037a` and `a7130c6b4`). Both halves the survey predicted, and both
+measured:
+
+* **SARA AM decomposition.** U+0E33 (Lao U+0EB3) is one character drawn as two
+  marks in two places, and Unicode gives it no canonical decomposition, so we
+  were asking faces for a glyph almost none have. `thai::preprocess` splits it
+  into nikhahit + sara aa and walks the nikhahit back over any above-base
+  marks, which is HarfBuzz's `preprocess_text_thai` — Uniscribe's behaviour,
+  not the MS OT Thai spec's. It runs from `norm::normalize` *between*
+  decomposition and the mark sort, and the ordering is load-bearing rather
+  than incidental: sorting first puts the nikhahit on the wrong side of a
+  tone mark. Host sweep, 556 faces: **agree 18806 → 21015, reordered 3 → 0,
+  differ 3382 → 1176**, every Thai and Lao string now agreeing on every face.
+  The residual 1176 is entirely the pre-existing NFC bucket, untouched.
+* **The private-use fallback.** `thai::pua_shape`, two state machines
+  transcribed from `hb-ot-shaper-thai.cc`, gated on HarfBuzz's
+  `!plan->map.found_script[0]` — the face's `GSUB` did not name `thai`.
+  Note that this is *not* `Face::shapes_as_default`, which answers false for a
+  face with no `GSUB` at all; a face with no `GSUB` is exactly the font the
+  pass exists for, and using the wrong predicate made the pass never fire.
+
+  This one could not be measured against the host at all: **not one of the 556
+  installed faces carries a single Thai private-use glyph** (probed directly),
+  because every Thai font Windows ships today describes its shaping in `GSUB`,
+  which turns the fallback off. A host sweep would have reported agreement it
+  never tested. So the oracle was built instead —
+  `gui/font/tools/gen_thai_legacy.py` synthesizes three faces with no
+  `GSUB`/`GPOS`/`GDEF` (Windows forms, Mac forms, and none), and
+  `thai-pua-corpus.txt` names one string per edge of the two machines plus
+  controls. **78 of 78 agree**, including the vendor preference and the
+  no-private-use face, which the pass must leave untouched.
+
+Khmer is next, then Myanmar, then USE. `harfbuzz_sweep.py` gained a
+`--corpus FILE` flag along the way, so each of those can bring its own corpus
+without editing the built-in one.
+
 **Where.** `gui/font/src/sfnt.rs` — `Face::substitute`, which dispatches on
 `Script::shaping` and would gain the other families; `gui/font/src/indic.rs`
 and `indic_machine.rs` — the models to copy; `gui/font/tools/harfbuzz_sweep.py`

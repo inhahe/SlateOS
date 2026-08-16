@@ -43,6 +43,7 @@ use crate::raster::{GlyphMask, rasterize};
 use crate::script::{self, ScriptTags};
 use crate::sfnt::{Face, PathCmd, SfntError};
 use crate::shape::{GlyphKey, ShapedGlyph, ShapedRun, TAB_WIDTH_IN_SPACES};
+use crate::thai;
 
 /// How many rasterized glyphs one [`ScaledFont`] keeps before it starts
 /// evicting.
@@ -559,6 +560,37 @@ impl ScaledFont {
         // the fallback asks each run whether its script is one whose marks it
         // is allowed to place.
         let runs = script::runs(&pieces, &piece_levels);
+        // Thai on a face that predates OpenType: the shifted tone marks are
+        // extra glyphs in the private use area rather than `GSUB` rules, and
+        // picking them is the engine's job. Empty — and not even allocated —
+        // for every face that registers `thai`, which is every face designed
+        // this century. See [`thai::pua_shape`].
+        //
+        // A replacement here changes which glyph is looked up and nothing
+        // else: `pieces` still holds the real characters, so a shifted mai ek
+        // is still a mark to everything downstream.
+        //
+        // The gate is HarfBuzz's `!plan->map.found_script[0]`: the face's
+        // `GSUB` did not name `thai`, whether because it named `DFLT`/`latn`
+        // instead or because there is no `GSUB` at all. Deliberately not
+        // `shapes_as_default`, which answers `false` for a face with no
+        // `GSUB` — and a face with no `GSUB` is precisely the legacy Thai
+        // font this pass exists for.
+        let mut pua: Vec<Option<char>> = Vec::new();
+        let legacy =
+            |t| thai::legacy_run(t) && self.face.gsub_chosen_script(t) != Some(*b"thai");
+        if runs.iter().any(|&(_, t)| legacy(t)) {
+            pua = alloc::vec![None; pieces.len()];
+            let mut at = 0usize;
+            for &(end, tags) in &runs {
+                if legacy(tags) {
+                    thai::pua_shape(&pieces, at..end, &mut pua, |ch| {
+                        self.face.glyph_index(ch).is_some()
+                    });
+                }
+                at = end;
+            }
+        }
         let mut glyphs: Vec<SubGlyph> = Vec::with_capacity(pieces.len());
         let mut tabs: Vec<bool> = Vec::with_capacity(pieces.len());
         // The run the piece loop is inside, and the three things the fallback
@@ -627,7 +659,11 @@ impl ScaledFont {
             // is several spaces of nothing. Substituting the space glyph gets
             // both — it draws blank, and its advance is the unit to multiply.
             let tab = ch == '\t';
-            let gid = if tab { space } else { self.glyph_id(ch) };
+            let gid = if tab {
+                space
+            } else {
+                self.glyph_id(pua.get(i).copied().flatten().unwrap_or(ch))
+            };
             glyphs.push(SubGlyph {
                 klass: if synth && placeable && !tab {
                     fallback::attach_class(ch)

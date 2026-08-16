@@ -70,6 +70,7 @@ pub mod sfnt;
 pub mod shape;
 mod skip;
 pub mod system;
+mod thai;
 mod would;
 
 use alloc::collections::BTreeMap;

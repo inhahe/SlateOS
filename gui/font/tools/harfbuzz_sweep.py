@@ -109,6 +109,28 @@ CORPUS = [
     # a vowel under it must be lifted clear of it, and Thai faces write that
     # lift as a contextual rule too.
     "\\u0e17\\u0e35\\u0e48\\u0e19\\u0e35\\u0e48",
+    # --- Thai and Lao SARA AM, which is what the Thai shaper is *for* ---
+    #
+    # SARA AM (U+0E33) is one character that draws as two marks: a nikhahit
+    # ring above the consonant and a sara aa stroke after it. A shaper splits
+    # it, and -- the part that needs an oracle -- moves the ring in front of
+    # any tone mark already sitting above, because the ring belongs closest to
+    # the letter and the tone rides on top of it. Stored order is consonant,
+    # tone, sara am; drawn order is consonant, nikhahit, tone, sara aa.
+    #
+    # Plain, with no tone: the split happens but nothing moves, so a shaper
+    # that only splits agrees here and disagrees on the entry below it.
+    "\\u0e01\\u0e33",
+    # KO KAI, MAI EK, SARA AM -- the reordering case.
+    "\\u0e01\\u0e48\\u0e33",
+    # The same pair in Lao, which shares the shaper and the rule: LO LING,
+    # MAI EK, SARA AM.
+    "\\u0ea5\\u0eb3",
+    "\\u0ea5\\u0ec8\\u0eb3",
+    # A whole Thai word with a pre-base vowel. Thai stores pre-base vowels
+    # before their consonant already, so nothing reorders and this is the
+    # control: a difference here is not the shaper.
+    "\\u0e40\\u0e01\\u0e34\\u0e14",
     # Devanagari, the reason script tags have two spellings.
     "\\u0939\\u093f\\u0928\\u094d\\u0926\\u0940",
     # Scriptless text, which selects the font's default features.
@@ -148,6 +170,29 @@ CORPUS = [
     # to another script's and never to another language's.
     ("chr", "office fluffy waffle"),
 ]
+
+
+def read_corpus(path):
+    """A corpus from a file of `[language<TAB>]string` lines.
+
+    Blank lines and `#` comments are skipped; the escapes are the built-in
+    corpus's, expanded later by `unescape` on both halves. A targeted corpus is
+    how a synthetic face is swept — the built-in one is 40 strings about the
+    host's fonts, and running it against two generated faces would report
+    thirty-eight agreements that mean nothing.
+    """
+    out = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if "\t" in line:
+                lang, text = line.split("\t", 1)
+                out.append((lang, text) if lang else text)
+            else:
+                out.append(line)
+    return out
 
 
 def lang_of(entry):
@@ -412,7 +457,19 @@ def main():
     ap.add_argument(
         "--limit", type=int, default=0, help="stop after this many faces (0 = all)"
     )
+    ap.add_argument(
+        "--corpus",
+        default=None,
+        help="file of `[language<TAB>]string` lines to sweep instead of the "
+        "built-in corpus, with the same backslash-u escapes",
+    )
     args = ap.parse_args()
+
+    corpus = CORPUS
+    if args.corpus:
+        corpus = read_corpus(args.corpus)
+        if not corpus:
+            sys.exit(f"{args.corpus} has no strings in it")
 
     if not os.path.isdir(args.fonts):
         sys.exit(f"{args.fonts} is not a directory")
@@ -422,9 +479,9 @@ def main():
     if not fonts:
         sys.exit(f"no fonts under {args.fonts}")
 
-    questions = [(lang_of(entry), unescape(string_of(entry))) for entry in CORPUS]
+    questions = [(lang_of(entry), unescape(string_of(entry))) for entry in corpus]
     print(f"{len(fonts)} faces x {len(questions)} strings")
-    mine = ours(CORPUS, fonts)
+    mine = ours(corpus, fonts)
 
     agree = 0
     order_only = Counter()
@@ -448,14 +505,14 @@ def main():
             # the buffer was right-to-left, logical when it did not.
             logical, visual = got
             ours_here, ours_pos = visual if rtl else logical
-            if CORPUS[i] in MIXED:
+            if corpus[i] in MIXED:
                 # Not a verdict on the shaper — see `MIXED`. Counted as
                 # agreement only when the itemizer happened not to matter for
                 # this face, which is the interesting half of the answer.
                 if ours_here == expected and same_positions(ours_pos, expected_pos):
                     agree += 1
                 else:
-                    mixed[CORPUS[i]] += 1
+                    mixed[corpus[i]] += 1
             elif ours_here == expected:
                 if same_positions(ours_pos, expected_pos):
                     agree += 1
@@ -465,9 +522,9 @@ def main():
                     # and mark attachment live here and nowhere else in this
                     # sweep: a mark stacked on the wrong base picks the same
                     # glyph id as one stacked on the right base.
-                    placed[CORPUS[i]] += 1
+                    placed[corpus[i]] += 1
                     placed_examples.setdefault(
-                        CORPUS[i],
+                        corpus[i],
                         (os.path.basename(path), ours_pos, expected_pos),
                     )
             elif sorted(ours_here) == sorted(expected):
@@ -478,11 +535,11 @@ def main():
                 # backwards, where we reorder each run on its own. The
                 # *shaping* agreed exactly, so it is worth separating from a
                 # real disagreement rather than burying in the total.
-                order_only[CORPUS[i]] += 1
+                order_only[corpus[i]] += 1
             else:
-                differ[CORPUS[i]] += 1
+                differ[corpus[i]] += 1
                 examples.setdefault(
-                    CORPUS[i], (os.path.basename(path), ours_here, expected)
+                    corpus[i], (os.path.basename(path), ours_here, expected)
                 )
 
     print(f"agree    {agree}  (same glyphs, same positions)")

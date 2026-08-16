@@ -21407,3 +21407,75 @@ stay declined.
 **Where.** `gui/font/src/device.rs` — `VARIATION_INDEX` and the format check in
 `pixel_delta`, and the "What is not here" section of the module doc, which
 names this entry.
+
+## TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL
+
+**Status:** OPEN
+
+**What.** The font layer now places a caret correctly in bidirectional text
+(`TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL`, fixed 2026-08-16): `ShapedRun::x_of`
+measures across the screen and takes an `Affinity`. None of the widgets that
+draw a caret call it. They all still place it by measuring the *width of the
+text before it*, which is `ShapedRun::width_upto` under another name — the
+number that entry renamed precisely because it is not a caret position.
+
+Three sites:
+
+* `gui/toolkit/src/pathbar.rs` — `width_before(text, bytes)`, which is
+  `text::width` of a prefix slice. Used for the caret **and** for the selection
+  rectangle.
+* `gui/toolkit/src/textview.rs` — `x_of_col`, which walks the spans of a
+  wrapped line summing `span_width` and then adds `text::measure(prefix)` for
+  the partial span.
+* `gui/toolkit/src/text.rs` — `char_index_at` returns `Hit::offset` and
+  discards the affinity, because its callers count characters. That is correct
+  for what it returns, but it means the affinity the click produced is thrown
+  away at the boundary of the toolkit and cannot reach whoever draws the caret.
+
+**Symptom.** In a path or a document containing a right-to-left run — a Hebrew
+or Arabic directory name, a quoted Arabic phrase in a markdown file — the caret
+is drawn at the distance *into the text*, not the position *across the line*.
+Click at the visual right end of a Hebrew word and the caret appears at its
+left end; type there and the character is inserted where the caret was drawn
+rather than where the click was. Selection highlighting in `pathbar` is wrong
+in the same way, and additionally cannot be right in its current shape: a
+logically-contiguous selection that spans a direction change is two or more
+*disjoint* rectangles on the screen, and `width_before` can only describe one.
+
+**Why it is filed rather than fixed.** The font-level fix is complete and this
+is a separate change with a design question in it: a widget cursor is a byte
+index today, and a correct caret needs a byte index *plus* an affinity. That
+value has to be stored in each widget's cursor state, updated by every
+operation that moves it (click sets it from the `Hit`; arrow keys set it from
+the direction of travel; typing and deletion set it downstream), and preserved
+across the undo stack in `textview`. Bolting `x_of(.., Affinity::Downstream)`
+onto the existing sites would fix the drawn position for exactly half of all
+boundary crossings and would silently keep the other half wrong — which is the
+failure mode the font entry argued against.
+
+**Proper fix.**
+
+1. A `TextCursor { byte: usize, affinity: Affinity }` in `gui/toolkit`, and
+   cursor fields changed from `usize` to it. `Affinity::Downstream` is the
+   right default, so `TextCursor::from(byte)` covers the sites that genuinely
+   have no opinion.
+2. `char_index_at` grows a sibling that returns the whole `Hit` — or better,
+   returns `TextCursor` — leaving the character-counting one for callers that
+   only want an index.
+3. `pathbar::width_before` and `textview::x_of_col` become `x_of` calls against
+   the shaped run, with the cursor's affinity. Both already shape the text to
+   measure it, so no extra shaping is introduced.
+4. Selection: a `selection_rects(from, to) -> impl Iterator<Item = (f32, f32)>`
+   on `ShapedRun`, walking the drawn order and emitting one box per maximal
+   stretch of the logical range that is contiguous on screen. This is the piece
+   with real work in it; the caret parts above are mechanical once (1) exists.
+
+Arrow-key motion is deliberately *not* in this list. Visual-order cursor
+movement (left arrow moves left on the screen, whichever direction the text
+runs) is a further question, and the affinity is a prerequisite for it rather
+than a solution to it.
+
+**Where.** `gui/toolkit/src/pathbar.rs` — `width_before` and its callers;
+`gui/toolkit/src/textview.rs` — `x_of_col`, `col_at_x`;
+`gui/toolkit/src/text.rs` — `char_index_at`; `gui/font/src/shape.rs` —
+`x_of`/`offset_at`/`Affinity`, which is everything the fix needs from the font.

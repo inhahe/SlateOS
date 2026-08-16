@@ -1679,6 +1679,36 @@ pub extern "C" fn sigtimedwait(
     -1
 }
 
+/// Wait for a signal from a set, reporting which one arrived.
+///
+/// Exactly `sigtimedwait(set, info, NULL)` — the "wait forever" form.  That
+/// is not a convenience here but the definition: POSIX specifies
+/// `sigwaitinfo(set, info)` as equivalent to `sigtimedwait` with a null
+/// timeout, and glibc (`sysdeps/unix/sysv/linux/sigwaitinfo.c`) and musl
+/// both implement it as that one call.  Expressing it as a forward is what
+/// keeps the two from drifting: any validation — or, later, any real
+/// delivery — added to [`sigtimedwait`] is inherited here for free, which a
+/// hand-copied body would not be.
+///
+/// Returns the signal number on success, or `-1` with `errno` set.  Note the
+/// `-1`/`errno` convention, unlike its near-neighbour [`sigwait`], which
+/// returns the errno directly; that inconsistency is POSIX's, not ours.
+///
+/// While nothing can be delivered to a waiter, this reports `EAGAIN` (from
+/// `sigtimedwait`) rather than blocking forever.  A caller that treats
+/// `EAGAIN` as "timed out, go round again" therefore spins — which is worse
+/// than a real wait and better than a hang, and is the same answer the timed
+/// form already gives.
+///
+/// CPython reaches this from `signal.sigwaitinfo`
+/// (`Modules/signalmodule.c:1178`); it was one of the thirteen symbols that
+/// stopped CPython 3.12 linking against our libc.  See
+/// `scripts/cpython-spike/README.md`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sigwaitinfo(set: *const SigsetT, info: *mut core::ffi::c_void) -> i32 {
+    sigtimedwait(set, info, core::ptr::null())
+}
+
 /// Queue a signal to a process with an attached `sigval`.
 ///
 /// Stub: validates arguments per Linux
@@ -1877,6 +1907,54 @@ pub unsafe extern "C" fn psiginfo(info: *const SiginfoT, msg: *const u8) {
 #[allow(clippy::field_reassign_with_default)] // Tests build SiginfoT etc. by mutating defaults; clearer than functional-update for single-field tweaks.
 mod tests {
     use super::*;
+
+    // -- sigwaitinfo is sigtimedwait(set, info, NULL), verified as such --
+
+    /// `sigwaitinfo` must *inherit* `sigtimedwait`'s validation rather
+    /// than re-implement it.  The cheapest way to pin that is to demand
+    /// the two agree on every input `sigwaitinfo` can produce — if
+    /// someone replaces the forward with a hand-copied body and the two
+    /// drift, this fails.
+    #[test]
+    fn test_sigwaitinfo_is_sigtimedwait_with_null_timeout() {
+        let set = SigsetT::EMPTY;
+        let mut info = [0u8; 128];
+
+        for (s, i) in [
+            (
+                core::ptr::null::<SigsetT>(),
+                core::ptr::null_mut::<core::ffi::c_void>(),
+            ),
+            (&raw const set, core::ptr::null_mut()),
+            (&raw const set, info.as_mut_ptr().cast()),
+        ] {
+            crate::errno::set_errno(0);
+            let want = sigtimedwait(s, i, core::ptr::null());
+            let want_errno = crate::errno::get_errno();
+
+            crate::errno::set_errno(0);
+            let got = sigwaitinfo(s, i);
+            assert_eq!(got, want);
+            assert_eq!(crate::errno::get_errno(), want_errno);
+        }
+    }
+
+    /// A NULL set is EFAULT — the kernel copies the set in before it
+    /// looks at anything else — and a non-NULL set reaches the
+    /// nothing-can-ever-be-delivered verdict, EAGAIN.  Stated directly
+    /// as well as by equivalence, so a change that broke both functions
+    /// identically would still be caught.
+    #[test]
+    fn test_sigwaitinfo_errno_values() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigwaitinfo(core::ptr::null(), core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+
+        let set = SigsetT::EMPTY;
+        crate::errno::set_errno(0);
+        assert_eq!(sigwaitinfo(&raw const set, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EAGAIN);
+    }
 
     // -- Signal number constants match Linux x86_64 --
 

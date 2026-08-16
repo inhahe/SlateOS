@@ -30,7 +30,7 @@
 //!   `isatty`, `ttyname`, `tcgetattr`, `tcsetattr`, `cfmakeraw`,
 //!   `cfsetspeed`, `tcsendbreak`, `tcdrain`, `tcflow`, `tcflush`,
 //!   termios flags, `posix_openpt`, `grantpt`, `unlockpt`, `ptsname`,
-//!   `ptsname_r`
+//!   `ptsname_r`, `ttyname_r`, `openpty`, `forkpty`, `login_tty`
 //! - **Process**: `_exit`, `getpid`, `getppid`, `posix_spawn`,
 //!   `posix_spawnp`, `execve`, `execvp`, `execv`, `execvpe`, `fexecve`,
 //!   `vfork`, `waitpid`, `sleep`, `nanosleep`, `getpgrp`, `setpgid`,
@@ -2531,6 +2531,7 @@ pub mod poll;
 pub mod printf;
 pub mod process;
 pub mod pthread;
+pub mod pty;
 pub mod pwd;
 pub mod random;
 pub mod regex;

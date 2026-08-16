@@ -613,6 +613,14 @@ pub unsafe extern "C" fn __libc_start_main(
         let _ = crate::tls::setup_main_thread();
     }
 
+    // Remember which kernel task is the initial thread.  Only threads that
+    // `pthread_create` made are in the pthread table, so without this a
+    // worker thread asking about the thread that started the process — the
+    // usual target of `pthread_kill(main, SIGTERM)` — would be told ESRCH.
+    // This must run on the initial thread itself, which is exactly here,
+    // and needs nothing but a working syscall path.
+    crate::pthread::record_initial_thread();
+
     // Retrieve inherited file descriptors from the kernel.
     // The parent's posix_spawn builds an fd_map and passes it to the
     // kernel; we retrieve it here and reinitialize our fd table.

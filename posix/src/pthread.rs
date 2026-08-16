@@ -705,6 +705,196 @@ pub extern "C" fn pthread_equal(t1: PthreadT, t2: PthreadT) -> i32 {
     i32::from(t1 == t2)
 }
 
+// ---------------------------------------------------------------------------
+// Identifying the initial thread
+//
+// `THREAD_TABLE` only holds threads this library created; the initial thread
+// arrives from the kernel and has no slot.  That is fine for stack
+// bookkeeping — nobody unmaps the initial stack — but it is not fine for
+// *existence* questions: without this, a worker thread asking about the
+// thread that started the process would be told ESRCH, which is the one
+// answer that is definitely wrong.  `pthread_kill(main_thread, SIGTERM)` is
+// a standard shutdown idiom, so this is not a corner case.
+//
+// Recording the id in a static rather than giving the initial thread a table
+// slot keeps the table's ownership protocol intact: every slot in it names a
+// mapping that exactly one party must free, and the initial thread owns no
+// such mapping.
+// ---------------------------------------------------------------------------
+
+/// Kernel task id of the initial (crt0) thread, or `SLOT_EMPTY` before
+/// [`record_initial_thread`] has run.
+static INITIAL_TASK_ID: AtomicU64 = AtomicU64::new(SLOT_EMPTY);
+
+/// Record the calling thread as the process's initial thread.
+///
+/// Called once from `crate::crt::__libc_start_main`, on the initial thread,
+/// before `main`.  Calling it from anywhere else would make the functions
+/// below misidentify which thread is the initial one, so it is
+/// crate-private.
+pub(crate) fn record_initial_thread() {
+    INITIAL_TASK_ID.store(pthread_self(), Ordering::Release);
+}
+
+/// Does `thread` name a thread of this process that is, as far as we can
+/// tell, still alive?
+///
+/// Three sources, in increasing cost:
+/// 1. it is us — always live, and the answer needs no table;
+/// 2. it is the initial thread — see [`INITIAL_TASK_ID`];
+/// 3. it holds a slot in `THREAD_TABLE`.
+///
+/// Case 3 has a benign race: a thread that has exited but not yet been
+/// joined still holds its slot, so this reports it live.  That matches
+/// POSIX, which makes `pthread_kill` on an unjoined-but-exited thread
+/// undefined rather than requiring `ESRCH`, and matches Linux, where the
+/// task stays a zombie until reaped.  What it must never do is the reverse —
+/// report a live thread as absent — and it cannot, because a slot is only
+/// released after the thread is confirmed off its stack.
+fn thread_is_live(thread: PthreadT) -> bool {
+    if thread == SLOT_EMPTY {
+        // No kernel task has id 0 — that is precisely why `SLOT_EMPTY` is
+        // 0.  Rejecting it here also stops an unrecorded `INITIAL_TASK_ID`
+        // from matching a caller's zeroed `pthread_t`.
+        return false;
+    }
+    thread == pthread_self()
+        || thread == INITIAL_TASK_ID.load(Ordering::Acquire)
+        || find_slot(thread).is_some()
+}
+
+/// Send a signal to a specific thread.
+///
+/// Returns 0 on success or a positive errno.  Like the rest of the
+/// `pthread_*` family, and unlike `kill(2)`, this does **not** set `errno`.
+///
+/// * `EINVAL` — `sig` is outside `[0, NSIG)`.
+/// * `ESRCH`  — no such thread in this process.
+///
+/// `sig == 0` performs the existence check without delivering anything,
+/// exactly as `kill(pid, 0)` does.
+///
+/// # What "to a specific thread" means here
+///
+/// Signal delivery in this system is **process-directed**: the kernel sets a
+/// signal pending on a process, not on a task (see this crate's `signal`
+/// module header on `SYS_SIGNAL_SEND`).  So:
+///
+/// * `thread == pthread_self()` is exact.  The signal is dispatched
+///   synchronously on this thread through the same path `raise(3)` uses,
+///   which is precisely what `pthread_kill(pthread_self(), sig)` means.
+///   This is also the overwhelmingly common call: CPython's
+///   `signal.pthread_kill` in a single-threaded interpreter, every
+///   `raise`-alike, and the whole "deliver to myself" idiom land here.
+/// * For any **other** thread of this process the signal is delivered
+///   process-directed, so the disposition runs on whichever thread next
+///   dispatches rather than necessarily on the named one.  The signal is
+///   not lost and the process-visible effect — handler runs, or the default
+///   action is taken — is right; what is approximate is *which* thread runs
+///   the handler.
+///
+/// That approximation is deliberate.  Refusing a peer thread with `ENOSYS`
+/// would be more precise about our limitation and less useful about the
+/// caller's intent: `pthread_kill(t, SIGTERM)` as a shutdown request works
+/// correctly under process-directed delivery, while a caller told `ENOSYS`
+/// learns only that it must find another way to do something we could in
+/// fact do.  The use the approximation genuinely fails — "interrupt the
+/// blocking call *in thread t*" — needs per-thread pending sets in the
+/// kernel; that is tracked in `todo.txt`, and when it lands this function
+/// targets the task directly with no change to any caller.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_kill(thread: PthreadT, sig: i32) -> i32 {
+    // Signal number first: an out-of-range signal is a programming error
+    // worth reporting even when the thread id is also stale, and Linux's
+    // `tgkill` likewise rejects the signal independently of the lookup.
+    if !(0..crate::signal::NSIG).contains(&sig) {
+        return errno::EINVAL;
+    }
+    if !thread_is_live(thread) {
+        return errno::ESRCH;
+    }
+    if sig == 0 {
+        // Existence probe only — the check above is the entire answer.
+        return 0;
+    }
+    if thread == pthread_self() {
+        // Exact: dispatch on this thread, synchronously.
+        if crate::signal::raise(sig) == 0 {
+            return 0;
+        }
+        // `raise` reports through errno; convert to this family's
+        // return-the-errno convention.  It can only fail on a signal
+        // number `raise` rejects but we accepted, i.e. `sig == 0`, which
+        // returned above — so this is unreachable in practice and the
+        // fallback exists to avoid inventing a success.
+        let e = errno::get_errno();
+        return if e == 0 { errno::EINVAL } else { e };
+    }
+    // Peer thread: process-directed delivery (see the doc comment above).
+    let self_pid = syscall::syscall0(syscall::SYS_PROCESS_ID);
+    #[allow(clippy::cast_sign_loss)]
+    let ret = syscall::syscall2(syscall::SYS_SIGNAL_SEND, self_pid as u64, sig as u64);
+    if ret < 0 {
+        // The target is our own process and the thread was just confirmed
+        // to exist, so a failure here is not "no such process"; report what
+        // the kernel actually said rather than guessing.
+        #[allow(clippy::cast_possible_truncation)]
+        return errno::translate(ret) as i32;
+    }
+    0
+}
+
+/// Obtain a clock id that measures a thread's CPU time.
+///
+/// Returns 0 on success or a positive errno; like the rest of this family it
+/// does not set `errno`.
+///
+/// * `ESRCH`  — no such thread in this process.
+/// * `EFAULT` — `clock_id` is NULL.  glibc has no such check and faults, and
+///   POSIX leaves it undefined; reporting it is strictly more useful than a
+///   crash and cannot be confused with a real clock id.
+/// * `ENOENT` — the thread exists but has no CPU-time clock.  POSIX
+///   documents exactly this errno for `pthread_getcpuclockid`: "the system
+///   does not support CPU-time clocks for the specified thread."
+///
+/// # Which threads have a clock
+///
+/// Only the calling thread.  `clock_gettime(CLOCK_THREAD_CPUTIME_ID, …)`
+/// reads *the caller's* clock, so handing that same id back for a peer would
+/// produce a number that looks like the peer's CPU time and is in fact the
+/// caller's — a silent wrong answer, which is worse than a refusal.  Linux
+/// avoids this by encoding the tid into the clock id
+/// (`CPUCLOCK_PERTHREAD_MASK`) and decoding it in the kernel; until
+/// `clock_gettime` can do that decoding, `ENOENT` is the truthful answer for
+/// a peer.
+///
+/// Note that even for the calling thread our `CLOCK_THREAD_CPUTIME_ID` is
+/// currently the monotonic clock rather than accumulated CPU time — a
+/// pre-existing approximation documented on `crate::time::clock_gettime`,
+/// not one this function introduces.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_getcpuclockid(
+    thread: PthreadT,
+    clock_id: *mut crate::types::ClockidT,
+) -> i32 {
+    if !thread_is_live(thread) {
+        return errno::ESRCH;
+    }
+    if clock_id.is_null() {
+        return errno::EFAULT;
+    }
+    if thread != pthread_self() {
+        return errno::ENOENT;
+    }
+    // SAFETY: clock_id is non-null (checked above).  Written unaligned
+    // because the caller's storage need only meet the C ABI's alignment for
+    // `clockid_t`, which Rust's `write` would additionally assume.
+    unsafe {
+        core::ptr::write_unaligned(clock_id, crate::time::CLOCK_THREAD_CPUTIME_ID);
+    }
+    0
+}
+
 /// Terminate the calling thread.
 ///
 /// Runs any registered thread-specific-data destructors for the calling
@@ -3162,6 +3352,81 @@ mod tests {
     // =======================================================================
     // Constants
     // =======================================================================
+
+    // =======================================================================
+    // pthread_kill / pthread_getcpuclockid
+    // =======================================================================
+
+    /// An out-of-range signal must be rejected *before* the thread is
+    /// looked up: Linux's `tgkill` validates the signal independently,
+    /// and a caller that passed both a stale id and a bad signal is
+    /// better served by the argument complaint.
+    #[test]
+    fn pthread_kill_rejects_bad_signal_before_bad_thread() {
+        let stale: PthreadT = u64::MAX - 1;
+        assert_eq!(pthread_kill(stale, -1), errno::EINVAL);
+        assert_eq!(pthread_kill(stale, crate::signal::NSIG), errno::EINVAL);
+        // Same bad thread, valid signal -> the thread verdict surfaces.
+        assert_eq!(pthread_kill(stale, crate::signal::SIGTERM), errno::ESRCH);
+    }
+
+    /// Signal 0 is the existence probe: no signal is sent, and the
+    /// answer is purely "does this thread exist".  The calling thread
+    /// always does.
+    #[test]
+    fn pthread_kill_signal_zero_probes_existence() {
+        assert_eq!(pthread_kill(pthread_self(), 0), 0);
+        assert_eq!(pthread_kill(u64::MAX - 1, 0), errno::ESRCH);
+    }
+
+    /// `SLOT_EMPTY` is the table's "no thread here" sentinel, not a
+    /// thread id.  If it were ever accepted as live, an uninitialised
+    /// `pthread_t` would silently signal something.
+    #[test]
+    fn pthread_kill_rejects_the_empty_slot_sentinel() {
+        assert_eq!(pthread_kill(SLOT_EMPTY, 0), errno::ESRCH);
+        assert_eq!(pthread_kill(SLOT_EMPTY, crate::signal::SIGTERM), errno::ESRCH);
+    }
+
+    /// The initial thread has no `THREAD_TABLE` slot — only
+    /// `pthread_create`d threads get one — so it is recognised through
+    /// `INITIAL_TASK_ID`, recorded by `__libc_start_main`.  Without that
+    /// registration, `pthread_kill(main_thread, SIGTERM)` from a worker
+    /// would answer ESRCH, which breaks the standard shutdown idiom.
+    #[test]
+    fn initial_thread_is_recognised_as_live() {
+        // Host tests do not run through the crt, so register explicitly;
+        // this is exactly what `__libc_start_main` does.
+        record_initial_thread();
+        let initial = INITIAL_TASK_ID.load(Ordering::Acquire);
+        assert_ne!(initial, SLOT_EMPTY);
+        assert!(thread_is_live(initial));
+        assert_eq!(pthread_kill(initial, 0), 0);
+    }
+
+    /// `pthread_getcpuclockid` must validate the thread before the
+    /// output pointer (a stale id is the caller's real bug), and must
+    /// hand back the *thread* CPU clock for the caller itself.
+    #[test]
+    fn pthread_getcpuclockid_self_yields_thread_cputime_clock() {
+        let mut clk: crate::types::ClockidT = -1;
+        assert_eq!(pthread_getcpuclockid(pthread_self(), &raw mut clk), 0);
+        assert_eq!(clk, crate::time::CLOCK_THREAD_CPUTIME_ID);
+    }
+
+    #[test]
+    fn pthread_getcpuclockid_validates_thread_before_pointer() {
+        // Stale thread + NULL out: the thread verdict wins.
+        assert_eq!(
+            pthread_getcpuclockid(u64::MAX - 1, core::ptr::null_mut()),
+            errno::ESRCH
+        );
+        // Live thread + NULL out: now the pointer is the complaint.
+        assert_eq!(
+            pthread_getcpuclockid(pthread_self(), core::ptr::null_mut()),
+            errno::EFAULT
+        );
+    }
 
     #[test]
     fn mutex_type_constants() {
